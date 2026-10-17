@@ -5,15 +5,23 @@ interface BeforeInstallPromptEvent extends Event {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
 }
 
+// Preserve global prompt instance across re-renders / re-mounts
+declare global {
+  interface Window {
+    __boostpay_pwa_prompt?: BeforeInstallPromptEvent | null;
+  }
+}
+
 export function usePWAInstall() {
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(() => {
+    if (typeof window !== 'undefined' && window.__boostpay_pwa_prompt) {
+      return window.__boostpay_pwa_prompt;
+    }
+    return null;
+  });
+
   const [isInstalled, setIsInstalled] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
-    // Clean up any stale/bogus localStorage flags
-    try {
-      localStorage.removeItem('boostpay_pwa_installed');
-    } catch {}
-
     const isStandalone =
       window.matchMedia('(display-mode: standalone)').matches ||
       (window.navigator as unknown as { standalone?: boolean }).standalone === true;
@@ -44,7 +52,7 @@ export function usePWAInstall() {
     setIsIOS(isIOSDevice);
     setIsAndroid(isAndroidDevice);
 
-    // Detect if inside an iframe (like AI Studio preview)
+    // Detect if running inside an iframe (such as an embedded preview)
     try {
       setIsIframe(window.self !== window.top);
     } catch {
@@ -52,14 +60,17 @@ export function usePWAInstall() {
     }
 
     const handleBeforeInstallPrompt = (e: Event) => {
-      // Prevent automatic mini-infobar so our in-app install button controls the flow
+      // Prevent automatic mini-infobar so our in-app install button controls the prompt
       e.preventDefault();
-      setDeferredPrompt(e as BeforeInstallPromptEvent);
+      const promptEvent = e as BeforeInstallPromptEvent;
+      window.__boostpay_pwa_prompt = promptEvent;
+      setDeferredPrompt(promptEvent);
     };
 
     const handleAppInstalled = () => {
       setIsInstalled(true);
       setJustInstalled(true);
+      window.__boostpay_pwa_prompt = null;
       setDeferredPrompt(null);
       setTimeout(() => setJustInstalled(false), 4000);
     };
@@ -74,19 +85,60 @@ export function usePWAInstall() {
   }, []);
 
   /**
-   * One-click direct native browser install prompt
+   * One-click direct native browser install prompt with automatic readiness resolution
    * Returns true if user accepted the installation prompt
    */
   const install = useCallback(async (): Promise<boolean> => {
-    if (deferredPrompt) {
+    let promptEvent = deferredPrompt || window.__boostpay_pwa_prompt;
+
+    // If deferredPrompt is not yet caught (e.g. Chrome on Android is still initializing),
+    // wait up to 2 seconds for beforeinstallprompt event before giving up
+    if (!promptEvent && !isInstalled) {
+      if (typeof window !== 'undefined' && window.self !== window.top) {
+        // If in an iframe, open in full top-level browser tab so Chrome allows native installation
+        window.open(window.location.href, '_blank');
+        return false;
+      }
+
+      setIsInstallLoading(true);
+      promptEvent = await new Promise<BeforeInstallPromptEvent | null>((resolve) => {
+        let finished = false;
+        const handler = (e: Event) => {
+          if (!finished) {
+            finished = true;
+            e.preventDefault();
+            const pe = e as BeforeInstallPromptEvent;
+            window.__boostpay_pwa_prompt = pe;
+            setDeferredPrompt(pe);
+            window.removeEventListener('beforeinstallprompt', handler);
+            resolve(pe);
+          }
+        };
+
+        window.addEventListener('beforeinstallprompt', handler);
+
+        setTimeout(() => {
+          if (!finished) {
+            finished = true;
+            window.removeEventListener('beforeinstallprompt', handler);
+            resolve(window.__boostpay_pwa_prompt || null);
+          }
+        }, 2000);
+      });
+      setIsInstallLoading(false);
+    }
+
+    if (promptEvent) {
       try {
         setIsInstallLoading(true);
-        await deferredPrompt.prompt();
-        const choice = await deferredPrompt.userChoice;
+        await promptEvent.prompt();
+        const choice = await promptEvent.userChoice;
         setIsInstallLoading(false);
+
         if (choice.outcome === 'accepted') {
           setIsInstalled(true);
           setJustInstalled(true);
+          window.__boostpay_pwa_prompt = null;
           setDeferredPrompt(null);
           return true;
         }
@@ -98,12 +150,11 @@ export function usePWAInstall() {
       }
     }
 
-    // If deferred prompt is not yet available (e.g. iOS Safari, or browser menu installation)
     return false;
-  }, [deferredPrompt]);
+  }, [deferredPrompt, isInstalled]);
 
   /**
-   * Direct app open without popup blocker
+   * Direct app open
    */
   const openApp = useCallback(() => {
     if (window.matchMedia('(display-mode: standalone)').matches) {
@@ -114,7 +165,7 @@ export function usePWAInstall() {
   }, []);
 
   return {
-    isInstallable: !!deferredPrompt,
+    isInstallable: !!(deferredPrompt || (typeof window !== 'undefined' && window.__boostpay_pwa_prompt)),
     isInstalled,
     isIOS,
     isAndroid,

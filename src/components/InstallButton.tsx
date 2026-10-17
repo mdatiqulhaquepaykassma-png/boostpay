@@ -28,9 +28,7 @@ export const InstallButton: FC<Props> = ({ variant = 'compact', className = '' }
   }
 
   const handleInstallClick = async () => {
-    if (isInstallable) {
-      await install();
-    }
+    await install();
   };
 
   return (

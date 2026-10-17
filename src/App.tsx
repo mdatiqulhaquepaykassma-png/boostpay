@@ -43,9 +43,7 @@ export default function App() {
   const { isInstallable, isInstalled, isInstallLoading, justInstalled, install, openApp } = usePWAInstall();
 
   const handleBottomInstallClick = async () => {
-    if (isInstallable) {
-      await install();
-    }
+    await install();
   };
 
   // Listen to /admin URL route changes

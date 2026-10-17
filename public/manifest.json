@@ -2,7 +2,7 @@
   "id": "/",
   "name": "BoostPay",
   "short_name": "BoostPay",
-  "description": "BoostPay - Dynamic Compounding Yield Engine, P2P Financial Transfers & Dokploy Integration",
+  "description": "BoostPay - Dynamic Compounding Yield Engine & P2P Financial Transfers",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -10,12 +10,6 @@
   "theme_color": "#09090b",
   "orientation": "portrait-primary",
   "icons": [
-    {
-      "src": "/icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any"
-    },
     {
       "src": "/pwa-192x192.png",
       "sizes": "192x192",
