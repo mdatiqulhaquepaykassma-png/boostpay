@@ -1,4 +1,5 @@
 import express from 'express';
+import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -563,11 +564,11 @@ async function startServer() {
           const idx = mergedUsers.findIndex(u => u.id === incUser.id);
           if (idx >= 0) {
             // Preserve active server boostState if running on server
-            const serverBoost = mergedUsers[idx].boostState;
+            // Authoritative server balance is STRICTLY preserved; client sync cannot overwrite balance
             mergedUsers[idx] = {
               ...incUser,
-              boostState: (serverBoost && serverBoost.isActive) ? serverBoost : incUser.boostState,
-              balance: incUser.balance !== undefined ? Number(incUser.balance) : mergedUsers[idx].balance
+              boostState: incUser.boostState,
+              balance: mergedUsers[idx].balance !== undefined ? Number(mergedUsers[idx].balance) : Number(incUser.balance || 0)
             };
           } else {
             mergedUsers.push(incUser);
@@ -920,14 +921,15 @@ async function startServer() {
     try {
       const { userId, type, amount, notes } = req.body;
       const db = readDb();
-      const user = db.users.find((u: any) => u.id === userId);
+      const user = db.users.find((u: any) => String(u.id) === String(userId));
       if (!user) {
-        return res.status(404).json({ error: 'User not found' });
+        return res.status(404).json({ error: `User #${userId} not found` });
       }
 
-      const numAmount = parseFloat(amount);
+      const cleanStr = String(amount || '').replace(/[\$,\s]/g, '');
+      const numAmount = parseFloat(cleanStr);
       if (isNaN(numAmount) || numAmount <= 0) {
-        return res.status(400).json({ error: 'Invalid amount' });
+        return res.status(400).json({ error: 'Please enter a valid positive amount (e.g. 50.00)' });
       }
 
       let adminTxId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
@@ -1168,12 +1170,15 @@ async function startServer() {
   });
 
   const isProduction = process.env.NODE_ENV === 'production';
+  const server = http.createServer(app);
 
   if (!isProduction) {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: false,
+        hmr: {
+          server,
+        },
       },
       appType: 'spa'
     });
@@ -1199,7 +1204,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`BoostPay Server listening on port ${PORT} [Version: ${SERVER_VERSION}]`);
   });
 }

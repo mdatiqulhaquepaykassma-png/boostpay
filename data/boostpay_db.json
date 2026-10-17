@@ -3,7 +3,7 @@
     {
       "id": "1",
       "email": "user1@boostpay.app",
-      "balance": 235,
+      "balance": 245,
       "lifetimeProfit": 14.5,
       "password": "user123",
       "createdAt": 1792155000876,
@@ -57,6 +57,14 @@
   ],
   "transactions": [
     {
+      "id": "TX-80125424",
+      "userId": "1",
+      "type": "ADMIN_CREDIT",
+      "amount": 10,
+      "timestamp": 1792266738271,
+      "notes": "Test credit"
+    },
+    {
       "id": "TX-96666895",
       "userId": "1",
       "type": "TRANSFER_SENT",
@@ -101,6 +109,21 @@
     }
   },
   "notifications": [
+    {
+      "id": "NOTIF-11875951",
+      "userId": "1",
+      "type": "SYSTEM_ALERT",
+      "title": "BOOSTPAY-TREASURY",
+      "message": "TREASURY CREDIT: $10.00 deposited into your account by Admin Treasury. Balance: $245.00. Ref: TX-80125424",
+      "amount": 10,
+      "referenceId": "TX-80125424",
+      "timestamp": 1792266738271,
+      "isRead": false,
+      "metadata": {
+        "balanceAfter": 245,
+        "notes": "Test credit"
+      }
+    },
     {
       "id": "NOTIF-41113809",
       "userId": "1",

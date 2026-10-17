@@ -96,6 +96,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [adjustNote, setAdjustNote] = useState('');
   const [adjustLoading, setAdjustLoading] = useState(false);
   const [adjustSuccessMsg, setAdjustSuccessMsg] = useState('');
+  const [adjustError, setAdjustError] = useState('');
+
+  // Quick Credit Modal State
+  const [quickCreditModalUser, setQuickCreditModalUser] = useState<User | null>(null);
+  const [quickCreditAmount, setQuickCreditAmount] = useState('');
+  const [quickCreditNote, setQuickCreditNote] = useState('');
+  const [quickCreditLoading, setQuickCreditLoading] = useState(false);
+  const [quickCreditSuccess, setQuickCreditSuccess] = useState('');
+  const [quickCreditError, setQuickCreditError] = useState('');
 
   // Password reset modal
   const [newPasswordInput, setNewPasswordInput] = useState('');
@@ -276,56 +285,40 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
   // Adjust Balance (Credit / Debit)
   const handleAdjustBalance = async (type: 'CREDIT' | 'DEBIT') => {
-    if (!selectedUser) return;
-    const amount = parseFloat(adjustAmount);
-    if (isNaN(amount) || amount <= 0) return;
+    if (!selectedUser) {
+      setAdjustError('Please select a user account first');
+      return;
+    }
+
+    const cleanAmt = String(adjustAmount || '').replace(/[\$,\s]/g, '');
+    const amount = parseFloat(cleanAmt);
+    if (isNaN(amount) || amount <= 0) {
+      setAdjustError('Please enter a valid positive dollar amount (e.g. 50.00)');
+      return;
+    }
 
     setAdjustLoading(true);
     setAdjustSuccessMsg('');
+    setAdjustError('');
 
-    try {
-      const res = await fetch('/api/admin/adjust', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: selectedUser.id,
-          type,
-          amount,
-          notes: adjustNote || `Admin Treasury ${type}`
-        })
-      });
+    const res = await BoostPayStore.adminAdjustBalance(
+      selectedUser.id,
+      type,
+      amount,
+      adjustNote || `Admin Treasury ${type}`
+    );
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.user) {
-          setSelectedUser({ ...data.user });
-        }
-        await refreshData();
-        setAdjustAmount('');
-        setAdjustNote('');
-        setAdjustSuccessMsg(`Successfully applied ${type} of $${amount.toFixed(2)} to User #${selectedUser.id}`);
-        setTimeout(() => setAdjustSuccessMsg(''), 4000);
-      }
-    } catch {
-      // Local fallback
-      const allUsers = BoostPayStore.getUsers();
-      const target = allUsers.find(u => u.id === selectedUser.id);
-      if (target) {
-        if (type === 'CREDIT') {
-          target.balance += amount;
-        } else {
-          target.balance = Math.max(0, target.balance - amount);
-        }
-        BoostPayStore.saveUsers(allUsers);
-        setUsers(allUsers);
-        setSelectedUser({ ...target });
-        setAdjustAmount('');
-        setAdjustNote('');
-        setAdjustSuccessMsg(`Applied ${type} of $${amount.toFixed(2)} to User #${selectedUser.id}`);
-        setTimeout(() => setAdjustSuccessMsg(''), 4000);
-      }
-    } finally {
-      setAdjustLoading(false);
+    setAdjustLoading(false);
+    if (res.success && res.user) {
+      setSelectedUser({ ...res.user });
+      await refreshData(true);
+      setAdjustAmount('');
+      setAdjustNote('');
+      setAdjustSuccessMsg(`✓ Successfully ${type === 'CREDIT' ? 'credited' : 'debited'} $${amount.toFixed(2)} to User #${selectedUser.id}! New Balance: $${res.user.balance.toFixed(2)}`);
+      setTimeout(() => setAdjustSuccessMsg(''), 6000);
+    } else {
+      setAdjustError(res.error || `Failed to apply ${type}`);
+      setTimeout(() => setAdjustError(''), 6000);
     }
   };
 
@@ -887,7 +880,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {/* ======================================================== */}
         {activeTab === 'USERS' && (
           <div className="space-y-6">
-            {/* Search Bar */}
+            {/* Search Bar & Quick Add Balance Action */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
               <div className="relative flex-1">
                 <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
@@ -899,8 +892,25 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/90 pl-10 pr-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500 focus:outline-none"
                 />
               </div>
-              <div className="text-xs font-mono text-zinc-400 self-center">
-                Showing {filteredUsers.length} of {users.length} users
+              <div className="flex items-center gap-2.5 self-end sm:self-center">
+                <button
+                  onClick={() => {
+                    const target = users[0] || null;
+                    setQuickCreditModalUser(target);
+                    setQuickCreditAmount('');
+                    setQuickCreditNote('');
+                    setQuickCreditSuccess('');
+                    setQuickCreditError('');
+                  }}
+                  className="flex items-center gap-1.5 rounded-2xl bg-emerald-500 px-3.5 py-2 text-xs font-bold text-zinc-950 hover:bg-emerald-400 active:scale-95 transition shadow-md shadow-emerald-500/20 cursor-pointer"
+                  title="Directly credit balance to any user account"
+                >
+                  <PlusCircle className="w-4 h-4 stroke-[2.5]" />
+                  <span>+ Deposit Balance</span>
+                </button>
+                <div className="text-xs font-mono text-zinc-400">
+                  {filteredUsers.length} of {users.length} users
+                </div>
               </div>
             </div>
 
@@ -981,15 +991,27 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             </div>
                           </td>
                           <td className="px-4 py-3 text-right">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedUser(u);
-                              }}
-                              className="rounded-xl border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[11px] text-amber-400 hover:border-amber-500 transition"
-                            >
-                              Manage
-                            </button>
+                            <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                onClick={() => {
+                                  setQuickCreditModalUser(u);
+                                  setQuickCreditAmount('');
+                                  setQuickCreditNote('');
+                                  setQuickCreditSuccess('');
+                                  setQuickCreditError('');
+                                }}
+                                className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-bold text-emerald-400 hover:bg-emerald-500/20 active:scale-95 transition cursor-pointer"
+                                title={`Deposit balance into User #${u.id}`}
+                              >
+                                + Credit
+                              </button>
+                              <button
+                                onClick={() => setSelectedUser(u)}
+                                className="rounded-xl border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[11px] text-amber-400 hover:border-amber-500 transition cursor-pointer"
+                              >
+                                Manage
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -1081,8 +1103,14 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     </div>
 
                     {adjustSuccessMsg && (
-                      <div className="text-[11px] text-emerald-400 font-medium">
+                      <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-2.5 text-xs font-bold text-emerald-400 animate-in fade-in">
                         {adjustSuccessMsg}
+                      </div>
+                    )}
+
+                    {adjustError && (
+                      <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-2.5 text-xs font-bold text-red-400 animate-in fade-in">
+                        {adjustError}
                       </div>
                     )}
 
@@ -1189,6 +1217,163 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     >
                       Update Password
                     </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Quick Balance Deposit / Credit Modal */}
+            {quickCreditModalUser && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-md animate-in fade-in duration-200">
+                <div className="w-full max-w-md rounded-3xl border border-emerald-500/30 bg-zinc-900 shadow-2xl p-6 space-y-4">
+                  <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-400">
+                        <PlusCircle className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-white">Deposit / Credit Balance</h3>
+                        <p className="text-[11px] text-zinc-400">Account: User #{quickCreditModalUser.id}</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setQuickCreditModalUser(null)}
+                      className="rounded-xl border border-zinc-800 p-1.5 text-zinc-400 hover:text-white cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-[10px] font-mono text-zinc-400 mb-1">Target Account</label>
+                      <select
+                        value={quickCreditModalUser.id}
+                        onChange={(e) => {
+                          const target = users.find(u => String(u.id) === String(e.target.value));
+                          if (target) {
+                            setQuickCreditModalUser(target);
+                            setQuickCreditSuccess('');
+                            setQuickCreditError('');
+                          }
+                        }}
+                        className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
+                      >
+                        {users.map(u => (
+                          <option key={u.id} value={u.id}>
+                            User #{u.id} — Current Balance: ${u.balance.toFixed(2)} ({u.email || 'No email'})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="text-[10px] font-mono text-zinc-400">Deposit Amount ($ USD)</label>
+                        <span className="text-[10px] font-mono text-emerald-400 font-bold">Current: ${quickCreditModalUser.balance.toFixed(2)}</span>
+                      </div>
+                      <input
+                        type="text"
+                        value={quickCreditAmount}
+                        onChange={(e) => setQuickCreditAmount(e.target.value)}
+                        placeholder="e.g. 50.00"
+                        className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white font-mono font-bold focus:border-emerald-500 focus:outline-none"
+                        autoFocus
+                      />
+                    </div>
+
+                    {/* Quick Amount Preset Chips */}
+                    <div className="flex gap-1.5">
+                      {[10, 25, 50, 100, 500].map(amt => (
+                        <button
+                          key={amt}
+                          type="button"
+                          onClick={() => setQuickCreditAmount(amt.toString())}
+                          className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 py-1.5 text-[11px] font-mono text-zinc-300 hover:border-emerald-500/50 hover:text-emerald-400 transition cursor-pointer"
+                        >
+                          +${amt}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-mono text-zinc-400 mb-1">Reason / Ledger Note (Optional)</label>
+                      <input
+                        type="text"
+                        value={quickCreditNote}
+                        onChange={(e) => setQuickCreditNote(e.target.value)}
+                        placeholder="e.g. Admin Treasury Deposit"
+                        className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white focus:border-emerald-500 focus:outline-none"
+                      />
+                    </div>
+
+                    {quickCreditSuccess && (
+                      <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs font-bold text-emerald-400 animate-in fade-in">
+                        {quickCreditSuccess}
+                      </div>
+                    )}
+
+                    {quickCreditError && (
+                      <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-xs font-bold text-red-400 animate-in fade-in">
+                        {quickCreditError}
+                      </div>
+                    )}
+
+                    <div className="flex gap-2 pt-2">
+                      <button
+                        onClick={async () => {
+                          const cleanAmt = String(quickCreditAmount || '').replace(/[\$,\s]/g, '');
+                          const num = parseFloat(cleanAmt);
+                          if (isNaN(num) || num <= 0) {
+                            setQuickCreditError('Please enter a valid positive dollar amount (e.g. 50.00)');
+                            return;
+                          }
+                          setQuickCreditLoading(true);
+                          setQuickCreditError('');
+                          setQuickCreditSuccess('');
+
+                          const res = await BoostPayStore.adminAdjustBalance(
+                            quickCreditModalUser.id,
+                            'CREDIT',
+                            num,
+                            quickCreditNote || 'Admin Treasury Credit'
+                          );
+
+                          setQuickCreditLoading(false);
+                          if (res.success && res.user) {
+                            setQuickCreditSuccess(`✓ Successfully added $${num.toFixed(2)} to User #${quickCreditModalUser.id}! New Balance: $${res.user.balance.toFixed(2)}`);
+                            setQuickCreditAmount('');
+                            setQuickCreditNote('');
+                            setQuickCreditModalUser(res.user);
+                            await refreshData(true);
+                            setTimeout(() => {
+                              setQuickCreditModalUser(null);
+                              setQuickCreditSuccess('');
+                            }, 2500);
+                          } else {
+                            setQuickCreditError(res.error || 'Failed to add balance');
+                          }
+                        }}
+                        disabled={quickCreditLoading || !quickCreditAmount}
+                        className="flex-1 rounded-xl bg-emerald-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-emerald-400 active:scale-95 transition shadow-lg shadow-emerald-500/20 disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
+                      >
+                        {quickCreditLoading ? (
+                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-950 border-t-transparent" />
+                        ) : (
+                          <>
+                            <PlusCircle className="w-4 h-4 stroke-[2.5]" />
+                            <span>Confirm + Deposit Funds</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => setQuickCreditModalUser(null)}
+                        className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-2 text-xs font-semibold text-zinc-400 hover:text-white cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

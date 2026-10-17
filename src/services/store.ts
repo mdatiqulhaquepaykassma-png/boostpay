@@ -496,6 +496,45 @@ export class BoostPayStore {
   }
 
   /**
+   * Authoritative Admin Balance Adjustment (Credit / Debit)
+   */
+  static async adminAdjustBalance(
+    userId: string,
+    type: 'CREDIT' | 'DEBIT',
+    amount: number,
+    notes?: string
+  ): Promise<{ success: boolean; user?: User; error?: string }> {
+    try {
+      const res = await fetch('/api/admin/adjust', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, type, amount, notes })
+      });
+
+      const data = await res.json();
+      if (res.ok && data.user) {
+        const users = this.getUsers();
+        const idx = users.findIndex(u => String(u.id) === String(userId));
+        if (idx >= 0) {
+          users[idx] = data.user;
+          localStorage.setItem(STORAGE_USERS, JSON.stringify(users));
+          localStorage.setItem('boostpay_users', JSON.stringify(users));
+        }
+
+        const cur = this.getCurrentUser();
+        if (cur && String(cur.id) === String(userId)) {
+          this.setCurrentUser(data.user);
+        }
+
+        return { success: true, user: data.user };
+      }
+      return { success: false, error: data.error || 'Server rejected balance adjustment' };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error during balance adjustment' };
+    }
+  }
+
+  /**
    * Real-time server sync for a single user (keeps boost state and balance 100% accurate)
    */
   static async syncUserFromServer(userId: string): Promise<User | null> {
