@@ -63,21 +63,27 @@ export const WalletView: FC<Props> = ({
     user.boostState.targetDurationMs || BoostPayStore.calculateDynamicDuration(user.balance, allUsers)
   , [user.boostState.targetDurationMs, user.balance, allUsers]);
 
-  // 1-second continuous server synchronization
+  // Smooth continuous server synchronization
   useEffect(() => {
     const syncWithServer = async () => {
       const freshUser = await BoostPayStore.syncUserFromServer(user.id);
       if (freshUser) {
-        onUpdateUser(freshUser);
+        if (
+          freshUser.balance !== user.balance ||
+          freshUser.lifetimeProfit !== user.lifetimeProfit ||
+          freshUser.boostState.isActive !== user.boostState.isActive ||
+          freshUser.boostState.isPaused !== user.boostState.isPaused
+        ) {
+          onUpdateUser(freshUser);
+        }
       }
     };
 
-    // Run every 500ms when boost is active, or every 1000ms when idle
-    const intervalTime = (user.boostState.isActive && !user.boostState.isPaused) ? 500 : 1000;
+    const intervalTime = (user.boostState.isActive && !user.boostState.isPaused) ? 1000 : 2000;
     const interval = setInterval(syncWithServer, intervalTime);
 
     return () => clearInterval(interval);
-  }, [user.id, user.boostState.isActive, user.boostState.isPaused, onUpdateUser]);
+  }, [user.id, user.boostState.isActive, user.boostState.isPaused, user.balance, user.lifetimeProfit, onUpdateUser]);
 
   // Client-side smooth interpolation ticker
   useEffect(() => {

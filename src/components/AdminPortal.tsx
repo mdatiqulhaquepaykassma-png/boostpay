@@ -111,24 +111,45 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [supportMessage, setSupportMessage] = useState('');
 
-  const refreshData = async () => {
-    setIsRefreshing(true);
+  const refreshData = async (isManual = false) => {
+    if (isManual) setIsRefreshing(true);
     try {
       const res = await fetch('/api/admin/stats');
       if (res.ok) {
         const data = await res.json();
-        setStats({
-          totalUsers: data.totalUsers,
-          totalLiquidity: data.totalLiquidity,
-          totalProfitPaid: data.totalProfitPaid,
-          activeBoosters: data.activeBoosters,
-          pausedBoosters: data.pausedBoosters,
-          totalTransactions: data.totalTransactions,
-          dokployStatus: data.dokployStatus
+        setStats((prev) => {
+          if (
+            prev.totalUsers === data.totalUsers &&
+            prev.totalLiquidity === data.totalLiquidity &&
+            prev.totalProfitPaid === data.totalProfitPaid &&
+            prev.activeBoosters === data.activeBoosters &&
+            prev.pausedBoosters === data.pausedBoosters &&
+            prev.totalTransactions === data.totalTransactions
+          ) {
+            return prev;
+          }
+          return {
+            totalUsers: data.totalUsers,
+            totalLiquidity: data.totalLiquidity,
+            totalProfitPaid: data.totalProfitPaid,
+            activeBoosters: data.activeBoosters,
+            pausedBoosters: data.pausedBoosters,
+            totalTransactions: data.totalTransactions,
+            dokployStatus: data.dokployStatus || prev.dokployStatus
+          };
         });
         
         if (data.config) {
-          setConfig(data.config);
+          setConfig((prev) => {
+            if (
+              prev.hourlyRatePercent === data.config.hourlyRatePercent &&
+              prev.minBoostMs === data.config.minBoostMs &&
+              prev.maxBoostMs === data.config.maxBoostMs
+            ) {
+              return prev;
+            }
+            return data.config;
+          });
           BoostPayStore.saveConfig(data.config); 
           if (!isEditing.current.hourlyRate) setCustomHourlyRate(formatRatePercent(data.config.hourlyRatePercent));
           if (!isEditing.current.minBoost) setMinBoostMinutes(Math.round((data.config.minBoostMs || 60000) / 60000).toString());
@@ -139,22 +160,64 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
       const usersRes = await fetch('/api/admin/users');
       if (usersRes.ok) {
         const data = await usersRes.json();
-        setUsers(data.users);
+        setUsers((prev) => {
+          if (prev.length === data.users.length) {
+            let changed = false;
+            for (let i = 0; i < prev.length; i++) {
+              if (
+                prev[i].id !== data.users[i].id ||
+                prev[i].balance !== data.users[i].balance ||
+                prev[i].lifetimeProfit !== data.users[i].lifetimeProfit ||
+                prev[i].boostState.isActive !== data.users[i].boostState.isActive ||
+                prev[i].boostState.isPaused !== data.users[i].boostState.isPaused
+              ) {
+                changed = true;
+                break;
+              }
+            }
+            if (!changed) return prev;
+          }
+          return data.users;
+        });
         BoostPayStore.saveUsers(data.users);
+
+        // Keep selectedUser in sync if one is currently opened
+        setSelectedUser((curr) => {
+          if (!curr) return null;
+          const fresh = data.users.find((u: User) => u.id === curr.id);
+          if (!fresh) return curr;
+          if (
+            fresh.balance !== curr.balance ||
+            fresh.lifetimeProfit !== curr.lifetimeProfit ||
+            fresh.boostState.isActive !== curr.boostState.isActive ||
+            fresh.boostState.isPaused !== curr.boostState.isPaused
+          ) {
+            return fresh;
+          }
+          return curr;
+        });
       }
-      setConversations(BoostPayStore.getConversations());
-      setMessages(BoostPayStore.getMessages());
+
+      const newConvs = BoostPayStore.getConversations();
+      setConversations((prev) => {
+        if (prev.length !== newConvs.length) return newConvs;
+        const changed = prev.some((c, i) => c.lastMessage !== newConvs[i]?.lastMessage || c.lastMessageAt !== newConvs[i]?.lastMessageAt || c.hasUnread !== newConvs[i]?.hasUnread);
+        return changed ? newConvs : prev;
+      });
+
+      const newMsgs = BoostPayStore.getMessages();
+      setMessages((prev) => (prev.length !== newMsgs.length ? newMsgs : prev));
     } catch (err) {
       console.error('Failed to refresh admin data:', err);
     } finally {
-      setIsRefreshing(false);
+      if (isManual) setIsRefreshing(false);
     }
   };
 
   useEffect(() => {
     if (adminSession?.isLoggedIn) {
-      refreshData();
-      const interval = setInterval(refreshData, 500);
+      refreshData(false);
+      const interval = setInterval(() => refreshData(false), 1200);
       return () => clearInterval(interval);
     }
   }, [adminSession?.isLoggedIn]);
@@ -606,7 +669,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           <div className="flex items-center gap-2.5">
             {/* Live Refresh */}
             <button
-              onClick={refreshData}
+              onClick={() => refreshData(true)}
               disabled={isRefreshing}
               className="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-700 active:scale-95 transition cursor-pointer"
               title="Refresh database state"

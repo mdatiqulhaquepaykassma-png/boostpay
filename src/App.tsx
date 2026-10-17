@@ -16,7 +16,6 @@ import { MessengerView } from './components/MessengerView';
 import { InboxView } from './components/InboxView';
 import { FloatingToastContainer } from './components/FloatingToast';
 import { P2PTransferModal } from './components/P2PTransferModal';
-import { UpdateNotification } from './components/UpdateNotification';
 import { usePWAInstall } from './hooks/usePWAInstall';
 
 export default function App() {
@@ -86,22 +85,36 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  // Periodic authoritative background synchronization & unread count tracking
+  // Periodic authoritative background synchronization with change-guarded updates
   useEffect(() => {
     if (!currentUser) return;
 
     const refreshState = async () => {
       const unread = BoostPayStore.getUnreadNotificationCount(currentUser.id);
-      setUnreadNotifCount(unread);
+      setUnreadNotifCount((prev) => (prev !== unread ? unread : prev));
 
       const synced = await BoostPayStore.syncUserFromServer(currentUser.id);
       if (synced) {
-        setCurrentUser(synced);
+        setCurrentUser((prev) => {
+          if (!prev) return synced;
+          // Only trigger React state update if key values actually changed
+          if (
+            prev.balance !== synced.balance ||
+            prev.lifetimeProfit !== synced.lifetimeProfit ||
+            prev.boostState.isActive !== synced.boostState.isActive ||
+            prev.boostState.isPaused !== synced.boostState.isPaused ||
+            prev.boostState.accumulatedYield !== synced.boostState.accumulatedYield ||
+            Math.abs(prev.boostState.elapsedMs - synced.boostState.elapsedMs) > 1000
+          ) {
+            return synced;
+          }
+          return prev;
+        });
       }
     };
 
     refreshState();
-    const interval = setInterval(refreshState, 500);
+    const interval = setInterval(refreshState, 1000);
     return () => clearInterval(interval);
   }, [currentUser?.id]);
 
@@ -206,8 +219,6 @@ export default function App() {
             )}
           </main>
 
-          {/* Subtle Bottom Banner on New Deployments / Updates */}
-          <UpdateNotification />
 
           {/* FIXED BOTTOM NAVIGATION BAR */}
           <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-3 py-1.5">

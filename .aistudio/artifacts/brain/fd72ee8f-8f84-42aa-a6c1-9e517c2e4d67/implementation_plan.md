@@ -1,105 +1,73 @@
-# Fix Android PWA Installation & Direct Prompt Execution
+# Seamless Real-Time In-Place Sync & Full-Reload Elimination
 
-A targeted plan to resolve Android Chrome PWA installability failures, eliminating the causes of the unresponsive "Nothing happens when tapped" issue and ensuring seamless native 1-tap installation on Android devices.
+Eliminates repetitive full-app reloads, page flushes, and UI re-render thrashing across both the user wallet interface and the Admin Portal. Replaces reload prompts with seamless, non-intrusive background state synchronization that preserves active typing, scroll position, and UI stability.
 
 ---
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following root causes and solutions were confirmed for this fix:
+> The following product decisions were confirmed during interactive clarification:
 
-- **Confirmed Issue (Chrome on Android: Nothing happens on tap)**: Tapping the button was doing nothing because the browser's install event was blocked by conflicting PWA manifests and dual service worker registrations, causing `deferredPrompt` to never initialize.
-- **Confirmed Resolution 1 (Single Unified Manifest)**: Eliminate duplicate manifest declarations (`/manifest.json` vs `/manifest.webmanifest`) in `index.html` and `vite.config.ts`, aligning on a single compliant manifest specification.
-- **Confirmed Resolution 2 (Single Authoritative Service Worker)**: Remove colliding service worker registration scripts so a single, robust, offline-capable service worker handles fetch events and passes Chrome's strict WebAPK installability criteria.
-- **Confirmed Resolution 3 (Android WebAPK Icon Compliance)**: Place compliant 192x192 and 512x512 PNG icons with proper `any` and `maskable` purposes in the manifest, avoiding SVG-first ordering that fails Google's WebAPK minting server.
-- **Confirmed Resolution 4 (Direct Prompt Execution with Visual Readiness)**: Enhance the install hook and buttons so the button reflects readiness, captures the `beforeinstallprompt` event reliably, and triggers the native install dialog immediately on tap.
+- **Confirmed Decision 1 (Real-Time Background Sync)**: Deliver all balance, user, rate, and transaction updates in real time in-place via non-intrusive background synchronization, with zero full-page reloads (`window.location.reload()`).
+- **Confirmed Decision 2 (Admin Portal Silent State Sync)**: Admin data refreshes silently without triggering loading spinners on every tick, without re-rendering untouched inputs, and strictly preserving active typing fields, focus states, and scroll position.
+- **Confirmed Decision 3 (Eliminate Version Reload Banner)**: Remove the `UpdateNotification` component and its reload prompt, allowing deployments and data updates to apply seamlessly in-place without disturbing the user.
 
 ---
 
-## 1. Overview & Root Cause Analysis
+## 1. Overview & Problem Definition
 
-### The Problem on Android Chrome
-When testing on Android Chrome, users reported that tapping the Install button did nothing. Investigation reveals four compounding technical causes:
+### The Reload & Thrashing Problem
+Previously, users experienced repetitive app reloading and jarring interface jitter due to four distinct issues:
+1. **Periodic Reload Prompt**: `UpdateNotification.tsx` polled `/api/version` every 12 seconds and listened to service worker `controllerchange`, displaying a prompt that forced `window.location.reload()`.
+2. **Aggressive Admin Polling with State Churn**: `AdminPortal.tsx` ran `refreshData()` every 500ms, toggling `setIsRefreshing(true)` twice a second and generating new object references on every pass. This caused the entire admin DOM tree to re-render continuously, producing input focus loss, cursor jumping, and visual jitter.
+3. **Redundant User Synchronization**: Both `App.tsx` and `WalletView.tsx` ran independent 500ms intervals calling `syncUserFromServer()` and triggering React state updates even when balances and boost states were unchanged.
 
-1. **Duplicate Manifest Conflict**:
-   - `index.html` included `<link rel="manifest" href="/manifest.json" />`.
-   - `vite-plugin-pwa` in `vite.config.ts` injected `<link rel="manifest" href="/manifest.webmanifest">`.
-   - Chromium detects two competing manifest declarations with differing metadata, failing the PWA installability check.
-
-2. **Colliding Service Worker Registrations**:
-   - `index.html` registered `/sw.js` via an inline script.
-   - `vite-plugin-pwa` injected `/registerSW.js` trying to register its own service worker.
-   - Dual registration causes scope collisions and prevents Chrome from recognizing a healthy, active service worker controlling the scope.
-
-3. **Android WebAPK Icon Failure**:
-   - `public/manifest.json` listed `/icon.svg` with `sizes: "any"` before the PNG icons.
-   - Android Chrome uses Google's WebAPK service to generate native `.apk` packages. WebAPK minting fails or rejects manifests when SVG is the primary icon.
-
-4. **Silent Dead Click in UI**:
-   - If `deferredPrompt` was null (due to the above failures), `handleInstallClick` simply did `if (isInstallable) await install();` with zero fallback or recovery, making the button appear completely broken.
+### The Solution
+1. **Completely eliminate forced full page reloads**: Remove `UpdateNotification` and any `window.location.reload()` calls.
+2. **Value-Equality & Diff-Guarded State Updates**: Deep-compare incoming server state against current state before calling React setters (`setUsers`, `setStats`, `setCurrentUser`). If data is identical, preserve object identity to prevent React re-renders.
+3. **Silent Background Sync in Admin Portal**: Run background polling without setting `isRefreshing = true` (reserving the spinner strictly for manual click). Isolate and preserve all input fields (`searchTerm`, `adjustAmount`, `adjustNote`, `supportMessage`, etc.) while live data syncs smoothly behind the scenes.
+4. **Single Consolidated Sync Loop**: Unify user state sync in `App.tsx` and `WalletView.tsx` to prevent redundant network requests and duplicate state dispatches.
 
 ---
 
-## 2. Technical Architecture & Fix Strategy
-
-### Architecture & Service Flow
+## 2. Technical Architecture & Data Flow
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│                      index.html                        │
-│  - Single <link rel="manifest" href="/manifest.json">  │
-│  - Single service worker registration: /sw.js          │
-│  - No conflicting duplicate manifest or SW tags        │
-└──────────────────────────┬─────────────────────────────┘
-                           │
-             ┌─────────────┴─────────────┐
-             ▼                           ▼
+│             Backend API Server (Express)               │
+│  - /api/user/:id                                       │
+│  - /api/admin/stats                                    │
+│  - /api/admin/users                                    │
+└────────────┬─────────────────────────────┬─────────────┘
+             │ (Periodic In-Place Sync)    │ (Silent Diff-Guarded Sync)
+             ▼                             ▼
 ┌──────────────────────────┐  ┌──────────────────────────┐
-│   public/manifest.json   │  │       public/sw.js       │
-│  - 192x192 PNG ("any")   │  │  - Active fetch handler  │
-│  - 512x512 PNG ("any")   │  │  - Cache-first strategy  │
-│  - 512x512 PNG ("mask")  │  │  - Chromium WebAPK       │
-│  - Compliant metadata    │  │    compliant install     │
-└────────────┬─────────────┘  └──────────┬───────────────┘
-             │                           │
-             └─────────────┬─────────────┘
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│             Android Chrome WebAPK Service              │
-│  - Validates single manifest & icon resolution         │
-│  - Dispatches 'beforeinstallprompt' reliably           │
-└──────────────────────────┬─────────────────────────────┘
-                           │
-                           ▼
-┌────────────────────────────────────────────────────────┐
-│                   usePWAInstall.ts                     │
-│  - Captures event immediately                          │
-│  - install(): executes prompt() directly on 1-tap      │
-│  - If prompt pending, prompts gracefully on gesture    │
-└────────────────────────────────────────────────────────┘
+│      App / Wallet        │  │       AdminPortal        │
+│  - Diff-checked sync     │  │  - Silent background sync│
+│  - Only update on change │  │  - No spinner on poll    │
+│  - Smooth local ticker   │  │  - Active typing guarded │
+│  - ZERO page reloads     │  │  - Table scroll preserved│
+└──────────────────────────┘  └──────────────────────────┘
 ```
 
 ---
 
 ## 3. Implementation Steps
 
-1. **Unify PWA Manifest & Vite Configuration (`vite.config.ts` & `index.html`)**:
-   - Set `VitePWA({ injectRegister: false, manifest: false })` or configure `VitePWA` so it does not inject a competing `manifest.webmanifest` and conflicting `registerSW.js`.
-   - Ensure `index.html` has exactly one manifest link: `<link rel="manifest" href="/manifest.json" />`.
+1. **Remove Reload Banner & Decommission Reload Prompts (`App.tsx` & `UpdateNotification.tsx`)**:
+   - Remove `<UpdateNotification />` and its import from `App.tsx`.
+   - Ensure no automatic or user-facing `window.location.reload()` triggers exist in the application.
 
-2. **Clean Android Icon Declaration (`public/manifest.json`)**:
-   - Reorder and ensure PNG icons (`pwa-192x192.png`, `pwa-512x512.png`, `pwa-maskable-512x512.png`) are primary.
-   - Keep `icon.svg` as optional desktop fallback, not primary WebAPK icon.
+2. **Refactor Admin Portal Silent Sync (`AdminPortal.tsx`)**:
+   - Decouple background polling from `isRefreshing`: background ticks never set `isRefreshing(true)`.
+   - Add shallow/deep diff guards before setting `users`, `stats`, `config`, and `messages` so React only re-renders when data actually changes.
+   - Guard active input elements so typing in adjustment amounts, search queries, or support chat is never interrupted by live background data updates.
 
-3. **Strengthen Service Worker (`public/sw.js`)**:
-   - Ensure the `fetch` listener handles navigation requests with a valid fallback response to pass Android Chrome's offline capability check.
-   - Ensure `skipWaiting()` and `clients.claim()` activate the service worker immediately on load.
+3. **Optimize User State Reconciliation (`App.tsx` & `WalletView.tsx`)**:
+   - Ensure `App.tsx` background sync only calls `setCurrentUser` if balance, lifetimeProfit, yield, or boost state values differ from the current user object.
+   - Harmonize `WalletView.tsx` sync interval to avoid duplicate parallel fetch requests.
 
-4. **Refine Install Hook & Button Interactions (`usePWAInstall.ts`, `InstallButton.tsx`, `App.tsx`)**:
-   - Ensure `isInstallable` is actively tracked and doesn't remain false when the prompt is ready.
-   - If the button is clicked before the browser finishes the prompt dispatch, provide immediate tactile feedback (e.g. quick spinner state) and trigger prompt cleanly once captured.
-
-5. **Build & Production Verification**:
-   - Run `npm run build` to verify `dist/index.html` contains no duplicate manifest or service worker tags.
-   - Validate with `compile_applet`.
+4. **Verify & Test**:
+   - Test admin inputs and table updates to confirm active text fields retain focus without jitter.
+   - Run `npm run build` and `compile_applet` to verify clean compilation.

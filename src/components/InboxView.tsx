@@ -34,12 +34,16 @@ export const InboxView: FC<Props> = ({ userId }) => {
 
   const loadNotifications = () => {
     const list = BoostPayStore.getNotifications(userId);
-    setNotifications(list);
+    setNotifications((prev) => {
+      if (prev.length !== list.length) return list;
+      const changed = prev.some((n, i) => n.id !== list[i]?.id || n.isRead !== list[i]?.isRead);
+      return changed ? list : prev;
+    });
   };
 
   useEffect(() => {
     loadNotifications();
-    const interval = setInterval(loadNotifications, 500);
+    const interval = setInterval(loadNotifications, 1000);
     return () => clearInterval(interval);
   }, [userId]);
 
