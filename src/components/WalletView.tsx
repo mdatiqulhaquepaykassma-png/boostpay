@@ -12,7 +12,7 @@ interface BalanceTickerProps {
 }
 
 const BalanceTicker = React.memo(({ intPart, decPart, isHighlighted }: BalanceTickerProps) => (
-  <div className={`flex items-baseline my-2 font-mono flex-wrap transition-all duration-700 rounded-2xl px-2.5 py-1 -mx-2.5 ${isHighlighted ? 'bg-emerald-500/15 border border-emerald-500/30 shadow-lg shadow-emerald-500/10 scale-[1.01]' : 'border border-transparent'}`}>
+  <div className={`flex items-baseline my-2 font-mono flex-wrap transition-all duration-700 rounded-2xl px-2.5 py-1 -mx-2.5 ${isHighlighted ? 'bg-emerald-500/15 border border-emerald-500/30 shadow-lg shadow-emerald-500/10 scale-[1.02] brightness-110 animate-pulse' : 'border border-transparent'}`}>
     <span className="text-2xl font-bold text-amber-400 mr-1">$</span>
     <span className={`text-4xl font-extrabold tracking-tight transition-colors duration-500 ${isHighlighted ? 'text-emerald-300' : 'text-white'}`}>
       {Number(intPart).toLocaleString()}
@@ -81,13 +81,19 @@ export const WalletView: FC<Props> = ({
     const syncWithServer = async () => {
       const freshUser = await BoostPayStore.syncUserFromServer(user.id);
       if (freshUser) {
+        const b1 = user.boostState;
+        const b2 = freshUser.boostState;
+        const boostStateChanged =
+          b1.isActive !== b2.isActive ||
+          b1.isPaused !== b2.isPaused ||
+          b1.startingBalance !== b2.startingBalance ||
+          b1.targetDurationMs !== b2.targetDurationMs ||
+          Math.abs((b1.elapsedMs || 0) - (b2.elapsedMs || 0)) > 2000;
+
         if (
           freshUser.balance !== user.balance ||
           freshUser.lifetimeProfit !== user.lifetimeProfit ||
-          freshUser.boostState.isActive !== user.boostState.isActive ||
-          freshUser.boostState.isPaused !== user.boostState.isPaused ||
-          freshUser.boostState.startingBalance !== user.boostState.startingBalance ||
-          freshUser.boostState.targetDurationMs !== user.boostState.targetDurationMs
+          boostStateChanged
         ) {
           onUpdateUser(freshUser);
         }

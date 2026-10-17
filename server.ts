@@ -565,10 +565,11 @@ async function startServer() {
           if (idx >= 0) {
             // Preserve active server boostState if running on server
             // Authoritative server balance is STRICTLY preserved; client sync cannot overwrite balance
+            const serverUser = mergedUsers[idx];
             mergedUsers[idx] = {
               ...incUser,
-              boostState: incUser.boostState,
-              balance: mergedUsers[idx].balance !== undefined ? Number(mergedUsers[idx].balance) : Number(incUser.balance || 0)
+              boostState: (serverUser.boostState && serverUser.boostState.isActive) ? serverUser.boostState : incUser.boostState,
+              balance: serverUser.balance !== undefined ? Number(serverUser.balance) : Number(incUser.balance || 0)
             };
           } else {
             mergedUsers.push(incUser);
