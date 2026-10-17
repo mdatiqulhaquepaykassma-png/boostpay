@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BoostPay</title>
+    <meta name="description" content="BoostPay - Dynamic Compounding Yield Engine, P2P Financial Transfers & Dokploy PostgreSQL Integration" />
+    <meta property="og:title" content="BoostPay" />
+    <meta property="og:description" content="BoostPay - Dynamic Compounding Yield Engine, P2P Financial Transfers & Dokploy PostgreSQL Integration" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#09090b" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="BoostPay" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <script>
+      // Early Chromium beforeinstallprompt capture
+      window.__boostpay_pwa_prompt = null;
+      window.addEventListener('beforeinstallprompt', function(e) {
+        e.preventDefault();
+        window.__boostpay_pwa_prompt = e;
+        window.dispatchEvent(new CustomEvent('boostpay_pwa_ready', { detail: e }));
+      });
+      window.addEventListener('appinstalled', function() {
+        window.__boostpay_pwa_prompt = null;
+      });
+
+      window.$RefreshReg$ = window.$RefreshReg$ || function () {};
+      window.$RefreshSig$ = window.$RefreshSig$ || function () { return function (type) { return type; }; };
+      window.__vite_plugin_react_preamble_installed__ = true;
+
+      window.addEventListener('error', function(e) {
+        if (e && e.message && (e.message.indexOf('WebSocket') !== -1 || e.message.indexOf('closed without opened') !== -1)) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+          return true;
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', function(e) {
+        if (e && e.reason && e.reason.message && (e.reason.message.indexOf('WebSocket') !== -1 || e.reason.message.indexOf('closed without opened') !== -1)) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        }
+      }, true);
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

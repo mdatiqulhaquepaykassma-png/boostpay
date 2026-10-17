@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan to fix PWA app installation for Android Chrome: adding missing manifest link in index.html, activating immediate service worker registration in main.tsx, removing iframe window.open blockers, and providing direct 1-tap native installation without modals or popups.",
+  "updatedAt": "2026-10-17T22:06:32.187878744Z",
+  "requestFeedback": true,
+  "userFacing": true
+}
