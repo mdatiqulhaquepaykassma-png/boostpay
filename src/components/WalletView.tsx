@@ -79,7 +79,7 @@ export const WalletView: FC<Props> = ({
       }
     };
 
-    const intervalTime = (user.boostState.isActive && !user.boostState.isPaused) ? 1000 : 2000;
+    const intervalTime = 5000; // 5 seconds polling to avoid race conditions with server background ticker
     const interval = setInterval(syncWithServer, intervalTime);
 
     return () => clearInterval(interval);
