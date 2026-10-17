@@ -8,15 +8,16 @@ import { formatPrecisionAmount, formatStrict8Decimals, formatRatePercent } from 
 interface BalanceTickerProps {
   intPart: string;
   decPart: string;
+  isHighlighted?: boolean;
 }
 
-const BalanceTicker = React.memo(({ intPart, decPart }: BalanceTickerProps) => (
-  <div className="flex items-baseline my-2 font-mono flex-wrap">
+const BalanceTicker = React.memo(({ intPart, decPart, isHighlighted }: BalanceTickerProps) => (
+  <div className={`flex items-baseline my-2 font-mono flex-wrap transition-all duration-700 rounded-2xl px-2.5 py-1 -mx-2.5 ${isHighlighted ? 'bg-emerald-500/15 border border-emerald-500/30 shadow-lg shadow-emerald-500/10 scale-[1.01]' : 'border border-transparent'}`}>
     <span className="text-2xl font-bold text-amber-400 mr-1">$</span>
-    <span className="text-4xl font-extrabold text-white tracking-tight">
+    <span className={`text-4xl font-extrabold tracking-tight transition-colors duration-500 ${isHighlighted ? 'text-emerald-300' : 'text-white'}`}>
       {Number(intPart).toLocaleString()}
     </span>
-    <span className="text-2xl font-bold text-amber-400">
+    <span className={`text-2xl font-bold transition-colors duration-500 ${isHighlighted ? 'text-emerald-400' : 'text-amber-400'}`}>
       .{decPart}
     </span>
     <span className="text-xs font-mono text-zinc-500 ml-1.5 self-end pb-1">USD</span>
@@ -42,8 +43,10 @@ export const WalletView: FC<Props> = ({
   // Live session yield ticker state
   const [liveYield, setLiveYield] = useState(user.boostState.accumulatedYield || 0);
   const [elapsedMs, setElapsedMs] = useState(user.boostState.elapsedMs || 0);
+  const [isHighlighted, setIsHighlighted] = useState(false);
 
   const prevBalanceRef = useRef(user.balance);
+  const prevYieldRef = useRef(liveYield);
 
   // Synchronize with user prop changes
   useEffect(() => {
@@ -57,6 +60,16 @@ export const WalletView: FC<Props> = ({
     }
     prevBalanceRef.current = user.balance;
   }, [user.boostState.elapsedMs, user.boostState.accumulatedYield, user.balance, user.boostState.isActive]);
+
+  // Trigger subtle green highlight when background yield accumulates or balance increases
+  useEffect(() => {
+    if (liveYield - prevYieldRef.current > 0.0005 || user.balance > prevBalanceRef.current) {
+      setIsHighlighted(true);
+      const timer = setTimeout(() => setIsHighlighted(false), 900);
+      return () => clearTimeout(timer);
+    }
+    prevYieldRef.current = liveYield;
+  }, [liveYield, user.balance]);
 
   const allUsers = useMemo(() => BoostPayStore.getUsers(), []);
   const dynamicTargetDurationMs = useMemo(() => 
@@ -72,18 +85,20 @@ export const WalletView: FC<Props> = ({
           freshUser.balance !== user.balance ||
           freshUser.lifetimeProfit !== user.lifetimeProfit ||
           freshUser.boostState.isActive !== user.boostState.isActive ||
-          freshUser.boostState.isPaused !== user.boostState.isPaused
+          freshUser.boostState.isPaused !== user.boostState.isPaused ||
+          freshUser.boostState.startingBalance !== user.boostState.startingBalance ||
+          freshUser.boostState.targetDurationMs !== user.boostState.targetDurationMs
         ) {
           onUpdateUser(freshUser);
         }
       }
     };
 
-    const intervalTime = 5000; // 5 seconds polling to avoid race conditions with server background ticker
+    const intervalTime = (user.boostState.isActive && !user.boostState.isPaused) ? 5000 : 10000;
     const interval = setInterval(syncWithServer, intervalTime);
 
     return () => clearInterval(interval);
-  }, [user.id, user.boostState.isActive, user.boostState.isPaused, user.balance, user.lifetimeProfit, onUpdateUser]);
+  }, [user.id, user.boostState.isActive, user.boostState.isPaused, user.balance, user.lifetimeProfit, user.boostState.startingBalance, user.boostState.targetDurationMs, onUpdateUser]);
 
   // Client-side smooth interpolation ticker
   useEffect(() => {
@@ -241,7 +256,7 @@ export const WalletView: FC<Props> = ({
         </div>
 
         {/* Large Decimals Display */}
-        <BalanceTicker intPart={intPart} decPart={decPart} />
+        <BalanceTicker intPart={intPart} decPart={decPart} isHighlighted={isHighlighted} />
 
         {/* Transfer Button */}
         <div className="mt-4">
