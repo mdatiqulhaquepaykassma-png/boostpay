@@ -1,0 +1,8 @@
+{
+  "name": "v4 BoostPay",
+  "description": "BoostPay - Dynamic Compounding Yield Engine, P2P Financial Transfers \u0026 Dokploy PostgreSQL Integration",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

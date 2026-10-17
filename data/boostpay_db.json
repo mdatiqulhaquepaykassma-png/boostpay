@@ -1,0 +1,149 @@
+{
+  "users": [
+    {
+      "id": "1",
+      "email": "user1@boostpay.app",
+      "balance": 235,
+      "lifetimeProfit": 14.5,
+      "password": "user123",
+      "createdAt": 1792155000876,
+      "boostState": {
+        "isActive": false,
+        "isPaused": false,
+        "startedAt": 0,
+        "pausedAt": 0,
+        "elapsedMs": 0,
+        "targetDurationMs": 86400000,
+        "startingBalance": 250,
+        "accumulatedYield": 0
+      }
+    },
+    {
+      "id": "2",
+      "email": "user2@boostpay.app",
+      "balance": 15,
+      "lifetimeProfit": 0,
+      "password": "pass",
+      "createdAt": 1792242417801,
+      "boostState": {
+        "isActive": false,
+        "isPaused": false,
+        "startedAt": 0,
+        "pausedAt": 0,
+        "elapsedMs": 0,
+        "targetDurationMs": 60000,
+        "startingBalance": 0,
+        "accumulatedYield": 0
+      }
+    },
+    {
+      "id": "3",
+      "email": "user3@boostpay.app",
+      "balance": 0,
+      "lifetimeProfit": 0,
+      "password": "123456",
+      "createdAt": 1792256151948,
+      "boostState": {
+        "isActive": false,
+        "isPaused": false,
+        "startedAt": 0,
+        "pausedAt": 0,
+        "elapsedMs": 0,
+        "targetDurationMs": 60000,
+        "startingBalance": 0,
+        "accumulatedYield": 0
+      }
+    }
+  ],
+  "transactions": [
+    {
+      "id": "TX-96666895",
+      "userId": "1",
+      "type": "TRANSFER_SENT",
+      "amount": 15,
+      "recipientId": "2",
+      "timestamp": 1792242417821,
+      "notes": "P2P transfer sent to #2"
+    },
+    {
+      "id": "TX-69151445",
+      "userId": "2",
+      "type": "TRANSFER_RECEIVED",
+      "amount": 15,
+      "senderId": "1",
+      "timestamp": 1792242417821,
+      "notes": "P2P transfer received from #1"
+    },
+    {
+      "id": "TX-99014120",
+      "userId": "1",
+      "type": "REWARD",
+      "amount": 14.5,
+      "timestamp": 1792237800877,
+      "notes": "Compounding reward credited"
+    }
+  ],
+  "conversations": [],
+  "messages": [],
+  "config": {
+    "hourlyRatePercent": 1.5,
+    "minBoostMs": 60000,
+    "maxBoostMs": 86400000,
+    "dokploy": {
+      "host": "boostpay-eoqehk",
+      "port": 5432,
+      "database": "boostpaydb",
+      "user": "boostpaydbuser",
+      "externalIp": "72.60.42.18",
+      "dockerHostname": "boostpay-eoqehk",
+      "isConnected": true,
+      "lastPingMs": 42
+    }
+  },
+  "notifications": [
+    {
+      "id": "NOTIF-41113809",
+      "userId": "1",
+      "type": "TRANSFER_SENT",
+      "title": "BOOSTPAY-ALERTS",
+      "message": "DEBIT ALERT: $15.00 was transferred to Peer #2. Remaining Balance: $235.00. Ref: TX-96666895",
+      "amount": 15,
+      "referenceId": "TX-96666895",
+      "timestamp": 1792242417821,
+      "isRead": false,
+      "metadata": {
+        "recipientId": "2",
+        "balanceAfter": 235
+      }
+    },
+    {
+      "id": "NOTIF-74038222",
+      "userId": "2",
+      "type": "TRANSFER_RECEIVED",
+      "title": "BOOSTPAY-ALERTS",
+      "message": "CREDIT ALERT: $15.00 has been credited to your wallet from Peer #1. Available Balance: $15.00. Ref: TX-69151445",
+      "amount": 15,
+      "referenceId": "TX-69151445",
+      "timestamp": 1792242417821,
+      "isRead": false,
+      "metadata": {
+        "senderId": "1",
+        "balanceAfter": 15
+      }
+    },
+    {
+      "id": "NOTIF-99014120",
+      "userId": "1",
+      "type": "YIELD_REWARD",
+      "title": "BOOSTPAY-ALERTS",
+      "message": "YIELD ALERT: Compounding reward credited. $14.50 profit credited to your wallet balance. Ref: TX-99014120",
+      "amount": 14.5,
+      "referenceId": "TX-99014120",
+      "timestamp": 1792238811452,
+      "isRead": true,
+      "metadata": {
+        "balanceAfter": 250
+      }
+    }
+  ]
+}

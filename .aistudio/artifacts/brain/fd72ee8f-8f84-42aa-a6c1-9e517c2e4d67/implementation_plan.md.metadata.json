@@ -1,0 +1,6 @@
+{
+  "summary": "Implementation plan to completely eliminate install popups, guide modals, and auto-banners, providing direct 1-tap native PWA app installation and silent fallback.",
+  "updatedAt": "2026-10-17T19:11:08.528654577Z",
+  "requestFeedback": true,
+  "userFacing": true
+}
