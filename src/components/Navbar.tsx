@@ -62,14 +62,6 @@ export const Navbar: FC<Props> = memo(({ user, isAdmin = false, onLogout }) => {
             </button>
           )}
 
-          {/* Discreet Admin Portal Button */}
-          <a
-            href="/admin"
-            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[11px] text-zinc-400 hover:text-amber-400 hover:border-zinc-700 active:scale-95 transition"
-            title="Open Admin Portal"
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-          </a>
 
           {/* Logout */}
           <button

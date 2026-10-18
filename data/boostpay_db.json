@@ -225,5 +225,14 @@
       "isConnected": true,
       "lastPingMs": 42
     }
-  }
+  },
+  "auditLogs": [
+    {
+      "id": "LOG-INIT",
+      "action": "SYSTEM_BOOT",
+      "adminEmail": "admin@boostpay.app",
+      "details": "BoostPay production environment verified healthy with 0.001605%/min rate",
+      "timestamp": 1792342417821
+    }
+  ]
 }

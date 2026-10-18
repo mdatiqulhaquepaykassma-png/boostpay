@@ -7,6 +7,7 @@ export interface User {
   password?: string; // Account security password
   createdAt: number;
   isBlocked?: boolean;
+  isFrozen?: boolean; // Account freeze prevents P2P transfers
   isTempLocked?: boolean;
   boostState: {
     isActive: boolean;
@@ -92,4 +93,14 @@ export interface SystemConfig {
   maxBoostMs: number; // 86,400,000 ms (24 hours)
   dokploy: DokployConfig;
 }
+
+export interface AuditLog {
+  id: string;
+  action: string;
+  adminEmail: string;
+  targetUserId?: string;
+  details: string;
+  timestamp: number;
+}
+
 

@@ -131,8 +131,32 @@ const INITIAL_DB = {
       isConnected: true,
       lastPingMs: 42
     }
-  }
+  },
+  auditLogs: [
+    {
+      id: "LOG-INIT",
+      action: "SYSTEM_INIT",
+      adminEmail: "admin@boostpay.app",
+      details: "System initialized with minute compounding engine (0.001605%/min)",
+      timestamp: Date.now() - 3600000
+    }
+  ]
 };
+
+function recordAuditLog(db: any, action: string, adminEmail: string, details: string, targetUserId?: string) {
+  if (!db.auditLogs) db.auditLogs = [];
+  const log = {
+    id: 'LOG-' + Math.floor(10000000 + Math.random() * 90000000),
+    action,
+    adminEmail: adminEmail || 'admin@boostpay.app',
+    targetUserId: targetUserId ? String(targetUserId) : undefined,
+    details,
+    timestamp: Date.now()
+  };
+  db.auditLogs.unshift(log);
+  if (db.auditLogs.length > 1000) db.auditLogs.pop();
+  return log;
+}
 
 const LEGACY_USER_ID_MAP: Record<string, string> = {
   '849201': '1',
@@ -162,6 +186,7 @@ function readDb() {
     if (!parsed.messages) parsed.messages = [];
     if (!parsed.notifications) parsed.notifications = INITIAL_DB.notifications || [];
     if (!parsed.config) parsed.config = INITIAL_DB.config;
+    if (!parsed.auditLogs) parsed.auditLogs = INITIAL_DB.auditLogs || [];
 
     // Check for legacy user IDs and auto-migrate sequentially starting at 1
     let migrated = false;
@@ -905,7 +930,9 @@ async function startServer() {
       if (!recipient) return res.status(404).json({ error: `Recipient User ID #${recipientId} was not found.` });
 
       if (sender.isBlocked) return res.status(403).json({ error: 'Your account is suspended.' });
+      if (sender.isFrozen) return res.status(403).json({ error: 'Your account is currently frozen by administration. Transfers are locked.' });
       if (recipient.isBlocked) return res.status(403).json({ error: 'Recipient account is restricted.' });
+      if (recipient.isFrozen) return res.status(403).json({ error: 'Recipient account is currently frozen.' });
 
       if (Number(sender.balance) < numAmount) {
         return res.status(400).json({ error: 'Insufficient wallet balance for this transfer.' });
@@ -1270,6 +1297,14 @@ async function startServer() {
         user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config);
       }
 
+      recordAuditLog(
+        db,
+        `TREASURY_${type}`,
+        req.body.adminEmail || 'admin@boostpay.app',
+        `Adjusted balance: ${type} $${numAmount.toFixed(2)} to User #${user.id}. Note: ${notes || 'Treasury ' + type}`,
+        user.id
+      );
+
       writeDb(db);
       res.json({ success: true, user });
     } catch (err: any) {
@@ -1279,7 +1314,7 @@ async function startServer() {
 
   app.post('/api/admin/status', (req, res) => {
     try {
-      const { userId, action } = req.body; // action: 'BLOCK' | 'UNBLOCK' | 'LOCK' | 'UNLOCK'
+      const { userId, action, adminEmail } = req.body; // action: 'BLOCK' | 'UNBLOCK' | 'LOCK' | 'UNLOCK'
       const db = readDb();
       const user = db.users.find((u: any) => u.id === userId);
       if (!user) {
@@ -1291,6 +1326,14 @@ async function startServer() {
       if (action === 'LOCK') user.isTempLocked = true;
       if (action === 'UNLOCK') user.isTempLocked = false;
 
+      recordAuditLog(
+        db,
+        `USER_${action}`,
+        adminEmail || 'admin@boostpay.app',
+        `User #${user.id} account status changed to ${action}`,
+        user.id
+      );
+
       writeDb(db);
       res.json({ success: true, user });
     } catch (err: any) {
@@ -1298,18 +1341,63 @@ async function startServer() {
     }
   });
 
+  // Account freeze toggle endpoint
+  app.post('/api/admin/users/freeze', (req, res) => {
+    try {
+      const { userId, isFrozen, reason, adminEmail } = req.body;
+      const db = readDb();
+      const user = db.users.find((u: any) => String(u.id) === String(userId));
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      user.isFrozen = Boolean(isFrozen);
+      const actionName = user.isFrozen ? 'FREEZE_USER' : 'UNFREEZE_USER';
+      recordAuditLog(
+        db,
+        actionName,
+        adminEmail || 'admin@boostpay.app',
+        `User #${user.id} account ${user.isFrozen ? 'frozen' : 'unfrozen'}. Reason: ${reason || 'Administrative action'}`,
+        user.id
+      );
+
+      writeDb(db);
+      res.json({ success: true, user });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Audit logs retrieval endpoint
+  app.get('/api/admin/audit-logs', (_req, res) => {
+    try {
+      const db = readDb();
+      res.json({ success: true, logs: db.auditLogs || [] });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/admin/users/password', (req, res) => {
     try {
-      const { userId, newPassword } = req.body;
+      const { userId, newPassword, adminEmail } = req.body;
       const db = readDb();
       const user = db.users.find((u: any) => u.id === userId);
       if (!user) {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      user.password = (newPassword || '').trim();
+      user.password = newPassword.trim();
+      recordAuditLog(
+        db,
+        'PASSWORD_RESET',
+        adminEmail || 'admin@boostpay.app',
+        `Password reset performed for User #${user.id}`,
+        user.id
+      );
+
       writeDb(db);
-      res.json({ success: true, user });
+      res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

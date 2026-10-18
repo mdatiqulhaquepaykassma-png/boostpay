@@ -2,7 +2,6 @@ import { FC, useState, useEffect, useRef } from 'react';
 import {
   ShieldCheck,
   PlusCircle,
-  MinusCircle,
   Users,
   MessageSquare,
   Percent,
@@ -28,18 +27,22 @@ import {
   ArrowLeft,
   Activity,
   Sliders,
-  Sparkles
+  Snowflake,
+  FileText,
+  ArrowRightLeft,
+  ShieldAlert,
+  Clock
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
-import { User, SystemConfig, Conversation, Message } from '../types';
-import { formatPrecisionAmount, formatRatePercent } from '../utils/format';
+import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
+import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
 
 interface Props {
   onBack?: () => void;
 }
 
 export const AdminPortal: FC<Props> = ({ onBack }) => {
-  // 1. Persistent Admin Auth State
+  // 1. Persistent Admin Auth State (Role-Bounded Non-Superuser)
   const [adminSession, setAdminSession] = useState(() => BoostPayStore.getAdminSession());
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
@@ -48,7 +51,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // 2. Admin Portal Views
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'USERS' | 'DATABASE' | 'ENGINE' | 'SUPPORT'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'DATABASE' | 'ENGINE' | 'SUPPORT'>('OVERVIEW');
 
   // 3. Database Storage & Diagnostics State
   const [storageProbe, setStorageProbe] = useState<any>(null);
@@ -61,9 +64,11 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [config, setConfig] = useState<SystemConfig>(() => BoostPayStore.getConfig());
   const [conversations, setConversations] = useState<Conversation[]>(() => BoostPayStore.getConversations());
   const [messages, setMessages] = useState<Message[]>(() => BoostPayStore.getMessages());
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>(() => BoostPayStore.getTransactions());
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  // 4. Stats
+  // Stats
   const [stats, setStats] = useState({
     totalUsers: 0,
     totalLiquidity: 0,
@@ -80,7 +85,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     }
   });
 
-  // 4. Admin Portal input focus tracking
+  // Admin Portal input focus tracking
   const isEditing = useRef({
     hourlyRate: false,
     minBoost: false,
@@ -106,9 +111,22 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [quickCreditSuccess, setQuickCreditSuccess] = useState('');
   const [quickCreditError, setQuickCreditError] = useState('');
 
+  // Freeze Modal State
+  const [freezeModalUser, setFreezeModalUser] = useState<User | null>(null);
+  const [freezeReason, setFreezeReason] = useState('');
+  const [freezeLoading, setFreezeLoading] = useState(false);
+
   // Password reset modal
   const [newPasswordInput, setNewPasswordInput] = useState('');
   const [passwordResetSuccess, setPasswordResetSuccess] = useState('');
+
+  // Audit Logs State
+  const [auditSearch, setAuditSearch] = useState('');
+  const [auditFilter, setAuditFilter] = useState<'ALL' | 'TREASURY' | 'FREEZE' | 'USER' | 'PASSWORD' | 'SYSTEM'>('ALL');
+
+  // Transactions Tab State
+  const [txSearch, setTxSearch] = useState('');
+  const [txFilter, setTxFilter] = useState<'ALL' | 'P2P' | 'REWARD' | 'TREASURY'>('ALL');
 
   // Rate config state
   const [customMinuteRate, setCustomMinuteRate] = useState(
@@ -186,6 +204,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                 prev[i].id !== data.users[i].id ||
                 prev[i].balance !== data.users[i].balance ||
                 prev[i].lifetimeProfit !== data.users[i].lifetimeProfit ||
+                prev[i].isBlocked !== data.users[i].isBlocked ||
+                prev[i].isFrozen !== data.users[i].isFrozen ||
                 prev[i].boostState.isActive !== data.users[i].boostState.isActive ||
                 prev[i].boostState.isPaused !== data.users[i].boostState.isPaused
               ) {
@@ -204,27 +224,27 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           if (!curr) return null;
           const fresh = data.users.find((u: User) => u.id === curr.id);
           if (!fresh) return curr;
-          if (
-            fresh.balance !== curr.balance ||
-            fresh.lifetimeProfit !== curr.lifetimeProfit ||
-            fresh.boostState.isActive !== curr.boostState.isActive ||
-            fresh.boostState.isPaused !== curr.boostState.isPaused
-          ) {
-            return fresh;
-          }
-          return curr;
+          return fresh;
         });
       }
 
+      // Fetch Audit Logs
+      const logs = await BoostPayStore.getAuditLogs();
+      if (logs) {
+        setAuditLogs(logs);
+      }
+
+      // Fetch Latest Transactions
+      const txs = BoostPayStore.getTransactions();
+      if (txs) {
+        setTransactions(txs);
+      }
+
       const newConvs = BoostPayStore.getConversations();
-      setConversations((prev) => {
-        if (prev.length !== newConvs.length) return newConvs;
-        const changed = prev.some((c, i) => c.lastMessage !== newConvs[i]?.lastMessage || c.lastMessageAt !== newConvs[i]?.lastMessageAt || c.hasUnread !== newConvs[i]?.hasUnread);
-        return changed ? newConvs : prev;
-      });
+      setConversations(newConvs);
 
       const newMsgs = BoostPayStore.getMessages();
-      setMessages((prev) => (prev.length !== newMsgs.length ? newMsgs : prev));
+      setMessages(newMsgs);
     } catch (err) {
       console.error('Failed to refresh admin data:', err);
     } finally {
@@ -235,7 +255,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   useEffect(() => {
     if (adminSession?.isLoggedIn) {
       refreshData(false);
-      const interval = setInterval(() => refreshData(false), 1200);
+      const interval = setInterval(() => refreshData(false), 2000);
 
       // Connect to real-time chat SSE stream for Admin Support
       const unsubStream = BoostPayStore.initChatStream('ADMIN_SUPPORT');
@@ -286,7 +306,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         return;
       }
     } catch {
-      // Local check fallback
+      // Local fallback
     }
 
     if (emailClean === 'admin@gmail.com' && (passClean === '123456' || passClean === 'admin786')) {
@@ -347,6 +367,30 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     } else {
       setAdjustError(res.error || `Failed to apply ${type}`);
       setTimeout(() => setAdjustError(''), 6000);
+    }
+  };
+
+  // Toggle Account Freeze
+  const handleConfirmFreezeToggle = async () => {
+    if (!freezeModalUser) return;
+    setFreezeLoading(true);
+    const newFreezeStatus = !freezeModalUser.isFrozen;
+    const res = await BoostPayStore.adminToggleFreezeUser(
+      freezeModalUser.id,
+      newFreezeStatus,
+      freezeReason.trim() || (newFreezeStatus ? 'Administrative security freeze' : 'Account unfreezing by admin'),
+      adminSession?.email
+    );
+    setFreezeLoading(false);
+    if (res.success && res.user) {
+      await refreshData(true);
+      if (selectedUser?.id === freezeModalUser.id) {
+        setSelectedUser({ ...res.user });
+      }
+      setFreezeModalUser(null);
+      setFreezeReason('');
+    } else {
+      alert(res.error || 'Failed to update account freeze state.');
     }
   };
 
@@ -452,15 +496,25 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     const minMins = parseInt(minBoostMinutes, 10);
     const maxHrs = parseInt(maxBoostHours, 10);
 
-    if (isNaN(minuteRate) || minuteRate < 0) return;
+    if (isNaN(minuteRate) || minuteRate < 0) {
+      alert('Please enter a valid compounding rate percentage per minute (e.g. 0.001605)');
+      return;
+    }
+    if (isNaN(minMins) || minMins < 1) {
+      alert('Min boost duration must be at least 1 minute');
+      return;
+    }
+    if (isNaN(maxHrs) || maxHrs < 1) {
+      alert('Max boost duration must be at least 1 hour');
+      return;
+    }
 
-    const hourlyEquiv = ((Math.pow(1 + minuteRate / 100, 60) - 1) * 100);
-
-    const newConfig: Partial<SystemConfig> = {
+    const newConfig: SystemConfig = {
       minuteRatePercent: minuteRate,
-      hourlyRatePercent: hourlyEquiv,
-      minBoostMs: !isNaN(minMins) && minMins > 0 ? minMins * 60000 : 60000,
-      maxBoostMs: !isNaN(maxHrs) && maxHrs > 0 ? maxHrs * 3600000 : 86400000
+      hourlyRatePercent: (Math.pow(1 + minuteRate / 100, 60) - 1) * 100,
+      minBoostMs: minMins * 60000,
+      maxBoostMs: maxHrs * 3600000,
+      dokploy: config.dokploy
     };
 
     try {
@@ -470,84 +524,91 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         body: JSON.stringify(newConfig)
       });
       if (res.ok) {
-        const data = await res.json();
-        setConfig(data.config);
-        BoostPayStore.saveConfig(data.config);
+        setConfig(newConfig);
+        BoostPayStore.saveConfig(newConfig);
         setRateSuccess(true);
-        setTimeout(() => setRateSuccess(false), 2500);
+        setTimeout(() => setRateSuccess(false), 3000);
+        await refreshData();
       }
-    } catch {
-      const merged = { ...config, ...newConfig };
-      BoostPayStore.saveConfig(merged as SystemConfig);
-      setConfig(merged as SystemConfig);
-      setRateSuccess(true);
-      setTimeout(() => setRateSuccess(false), 2500);
+    } catch (err) {
+      console.warn('Config save error:', err);
     }
   };
 
-  // Support Message Sender
+  // Send Support Message
   const handleSendSupportMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeConv || !supportMessage.trim()) return;
 
-    const userParticipant = activeConv.participants.find(p => p !== 'ADMIN_SUPPORT') || '';
-    const textToSend = supportMessage.trim();
-    setSupportMessage('');
+    const peerId = activeConv.participants.find(p => p !== 'ADMIN_SUPPORT');
+    if (!peerId) return;
 
-    await BoostPayStore.sendChatMessage(userParticipant, textToSend, 'ADMIN');
-    setTimeout(() => {
-      adminChatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, 50);
+    const res = await BoostPayStore.sendChatMessage(peerId, supportMessage.trim(), 'ADMIN');
+    if (res.success) {
+      setSupportMessage('');
+      await refreshData();
+    }
   };
 
-  // Run live database probe
+  // Run Database Storage Health Probe
   const runStorageProbe = async () => {
     setIsProbing(true);
-    const res = await BoostPayStore.probeDatabaseStorage();
-    setStorageProbe(res);
-    setIsProbing(false);
+    try {
+      const data = await BoostPayStore.probeDatabaseStorage();
+      setStorageProbe(data);
+    } catch (err) {
+      console.warn('Storage probe error:', err);
+    } finally {
+      setIsProbing(false);
+    }
   };
 
-  useEffect(() => {
-    runStorageProbe();
-  }, []);
-
-  // Download DB Backup as JSON snapshot
+  // Export JSON Database Snapshot
   const handleDownloadBackup = async () => {
-    const blob = await BoostPayStore.exportDatabase();
-    if (!blob) return;
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `boostpay_database_backup_${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    try {
+      const blob = await BoostPayStore.exportDatabase();
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `boostpay_db_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.warn('Backup download failed:', err);
+    }
   };
 
-  // Restore DB from uploaded JSON file
+  // Restore JSON Database Snapshot
   const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (!confirm('Warning: Restoring a database backup will merge records into the live database. Proceed?')) {
+      e.target.value = '';
+      return;
+    }
+
     setImportLoading(true);
     setImportStatus(null);
+
     try {
       const text = await file.text();
       const parsed = JSON.parse(text);
       const res = await BoostPayStore.importDatabase(parsed);
       if (res.success) {
-        setImportStatus(`✓ Success: Restored ${res.restoredUsers || 0} user accounts and database records!`);
-        await refreshData();
-        await runStorageProbe();
+        setImportStatus(`✓ Database restored successfully! (${res.restoredUsers || 0} user accounts verified)`);
+        await refreshData(true);
+        runStorageProbe();
       } else {
-        setImportStatus(`Error: ${res.error || 'Failed to restore database.'}`);
+        setImportStatus(`Error: ${res.error || 'Failed to restore backup'}`);
       }
     } catch (err: any) {
-      setImportStatus(`Invalid JSON backup file: ${err.message}`);
+      setImportStatus(`Parse error: Invalid JSON file (${err.message})`);
     } finally {
       setImportLoading(false);
-      // Reset input value so same file can be re-selected if needed
       e.target.value = '';
     }
   };
@@ -556,8 +617,44 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const filteredUsers = users.filter(u =>
     u.id.includes(searchTerm) ||
     u.balance.toString().includes(searchTerm) ||
+    (u.email && u.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
     (u.phrase && u.phrase.toLowerCase().includes(searchTerm.toLowerCase()))
   );
+
+  // Filter Audit Logs
+  const filteredAuditLogs = auditLogs.filter(log => {
+    const matchesSearch =
+      log.action.toLowerCase().includes(auditSearch.toLowerCase()) ||
+      log.adminEmail.toLowerCase().includes(auditSearch.toLowerCase()) ||
+      (log.targetUserId && log.targetUserId.includes(auditSearch)) ||
+      log.details.toLowerCase().includes(auditSearch.toLowerCase());
+
+    if (!matchesSearch) return false;
+    if (auditFilter === 'ALL') return true;
+    if (auditFilter === 'TREASURY') return log.action.includes('TREASURY');
+    if (auditFilter === 'FREEZE') return log.action.includes('FREEZE');
+    if (auditFilter === 'USER') return log.action.startsWith('USER_');
+    if (auditFilter === 'PASSWORD') return log.action.includes('PASSWORD');
+    if (auditFilter === 'SYSTEM') return log.action.includes('SYSTEM') || log.action.includes('CONFIG');
+    return true;
+  });
+
+  // Filter Transactions
+  const filteredTransactions = transactions.filter(tx => {
+    const matchesSearch =
+      tx.id.toLowerCase().includes(txSearch.toLowerCase()) ||
+      tx.userId.includes(txSearch) ||
+      (tx.recipientId && tx.recipientId.includes(txSearch)) ||
+      (tx.senderId && tx.senderId.includes(txSearch)) ||
+      (tx.notes && tx.notes.toLowerCase().includes(txSearch.toLowerCase()));
+
+    if (!matchesSearch) return false;
+    if (txFilter === 'ALL') return true;
+    if (txFilter === 'P2P') return tx.type === 'TRANSFER_SENT' || tx.type === 'TRANSFER_RECEIVED';
+    if (txFilter === 'REWARD') return tx.type === 'REWARD';
+    if (txFilter === 'TREASURY') return tx.type === 'ADMIN_CREDIT' || tx.type === 'ADMIN_DEBIT';
+    return true;
+  });
 
   // -------------------------------------------------------------
   // RENDER: 1. ADMIN LOGIN FORM (When not logged in)
@@ -571,8 +668,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-500 text-zinc-950 font-black shadow-lg shadow-amber-500/20 mb-3">
               <ShieldCheck className="w-7 h-7" />
             </div>
-            <h1 className="text-xl font-black tracking-tight text-white">BoostPay SuperAdmin</h1>
-            <p className="text-xs text-zinc-400 mt-1">Independent Full-Stack Administration Portal</p>
+            <h1 className="text-xl font-black tracking-tight text-white">BoostPay Admin Portal</h1>
+            <p className="text-xs text-zinc-400 mt-1">Role-Bounded Administrative Console (Direct Route)</p>
           </div>
 
           <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-6 shadow-2xl backdrop-blur-xl">
@@ -625,7 +722,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                 disabled={isLoggingIn}
                 className="w-full rounded-xl bg-amber-500 py-3 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.99] transition shadow-lg shadow-amber-500/20 cursor-pointer disabled:opacity-50"
               >
-                {isLoggingIn ? 'Authenticating...' : 'Sign In to SuperAdmin'}
+                {isLoggingIn ? 'Authenticating...' : 'Sign In to Admin Portal'}
               </button>
 
               {onBack && (
@@ -648,7 +745,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   }
 
   // -------------------------------------------------------------
-  // RENDER: 2. LOGGED-IN SUPERADMIN CONSOLE
+  // RENDER: 2. LOGGED-IN ADMIN CONSOLE (ROLE-BOUNDED)
   // -------------------------------------------------------------
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans">
@@ -662,14 +759,14 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-bold text-sm tracking-tight text-white block">
-                  BoostPay SuperAdmin
+                  BoostPay Admin Portal
                 </span>
-                <span className="rounded-full bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 text-[10px] font-mono text-amber-400 font-semibold">
-                  SUPERUSER
+                <span className="rounded-full bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-mono text-emerald-400 font-semibold">
+                  ROLE_ADMIN
                 </span>
               </div>
               <span className="text-[10px] text-zinc-400 font-mono">
-                Decoupled Full-Stack Backend • {adminSession.email}
+                Authoritative Session • {adminSession.email}
               </span>
             </div>
           </div>
@@ -749,6 +846,30 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           </button>
 
           <button
+            onClick={() => setActiveTab('AUDIT')}
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+              activeTab === 'AUDIT'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <FileText className="w-4 h-4" />
+            <span>Audit Action Log ({auditLogs.length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('TRANSACTIONS')}
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+              activeTab === 'TRANSACTIONS'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <ArrowRightLeft className="w-4 h-4" />
+            <span>Transactions Ledger ({transactions.length})</span>
+          </button>
+
+          <button
             onClick={() => {
               setActiveTab('DATABASE');
               runStorageProbe();
@@ -760,7 +881,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             }`}
           >
             <Database className="w-4 h-4" />
-            <span>Database Storage & Inspector</span>
+            <span>Database Storage</span>
           </button>
 
           <button
@@ -772,7 +893,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             }`}
           >
             <Sliders className="w-4 h-4" />
-            <span>Compounding Engine & Rates</span>
+            <span>Compounding Engine</span>
           </button>
 
           <button
@@ -822,68 +943,89 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
               <div className="rounded-2xl border border-zinc-800 bg-zinc-900/90 p-4">
                 <div className="flex items-center justify-between text-zinc-400 text-xs mb-2">
-                  <span>Active 24/7 Boosters</span>
+                  <span>Active Compounding</span>
                   <Zap className="w-4 h-4 text-emerald-400" />
                 </div>
                 <div className="text-2xl font-black font-mono text-emerald-400">
                   {stats.activeBoosters}
                 </div>
-                <div className="text-[10px] text-zinc-500 mt-1">Running continuous server ticks</div>
+                <div className="text-[10px] text-zinc-500 mt-1">{stats.pausedBoosters} cycles paused</div>
               </div>
 
               <div className="rounded-2xl border border-zinc-800 bg-zinc-900/90 p-4">
                 <div className="flex items-center justify-between text-zinc-400 text-xs mb-2">
-                  <span>Total Profits Distributed</span>
-                  <Sparkles className="w-4 h-4 text-amber-400" />
+                  <span>Total Yield Paid</span>
+                  <Percent className="w-4 h-4 text-amber-400" />
                 </div>
-                <div className="text-2xl font-black font-mono text-amber-400">
-                  +${stats.totalProfitPaid.toFixed(2)}
+                <div className="text-2xl font-black font-mono text-white">
+                  ${stats.totalProfitPaid.toFixed(2)}
                 </div>
-                <div className="text-[10px] text-zinc-500 mt-1">Total compounded yields credited</div>
+                <div className="text-[10px] text-zinc-500 mt-1">{stats.totalTransactions} transactions recorded</div>
               </div>
             </div>
 
-            {/* Dokploy Backend Engine Status */}
-            <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-6 shadow-xl">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-zinc-800/80 pb-4 mb-4">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                    <Server className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                      Dokploy Containerized Node Engine
-                      <span className="flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-                    </h3>
-                    <p className="text-xs text-zinc-400 font-mono">
-                      Database: {stats.dokployStatus.database} • Host: {stats.dokployStatus.host}
-                    </p>
-                  </div>
+            {/* Quick Actions & Security Status */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/90 p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold uppercase tracking-wider font-mono text-zinc-400">Security Architecture</h4>
+                  <ShieldCheck className="w-4 h-4 text-emerald-400" />
                 </div>
-                <div className="flex items-center gap-4 text-xs font-mono">
-                  <div className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-1.5">
-                    <span className="text-zinc-500">Latency: </span>
-                    <span className="text-emerald-400 font-bold">{stats.dokployStatus.lastPingMs}ms</span>
+                <div className="space-y-2 text-xs">
+                  <div className="flex justify-between items-center py-1 border-b border-zinc-800/60">
+                    <span className="text-zinc-400">Role Boundary</span>
+                    <span className="font-mono text-emerald-400 font-bold">ROLE_ADMIN (Non-Superuser)</span>
                   </div>
-                  <div className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-1.5">
-                    <span className="text-zinc-500">Status: </span>
-                    <span className="text-emerald-400 font-bold">ONLINE (24/7)</span>
+                  <div className="flex justify-between items-center py-1 border-b border-zinc-800/60">
+                    <span className="text-zinc-400">Audit Logging</span>
+                    <span className="font-mono text-emerald-400">Active & Tamper-Evident</span>
+                  </div>
+                  <div className="flex justify-between items-center py-1">
+                    <span className="text-zinc-400">Account Freeze Engine</span>
+                    <span className="font-mono text-sky-400">Ready</span>
                   </div>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono">
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
-                  <span className="text-zinc-500 block text-[10px]">CURRENT HOURLY RATE</span>
-                  <span className="text-sm font-bold text-amber-400 mt-0.5 block">{config.hourlyRatePercent}% / hr</span>
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/90 p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold uppercase tracking-wider font-mono text-zinc-400">Compounding Engine</h4>
+                  <Percent className="w-4 h-4 text-amber-400" />
                 </div>
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
-                  <span className="text-zinc-500 block text-[10px]">DYNAMIC DURATION BOUNDS</span>
-                  <span className="text-sm font-bold text-zinc-200 mt-0.5 block">1 min (min) to 24 hrs (max)</span>
+                <div className="space-y-2 text-xs">
+                  <div className="flex justify-between items-center py-1 border-b border-zinc-800/60">
+                    <span className="text-zinc-400">Minute Rate</span>
+                    <span className="font-mono text-amber-400 font-bold">{config.minuteRatePercent || 0.001605}% / min</span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-zinc-800/60">
+                    <span className="text-zinc-400">Hourly Equivalent</span>
+                    <span className="font-mono text-zinc-200">~{((Math.pow(1 + (config.minuteRatePercent || 0.001605) / 100, 60) - 1) * 100).toFixed(4)}% / hr</span>
+                  </div>
+                  <div className="flex justify-between items-center py-1">
+                    <span className="text-zinc-400">Dynamic Boost Window</span>
+                    <span className="font-mono text-zinc-300">1m – 24h</span>
+                  </div>
                 </div>
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
-                  <span className="text-zinc-500 block text-[10px]">OFFLINE TICKING ENGINE</span>
-                  <span className="text-sm font-bold text-emerald-400 mt-0.5 block">Active (1-sec intervals)</span>
+              </div>
+
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/90 p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold uppercase tracking-wider font-mono text-zinc-400">Recent Audit Activities</h4>
+                  <FileText className="w-4 h-4 text-sky-400" />
+                </div>
+                <div className="space-y-1.5 text-xs font-mono">
+                  {auditLogs.slice(0, 3).map(log => (
+                    <div key={log.id} className="py-1 border-b border-zinc-800/60 last:border-none">
+                      <div className="flex justify-between text-[11px]">
+                        <span className="text-amber-400 font-bold truncate max-w-[140px]">{log.action}</span>
+                        <span className="text-zinc-500 text-[10px]">{new Date(log.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                      </div>
+                      <p className="text-[10px] text-zinc-400 truncate">{log.details}</p>
+                    </div>
+                  ))}
+                  {auditLogs.length === 0 && (
+                    <p className="text-[11px] text-zinc-500">No recent logs recorded.</p>
+                  )}
                 </div>
               </div>
             </div>
@@ -891,105 +1033,91 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         )}
 
         {/* ======================================================== */}
-        {/* TAB 2: USER MANAGEMENT & TREASURY                        */}
+        {/* TAB 2: USER ACCOUNTS & MANAGEMENT                        */}
         {/* ======================================================== */}
         {activeTab === 'USERS' && (
           <div className="space-y-6">
-            {/* Search Bar & Quick Add Balance Action */}
+            {/* Top Toolbar */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-              <div className="relative flex-1">
-                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" />
                 <input
                   type="text"
+                  placeholder="Search accounts by ID, email, balance..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="Search by User ID, recovery phrase keyword, or balance..."
-                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/90 pl-10 pr-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500 focus:outline-none"
+                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/90 pl-10 pr-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500 focus:outline-none shadow-sm"
                 />
               </div>
-              <div className="flex items-center gap-2.5 self-end sm:self-center">
-                <button
-                  onClick={() => {
-                    const target = users[0] || null;
-                    setQuickCreditModalUser(target);
-                    setQuickCreditAmount('');
-                    setQuickCreditNote('');
-                    setQuickCreditSuccess('');
-                    setQuickCreditError('');
-                  }}
-                  className="flex items-center gap-1.5 rounded-2xl bg-emerald-500 px-3.5 py-2 text-xs font-bold text-zinc-950 hover:bg-emerald-400 active:scale-95 transition shadow-md shadow-emerald-500/20 cursor-pointer"
-                  title="Directly credit balance to any user account"
-                >
-                  <PlusCircle className="w-4 h-4 stroke-[2.5]" />
-                  <span>+ Deposit Balance</span>
-                </button>
-                <div className="text-xs font-mono text-zinc-400">
-                  {filteredUsers.length} of {users.length} users
-                </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono text-zinc-400">
+                  Showing {filteredUsers.length} of {users.length} accounts
+                </span>
               </div>
             </div>
 
-            {/* User List Table */}
+            {/* Users Table */}
             <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden">
               <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-zinc-950 text-zinc-400 border-b border-zinc-800 uppercase font-mono text-[10px]">
-                    <tr>
-                      <th className="px-4 py-3">User ID</th>
-                      <th className="px-4 py-3">Balance</th>
-                      <th className="px-4 py-3">Lifetime Profit</th>
-                      <th className="px-4 py-3">Boost State</th>
-                      <th className="px-4 py-3">Account Status</th>
-                      <th className="px-4 py-3">Email Address</th>
-                      <th className="px-4 py-3 text-right">Actions</th>
+                <table className="w-full text-left text-xs font-mono">
+                  <thead>
+                    <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
+                      <th className="px-4 py-3 font-semibold">User ID</th>
+                      <th className="px-4 py-3 font-semibold">Balance</th>
+                      <th className="px-4 py-3 font-semibold">Profit</th>
+                      <th className="px-4 py-3 font-semibold">Compounding</th>
+                      <th className="px-4 py-3 font-semibold">Status</th>
+                      <th className="px-4 py-3 font-semibold">Email Account</th>
+                      <th className="px-4 py-3 font-semibold text-right">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-zinc-800/60 font-mono">
+                  <tbody className="divide-y divide-zinc-800/60">
                     {filteredUsers.map((u) => {
-                      const isSelected = selectedUser?.id === u.id;
-                      const isBoosting = u.boostState && u.boostState.isActive && !u.boostState.isPaused;
-
                       return (
                         <tr
                           key={u.id}
-                          className={`hover:bg-zinc-800/40 transition cursor-pointer ${
-                            isSelected ? 'bg-amber-500/10' : ''
-                          }`}
                           onClick={() => setSelectedUser(u)}
+                          className={`hover:bg-zinc-800/40 transition cursor-pointer ${
+                            selectedUser?.id === u.id ? 'bg-amber-500/10' : ''
+                          }`}
                         >
                           <td className="px-4 py-3 font-bold text-amber-400">
                             #{u.id}
                           </td>
-                          <td className="px-4 py-3 font-bold text-white">
-                            ${u.balance.toFixed(2)}
+                          <td className="px-4 py-3 font-bold text-emerald-400 tabular-nums">
+                            ${formatPrecisionAmount(u.balance, 8)}
                           </td>
-                          <td className="px-4 py-3 text-emerald-400 font-semibold">
-                            +${u.lifetimeProfit.toFixed(2)}
+                          <td className="px-4 py-3 text-zinc-300 tabular-nums">
+                            +${formatPrecisionAmount(u.lifetimeProfit || 0, 8)}
                           </td>
                           <td className="px-4 py-3">
-                            {isBoosting ? (
-                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] text-emerald-400 border border-emerald-500/30">
-                                <Zap className="w-3 h-3 animate-pulse" />
-                                <span>Boosting ({Math.round(((u.boostState?.elapsedMs || 0) / (u.boostState?.targetDurationMs || 60000)) * 100)}%)</span>
-                              </span>
-                            ) : u.boostState?.isPaused ? (
-                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] text-amber-400 border border-amber-500/30">
-                                Paused
+                            {u.boostState?.isActive ? (
+                              <span className="inline-flex items-center gap-1 text-emerald-400 font-semibold">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                {u.boostState.isPaused ? 'Paused' : 'Active'}
                               </span>
                             ) : (
                               <span className="text-zinc-500 text-[10px]">Idle</span>
                             )}
                           </td>
                           <td className="px-4 py-3">
-                            {u.isBlocked ? (
-                              <span className="rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] text-red-400 font-semibold border border-red-500/30">
-                                Suspended
-                              </span>
-                            ) : (
-                              <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-300">
-                                Active
-                              </span>
-                            )}
+                            <div className="flex items-center gap-1.5">
+                              {u.isFrozen ? (
+                                <span className="rounded-full bg-cyan-500/20 px-2 py-0.5 text-[10px] text-cyan-300 font-bold border border-cyan-500/40 flex items-center gap-1">
+                                  <Snowflake className="w-2.5 h-2.5" />
+                                  <span>FROZEN</span>
+                                </span>
+                              ) : u.isBlocked ? (
+                                <span className="rounded-full bg-red-500/20 px-2 py-0.5 text-[10px] text-red-400 font-semibold border border-red-500/30">
+                                  SUSPENDED
+                                </span>
+                              ) : (
+                                <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-400 border border-emerald-500/20">
+                                  ACTIVE
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
@@ -1007,6 +1135,23 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           </td>
                           <td className="px-4 py-3 text-right">
                             <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                              {/* 1-Click Freeze / Unfreeze Button */}
+                              <button
+                                onClick={() => {
+                                  setFreezeModalUser(u);
+                                  setFreezeReason('');
+                                }}
+                                className={`rounded-xl px-2.5 py-1 text-[11px] font-bold border transition cursor-pointer flex items-center gap-1 ${
+                                  u.isFrozen
+                                    ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20'
+                                    : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-cyan-300 hover:border-cyan-500/40'
+                                }`}
+                                title={u.isFrozen ? "Unfreeze this account" : "Freeze this account"}
+                              >
+                                <Snowflake className="w-3 h-3" />
+                                <span>{u.isFrozen ? 'Unfreeze' : 'Freeze'}</span>
+                              </button>
+
                               <button
                                 onClick={() => {
                                   setQuickCreditModalUser(u);
@@ -1046,6 +1191,11 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     </span>
                     <h3 className="text-lg font-bold text-white flex items-center gap-2 mt-0.5">
                       User #{selectedUser.id}
+                      {selectedUser.isFrozen && (
+                        <span className="rounded-full bg-cyan-500/20 text-cyan-300 text-xs px-2.5 py-0.5 border border-cyan-500/40 flex items-center gap-1 font-mono">
+                          <Snowflake className="w-3 h-3" /> FROZEN
+                        </span>
+                      )}
                       {selectedUser.isBlocked && (
                         <span className="rounded-full bg-red-500/20 text-red-400 text-xs px-2 py-0.5">SUSPENDED</span>
                       )}
@@ -1053,6 +1203,22 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   </div>
 
                   <div className="flex items-center gap-2">
+                    {/* Freeze Toggle in Panel */}
+                    <button
+                      onClick={() => {
+                        setFreezeModalUser(selectedUser);
+                        setFreezeReason('');
+                      }}
+                      className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold border transition cursor-pointer ${
+                        selectedUser.isFrozen
+                          ? 'border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20'
+                          : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:text-cyan-300 hover:border-cyan-500/40'
+                      }`}
+                    >
+                      <Snowflake className="w-3.5 h-3.5" />
+                      <span>{selectedUser.isFrozen ? 'Unfreeze Account' : 'Freeze Account'}</span>
+                    </button>
+
                     <button
                       onClick={() => toggleBlockUser(selectedUser.id)}
                       className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold border transition cursor-pointer ${
@@ -1236,168 +1402,218 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                 </div>
               </div>
             )}
-
-            {/* Quick Balance Deposit / Credit Modal */}
-            {quickCreditModalUser && (
-              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-md animate-in fade-in duration-200">
-                <div className="w-full max-w-md rounded-3xl border border-emerald-500/30 bg-zinc-900 shadow-2xl p-6 space-y-4">
-                  <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-                    <div className="flex items-center gap-2.5">
-                      <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-400">
-                        <PlusCircle className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <h3 className="text-sm font-bold text-white">Deposit / Credit Balance</h3>
-                        <p className="text-[11px] text-zinc-400">Account: User #{quickCreditModalUser.id}</p>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => setQuickCreditModalUser(null)}
-                      className="rounded-xl border border-zinc-800 p-1.5 text-zinc-400 hover:text-white cursor-pointer"
-                    >
-                      ✕
-                    </button>
-                  </div>
-
-                  <div className="space-y-3">
-                    <div>
-                      <label className="block text-[10px] font-mono text-zinc-400 mb-1">Target Account</label>
-                      <select
-                        value={quickCreditModalUser.id}
-                        onChange={(e) => {
-                          const target = users.find(u => String(u.id) === String(e.target.value));
-                          if (target) {
-                            setQuickCreditModalUser(target);
-                            setQuickCreditSuccess('');
-                            setQuickCreditError('');
-                          }
-                        }}
-                        className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
-                      >
-                        {users.map(u => (
-                          <option key={u.id} value={u.id}>
-                            User #{u.id} — Current Balance: ${u.balance.toFixed(2)} ({u.email || 'No email'})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <div className="flex justify-between items-center mb-1">
-                        <label className="text-[10px] font-mono text-zinc-400">Deposit Amount ($ USD)</label>
-                        <span className="text-[10px] font-mono text-emerald-400 font-bold">Current: ${quickCreditModalUser.balance.toFixed(2)}</span>
-                      </div>
-                      <input
-                        type="text"
-                        value={quickCreditAmount}
-                        onChange={(e) => setQuickCreditAmount(e.target.value)}
-                        placeholder="e.g. 50.00"
-                        className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white font-mono font-bold focus:border-emerald-500 focus:outline-none"
-                        autoFocus
-                      />
-                    </div>
-
-                    {/* Quick Amount Preset Chips */}
-                    <div className="flex gap-1.5">
-                      {[10, 25, 50, 100, 500].map(amt => (
-                        <button
-                          key={amt}
-                          type="button"
-                          onClick={() => setQuickCreditAmount(amt.toString())}
-                          className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 py-1.5 text-[11px] font-mono text-zinc-300 hover:border-emerald-500/50 hover:text-emerald-400 transition cursor-pointer"
-                        >
-                          +${amt}
-                        </button>
-                      ))}
-                    </div>
-
-                    <div>
-                      <label className="block text-[10px] font-mono text-zinc-400 mb-1">Reason / Ledger Note (Optional)</label>
-                      <input
-                        type="text"
-                        value={quickCreditNote}
-                        onChange={(e) => setQuickCreditNote(e.target.value)}
-                        placeholder="e.g. Admin Treasury Deposit"
-                        className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white focus:border-emerald-500 focus:outline-none"
-                      />
-                    </div>
-
-                    {quickCreditSuccess && (
-                      <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs font-bold text-emerald-400 animate-in fade-in">
-                        {quickCreditSuccess}
-                      </div>
-                    )}
-
-                    {quickCreditError && (
-                      <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-xs font-bold text-red-400 animate-in fade-in">
-                        {quickCreditError}
-                      </div>
-                    )}
-
-                    <div className="flex gap-2 pt-2">
-                      <button
-                        onClick={async () => {
-                          const cleanAmt = String(quickCreditAmount || '').replace(/[\$,\s]/g, '');
-                          const num = parseFloat(cleanAmt);
-                          if (isNaN(num) || num <= 0) {
-                            setQuickCreditError('Please enter a valid positive dollar amount (e.g. 50.00)');
-                            return;
-                          }
-                          setQuickCreditLoading(true);
-                          setQuickCreditError('');
-                          setQuickCreditSuccess('');
-
-                          const res = await BoostPayStore.adminAdjustBalance(
-                            quickCreditModalUser.id,
-                            'CREDIT',
-                            num,
-                            quickCreditNote || 'Admin Treasury Credit'
-                          );
-
-                          setQuickCreditLoading(false);
-                          if (res.success && res.user) {
-                            setQuickCreditSuccess(`✓ Successfully added $${num.toFixed(2)} to User #${quickCreditModalUser.id}! New Balance: $${res.user.balance.toFixed(2)}`);
-                            setQuickCreditAmount('');
-                            setQuickCreditNote('');
-                            setQuickCreditModalUser(res.user);
-                            await refreshData(true);
-                            setTimeout(() => {
-                              setQuickCreditModalUser(null);
-                              setQuickCreditSuccess('');
-                            }, 2500);
-                          } else {
-                            setQuickCreditError(res.error || 'Failed to add balance');
-                          }
-                        }}
-                        disabled={quickCreditLoading || !quickCreditAmount}
-                        className="flex-1 rounded-xl bg-emerald-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-emerald-400 active:scale-95 transition shadow-lg shadow-emerald-500/20 disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
-                      >
-                        {quickCreditLoading ? (
-                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-950 border-t-transparent" />
-                        ) : (
-                          <>
-                            <PlusCircle className="w-4 h-4 stroke-[2.5]" />
-                            <span>Confirm + Deposit Funds</span>
-                          </>
-                        )}
-                      </button>
-
-                      <button
-                        onClick={() => setQuickCreditModalUser(null)}
-                        className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-2 text-xs font-semibold text-zinc-400 hover:text-white cursor-pointer"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         )}
 
         {/* ======================================================== */}
-        {/* TAB 3: DATABASE STORAGE & LIVE INSPECTOR                 */}
+        {/* TAB 3: AUDIT ACTION LOG TRAIL                            */}
+        {/* ======================================================== */}
+        {activeTab === 'AUDIT' && (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" />
+                <input
+                  type="text"
+                  placeholder="Search logs by action, admin, user, details..."
+                  value={auditSearch}
+                  onChange={(e) => setAuditSearch(e.target.value)}
+                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/90 pl-10 pr-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500 focus:outline-none shadow-sm"
+                />
+              </div>
+
+              {/* Action Filter Pills */}
+              <div className="flex items-center gap-1.5 overflow-x-auto py-1">
+                {(['ALL', 'TREASURY', 'FREEZE', 'USER', 'PASSWORD', 'SYSTEM'] as const).map(pill => (
+                  <button
+                    key={pill}
+                    onClick={() => setAuditFilter(pill)}
+                    className={`rounded-xl px-3 py-1.5 text-[11px] font-mono font-semibold transition cursor-pointer ${
+                      auditFilter === pill
+                        ? 'bg-amber-500 text-zinc-950 font-bold'
+                        : 'bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {pill}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Audit Logs Table */}
+            <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead>
+                    <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
+                      <th className="px-4 py-3 font-semibold">Timestamp</th>
+                      <th className="px-4 py-3 font-semibold">Action</th>
+                      <th className="px-4 py-3 font-semibold">Admin Identity</th>
+                      <th className="px-4 py-3 font-semibold">Target User</th>
+                      <th className="px-4 py-3 font-semibold">Details & Rationale</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-800/60">
+                    {filteredAuditLogs.map(log => {
+                      const isFreeze = log.action.includes('FREEZE');
+                      const isTreasury = log.action.includes('TREASURY');
+                      const isPassword = log.action.includes('PASSWORD');
+
+                      return (
+                        <tr key={log.id} className="hover:bg-zinc-800/30 transition">
+                          <td className="px-4 py-3 text-zinc-400 whitespace-nowrap">
+                            <div className="flex items-center gap-1.5 text-[11px]">
+                              <Clock className="w-3 h-3 text-zinc-500" />
+                              <span>{new Date(log.timestamp).toLocaleString()}</span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 font-bold">
+                            <span className={`inline-block rounded-md px-2 py-0.5 text-[10px] ${
+                              isFreeze
+                                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                                : isTreasury
+                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                                : isPassword
+                                ? 'bg-sky-500/20 text-sky-400 border border-sky-500/40'
+                                : 'bg-zinc-800 text-amber-400 border border-amber-500/30'
+                            }`}>
+                              {log.action}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-zinc-300 font-sans text-[11px]">
+                            {log.adminEmail}
+                          </td>
+                          <td className="px-4 py-3">
+                            {log.targetUserId ? (
+                              <span className="text-amber-400 font-bold">User #{log.targetUserId}</span>
+                            ) : (
+                              <span className="text-zinc-500">—</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-zinc-200 font-sans text-xs">
+                            {log.details}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {filteredAuditLogs.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-8 text-center text-zinc-500 font-sans">
+                          No audit entries match the active search/filter criteria.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB 4: TRANSACTIONS LEDGER                               */}
+        {/* ======================================================== */}
+        {activeTab === 'TRANSACTIONS' && (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" />
+                <input
+                  type="text"
+                  placeholder="Search ledger by Tx ID, user, notes..."
+                  value={txSearch}
+                  onChange={(e) => setTxSearch(e.target.value)}
+                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/90 pl-10 pr-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500 focus:outline-none shadow-sm"
+                />
+              </div>
+
+              {/* Filter Pills */}
+              <div className="flex items-center gap-1.5 overflow-x-auto py-1">
+                {(['ALL', 'P2P', 'REWARD', 'TREASURY'] as const).map(pill => (
+                  <button
+                    key={pill}
+                    onClick={() => setTxFilter(pill)}
+                    className={`rounded-xl px-3 py-1.5 text-[11px] font-mono font-semibold transition cursor-pointer ${
+                      txFilter === pill
+                        ? 'bg-amber-500 text-zinc-950 font-bold'
+                        : 'bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {pill}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Transactions Table */}
+            <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs font-mono">
+                  <thead>
+                    <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
+                      <th className="px-4 py-3 font-semibold">Reference ID</th>
+                      <th className="px-4 py-3 font-semibold">Timestamp</th>
+                      <th className="px-4 py-3 font-semibold">Type</th>
+                      <th className="px-4 py-3 font-semibold">User</th>
+                      <th className="px-4 py-3 font-semibold">Amount</th>
+                      <th className="px-4 py-3 font-semibold">Details / Ledger Note</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-800/60">
+                    {filteredTransactions.map(tx => {
+                      const isCredit = tx.type === 'TRANSFER_RECEIVED' || tx.type === 'REWARD' || tx.type === 'ADMIN_CREDIT';
+                      return (
+                        <tr key={tx.id} className="hover:bg-zinc-800/30 transition">
+                          <td className="px-4 py-3 font-bold text-amber-400 whitespace-nowrap">
+                            {tx.id}
+                          </td>
+                          <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-[11px]">
+                            {new Date(tx.timestamp).toLocaleString()}
+                          </td>
+                          <td className="px-4 py-3 font-bold">
+                            <span className={`inline-block rounded-md px-2 py-0.5 text-[10px] ${
+                              tx.type.includes('TRANSFER')
+                                ? 'bg-sky-500/20 text-sky-400 border border-sky-500/40'
+                                : tx.type === 'REWARD'
+                                ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
+                                : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                            }`}>
+                              {tx.type}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 font-bold text-zinc-200">
+                            User #{tx.userId}
+                            {tx.recipientId && (
+                              <span className="text-zinc-500 text-[10px] font-normal block">
+                                → #{tx.recipientId}
+                              </span>
+                            )}
+                          </td>
+                          <td className={`px-4 py-3 font-bold tabular-nums ${isCredit ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {isCredit ? '+' : '-'}${formatPrecisionAmount(tx.amount, 8)}
+                          </td>
+                          <td className="px-4 py-3 text-zinc-300 font-sans text-xs">
+                            {tx.notes || '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {filteredTransactions.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="px-4 py-8 text-center text-zinc-500 font-sans">
+                          No transactions found.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ======================================================== */}
+        {/* TAB 5: DATABASE STORAGE & LIVE INSPECTOR                 */}
         {/* ======================================================== */}
         {activeTab === 'DATABASE' && (
           <div className="space-y-6">
@@ -1529,7 +1745,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <Download className="w-4 h-4 text-emerald-400" /> Export Database Snapshot
                     </h4>
                     <p className="text-[11px] text-zinc-400 mt-1 leading-relaxed">
-                      Download a complete timestamped JSON file containing all user accounts, mnemonics, balances, transactions, and SMS notifications.
+                      Download a complete timestamped JSON file containing all user accounts, balances, transactions, and SMS notifications.
                     </p>
                   </div>
                   <button
@@ -1578,90 +1794,11 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                 </div>
               )}
             </div>
-
-            {/* Deployment Data Loss Explanation Guide */}
-            <div className="rounded-3xl border border-amber-500/20 bg-amber-500/5 p-5 space-y-2.5">
-              <div className="flex items-center gap-2 text-amber-400 text-xs font-bold">
-                <AlertTriangle className="w-4 h-4" />
-                <span>Why do data reset on deployment, and how BoostPay protects you:</span>
-              </div>
-              <div className="text-xs text-zinc-300 space-y-1.5 leading-relaxed">
-                <p>
-                  • <strong>Stateless Containers:</strong> When you deploy an update on Cloud Run or container platforms, a brand new container image is created. Local container files (like <code className="text-amber-400 font-mono">boostpay_db.json</code>) start fresh with default data.
-                </p>
-                <p>
-                  • <strong>Dual Self-Healing Sync (Active):</strong> BoostPay clients keep a permanent verified copy of their credentials and balance. Whenever any user opens the app after an update deployment, their browser automatically re-registers and restores their balance and boost duration on the server without losing funds.
-                </p>
-                <p>
-                  • <strong>1-Click Backup:</strong> Before any major deployment, click &quot;Download Backup (.json)&quot; above. If you ever need to restore everything at once, click &quot;Select Backup JSON to Restore&quot; to repopulate all accounts instantly.
-                </p>
-              </div>
-            </div>
-
-            {/* Live Database Records Inspector Table */}
-            <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-6 shadow-xl space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800 pb-3">
-                <div>
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Database className="w-4 h-4 text-amber-400" />
-                    Live Database Record Table ({users.length} Users Stored)
-                  </h3>
-                  <p className="text-xs text-zinc-400 mt-0.5">
-                    Direct inspection of records saved in the server database right now.
-                  </p>
-                </div>
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs font-mono">
-                  <thead>
-                    <tr className="border-b border-zinc-800 text-[11px] text-zinc-400">
-                      <th className="pb-2 font-semibold">User ID</th>
-                      <th className="pb-2 font-semibold">Balance</th>
-                      <th className="pb-2 font-semibold">Profit</th>
-                      <th className="pb-2 font-semibold">Boost State</th>
-                      <th className="pb-2 font-semibold">Email Address</th>
-                      <th className="pb-2 font-semibold">Password</th>
-                      <th className="pb-2 font-semibold">Registered</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-800/60">
-                    {users.map((u) => {
-                      return (
-                        <tr key={u.id} className="hover:bg-zinc-800/30 transition">
-                          <td className="py-2.5 font-bold text-amber-400">#{u.id}</td>
-                          <td className="py-2.5 font-bold text-emerald-400 tabular-nums">${formatPrecisionAmount(u.balance, 8)}</td>
-                          <td className="py-2.5 text-zinc-300 tabular-nums">+${formatPrecisionAmount(u.lifetimeProfit || 0, 8)}</td>
-                          <td className="py-2.5">
-                            {u.boostState?.isActive ? (
-                              <span className="text-emerald-400 font-semibold">
-                                {u.boostState.isPaused ? 'Paused' : 'Active'}
-                              </span>
-                            ) : (
-                              <span className="text-zinc-500">Idle</span>
-                            )}
-                          </td>
-                          <td className="py-2.5 text-zinc-200 font-mono">
-                            {u.email || `user${u.id}@boostpay.app`}
-                          </td>
-                          <td className="py-2.5 text-zinc-400 font-mono">
-                            {u.password || <span className="text-zinc-600">None</span>}
-                          </td>
-                          <td className="py-2.5 text-zinc-500 text-[10px]">
-                            {new Date(u.createdAt || Date.now()).toLocaleDateString()}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
           </div>
         )}
 
         {/* ======================================================== */}
-        {/* TAB 4: COMPOUNDING ENGINE & RATES                        */}
+        {/* TAB 6: COMPOUNDING ENGINE & RATES                        */}
         {/* ======================================================== */}
         {activeTab === 'ENGINE' && (
           <div className="max-w-2xl mx-auto space-y-6">
@@ -1753,7 +1890,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         )}
 
         {/* ======================================================== */}
-        {/* TAB 4: SUPPORT COMMUNICATIONS                            */}
+        {/* TAB 7: SUPPORT COMMUNICATIONS                            */}
         {/* ======================================================== */}
         {activeTab === 'SUPPORT' && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -1868,6 +2005,241 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           </div>
         )}
       </main>
+
+      {/* Quick Balance Deposit / Credit Modal */}
+      {quickCreditModalUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="w-full max-w-md rounded-3xl border border-emerald-500/30 bg-zinc-900 shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-400">
+                  <PlusCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Deposit / Credit Balance</h3>
+                  <p className="text-[11px] text-zinc-400">Account: User #{quickCreditModalUser.id}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setQuickCreditModalUser(null)}
+                className="rounded-xl border border-zinc-800 p-1.5 text-zinc-400 hover:text-white cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-400 mb-1">Target Account</label>
+                <select
+                  value={quickCreditModalUser.id}
+                  onChange={(e) => {
+                    const target = users.find(u => String(u.id) === String(e.target.value));
+                    if (target) {
+                      setQuickCreditModalUser(target);
+                      setQuickCreditSuccess('');
+                      setQuickCreditError('');
+                    }
+                  }}
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
+                >
+                  {users.map(u => (
+                    <option key={u.id} value={u.id}>
+                      User #{u.id} — Current Balance: ${u.balance.toFixed(2)} ({u.email || 'No email'})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-[10px] font-mono text-zinc-400">Deposit Amount ($ USD)</label>
+                  <span className="text-[10px] font-mono text-emerald-400 font-bold">Current: ${quickCreditModalUser.balance.toFixed(2)}</span>
+                </div>
+                <input
+                  type="text"
+                  value={quickCreditAmount}
+                  onChange={(e) => setQuickCreditAmount(e.target.value)}
+                  placeholder="e.g. 50.00"
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white font-mono font-bold focus:border-emerald-500 focus:outline-none"
+                  autoFocus
+                />
+              </div>
+
+              {/* Quick Amount Preset Chips */}
+              <div className="flex gap-1.5">
+                {[10, 25, 50, 100, 500].map(amt => (
+                  <button
+                    key={amt}
+                    type="button"
+                    onClick={() => setQuickCreditAmount(amt.toString())}
+                    className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950 py-1.5 text-[11px] font-mono text-zinc-300 hover:border-emerald-500/50 hover:text-emerald-400 transition cursor-pointer"
+                  >
+                    +${amt}
+                  </button>
+                ))}
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-400 mb-1">Reason / Ledger Note (Optional)</label>
+                <input
+                  type="text"
+                  value={quickCreditNote}
+                  onChange={(e) => setQuickCreditNote(e.target.value)}
+                  placeholder="e.g. Admin Treasury Deposit"
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white focus:border-emerald-500 focus:outline-none"
+                />
+              </div>
+
+              {quickCreditSuccess && (
+                <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs font-bold text-emerald-400 animate-in fade-in">
+                  {quickCreditSuccess}
+                </div>
+              )}
+
+              {quickCreditError && (
+                <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-xs font-bold text-red-400 animate-in fade-in">
+                  {quickCreditError}
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={async () => {
+                    const cleanAmt = String(quickCreditAmount || '').replace(/[\$,\s]/g, '');
+                    const num = parseFloat(cleanAmt);
+                    if (isNaN(num) || num <= 0) {
+                      setQuickCreditError('Please enter a valid positive dollar amount (e.g. 50.00)');
+                      return;
+                    }
+                    setQuickCreditLoading(true);
+                    setQuickCreditError('');
+                    setQuickCreditSuccess('');
+
+                    const res = await BoostPayStore.adminAdjustBalance(
+                      quickCreditModalUser.id,
+                      'CREDIT',
+                      num,
+                      quickCreditNote || 'Admin Treasury Credit'
+                    );
+
+                    setQuickCreditLoading(false);
+                    if (res.success && res.user) {
+                      setQuickCreditSuccess(`✓ Successfully added $${num.toFixed(2)} to User #${quickCreditModalUser.id}! New Balance: $${res.user.balance.toFixed(2)}`);
+                      setQuickCreditAmount('');
+                      setQuickCreditNote('');
+                      setQuickCreditModalUser(res.user);
+                      await refreshData(true);
+                      setTimeout(() => {
+                        setQuickCreditModalUser(null);
+                        setQuickCreditSuccess('');
+                      }, 2500);
+                    } else {
+                      setQuickCreditError(res.error || 'Failed to add balance');
+                    }
+                  }}
+                  disabled={quickCreditLoading || !quickCreditAmount}
+                  className="flex-1 rounded-xl bg-emerald-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-emerald-400 active:scale-95 transition shadow-lg shadow-emerald-500/20 disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
+                >
+                  {quickCreditLoading ? (
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-950 border-t-transparent" />
+                  ) : (
+                    <>
+                      <PlusCircle className="w-4 h-4 stroke-[2.5]" />
+                      <span>Confirm + Deposit Funds</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => setQuickCreditModalUser(null)}
+                  className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-2 text-xs font-semibold text-zinc-400 hover:text-white cursor-pointer"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Freeze / Unfreeze Confirmation Modal */}
+      {freezeModalUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-md animate-in fade-in duration-200">
+          <div className="w-full max-w-md rounded-3xl border border-cyan-500/40 bg-zinc-900 shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-500/20 text-cyan-300">
+                  <Snowflake className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">
+                    {freezeModalUser.isFrozen ? 'Unfreeze Account' : 'Freeze User Account'}
+                  </h3>
+                  <p className="text-[11px] text-zinc-400">Target: User #{freezeModalUser.id}</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setFreezeModalUser(null)}
+                className="rounded-xl border border-zinc-800 p-1.5 text-zinc-400 hover:text-white cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <p className="text-xs text-zinc-300 leading-relaxed">
+                {freezeModalUser.isFrozen
+                  ? `Unfreezing User #${freezeModalUser.id} will restore their ability to send P2P transfers and claim yield.`
+                  : `Freezing User #${freezeModalUser.id} locks all outgoing P2P transfers and prevents unauthorized funds movement immediately.`
+                }
+              </p>
+
+              <div>
+                <label className="block text-[10px] font-mono text-zinc-400 mb-1">
+                  Reason for Audit Log (Required)
+                </label>
+                <input
+                  type="text"
+                  value={freezeReason}
+                  onChange={(e) => setFreezeReason(e.target.value)}
+                  placeholder={freezeModalUser.isFrozen ? "e.g. KYC verification completed" : "e.g. Suspicious transfer investigation"}
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                  autoFocus
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={handleConfirmFreezeToggle}
+                  disabled={freezeLoading}
+                  className={`flex-1 rounded-xl py-2.5 text-xs font-bold transition shadow-lg cursor-pointer flex items-center justify-center gap-2 ${
+                    freezeModalUser.isFrozen
+                      ? 'bg-emerald-500 text-zinc-950 hover:bg-emerald-400 shadow-emerald-500/20'
+                      : 'bg-cyan-500 text-zinc-950 hover:bg-cyan-400 shadow-cyan-500/20'
+                  }`}
+                >
+                  {freezeLoading ? (
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-950 border-t-transparent" />
+                  ) : (
+                    <>
+                      <Snowflake className="w-4 h-4 stroke-[2.5]" />
+                      <span>{freezeModalUser.isFrozen ? 'Confirm Unfreeze' : 'Confirm Freeze Account'}</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => setFreezeModalUser(null)}
+                  className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-2 text-xs font-semibold text-zinc-400 hover:text-white cursor-pointer"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

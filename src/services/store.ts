@@ -1,4 +1,4 @@
-import { User, Transaction, Conversation, Message, SystemConfig, InboxNotification } from '../types';
+import { User, Transaction, Conversation, Message, SystemConfig, InboxNotification, AuditLog } from '../types';
 import { copyToClipboard as clipboardHelper } from '../utils/clipboard';
 
 const STORAGE_USERS = 'boostpay_users_v4';
@@ -801,6 +801,57 @@ export class BoostPayStore {
     } catch (err: any) {
       return { success: false, error: err.message || 'Network error during balance adjustment' };
     }
+  }
+
+  /**
+   * Toggle account freeze status (Admin security control)
+   */
+  static async adminToggleFreezeUser(
+    userId: string,
+    isFrozen: boolean,
+    reason?: string,
+    adminEmail?: string
+  ): Promise<{ success: boolean; user?: User; error?: string }> {
+    try {
+      const res = await fetch('/api/admin/users/freeze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, isFrozen, reason, adminEmail })
+      });
+      const data = await res.json();
+      if (res.ok && data.user) {
+        const users = this.getUsers();
+        const idx = users.findIndex(u => String(u.id) === String(userId));
+        if (idx >= 0) {
+          users[idx] = data.user;
+          localStorage.setItem(STORAGE_USERS, JSON.stringify(users));
+        }
+        const cur = this.getCurrentUser();
+        if (cur && String(cur.id) === String(userId)) {
+          this.setCurrentUser(data.user);
+        }
+        return { success: true, user: data.user };
+      }
+      return { success: false, error: data.error || 'Failed to toggle account freeze' };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error during freeze action' };
+    }
+  }
+
+  /**
+   * Retrieve immutable system audit log entries
+   */
+  static async getAuditLogs(): Promise<AuditLog[]> {
+    try {
+      const res = await fetch('/api/admin/audit-logs');
+      if (res.ok) {
+        const data = await res.json();
+        return Array.isArray(data.logs) ? data.logs : [];
+      }
+    } catch (err) {
+      console.warn('Failed to fetch audit logs:', err);
+    }
+    return [];
   }
 
   /**

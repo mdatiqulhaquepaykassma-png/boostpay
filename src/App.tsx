@@ -16,10 +16,12 @@ import { MessengerView } from './components/MessengerView';
 import { InboxView } from './components/InboxView';
 import { FloatingToastContainer } from './components/FloatingToast';
 import { P2PTransferModal } from './components/P2PTransferModal';
+import { WalletSkeleton } from './components/WalletSkeleton';
 import { usePWAInstall } from './hooks/usePWAInstall';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(() => BoostPayStore.getCurrentUser());
+  const [isInitialSyncing, setIsInitialSyncing] = useState<boolean>(true);
   const [isOnAdminRoute, setIsOnAdminRoute] = useState<boolean>(() => {
     const path = window.location.pathname.toLowerCase();
     const hash = window.location.hash.toLowerCase();
@@ -60,17 +62,21 @@ export default function App() {
     window.addEventListener('hashchange', checkAdminRoute);
 
     // Initialize backend sync without logging out the user
-    BoostPayStore.initSync().then(() => {
-      const freshUser = BoostPayStore.getCurrentUser();
-      if (freshUser) {
-        setCurrentUser(freshUser);
-        // Refresh single user boost status from authoritative backend
-        BoostPayStore.syncUserFromServer(freshUser.id).then((synced) => {
+    BoostPayStore.initSync()
+      .then(async () => {
+        const freshUser = BoostPayStore.getCurrentUser();
+        if (freshUser) {
+          setCurrentUser(freshUser);
+          // Refresh single user boost status from authoritative backend
+          const synced = await BoostPayStore.syncUserFromServer(freshUser.id);
           if (synced) setCurrentUser(synced);
-        });
-      }
-      setConfig(BoostPayStore.getConfig());
-    });
+        }
+        setConfig(BoostPayStore.getConfig());
+        setIsInitialSyncing(false);
+      })
+      .catch(() => {
+        setIsInitialSyncing(false);
+      });
 
     return () => {
       window.removeEventListener('popstate', checkAdminRoute);
@@ -203,16 +209,8 @@ export default function App() {
         <AdminPortal onBack={handleExitAdmin} />
       ) : !currentUser ? (
         /* 2. AUTHENTICATION GATE */
-        <div className="flex-1 flex flex-col justify-between">
+        <div className="flex-1 flex flex-col justify-center">
           <AuthGate onLoginUser={handleUserLogin} />
-          <div className="text-center pb-6">
-            <button
-              onClick={handleEnterAdmin}
-              className="text-zinc-500 hover:text-amber-400 font-mono text-xs transition cursor-pointer"
-            >
-              Administrator Console Portal →
-            </button>
-          </div>
         </div>
       ) : (
         /* 3. LOGGED-IN MAIN USER INTERFACE */
@@ -225,12 +223,16 @@ export default function App() {
 
           <main className={`flex-1 ${activeTab === 'MESSENGER' ? 'flex flex-col min-h-0 overflow-hidden' : 'overflow-y-auto'}`}>
             {activeTab === 'WALLET' && (
-              <WalletView
-                user={currentUser}
-                onUpdateUser={(updated: User) => setCurrentUser({ ...updated })}
-                onOpenSendMoney={() => setIsSendMoneyOpen(true)}
-                config={config}
-              />
+              isInitialSyncing ? (
+                <WalletSkeleton />
+              ) : (
+                <WalletView
+                  user={currentUser}
+                  onUpdateUser={(updated: User) => setCurrentUser({ ...updated })}
+                  onOpenSendMoney={() => setIsSendMoneyOpen(true)}
+                  config={config}
+                />
+              )
             )}
 
             {activeTab === 'LEADERBOARD' && (
