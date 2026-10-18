@@ -2,6 +2,7 @@ import express from 'express';
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 
@@ -192,6 +193,182 @@ function writeDb(data: any) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Security: password hashing (scrypt, no external deps) + signed session tokens
+// ---------------------------------------------------------------------------
+
+/** Hash a password with a random per-user salt. Format: scrypt$<salt>$<hex> */
+function hashPassword(plain: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(plain), salt, 32).toString('hex');
+  return `scrypt$${salt}$${hash}`;
+}
+
+/** Verify a password. Supports legacy plaintext rows (auto-upgraded on login). */
+function verifyPassword(stored: string | undefined, plain: string): boolean {
+  if (!stored) return true; // account has no password set (legacy behaviour)
+  if (stored.startsWith('scrypt$')) {
+    const parts = stored.split('$');
+    const salt = parts[1] || '';
+    const hash = parts[2] || '';
+    try {
+      const test = crypto.scryptSync(String(plain), salt, 32).toString('hex');
+      const a = Buffer.from(hash, 'hex');
+      const b = Buffer.from(test, 'hex');
+      return a.length === b.length && crypto.timingSafeEqual(a, b);
+    } catch {
+      return false;
+    }
+  }
+  // Legacy plaintext row: constant-time-ish compare, then caller should re-hash
+  const a = Buffer.from(stored);
+  const b = Buffer.from(String(plain));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function needsRehash(stored: string | undefined): boolean {
+  return !!stored && !stored.startsWith('scrypt$');
+}
+
+/** Persistent signing secret so sessions survive server restarts.
+ *  Set API_SECRET in the environment for stable tokens across container redeploys. */
+const SECRET_FILE = path.join(DATA_DIR, '.api-secret');
+function getApiSecret(): string {
+  if (process.env.API_SECRET) return process.env.API_SECRET;
+  try {
+    if (fs.existsSync(SECRET_FILE)) {
+      const existing = fs.readFileSync(SECRET_FILE, 'utf-8').trim();
+      if (existing) return existing;
+    }
+    const secret = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(SECRET_FILE, secret, { encoding: 'utf-8', mode: 0o600 });
+    return secret;
+  } catch {
+    return crypto.randomBytes(32).toString('hex');
+  }
+}
+const API_SECRET = getApiSecret();
+
+const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+function issueToken(sub: string, role: 'USER' | 'ADMIN'): string {
+  const payload = { sub: String(sub), role, exp: Date.now() + TOKEN_TTL_MS };
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', API_SECRET).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
+
+function verifyToken(token: unknown): { sub: string; role: string; exp: number } | null {
+  try {
+    const raw = String(token || '');
+    const dot = raw.lastIndexOf('.');
+    if (dot <= 0) return null;
+    const body = raw.slice(0, dot);
+    const sig = raw.slice(dot + 1);
+    const expected = crypto.createHmac('sha256', API_SECRET).update(body).digest('base64url');
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf-8'));
+    if (!payload || !payload.sub || !payload.role || !payload.exp) return null;
+    if (Number(payload.exp) < Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function getBearerToken(req: any): string | null {
+  const auth = req.headers['authorization'];
+  if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) {
+    return auth.slice(7).trim();
+  }
+  const alt = req.headers['x-boostpay-token'];
+  if (typeof alt === 'string' && alt.trim()) return alt.trim();
+  return null;
+}
+
+function requireUser(req: any, res: any, next: any) {
+  const payload = verifyToken(getBearerToken(req));
+  if (!payload || payload.role !== 'USER') {
+    return res.status(401).json({ error: 'Authentication required. Please sign in.' });
+  }
+  req.authUserId = payload.sub;
+  next();
+}
+
+function requireAdmin(req: any, res: any, next: any) {
+  const payload = verifyToken(getBearerToken(req));
+  if (!payload || payload.role !== 'ADMIN') {
+    return res.status(401).json({ error: 'Administrator authentication required.' });
+  }
+  req.authAdmin = payload.sub;
+  next();
+}
+
+function requireUserOrAdmin(req: any, res: any, next: any) {
+  const payload = verifyToken(getBearerToken(req));
+  if (!payload || (payload.role !== 'USER' && payload.role !== 'ADMIN')) {
+    return res.status(401).json({ error: 'Authentication required. Please sign in.' });
+  }
+  if (payload.role === 'USER') req.authUserId = payload.sub;
+  if (payload.role === 'ADMIN') req.authAdmin = payload.sub;
+  next();
+}
+
+/** Never leak credentials through the API. */
+function publicUser(u: any): any {
+  if (!u || typeof u !== 'object') return u;
+  const { password, phrase, ...rest } = u;
+  return rest;
+}
+
+/** Admin console view: hides passwords (reset-only), keeps recovery phrase for support search. */
+function adminUserView(u: any): any {
+  if (!u || typeof u !== 'object') return u;
+  const { password, ...rest } = u;
+  return { ...rest, hasPassword: !!password };
+}
+
+/** Drop prototype-pollution keys and normalize money fields on client-supplied users. */
+function sanitizeIncomingUser(u: any): any | null {
+  if (!u || typeof u !== 'object' || Array.isArray(u)) return null;
+  const clean: any = {};
+  for (const key of Object.keys(u)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+    clean[key] = u[key];
+  }
+  for (const field of ['balance', 'lifetimeProfit', 'createdAt']) {
+    if (clean[field] !== undefined) {
+      const n = Number(clean[field]);
+      clean[field] = Number.isFinite(n) && n >= 0 ? Math.min(n, 1e12) : (field === 'createdAt' ? Date.now() : 0);
+    }
+  }
+  if (typeof clean.password === 'string' && clean.password && needsRehash(clean.password)) {
+    clean.password = hashPassword(clean.password);
+  }
+  return clean;
+}
+
+// --- Simple in-memory rate limiter for auth endpoints (brute-force protection) ---
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+function rateLimit(maxPerMinute: number) {
+  return (req: any, res: any, next: any) => {
+    const key = `${req.ip || 'unknown'}|${req.path}`;
+    const now = Date.now();
+    let bucket = rateBuckets.get(key);
+    if (!bucket || bucket.resetAt < now) {
+      bucket = { count: 0, resetAt: now + 60000 };
+      rateBuckets.set(key, bucket);
+    }
+    bucket.count += 1;
+    if (bucket.count > maxPerMinute) {
+      return res.status(429).json({ error: 'Too many attempts. Please wait a minute and try again.' });
+    }
+    next();
+  };
+}
+
 // Initial bootstrap check
 readDb();
 
@@ -333,6 +510,40 @@ async function startServer() {
 
   app.use(express.json({ limit: '10mb' }));
 
+  // Basic security headers
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    next();
+  });
+
+  // Brute-force protection on credential endpoints
+  app.use('/api/users/login', rateLimit(15));
+  app.use('/api/users/register', rateLimit(10));
+  app.use('/api/admin/login', rateLimit(10));
+
+  // --- Authentication guards -------------------------------------------------
+  // Admin API: every route except /api/admin/login requires a valid admin token
+  app.use('/api/admin', (req: any, res: any, next: any) => {
+    if (req.path === '/login') return next();
+    return requireAdmin(req, res, next);
+  });
+
+  // User API: everything except login/register requires a valid user token
+  app.use('/api/users', (req: any, res: any, next: any) => {
+    if (req.path === '/login' || req.path === '/register') return next();
+    return requireUser(req, res, next);
+  });
+
+  app.use('/api/transfer', requireUser);
+  app.use('/api/boost', requireUser);
+  app.use('/api/notifications', requireUser);
+  app.use('/api/sync', requireUserOrAdmin);
+  app.use('/api/db', requireUserOrAdmin);
+  // ---------------------------------------------------------------------------
+
   // 1. Version / Deployment Detection endpoint
   app.get('/api/version', (_req, res) => {
     res.json({
@@ -347,14 +558,17 @@ async function startServer() {
     res.json({ status: 'ok', version: SERVER_VERSION, timestamp: Date.now() });
   });
 
-  // 3. Database snapshot
+  // 3. Database snapshot (authenticated; credentials never leave the server)
   app.get('/api/db', (_req, res) => {
     const db = readDb();
-    res.json(db);
+    res.json({ ...db, users: (db.users || []).map(publicUser) });
   });
 
   // 4. Single-user fetch endpoint (fast, keeps session synced without large payload)
-  app.get('/api/users/:id', (req, res) => {
+  app.get('/api/users/:id', (req: any, res) => {
+    if (String(req.params.id) !== String(req.authUserId)) {
+      return res.status(403).json({ error: 'You can only access your own account.' });
+    }
     const db = readDb();
     const user = db.users.find((u: any) => u.id === req.params.id);
     if (!user) {
@@ -362,7 +576,7 @@ async function startServer() {
     }
     const userTxs = (db.transactions || []).filter((t: any) => t.userId === user.id);
     const userNotifs = (db.notifications || []).filter((n: any) => n.userId === user.id);
-    res.json({ user, transactions: userTxs, notifications: userNotifs });
+    res.json({ user: publicUser(user), transactions: userTxs, notifications: userNotifs });
   });
 
   // 5. User registration & restoration endpoint
@@ -374,57 +588,95 @@ async function startServer() {
       const cleanEmail = email ? email.trim().toLowerCase() : '';
       const cleanPhrase = phrase ? phrase.trim().toLowerCase() : '';
 
-      // Check if email already belongs to an existing user
+      // Resolve existing account by ID OR recovery phrase (phrase-only restore must work too)
+      const lookupId = id ? (LEGACY_USER_ID_MAP[id] || id) : '';
+      const existing = db.users.find((u: any) =>
+        (lookupId && u.id === lookupId) || (cleanPhrase && u.phrase === cleanPhrase)
+      );
+
+      // Email must not be taken by a DIFFERENT account
       if (cleanEmail) {
-        const emailConflict = db.users.find((u: any) => u.email && u.email.toLowerCase() === cleanEmail);
+        const emailConflict = db.users.find((u: any) =>
+          u.email && u.email.toLowerCase() === cleanEmail && (!existing || u.id !== existing.id)
+        );
         if (emailConflict) {
           return res.status(400).json({ error: 'An account with this email address already exists. Please sign in.' });
         }
       }
 
-      // If restoring a legacy user by ID
-      let userId = id ? (LEGACY_USER_ID_MAP[id] || id) : '';
-      if (userId) {
-        const existing = db.users.find((u: any) => u.id === userId || (cleanPhrase && u.phrase === cleanPhrase));
-        if (existing) {
-          if (cleanEmail && !existing.email) existing.email = cleanEmail;
-          if (balance !== undefined && Number(balance) > (Number(existing.balance) || 0)) {
-            existing.balance = Number(balance);
-          }
-          if (lifetimeProfit !== undefined && Number(lifetimeProfit) > (Number(existing.lifetimeProfit) || 0)) {
-            existing.lifetimeProfit = Number(lifetimeProfit);
-          }
-          writeDb(db);
-          return res.json({ success: true, user: existing, restored: true });
-        }
+      // Restoring an existing user (by ID or phrase): update safe fields only.
+      // SECURITY: balances are NEVER modified here — this endpoint is unauthenticated
+      // account recovery, so it must not be able to mint or move money.
+      if (existing) {
+        if (cleanEmail && !existing.email) existing.email = cleanEmail;
+        if (cleanPhrase && !existing.phrase) existing.phrase = cleanPhrase;
+        if (password && !existing.password) existing.password = hashPassword(String(password).trim());
+        writeDb(db);
+        return res.json({ success: true, user: publicUser(existing), restored: true, token: issueToken(existing.id, 'USER') });
       }
 
-      // New registration: strictly allocate next serial ID (1, 2, 3...)
-      userId = getNextSequentialUserId(db.users);
+      // Recreating a user that vanished from the server (e.g. container redeploy):
+      // honor the exact provided ID so local sessions/self-heal keep working.
+      if (lookupId && !db.users.some((u: any) => u.id === lookupId)) {
+        const restoreBal = balance !== undefined && isFinite(Number(balance)) && Number(balance) > 0 ? Math.min(Number(balance), 1e12) : 0;
+        const restoreProfit = lifetimeProfit !== undefined && isFinite(Number(lifetimeProfit)) && Number(lifetimeProfit) > 0 ? Math.min(Number(lifetimeProfit), 1e12) : 0;
+        const restoredUser = {
+          id: lookupId,
+          email: cleanEmail || `user${lookupId}@boostpay.app`,
+          phrase: cleanPhrase || undefined,
+          balance: restoreBal,
+          lifetimeProfit: restoreProfit,
+          password: password ? hashPassword(String(password).trim()) : '',
+          createdAt: createdAt || Date.now(),
+          boostState: boostState || {
+            isActive: false,
+            isPaused: false,
+            startedAt: 0,
+            pausedAt: 0,
+            elapsedMs: 0,
+            targetDurationMs: calculateDynamicDuration(restoreBal, db.users, db.config),
+            startingBalance: restoreBal,
+            accumulatedYield: 0
+          }
+        };
+        db.users.push(restoredUser);
+        writeDb(db);
+        return res.json({ success: true, user: publicUser(restoredUser), restored: true, token: issueToken(restoredUser.id, 'USER') });
+      }
 
-      const initialDuration = calculateDynamicDuration(balance !== undefined ? Number(balance) : 0, db.users, db.config);
+      // Fresh registration: strictly allocate next serial ID (1, 2, 3...)
+      // The server is authoritative: new accounts always start at zero balance.
+      // (Client-supplied balance/lifetimeProfit/boostState are ignored here to block money minting.)
+      if (!password || typeof password !== 'string' || password.trim().length < 4) {
+        return res.status(400).json({ error: 'Password must be at least 4 characters long.' });
+      }
+
+      const userId = getNextSequentialUserId(db.users);
+
+      const initialDuration = calculateDynamicDuration(0, db.users, db.config);
       const newUser = {
         id: userId,
         email: cleanEmail || `user${userId}@boostpay.app`,
-        balance: balance !== undefined ? Number(balance) : 0,
-        lifetimeProfit: lifetimeProfit !== undefined ? Number(lifetimeProfit) : 0,
-        password: (password || '').trim(),
-        createdAt: createdAt || Date.now(),
-        boostState: boostState || {
+        phrase: cleanPhrase || undefined,
+        balance: 0,
+        lifetimeProfit: 0,
+        password: hashPassword(password.trim()),
+        createdAt: Date.now(),
+        boostState: {
           isActive: false,
           isPaused: false,
           startedAt: 0,
           pausedAt: 0,
           elapsedMs: 0,
           targetDurationMs: initialDuration,
-          startingBalance: balance !== undefined ? Number(balance) : 0,
+          startingBalance: 0,
           accumulatedYield: 0
         }
       };
 
       db.users.push(newUser);
       writeDb(db);
-      res.json({ success: true, user: newUser });
+      res.json({ success: true, user: publicUser(newUser), token: issueToken(userId, 'USER') });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -449,8 +701,14 @@ async function startServer() {
         return res.status(404).json({ error: 'No account found with this email address. Please create an account.' });
       }
 
-      if (user.password && user.password !== password.trim()) {
+      if (!verifyPassword(user.password, password.trim())) {
         return res.status(401).json({ error: 'Incorrect password for this account. Please try again.' });
+      }
+
+      // Upgrade legacy plaintext password rows to scrypt hashes on successful login
+      if (needsRehash(user.password)) {
+        user.password = hashPassword(password.trim());
+        writeDb(db);
       }
 
       if (user.isBlocked) {
@@ -461,16 +719,19 @@ async function startServer() {
         return res.status(403).json({ error: 'Account is temporarily locked. Contact support.' });
       }
 
-      res.json({ success: true, user });
+      res.json({ success: true, user: publicUser(user), token: issueToken(user.id, 'USER') });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
   // 6. Direct Server-Side Boost Endpoints (authoritative state!)
-  app.post('/api/boost/start', (req, res) => {
+  app.post('/api/boost/start', (req: any, res) => {
     try {
       const { userId } = req.body;
+      if (String(userId) !== String(req.authUserId)) {
+        return res.status(403).json({ error: 'You can only manage your own boost.' });
+      }
       const db = readDb();
       const user = db.users.find((u: any) => u.id === userId);
       if (!user) {
@@ -494,15 +755,18 @@ async function startServer() {
       };
 
       writeDb(db);
-      res.json({ success: true, user });
+      res.json({ success: true, user: publicUser(user) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.post('/api/boost/pause', (req, res) => {
+  app.post('/api/boost/pause', (req: any, res) => {
     try {
       const { userId } = req.body;
+      if (String(userId) !== String(req.authUserId)) {
+        return res.status(403).json({ error: 'You can only manage your own boost.' });
+      }
       const db = readDb();
       const user = db.users.find((u: any) => u.id === userId);
       if (!user || !user.boostState) {
@@ -512,15 +776,18 @@ async function startServer() {
       user.boostState.isPaused = true;
       user.boostState.pausedAt = Date.now();
       writeDb(db);
-      res.json({ success: true, user });
+      res.json({ success: true, user: publicUser(user) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.post('/api/boost/resume', (req, res) => {
+  app.post('/api/boost/resume', (req: any, res) => {
     try {
       const { userId } = req.body;
+      if (String(userId) !== String(req.authUserId)) {
+        return res.status(403).json({ error: 'You can only manage your own boost.' });
+      }
       const db = readDb();
       const user = db.users.find((u: any) => u.id === userId);
       if (!user || !user.boostState) {
@@ -531,20 +798,23 @@ async function startServer() {
       user.boostState.startedAt = Date.now() - (user.boostState.elapsedMs || 0);
       user.boostState.pausedAt = 0;
       writeDb(db);
-      res.json({ success: true, user });
+      res.json({ success: true, user: publicUser(user) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.get('/api/boost/status/:userId', (req, res) => {
+  app.get('/api/boost/status/:userId', (req: any, res) => {
+    if (String(req.params.userId) !== String(req.authUserId)) {
+      return res.status(403).json({ error: 'You can only view your own boost status.' });
+    }
     const db = readDb();
     const user = db.users.find((u: any) => u.id === req.params.userId);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
     res.json({
-      user,
+      user: publicUser(user),
       boostState: user.boostState,
       balance: user.balance,
       lifetimeProfit: user.lifetimeProfit
@@ -557,10 +827,14 @@ async function startServer() {
       const incoming = req.body;
       const current = readDb();
 
-      // Merge users safely rather than blind overwrite
+      // Merge users safely rather than blind overwrite.
+      // The server is authoritative for balances, credentials and admin-managed flags:
+      // a stale client push can never rewrite them (money integrity + blocked users stay blocked).
       let mergedUsers = [...current.users];
       if (Array.isArray(incoming.users)) {
-        for (const incUser of incoming.users) {
+        for (const rawIncUser of incoming.users) {
+          const incUser = sanitizeIncomingUser(rawIncUser);
+          if (!incUser || incUser.id === undefined || incUser.id === null) continue;
           const idx = mergedUsers.findIndex(u => u.id === incUser.id);
           if (idx >= 0) {
             // Preserve active server boostState if running on server
@@ -568,8 +842,15 @@ async function startServer() {
             const serverUser = mergedUsers[idx];
             mergedUsers[idx] = {
               ...incUser,
+              phrase: incUser.phrase || serverUser.phrase,
+              email: serverUser.email || incUser.email,
+              password: serverUser.password !== undefined ? serverUser.password : incUser.password,
+              createdAt: serverUser.createdAt || incUser.createdAt,
+              isBlocked: serverUser.isBlocked,
+              isTempLocked: serverUser.isTempLocked,
               boostState: (serverUser.boostState && serverUser.boostState.isActive) ? serverUser.boostState : incUser.boostState,
-              balance: serverUser.balance !== undefined ? Number(serverUser.balance) : Number(incUser.balance || 0)
+              balance: serverUser.balance !== undefined ? Number(serverUser.balance) : Number(incUser.balance || 0),
+              lifetimeProfit: serverUser.lifetimeProfit !== undefined ? Number(serverUser.lifetimeProfit) : Number(incUser.lifetimeProfit || 0)
             };
           } else {
             mergedUsers.push(incUser);
@@ -577,23 +858,44 @@ async function startServer() {
         }
       }
 
-      const transactionsToSave = Array.isArray(incoming.transactions) && incoming.transactions.length > 0
-        ? incoming.transactions
-        : current.transactions;
+      // Union-merge collections by id so a stale client push can never wipe
+      // server-generated rows (rewards, transfer alerts, admin credits) it has not seen yet.
+      const mergeById = (serverList: any[] | undefined, incomingList: any, preferIncoming: boolean, readAware = false) => {
+        const map = new Map<string, any>();
+        for (const item of (serverList || [])) {
+          if (item && item.id !== undefined) map.set(String(item.id), item);
+        }
+        if (Array.isArray(incomingList)) {
+          for (const item of incomingList) {
+            if (!item || item.id === undefined) continue;
+            const key = String(item.id);
+            const existing = map.get(key);
+            if (existing && readAware) {
+              // "Read" state is sticky: once read anywhere it stays read
+              map.set(key, { ...item, isRead: !!(item.isRead || existing.isRead) });
+            } else {
+              map.set(key, preferIncoming ? item : (existing || item));
+            }
+          }
+        }
+        return Array.from(map.values());
+      };
 
-      const conversationsToSave = Array.isArray(incoming.conversations)
-        ? incoming.conversations
-        : current.conversations;
+      const transactionsToSave = mergeById(current.transactions, incoming.transactions, true)
+        .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
-      const messagesToSave = Array.isArray(incoming.messages)
-        ? incoming.messages
-        : current.messages;
+      const conversationsToSave = mergeById(current.conversations, incoming.conversations, true)
+        .sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0));
 
-      const notificationsToSave = Array.isArray(incoming.notifications)
-        ? incoming.notifications
-        : (current.notifications || []);
+      const messagesToSave = mergeById(current.messages, incoming.messages, true)
+        .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
 
-      const configToSave = incoming.config || current.config;
+      const notificationsToSave = mergeById(current.notifications, incoming.notifications, true, true)
+        .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+      // System config is server-authoritative (changes go through the admin endpoints),
+      // so a stale client config push can never revert the live hourly rate / boost limits.
+      const configToSave = current.config;
 
       const updatedDb = {
         users: mergedUsers,
@@ -612,12 +914,18 @@ async function startServer() {
   });
 
   // 7b. Server-Authoritative Instant P2P Transfer with SMS Notifications
-  app.post('/api/transfer', (req, res) => {
+  app.post('/api/transfer', (req: any, res) => {
     try {
       const { senderId, recipientId, amount } = req.body;
       const numAmount = parseFloat(amount);
       if (isNaN(numAmount) || numAmount <= 0) {
         return res.status(400).json({ error: 'Please enter a valid transfer amount.' });
+      }
+      if (String(senderId) === String(recipientId)) {
+        return res.status(400).json({ error: 'Recipient must be different from the sender.' });
+      }
+      if (String(senderId) !== String(req.authUserId)) {
+        return res.status(403).json({ error: 'You can only send money from your own account.' });
       }
 
       const db = readDb();
@@ -711,14 +1019,17 @@ async function startServer() {
       }
 
       writeDb(db);
-      res.json({ success: true, sender, recipient, sentTx, recvTx, recvNotif, sentNotif });
+      res.json({ success: true, sender: publicUser(sender), recipient: publicUser(recipient), sentTx, recvTx, recvNotif, sentNotif });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
   // 7c. Notification System Endpoints
-  app.get('/api/notifications/:userId', (req, res) => {
+  app.get('/api/notifications/:userId', (req: any, res) => {
+    if (String(req.params.userId) !== String(req.authUserId)) {
+      return res.status(403).json({ error: 'You can only view your own notifications.' });
+    }
     const db = readDb();
     const userNotifs = (db.notifications || [])
       .filter((n: any) => n.userId === req.params.userId)
@@ -726,9 +1037,12 @@ async function startServer() {
     res.json(userNotifs);
   });
 
-  app.post('/api/notifications/mark-read', (req, res) => {
+  app.post('/api/notifications/mark-read', (req: any, res) => {
     try {
       const { userId, notificationId } = req.body;
+      if (String(userId) !== String(req.authUserId)) {
+        return res.status(403).json({ error: 'You can only modify your own notifications.' });
+      }
       const db = readDb();
       if (!db.notifications) db.notifications = [];
 
@@ -753,9 +1067,12 @@ async function startServer() {
     }
   });
 
-  app.post('/api/notifications/delete', (req, res) => {
+  app.post('/api/notifications/delete', (req: any, res) => {
     try {
       const { userId, notificationId } = req.body;
+      if (String(userId) !== String(req.authUserId)) {
+        return res.status(403).json({ error: 'You can only modify your own notifications.' });
+      }
       const db = readDb();
       if (!db.notifications) db.notifications = [];
 
@@ -773,18 +1090,25 @@ async function startServer() {
   });
 
   // 8. Full-Stack Admin API endpoints (Completely decoupled from user sessions)
+  // Admin credentials can be overridden with ADMIN_EMAIL / ADMIN_PASSWORD env vars.
+  const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@gmail.com').trim().toLowerCase();
+  const ADMIN_VALID_PASSWORDS = ([
+    process.env.ADMIN_PASSWORD,
+    '123456',
+    'admin786'
+  ].filter(Boolean) as string[]).map(p => p.trim());
+
   app.post('/api/admin/login', (req, res) => {
     try {
       const { email, password } = req.body;
       const cleanEmail = (email || '').trim().toLowerCase();
       const cleanPass = (password || '').trim();
 
-      if (cleanEmail === 'admin@gmail.com' && (cleanPass === '123456' || cleanPass === 'admin786')) {
-        const token = 'admin_sess_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
+      if (cleanEmail === ADMIN_EMAIL && cleanPass && ADMIN_VALID_PASSWORDS.includes(cleanPass)) {
         return res.json({
           success: true,
-          token,
-          email: 'admin@gmail.com',
+          token: issueToken(ADMIN_EMAIL, 'ADMIN'),
+          email: ADMIN_EMAIL,
           role: 'SUPER_ADMIN',
           loginTime: Date.now()
         });
@@ -824,7 +1148,7 @@ async function startServer() {
 
   app.get('/api/admin/users', (_req, res) => {
     const db = readDb();
-    res.json({ users: db.users, config: db.config });
+    res.json({ users: db.users.map(adminUserView), config: db.config });
   });
 
   // Storage Diagnostic Probe: Live read/write verification and stats
@@ -994,7 +1318,7 @@ async function startServer() {
       }
 
       writeDb(db);
-      res.json({ success: true, user });
+      res.json({ success: true, user: adminUserView(user) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1015,7 +1339,7 @@ async function startServer() {
       if (action === 'UNLOCK') user.isTempLocked = false;
 
       writeDb(db);
-      res.json({ success: true, user });
+      res.json({ success: true, user: adminUserView(user) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1032,7 +1356,7 @@ async function startServer() {
 
       user.password = (newPassword || '').trim();
       writeDb(db);
-      res.json({ success: true, user });
+      res.json({ success: true, user: adminUserView(user) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1100,7 +1424,7 @@ async function startServer() {
       }
 
       writeDb(db);
-      res.json({ success: true, user });
+      res.json({ success: true, user: adminUserView(user) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1170,13 +1494,19 @@ async function startServer() {
     res.send(JSON.stringify(db, null, 2));
   });
 
-  const isProduction = process.env.NODE_ENV === 'production';
+  // Serve the built static app UNLESS explicitly running in development mode.
+  // (If NODE_ENV is missing on a host, production is the safe default — running the
+  // Vite dev middleware in production breaks PWA install & cannot handle traffic.)
+  const isProduction = process.env.NODE_ENV !== 'development';
   const server = http.createServer(app);
 
   if (!isProduction) {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
+        // Allow any deployment/preview host (e.g. *.e2b.app, custom domains).
+        // Without this Vite's host-check returns 403 for every proxied request.
+        allowedHosts: true,
         hmr: {
           server,
         },
@@ -1199,8 +1529,22 @@ async function startServer() {
       }
     });
   } else {
-    app.use(express.static(path.join(__dirname, 'dist')));
+    app.use(express.static(path.join(__dirname, 'dist'), {
+      setHeaders: (res, filePath) => {
+        // The service worker & manifest must always be revalidated so updates roll out
+        // and browsers see a fresh manifest (needed for PWA installability).
+        if (
+          filePath.endsWith('sw.js') ||
+          filePath.endsWith('manifest.json') ||
+          /workbox-.*\.js$/.test(filePath) ||
+          filePath.endsWith('index.html')
+        ) {
+          res.setHeader('Cache-Control', 'no-cache');
+        }
+      }
+    }));
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(__dirname, 'dist', 'index.html'));
     });
   }

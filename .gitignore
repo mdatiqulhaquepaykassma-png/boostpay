@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+# Never commit the API token signing secret
+data/.api-secret
+.api-secret

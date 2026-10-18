@@ -12,6 +12,8 @@ declare global {
   }
 }
 
+export type InstallHelpMode = 'ios' | 'manual' | 'iframe';
+
 export function usePWAInstall() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(() => {
     if (typeof window !== 'undefined' && window.__boostpay_pwa_prompt) {
@@ -33,6 +35,9 @@ export function usePWAInstall() {
   const [isIOS, setIsIOS] = useState(false);
   const [isAndroid, setIsAndroid] = useState(false);
   const [isIframe, setIsIframe] = useState(false);
+
+  // Manual-install guidance (shown when the browser offers no native prompt)
+  const [installHelpMode, setInstallHelpMode] = useState<InstallHelpMode | null>(null);
 
   useEffect(() => {
     // Check true standalone display mode
@@ -96,7 +101,12 @@ export function usePWAInstall() {
     if (!promptEvent && !isInstalled) {
       if (typeof window !== 'undefined' && window.self !== window.top) {
         // If in an iframe, open in full top-level browser tab so Chrome allows native installation
-        window.open(window.location.href, '_blank');
+        try {
+          window.open(window.location.href, '_blank');
+        } catch {
+          // Popup blocked — fall through to guidance
+        }
+        setInstallHelpMode('iframe');
         return false;
       }
 
@@ -150,8 +160,12 @@ export function usePWAInstall() {
       }
     }
 
+    // No native prompt available (iOS Safari, in-app browsers, a previously
+    // dismissed prompt, or an insecure context) — show step-by-step guidance
+    // instead of silently doing nothing.
+    setInstallHelpMode(isIOS ? 'ios' : 'manual');
     return false;
-  }, [deferredPrompt, isInstalled]);
+  }, [deferredPrompt, isInstalled, isIOS]);
 
   /**
    * Direct app open
@@ -173,6 +187,8 @@ export function usePWAInstall() {
     isInstallLoading,
     justInstalled,
     install,
-    openApp
+    openApp,
+    installHelpMode,
+    closeInstallHelp: () => setInstallHelpMode(null)
   };
 }

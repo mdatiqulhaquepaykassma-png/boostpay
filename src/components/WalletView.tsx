@@ -46,29 +46,48 @@ export const WalletView: FC<Props> = ({
   const [isHighlighted, setIsHighlighted] = useState(false);
 
   const prevBalanceRef = useRef(user.balance);
+  const prevLifetimeRef = useRef(user.lifetimeProfit);
   const prevYieldRef = useRef(liveYield);
+  const prevHighlightBalanceRef = useRef(user.balance);
+  const shownCompletionKeyRef = useRef<string | null>(null);
 
   // Synchronize with user prop changes
   useEffect(() => {
     setLiveYield(user.boostState.accumulatedYield || 0);
     setElapsedMs(user.boostState.elapsedMs || 0);
 
-    // If balance increased due to reward credit while app was in background or reloaded
-    if (user.balance > prevBalanceRef.current && !user.boostState.isActive) {
-      const diff = user.balance - prevBalanceRef.current;
-      setCompletionBanner({ amount: diff });
+    // Detect a freshly completed compounding cycle (server stamps justCompletedReward).
+    const completedReward = Number(user.boostState.justCompletedReward) || 0;
+    if (completedReward > 0) {
+      const key = `${user.boostState.startingBalance}-${completedReward}`;
+      if (shownCompletionKeyRef.current !== key) {
+        shownCompletionKeyRef.current = key;
+        setCompletionBanner({ amount: completedReward });
+      }
+    } else if (!user.boostState.isActive) {
+      // Fallback: a reward credit raises balance AND lifetimeProfit by the same amount.
+      // (Transfers / admin credits touch only balance, so they never fake this banner.)
+      const balDiff = user.balance - prevBalanceRef.current;
+      const profitDiff = user.lifetimeProfit - prevLifetimeRef.current;
+      if (balDiff > 0 && profitDiff > 0 && Math.abs(balDiff - profitDiff) < 1e-6) {
+        setCompletionBanner({ amount: balDiff });
+      }
     }
     prevBalanceRef.current = user.balance;
-  }, [user.boostState.elapsedMs, user.boostState.accumulatedYield, user.balance, user.boostState.isActive]);
+    prevLifetimeRef.current = user.lifetimeProfit;
+  }, [user.boostState.elapsedMs, user.boostState.accumulatedYield, user.boostState.justCompletedReward, user.boostState.startingBalance, user.balance, user.lifetimeProfit, user.boostState.isActive]);
 
   // Trigger subtle green highlight when background yield accumulates or balance increases
   useEffect(() => {
-    if (liveYield - prevYieldRef.current > 0.0005 || user.balance > prevBalanceRef.current) {
+    const balanceIncreased = user.balance > prevHighlightBalanceRef.current;
+    const yieldJumped = liveYield - prevYieldRef.current > 0.0005;
+    prevYieldRef.current = liveYield;
+    prevHighlightBalanceRef.current = user.balance;
+    if (yieldJumped || balanceIncreased) {
       setIsHighlighted(true);
       const timer = setTimeout(() => setIsHighlighted(false), 900);
       return () => clearTimeout(timer);
     }
-    prevYieldRef.current = liveYield;
   }, [liveYield, user.balance]);
 
   const allUsers = useMemo(() => BoostPayStore.getUsers(), []);
@@ -354,7 +373,7 @@ export const WalletView: FC<Props> = ({
           ) : (
             <button
               onClick={handlePauseBoost}
-              className="w-full h-11 rounded-2xl border border-zinc-700 bg-zinc-800 text-xs font-semibold text-zinc-200 hover:bg-zinc-750 active:scale-[0.98] transition flex items-center justify-center gap-1.5 cursor-pointer"
+              className="w-full h-11 rounded-2xl border border-zinc-700 bg-zinc-800 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 active:scale-[0.98] transition flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Pause className="w-4 h-4" /> Pause (Unlocks Transfers)
             </button>
