@@ -1,5 +1,6 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
-import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History } from 'lucide-react';
+import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode
+} from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User, BoostState, SystemConfig } from '../types';
 import { RecentTransactionsSection } from './RecentTransactionsSection';
@@ -31,6 +32,7 @@ interface BalanceCardProps {
   dynamicTargetDurationMs: number;
   minuteRatePercent: number;
   onOpenSendMoney: () => void;
+  onOpenQR?: () => void;
 }
 
 const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
@@ -38,7 +40,8 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   boostState,
   dynamicTargetDurationMs,
   minuteRatePercent,
-  onOpenSendMoney
+  onOpenSendMoney,
+  onOpenQR
 }) => {
   const isRunning = boostState.isActive && !boostState.isPaused;
   const [liveAccrued, setLiveAccrued] = useState(0);
@@ -117,20 +120,29 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
         />
       </div>
 
-      {/* Transfer Button */}
-      <div className="mt-4">
+      {/* Transfer + QR Buttons */}
+      <div className="mt-4 grid grid-cols-2 gap-2.5">
         <button
           onClick={onOpenSendMoney}
           disabled={isRunning}
-          className={`w-full h-11 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+          className={`h-11 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
             isRunning
               ? 'border border-zinc-800 bg-zinc-950 text-zinc-500 cursor-not-allowed opacity-80'
               : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700/80 active:scale-[0.98]'
           }`}
         >
           <Send className="w-3.5 h-3.5 text-amber-400" />
-          {isRunning ? 'Transfers Locked During Boost' : 'Send Money (P2P)'}
+          {isRunning ? 'Transfers Locked' : 'Send Money'}
         </button>
+        {onOpenQR && (
+          <button
+            onClick={onOpenQR}
+            className="h-11 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700/80 active:scale-[0.98]"
+          >
+            <QrCode className="w-3.5 h-3.5 text-amber-400" />
+            QR Pay
+          </button>
+        )}
       </div>
     </div>
   );
@@ -396,6 +408,7 @@ interface Props {
   user: User;
   onUpdateUser: (user: User) => void;
   onOpenSendMoney: () => void;
+  onOpenQR?: () => void;
   config: SystemConfig;
 }
 
@@ -403,6 +416,7 @@ export const WalletView: FC<Props> = ({
   user,
   onUpdateUser,
   onOpenSendMoney,
+  onOpenQR,
   config
 }) => {
   const [walletTab, setWalletTab] = useState<'OVERVIEW' | 'TRANSACTIONS'>('OVERVIEW');
@@ -495,6 +509,7 @@ export const WalletView: FC<Props> = ({
         dynamicTargetDurationMs={dynamicTargetDurationMs}
         minuteRatePercent={config.minuteRatePercent !== undefined ? config.minuteRatePercent : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605)}
         onOpenSendMoney={onOpenSendMoney}
+        onOpenQR={onOpenQR}
       />
 
       {/* 2. SUB-TAB SWITCHER: OVERVIEW (COMPOUNDING) vs TRANSACTIONS */}

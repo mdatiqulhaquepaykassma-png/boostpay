@@ -31,9 +31,13 @@ import {
   FileText,
   ArrowRightLeft,
   ShieldAlert,
-  Clock
+  Clock,
+  BarChart3,
+  Radio,
+  Users2
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
+import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView } from './AdminExtraViews';
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
 
@@ -51,7 +55,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // 2. Admin Portal Views
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'DATABASE' | 'ENGINE' | 'SUPPORT'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS'>('OVERVIEW');
 
   // 3. Database Storage & Diagnostics State
   const [storageProbe, setStorageProbe] = useState<any>(null);
@@ -300,7 +304,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         const sess = BoostPayStore.setAdminSession({
           email: data.email || emailClean,
           token: data.token,
-          loginTime: data.loginTime || Date.now()
+          loginTime: data.loginTime || Date.now(),
+          role: data.role === 'SUPPORT' ? 'SUPPORT' : 'SUPERADMIN'
         });
         setAdminSession(sess);
         return;
@@ -829,6 +834,18 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           </button>
 
           <button
+            onClick={() => setActiveTab('ANALYTICS')}
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+              activeTab === 'ANALYTICS'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            <span>Financial Analytics</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('USERS')}
             className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
               activeTab === 'USERS'
@@ -862,6 +879,30 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           >
             <ArrowRightLeft className="w-4 h-4" />
             <span>Transactions Ledger ({transactions.length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('FRAUD')}
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+              activeTab === 'FRAUD'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <ShieldAlert className="w-4 h-4" />
+            <span>Anti-Fraud</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('BROADCAST')}
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+              activeTab === 'BROADCAST'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <Radio className="w-4 h-4" />
+            <span>Broadcast</span>
           </button>
 
           <button
@@ -902,11 +943,32 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             <MessageSquare className="w-4 h-4" />
             <span>Support Communications</span>
           </button>
+
+          <button
+            onClick={() => setActiveTab('ADMINS')}
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+              activeTab === 'ADMINS'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <Users2 className="w-4 h-4" />
+            <span>Admin Roles</span>
+          </button>
         </div>
       </div>
 
       {/* Main Admin Content Body */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-8 space-y-6">
+        {activeTab === 'ANALYTICS' && <AnalyticsDashboard />}
+        {activeTab === 'BROADCAST' && <BroadcastView />}
+        {activeTab === 'FRAUD' && <FraudView />}
+        {activeTab === 'ADMINS' && (
+          <AdminAccountsView
+            myEmail={(adminSession && adminSession.email) || ''}
+            myRole={(adminSession && adminSession.role) || 'SUPERADMIN'}
+          />
+        )}
         {/* ======================================================== */}
         {/* TAB 1: OVERVIEW & SYSTEM HEALTH                          */}
         {/* ======================================================== */}

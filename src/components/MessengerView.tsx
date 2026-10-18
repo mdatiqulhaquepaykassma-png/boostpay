@@ -7,6 +7,7 @@ import {
   ShieldCheck,
   ArrowLeft,
   Plus,
+  Users,
   Headphones,
   Copy,
   Check,
@@ -177,6 +178,11 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const [isNewChatOpen, setIsNewChatOpen] = useState(false);
   const [newPeerId, setNewPeerId] = useState('');
   const [newChatError, setNewChatError] = useState('');
+  const [newChatMode, setNewChatMode] = useState<'DM' | 'GROUP'>('DM');
+  const [groupName, setGroupName] = useState('');
+  const [groupMemberIds, setGroupMemberIds] = useState<string[]>([]);
+  const [groupSuggestions, setGroupSuggestions] = useState<{ id: string; email: string }[]>([]);
+  const [isCreatingGroup, setIsCreatingGroup] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
 
@@ -270,7 +276,48 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   );
 
   const getOtherParticipant = (conv: Conversation): string => {
+    if (conv.type === 'group') return conv.id;
     return conv.participants.find(p => p !== currentUser.id) || (conv.participants.includes('ADMIN_SUPPORT') ? 'ADMIN_SUPPORT' : 'Support');
+  };
+
+  const getConvTitle = (conv: Conversation): string => {
+    if (conv.type === 'group') return conv.name || 'Group chat';
+    const other = conv.participants.find(p => p !== currentUser.id);
+    if (other === 'ADMIN_SUPPORT' || conv.participants.includes('ADMIN_SUPPORT')) return 'Official Verified Support';
+    return `User #${other}`;
+  };
+
+  const openNewChatModal = async () => {
+    setIsNewChatOpen(true);
+    setNewChatMode('DM');
+    setNewChatError('');
+    setGroupName('');
+    setGroupMemberIds([]);
+    const suggestions = await BoostPayStore.getGroupSuggestions();
+    setGroupSuggestions(suggestions);
+  };
+
+  const handleCreateGroup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setNewChatError('');
+    if (!groupName.trim()) {
+      setNewChatError('Give the group a name.');
+      return;
+    }
+    if (groupMemberIds.length < 2) {
+      setNewChatError('Pick at least 2 other members.');
+      return;
+    }
+    setIsCreatingGroup(true);
+    try {
+      const conv = await BoostPayStore.createGroup(groupName.trim(), groupMemberIds);
+      setIsNewChatOpen(false);
+      setActiveConv(conv);
+    } catch (err: any) {
+      setNewChatError(err.message || 'Could not create the group.');
+    } finally {
+      setIsCreatingGroup(false);
+    }
   };
 
   const handleStartNewConversation = (e: React.FormEvent) => {
@@ -309,10 +356,11 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     setShowEmojiPicker(false);
     setIsSending(true);
 
-    const otherParticipant = getOtherParticipant(activeConv);
+    // Groups: send to the group conversation ID; DMs: send to the peer
+    const recipient = activeConv.type === 'group' ? activeConv.id : getOtherParticipant(activeConv);
 
     try {
-      await BoostPayStore.sendChatMessage(otherParticipant, textToSend, 'USER');
+      await BoostPayStore.sendChatMessage(recipient, textToSend, 'USER');
     } finally {
       setIsSending(false);
       setTimeout(() => {
@@ -357,7 +405,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               {/* Participant Avatar with Presence Dot */}
               <div className="relative shrink-0">
                 <div className={`h-10 w-10 rounded-2xl bg-gradient-to-tr ${getAvatarGradient(getOtherParticipant(activeConv))} flex items-center justify-center text-white font-mono font-bold text-xs shadow-md`}>
-                  {getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? (
+                  {activeConv.type === 'group' ? (
+                    <Users className="w-5 h-5 text-white" />
+                  ) : getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? (
                     <ShieldCheck className="w-5 h-5 text-white stroke-[2.2]" />
                   ) : (
                     `#${getOtherParticipant(activeConv)}`
@@ -368,7 +418,11 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
 
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5 truncate">
-                  {getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? (
+                  {activeConv.type === 'group' ? (
+                    <span className="text-xs font-bold font-mono text-zinc-100">
+                      {activeConv.name || 'Group chat'}
+                    </span>
+                  ) : getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? (
                     <span className="text-xs font-bold text-sky-400 font-mono flex items-center gap-1">
                       Official Verified Support
                     </span>
@@ -499,7 +553,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               <p className="text-[11px] text-zinc-400">Direct peer communication & Verified Support</p>
             </div>
             <button
-              onClick={() => setIsNewChatOpen(true)}
+              onClick={() => openNewChatModal()}
               className="flex items-center gap-1.5 rounded-2xl bg-amber-500 px-3 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 transition shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 min-h-[44px]"
             >
               <Plus className="w-4 h-4" /> New Chat
@@ -561,7 +615,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                   <div className="flex items-center gap-3 min-w-0 pr-2">
                     <div className="relative shrink-0">
                       <div className={`h-10 w-10 rounded-xl bg-gradient-to-tr ${gradient} flex items-center justify-center text-white font-mono font-bold text-xs shadow-md`}>
-                        {isSupport ? (
+                        {conv.type === 'group' ? (
+                          <Users className="w-4 h-4 text-white" />
+                        ) : isSupport ? (
                           <ShieldCheck className="w-4 h-4 text-white stroke-[2.2]" />
                         ) : (
                           `#${other}`
@@ -573,7 +629,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
                         <span className="text-xs font-bold font-mono text-zinc-100">
-                          {isSupport ? 'Official Verified Support' : `User #${other}`}
+                          {conv.type === 'group'
+                            ? conv.name || 'Group chat'
+                            : isSupport ? 'Official Verified Support' : `User #${other}`}
                         </span>
                       </div>
                       <p className="text-[11px] text-zinc-400 truncate max-w-[200px] sm:max-w-xs mt-0.5">
@@ -583,7 +641,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                   </div>
 
                   <span className="text-[10px] font-mono text-zinc-500 shrink-0 self-start mt-0.5">
-                    {new Date(conv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    {new Date(conv.lastMessageAt || conv.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
                 </button>
               );
@@ -596,48 +654,137 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             )}
           </div>
 
-          {/* New Chat Modal */}
+          {/* New Chat / New Group Modal */}
           {isNewChatOpen && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-150">
               <div className="relative w-full max-w-sm rounded-3xl border border-zinc-800 bg-zinc-900/95 p-5 shadow-2xl text-zinc-100 backdrop-blur-2xl">
                 <h3 className="font-bold text-sm text-white mb-1">Start New Conversation</h3>
-                <p className="text-xs text-zinc-400 mb-4">Enter recipient&apos;s numeric User ID (e.g. 1, 2, 3)</p>
+                <p className="text-xs text-zinc-400 mb-3">Message a peer directly or create a group chat</p>
 
-                <form onSubmit={handleStartNewConversation} className="space-y-4">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-zinc-300 font-mono mb-1.5">
-                      Recipient User ID
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="e.g. 2"
-                      value={newPeerId}
-                      onChange={(e) => setNewPeerId(e.target.value.replace(/\D/g, ''))}
-                      className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 p-3 text-xs font-mono text-zinc-100 focus:border-amber-500 focus:outline-none"
-                      autoFocus
-                    />
-                  </div>
+                {/* Mode switch */}
+                <div className="flex rounded-2xl bg-zinc-950 p-1 mb-4 border border-zinc-800/80">
+                  <button
+                    type="button"
+                    onClick={() => setNewChatMode('DM')}
+                    className={`flex-1 rounded-xl py-2 text-[11px] font-semibold transition cursor-pointer ${newChatMode === 'DM' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-zinc-200'}`}
+                  >
+                    Direct Message
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNewChatMode('GROUP')}
+                    className={`flex-1 rounded-xl py-2 text-[11px] font-semibold transition cursor-pointer ${newChatMode === 'GROUP' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-zinc-200'}`}
+                  >
+                    Group Chat
+                  </button>
+                </div>
 
-                  {newChatError && (
-                    <p className="text-xs text-red-400 font-medium">{newChatError}</p>
-                  )}
+                {newChatMode === 'DM' ? (
+                  <form onSubmit={handleStartNewConversation} className="space-y-4">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-zinc-300 font-mono mb-1.5">
+                        Recipient User ID
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. 2"
+                        value={newPeerId}
+                        onChange={(e) => setNewPeerId(e.target.value.replace(/\D/g, ''))}
+                        className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 p-3 text-xs font-mono text-zinc-100 focus:border-amber-500 focus:outline-none"
+                        autoFocus
+                      />
+                    </div>
 
-                  <div className="flex gap-2.5 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setIsNewChatOpen(false)}
-                      className="flex-1 rounded-2xl bg-zinc-800 py-2.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-700 cursor-pointer min-h-[44px]"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      className="flex-1 rounded-2xl bg-amber-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 min-h-[44px]"
-                    >
-                      Open Chat
-                    </button>
-                  </div>
-                </form>
+                    {newChatError && (
+                      <p className="text-xs text-red-400 font-medium">{newChatError}</p>
+                    )}
+
+                    <div className="flex gap-2.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setIsNewChatOpen(false)}
+                        className="flex-1 rounded-2xl bg-zinc-800 py-2.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-700 cursor-pointer min-h-[44px]"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        className="flex-1 rounded-2xl bg-amber-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 min-h-[44px]"
+                      >
+                        Open Chat
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <form onSubmit={handleCreateGroup} className="space-y-4">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-zinc-300 mb-1.5">Group name</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Trading Squad"
+                        value={groupName}
+                        onChange={(e) => setGroupName(e.target.value.slice(0, 60))}
+                        className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-100 focus:border-amber-500 focus:outline-none"
+                        autoFocus
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-zinc-300 mb-1.5">
+                        Members ({groupMemberIds.length} selected)
+                      </label>
+                      <div className="max-h-44 overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950 p-2 space-y-1">
+                        {groupSuggestions.length === 0 && (
+                          <p className="p-2 text-[11px] text-zinc-500">No other users found.</p>
+                        )}
+                        {groupSuggestions.map((u) => {
+                          const checked = groupMemberIds.includes(u.id);
+                          return (
+                            <button
+                              key={u.id}
+                              type="button"
+                              onClick={() =>
+                                setGroupMemberIds((prev) =>
+                                  checked ? prev.filter((x) => x !== u.id) : [...prev, u.id]
+                                )
+                              }
+                              className={`flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition cursor-pointer ${checked ? 'bg-amber-500/15 border border-amber-500/40' : 'hover:bg-zinc-900 border border-transparent'}`}
+                            >
+                              <div className={`flex h-7 w-7 items-center justify-center rounded-lg font-mono text-[10px] font-bold ${checked ? 'bg-amber-500 text-zinc-950' : 'bg-zinc-800 text-zinc-400'}`}>
+                                {checked ? <Check className="w-3.5 h-3.5" /> : `#${u.id}`}
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-[11px] font-semibold text-zinc-200">User #{u.id}</p>
+                                <p className="text-[10px] text-zinc-500 truncate">{u.email}</p>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {newChatError && (
+                      <p className="text-xs text-red-400 font-medium">{newChatError}</p>
+                    )}
+
+                    <div className="flex gap-2.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setIsNewChatOpen(false)}
+                        className="flex-1 rounded-2xl bg-zinc-800 py-2.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-700 cursor-pointer min-h-[44px]"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isCreatingGroup}
+                        className="flex-1 rounded-2xl bg-amber-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 min-h-[44px] disabled:opacity-60"
+                      >
+                        {isCreatingGroup ? 'Creating...' : 'Create Group'}
+                      </button>
+                    </div>
+                  </form>
+                )}
               </div>
             </div>
           )}

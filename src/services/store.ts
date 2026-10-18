@@ -1,4 +1,4 @@
-import { User, Transaction, Conversation, Message, SystemConfig, InboxNotification, AuditLog } from '../types';
+import { User, Transaction, Conversation, Message, SystemConfig, InboxNotification, AuditLog, SessionDevice } from '../types';
 import { copyToClipboard as clipboardHelper } from '../utils/clipboard';
 
 const STORAGE_USERS = 'boostpay_users_v4';
@@ -44,6 +44,7 @@ export interface AdminSession {
   email: string;
   token: string;
   loginTime: number;
+  role?: 'SUPERADMIN' | 'SUPPORT';
 }
 
 export const MNEMONIC_WORDS = [
@@ -286,9 +287,15 @@ export class BoostPayStore {
       if (res.ok) {
         const data = await res.json();
         if (data.users && Array.isArray(data.users)) {
-          localStorage.setItem(STORAGE_USERS, JSON.stringify(data.users));
-          localStorage.setItem('boostpay_users', JSON.stringify(data.users));
-          return data.users;
+          // Preserve local secrets (password/phrase) that the server strips
+          const locals = this.getUsers();
+          const merged = data.users.map((u: User) => {
+            const local = locals.find((l: User) => l.id === u.id);
+            return this.mergeServerUser(u, local || null);
+          });
+          localStorage.setItem(STORAGE_USERS, JSON.stringify(merged));
+          localStorage.setItem('boostpay_users', JSON.stringify(merged));
+          return merged;
         }
       }
     } catch (err) {
@@ -378,6 +385,30 @@ export class BoostPayStore {
                 localStorage.setItem(STORAGE_MESSAGES, JSON.stringify(msgs));
                 this.triggerChatUpdate(this.getConversations(), msgs);
               }
+            } else if (data.type === 'user_update' && data.user) {
+              // Authoritative realtime profile/balance/boost update
+              this.mergeRealtimeUser(data.user);
+            } else if (data.type === 'notification' && data.notification) {
+              const notifs = this.getNotifications();
+              if (!notifs.some(n => n.id === data.notification.id)) {
+                notifs.unshift(data.notification);
+                localStorage.setItem(STORAGE_NOTIFICATIONS, JSON.stringify(notifs));
+              }
+              this.triggerToast({
+                id: 'toast-' + data.notification.id,
+                type: data.notification.type === 'TRANSFER_RECEIVED' ? 'TRANSFER_IN' : 'INFO',
+                title: data.notification.title || 'BoostPay Alert',
+                message: data.notification.message || ''
+              } as any);
+            } else if (data.type === 'banner') {
+              this.triggerBanner(data.banner || null);
+            } else if (data.type === 'boost_cycle_complete') {
+              this.triggerToast({
+                id: 'toast-cyc-' + Date.now(),
+                type: 'SUCCESS',
+                title: 'Compounding Cycle Complete',
+                message: `Yield reward of $${Number(data.reward || 0).toFixed(8)} was credited to your wallet.`
+              } as any);
             }
           } catch (e) {
             console.warn('Error parsing SSE event data:', e);
@@ -1423,6 +1454,169 @@ export class BoostPayStore {
   // --- Notification & Real-Time Alert Engine ---
 
   private static chatListeners: ((conversations: Conversation[], messages: Message[]) => void)[] = [];
+  private static userListeners: ((user: User) => void)[] = [];
+  private static bannerListeners: ((banner: any | null) => void)[] = [];
+
+  /** Merge a realtime server user into local caches and notify subscribers. */
+  static mergeRealtimeUser(serverUser: User): void {
+    if (!serverUser || !serverUser.id) return;
+    const users = this.getUsers();
+    const idx = users.findIndex(u => u.id === serverUser.id);
+    const merged = this.mergeServerUser(serverUser, idx >= 0 ? users[idx] : null);
+    if (idx >= 0) {
+      users[idx] = merged;
+    } else {
+      users.push(merged);
+    }
+    localStorage.setItem(STORAGE_USERS, JSON.stringify(users));
+    const curId = localStorage.getItem(STORAGE_CURRENT_USER_ID);
+    if (curId === String(serverUser.id)) {
+      const cur = this.getCurrentUser();
+      const next = this.mergeServerUser(serverUser, cur);
+      localStorage.setItem(STORAGE_CURRENT_USER, JSON.stringify(next));
+      for (const listener of this.userListeners) {
+        try { listener(next); } catch (e) { console.warn('User listener error:', e); }
+      }
+    }
+  }
+
+  static onUserUpdate(listener: (user: User) => void): () => void {
+    this.userListeners.push(listener);
+    return () => {
+      this.userListeners = this.userListeners.filter(l => l !== listener);
+    };
+  }
+
+  static onBanner(listener: (banner: any | null) => void): () => void {
+    this.bannerListeners.push(listener);
+    return () => {
+      this.bannerListeners = this.bannerListeners.filter(l => l !== listener);
+    };
+  }
+
+  static triggerBanner(banner: any | null): void {
+    for (const listener of this.bannerListeners) {
+      try { listener(banner); } catch (e) { console.warn('Banner listener error:', e); }
+    }
+  }
+
+  // --- Sessions / anti-phishing / QR / groups / leaderboard / banner APIs ---
+
+  static async fetchLeaderboard(): Promise<{ users: any[]; me: any | null; total: number }> {
+    try {
+      const res = await fetch('/api/leaderboard', { headers: this.authHeaders() });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      console.warn('fetchLeaderboard error:', e);
+    }
+    return { users: [], me: null, total: 0 };
+  }
+
+  static async getSessions(): Promise<SessionDevice[]> {
+    try {
+      const res = await fetch('/api/users/me/sessions', { headers: this.authHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        return data.sessions || [];
+      }
+    } catch (e) { console.warn('getSessions error:', e); }
+    return [];
+  }
+
+  static async revokeSession(sessionId: string): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/users/me/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'DELETE',
+        headers: this.authHeaders()
+      });
+      return res.ok;
+    } catch { return false; }
+  }
+
+  static async revokeOtherSessions(): Promise<number> {
+    try {
+      const res = await fetch('/api/users/me/sessions/revoke-others', {
+        method: 'POST',
+        headers: this.authHeaders()
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data.revoked || 0;
+      }
+    } catch { /* ignore */ }
+    return 0;
+  }
+
+  static async setAntiPhishingCode(code: string): Promise<string> {
+    const res = await fetch('/api/users/me/anti-phishing', {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body: JSON.stringify({ code })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to save anti-phishing code.');
+    return data.antiPhishingCode || '';
+  }
+
+  static async getQRPayload(): Promise<{ payload: string; userId: string; name: string }> {
+    const res = await fetch('/api/users/me/qr', { headers: this.authHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to load QR payload.');
+    return data;
+  }
+
+  static async createGroup(name: string, memberIds: string[]): Promise<Conversation> {
+    const res = await fetch('/api/chat/groups', {
+      method: 'POST',
+      headers: this.authHeaders(),
+      body: JSON.stringify({ name, memberIds })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Failed to create group.');
+    const convs = this.getConversations();
+    if (!convs.some(c => c.id === data.conversation.id)) {
+      convs.unshift(data.conversation);
+      localStorage.setItem(STORAGE_CONVERSATIONS, JSON.stringify(convs));
+      this.triggerChatUpdate(convs, this.getMessages());
+    }
+    return data.conversation;
+  }
+
+  static async getGroupSuggestions(): Promise<{ id: string; email: string }[]> {
+    try {
+      const res = await fetch('/api/chat/groups/suggested', { headers: this.authHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        return data.users || [];
+      }
+    } catch { /* ignore */ }
+    return [];
+  }
+
+  /** Authenticated admin API helper (throws on error responses). */
+  static async adminApi(path: string, options: { method?: string; body?: any } = {}): Promise<any> {
+    const res = await fetch(path, {
+      method: options.method || 'GET',
+      headers: this.adminAuthHeaders(),
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    return data;
+  }
+
+  static async getBanner(): Promise<any | null> {
+    try {
+      const res = await fetch('/api/banner', { headers: this.authHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        return data.banner || null;
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
+
 
   static subscribeToChat(listener: (conversations: Conversation[], messages: Message[]) => void): () => void {
     this.chatListeners.push(listener);

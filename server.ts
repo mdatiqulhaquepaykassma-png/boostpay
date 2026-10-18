@@ -173,6 +173,7 @@ function getNextSequentialUserId(users: any[]): string {
   return (Math.max(...numericIds) + 1).toString();
 }
 
+let lastKnownConfig: any = null;
 function readDb() {
   try {
     if (!fs.existsSync(DB_FILE)) {
@@ -188,6 +189,8 @@ function readDb() {
     if (!parsed.notifications) parsed.notifications = INITIAL_DB.notifications || [];
     if (!parsed.config) parsed.config = INITIAL_DB.config;
     if (!parsed.auditLogs) parsed.auditLogs = INITIAL_DB.auditLogs || [];
+    lastKnownConfig = parsed.config;
+    if (!Array.isArray(parsed.sessions)) parsed.sessions = [];
 
     // Check for legacy user IDs and auto-migrate sequentially starting at 1
     let migrated = false;
@@ -324,14 +327,16 @@ const API_SECRET = getApiSecret();
 
 const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-function issueToken(sub: string, role: 'USER' | 'ADMIN'): string {
-  const payload = { sub: String(sub), role, exp: Date.now() + TOKEN_TTL_MS };
+function issueToken(sub: string, role: 'USER' | 'ADMIN', sid?: string, adminRole?: string): string {
+  const payload: any = { sub: String(sub), role, exp: Date.now() + TOKEN_TTL_MS };
+  if (sid) payload.sid = String(sid);
+  if (adminRole) payload.adminRole = adminRole;
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const sig = crypto.createHmac('sha256', API_SECRET).update(body).digest('base64url');
   return `${body}.${sig}`;
 }
 
-function verifyToken(token: unknown): { sub: string; role: string; exp: number } | null {
+function verifyToken(token: unknown): { sub: string; role: string; exp: number; sid?: string; adminRole?: string } | null {
   try {
     const raw = String(token || '');
     const dot = raw.lastIndexOf('.');
@@ -351,6 +356,12 @@ function verifyToken(token: unknown): { sub: string; role: string; exp: number }
   }
 }
 
+function clientIp(req: any): string {
+  const fwd = req.headers && (req.headers['x-forwarded-for'] || req.headers['x-real-ip']);
+  if (typeof fwd === 'string' && fwd.trim()) return fwd.split(',')[0].trim();
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
 function getBearerToken(req: any): string | null {
   const auth = req.headers['authorization'];
   if (typeof auth === 'string' && auth.toLowerCase().startsWith('bearer ')) {
@@ -365,12 +376,142 @@ function getBearerToken(req: any): string | null {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Session devices (login sessions bound to signed tokens)
+// ---------------------------------------------------------------------------
+interface SessionRecord {
+  id: string;
+  userId: string;
+  role: 'USER' | 'ADMIN';
+  ip: string;
+  userAgent: string;
+  createdAt: number;
+  lastSeenAt: number;
+  revoked?: boolean;
+}
+const revokedSessions = new Set<string>();
+function sessionSnapshot(db: any): SessionRecord[] {
+  if (!Array.isArray(db.sessions)) db.sessions = [];
+  return db.sessions;
+}
+function createSession(db: any, userId: string, role: 'USER' | 'ADMIN', ip: string, userAgent: string): SessionRecord {
+  const sess: SessionRecord = {
+    id: 'SESS-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
+    userId: String(userId),
+    role,
+    ip: ip || 'unknown',
+    userAgent: (userAgent || '').slice(0, 220),
+    createdAt: Date.now(),
+    lastSeenAt: Date.now()
+  };
+  sessionSnapshot(db).unshift(sess);
+  if (db.sessions.length > 2000) db.sessions.length = 2000;
+  return sess;
+}
+function revokeSession(db: any, sessionId: string): boolean {
+  const list = sessionSnapshot(db);
+  const sess = list.find((x: SessionRecord) => x.id === sessionId);
+  if (!sess) return false;
+  sess.revoked = true;
+  revokedSessions.add(sessionId);
+  return true;
+}
+function touchSession(db: any, sid?: string) {
+  if (!sid) return;
+  const sess = sessionSnapshot(db).find((x: SessionRecord) => x.id === sid && !x.revoked);
+  if (sess) sess.lastSeenAt = Date.now();
+}
+
+// ---------------------------------------------------------------------------
+// Realtime event push (reuses the authenticated SSE connections)
+// ---------------------------------------------------------------------------
+function pushToUser(userId: string, event: Record<string, any>) {
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const [clientId, client] of chatSseClients.entries()) {
+    if (client.userId === String(userId)) {
+      try { client.res.write(payload); } catch { chatSseClients.delete(clientId); }
+    }
+  }
+}
+function pushToAdmins(event: Record<string, any>) {
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const [clientId, client] of chatSseClients.entries()) {
+    if (client.userId === 'ADMIN_SUPPORT') {
+      try { client.res.write(payload); } catch { chatSseClients.delete(clientId); }
+    }
+  }
+}
+
+/** Push a fresh (live-computed) user snapshot to that user's open tabs. */
+function broadcastUserUpdate(db: any, userId: string) {
+  const u = (db.users || []).find((x: any) => x.id === String(userId));
+  if (!u) return;
+  pushToUser(String(userId), { type: 'user_update', user: publicUser(u), timestamp: Date.now() });
+}
+
+// ---------------------------------------------------------------------------
+// Anti-phishing code tag: every genuine server alert carries the user's code
+// ---------------------------------------------------------------------------
+function phishTag(u: any): string {
+  const code = u && typeof u.antiPhishingCode === 'string' && u.antiPhishingCode.trim()
+    ? u.antiPhishingCode.trim()
+    : '';
+  return code ? ` [PhishCode: ${code}]` : '';
+}
+
+/** Notification helper that automatically stamps the user's anti-phishing code. */
+function pushNotification(db: any, notif: any) {
+  if (!db.notifications) db.notifications = [];
+  const user = (db.users || []).find((x: any) => x.id === String(notif.userId));
+  const stamped = { ...notif, message: `${notif.message || ''}${phishTag(user)}` };
+  db.notifications.unshift(stamped);
+  if (db.notifications.length > 5000) db.notifications.length = 5000;
+  pushToUser(String(notif.userId), { type: 'notification', notification: stamped, timestamp: Date.now() });
+  return stamped;
+}
+
+/**
+ * Live boost state: elapsed time and accrued yield are computed on read so the
+ * background ticker never needs to rewrite the database every second (this was
+ * the source of UI flashing and disk churn).
+ */
+function liveBoostState(u: any): any {
+  const bs = u && u.boostState ? u.boostState : null;
+  if (!bs) return bs;
+  const config = lastKnownConfig || INITIAL_DB.config;
+  const minuteRate = config.minuteRatePercent !== undefined
+    ? config.minuteRatePercent
+    : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605);
+  const ratePerMs = (minuteRate / 100) / 60000;
+  const out = { ...bs };
+  if (bs.isActive && !bs.isPaused && bs.startedAt > 0) {
+    const target = bs.targetDurationMs || 1;
+    const elapsed = Math.min(Date.now() - bs.startedAt, target);
+    out.elapsedMs = elapsed;
+    const startingBal = Number(bs.startingBalance ?? u.balance) || 0;
+    out.accumulatedYield = ratePerMs > 0
+      ? (elapsed * ratePerMs < 1e-5
+          ? startingBal * elapsed * ratePerMs
+          : startingBal * Math.expm1(elapsed * Math.log1p(ratePerMs)))
+      : 0;
+  }
+  return out;
+}
+
 function requireUser(req: any, res: any, next: any) {
   const payload = verifyToken(getBearerToken(req));
   if (!payload || payload.role !== 'USER') {
     return res.status(401).json({ error: 'Authentication required. Please sign in.' });
   }
+  if (payload.sid && revokedSessions.has(payload.sid)) {
+    return res.status(401).json({ error: 'This session was signed out. Please sign in again.' });
+  }
   req.authUserId = payload.sub;
+  req.authSid = payload.sid;
+  try {
+    const db = readDb();
+    touchSession(db, payload.sid);
+  } catch { /* non-fatal */ }
   next();
 }
 
@@ -379,7 +520,20 @@ function requireAdmin(req: any, res: any, next: any) {
   if (!payload || payload.role !== 'ADMIN') {
     return res.status(401).json({ error: 'Administrator authentication required.' });
   }
+  if (payload.sid && revokedSessions.has(payload.sid)) {
+    return res.status(401).json({ error: 'This admin session was signed out.' });
+  }
   req.authAdmin = payload.sub;
+  req.authSid = payload.sid;
+  req.authAdminRole = payload.adminRole || 'SUPERADMIN';
+  next();
+}
+
+/** Sensitive admin operations require the SUPERADMIN role (audit-logged). */
+function requireSuperAdmin(req: any, res: any, next: any) {
+  if ((req.authAdminRole || 'SUPERADMIN') !== 'SUPERADMIN') {
+    return res.status(403).json({ error: 'This action requires a SUPERADMIN account. Support admins have read-only access.' });
+  }
   next();
 }
 
@@ -397,14 +551,14 @@ function requireUserOrAdmin(req: any, res: any, next: any) {
 function publicUser(u: any): any {
   if (!u || typeof u !== 'object') return u;
   const { password, phrase, ...rest } = u;
-  return rest;
+  return { ...rest, boostState: liveBoostState(u) };
 }
 
 /** Admin console view: hides passwords (reset-only), keeps recovery phrase for support search. */
 function adminUserView(u: any): any {
   if (!u || typeof u !== 'object') return u;
   const { password, ...rest } = u;
-  return { ...rest, hasPassword: !!password };
+  return { ...rest, boostState: liveBoostState(u), hasPassword: !!password };
 }
 
 /** Drop prototype-pollution keys and normalize money fields on client-supplied users. */
@@ -521,7 +675,7 @@ setInterval(() => {
                 ? startingBal * target * ratePerMs
                 : startingBal * Math.expm1(target * Math.log1p(ratePerMs)))
             : 0;
-          
+
           user.balance = (Number(user.balance) || 0) + finalYield;
           user.lifetimeProfit = (Number(user.lifetimeProfit) || 0) + finalYield;
 
@@ -536,7 +690,7 @@ setInterval(() => {
           db.transactions.unshift(rewardTx);
 
           // Also generate SMS-style inbox notification with micro precision
-          const yieldNotif = {
+          pushNotification(db, {
             id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
             userId: user.id,
             type: 'YIELD_REWARD',
@@ -549,17 +703,17 @@ setInterval(() => {
             metadata: {
               balanceAfter: user.balance
             }
-          };
-          if (!db.notifications) db.notifications = [];
-          db.notifications.unshift(yieldNotif);
+          });
 
           // Calculate new duration based on latest balance
           const nextDuration = calculateDynamicDuration(user.balance, db.users, config);
 
+          // Auto-compounding: the next cycle starts immediately from the new
+          // (larger) balance. The engine only stops when the user pauses/stops.
           user.boostState = {
-            isActive: false,
+            isActive: true,
             isPaused: false,
-            startedAt: 0,
+            startedAt: now,
             pausedAt: 0,
             elapsedMs: 0,
             targetDurationMs: nextDuration,
@@ -568,15 +722,21 @@ setInterval(() => {
             justCompletedReward: finalYield
           };
           updated = true;
+          broadcastUserUpdate(db, user.id);
+          pushToUser(String(user.id), {
+            type: 'boost_cycle_complete',
+            reward: finalYield,
+            newBalance: user.balance,
+            timestamp: now
+          });
         } else {
-          user.boostState.elapsedMs = elapsed;
-          const startingBal = Number(user.boostState.startingBalance ?? user.balance);
-          user.boostState.accumulatedYield = ratePerMs > 0
-            ? (elapsed * ratePerMs < 1e-5
-                ? startingBal * elapsed * ratePerMs
-                : startingBal * Math.expm1(elapsed * Math.log1p(ratePerMs)))
-            : 0;
-          updated = true;
+          // Yield is computed live on read (liveBoostState) — no per-second writes.
+          // Persist a coarse checkpoint every 60s so elapsedMs survives restarts.
+          const startedAt = user.boostState.startedAt || 0;
+          if (now - startedAt - Math.floor((now - startedAt) / 60000) * 60000 < 1000) {
+            user.boostState.elapsedMs = elapsed;
+            updated = true;
+          }
         }
       }
     }
@@ -645,9 +805,22 @@ async function startServer() {
   });
 
   // 3. Database snapshot (authenticated; credentials never leave the server)
-  app.get('/api/db', (_req, res) => {
+  app.get('/api/db', (req: any, res) => {
     const db = readDb();
-    res.json({ ...db, users: (db.users || []).map(publicUser) });
+    // Only safe data is exposed: never auth tokens, sessions, admin accounts,
+    // audit logs, or other users' private chat/notification content.
+    const me = req.authUserId ? String(req.authUserId) : '';
+    res.json({
+      users: (db.users || []).map(publicUser),
+      config: db.config,
+      transactions: (db.transactions || []).filter((t: any) => String(t.userId) === me || String(t.recipientId) === me),
+      conversations: (db.conversations || []).filter((c: any) => Array.isArray(c.participants) && c.participants.includes(me)),
+      messages: (db.messages || []).filter((m: any) => {
+        const conv = (db.conversations || []).find((c: any) => c.id === m.conversationId);
+        return conv && Array.isArray(conv.participants) && conv.participants.includes(me);
+      }),
+      notifications: (db.notifications || []).filter((n: any) => String(n.userId) === me)
+    });
   });
 
   // 4. Single-user fetch endpoint (fast, keeps session synced without large payload)
@@ -698,7 +871,9 @@ async function startServer() {
         if (cleanPhrase && !existing.phrase) existing.phrase = cleanPhrase;
         if (password && !existing.password) existing.password = hashPassword(String(password).trim());
         writeDb(db);
-        return res.json({ success: true, user: publicUser(existing), restored: true, token: issueToken(existing.id, 'USER') });
+        const sess = createSession(db, existing.id, 'USER', clientIp(req), String(req.headers['user-agent'] || ''));
+        writeDb(db);
+        return res.json({ success: true, user: publicUser(existing), restored: true, token: issueToken(existing.id, 'USER', sess.id), sessionId: sess.id });
       }
 
       // Recreating a user that vanished from the server (e.g. container redeploy):
@@ -734,7 +909,9 @@ async function startServer() {
         };
         db.users.push(restoredUser);
         writeDb(db);
-        return res.json({ success: true, user: publicUser(restoredUser), restored: true, token: issueToken(restoredUser.id, 'USER') });
+        const sess2 = createSession(db, restoredUser.id, 'USER', clientIp(req), String(req.headers['user-agent'] || ''));
+        writeDb(db);
+        return res.json({ success: true, user: publicUser(restoredUser), restored: true, token: issueToken(restoredUser.id, 'USER', sess2.id), sessionId: sess2.id });
       }
 
       // Fresh registration: strictly allocate next serial ID (1, 2, 3...)
@@ -768,8 +945,9 @@ async function startServer() {
       };
 
       db.users.push(newUser);
+      const sess3 = createSession(db, userId, 'USER', clientIp(req), String(req.headers['user-agent'] || ''));
       writeDb(db);
-      res.json({ success: true, user: publicUser(newUser), token: issueToken(userId, 'USER') });
+      res.json({ success: true, user: publicUser(newUser), token: issueToken(userId, 'USER', sess3.id), sessionId: sess3.id });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -788,10 +966,15 @@ async function startServer() {
 
       const db = readDb();
       const cleanEmail = email.trim().toLowerCase();
-      const user = db.users.find((u: any) => u.email && u.email.toLowerCase() === cleanEmail);
+      // Accept either the account email OR the numeric User ID (e.g. "890" or "#890")
+      const idQuery = cleanEmail.replace(/^#/, '');
+      const user = db.users.find((u: any) =>
+        (u.email && u.email.toLowerCase() === cleanEmail) ||
+        (idQuery && String(u.id) === idQuery)
+      );
 
       if (!user) {
-        return res.status(404).json({ error: 'No account found with this email address. Please create an account.' });
+        return res.status(404).json({ error: 'No account found with this email or User ID. Please create an account.' });
       }
 
       if (!verifyPassword(user.password, password.trim())) {
@@ -812,7 +995,9 @@ async function startServer() {
         return res.status(403).json({ error: 'Account is temporarily locked. Contact support.' });
       }
 
-      res.json({ success: true, user: publicUser(user), token: issueToken(user.id, 'USER') });
+      const sess = createSession(db, user.id, 'USER', clientIp(req), String(req.headers['user-agent'] || ''));
+      writeDb(db);
+      res.json({ success: true, user: publicUser(user), token: issueToken(user.id, 'USER', sess.id), sessionId: sess.id });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -869,6 +1054,7 @@ async function startServer() {
       user.boostState.isPaused = true;
       user.boostState.pausedAt = Date.now();
       writeDb(db);
+      broadcastUserUpdate(db, user.id);
       res.json({ success: true, user: publicUser(user) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -891,6 +1077,7 @@ async function startServer() {
       user.boostState.startedAt = Date.now() - (user.boostState.elapsedMs || 0);
       user.boostState.pausedAt = 0;
       writeDb(db);
+      broadcastUserUpdate(db, user.id);
       res.json({ success: true, user: publicUser(user) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1142,6 +1329,32 @@ async function startServer() {
       let convId = '';
       let participants: string[] = [];
 
+      // Group messages: recipientId carries the group conversation ID
+      if (cleanRecipient.startsWith('GROUP-')) {
+        const groupConv = db.conversations.find((c: any) => c.id === cleanRecipient && c.type === 'group');
+        if (!groupConv) {
+          return res.status(404).json({ error: 'Group conversation not found.' });
+        }
+        if (!Array.isArray(groupConv.participants) || !groupConv.participants.includes(cleanSender)) {
+          return res.status(403).json({ error: 'You are not a member of this group.' });
+        }
+        const nowG = Date.now();
+        const gMsg = {
+          id: 'MSG-' + Math.floor(10000000 + Math.random() * 90000000),
+          conversationId: groupConv.id,
+          senderId: cleanSender,
+          text: cleanText.slice(0, 2000),
+          timestamp: nowG,
+          reactions: {}
+        };
+        db.messages.push(gMsg);
+        groupConv.lastMessage = cleanText.slice(0, 120);
+        groupConv.timestamp = nowG;
+        writeDb(db);
+        broadcastChatMessage(gMsg, groupConv);
+        return res.json({ success: true, message: gMsg, conversation: groupConv });
+      }
+
       if (cleanSender === 'ADMIN_SUPPORT' || cleanRecipient === 'ADMIN_SUPPORT') {
         const peerUserId = cleanSender === 'ADMIN_SUPPORT' ? cleanRecipient : cleanSender;
         convId = `CONV-${peerUserId}-ADMIN_SUPPORT`;
@@ -1292,6 +1505,7 @@ async function startServer() {
       sender.balance = Math.max(0, (Number(sender.balance) || 0) - numAmount);
       recipient.balance = (Number(recipient.balance) || 0) + numAmount;
 
+      const senderIp = clientIp(req);
       const sentTx = {
         id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000),
         userId: sender.id,
@@ -1299,6 +1513,7 @@ async function startServer() {
         amount: numAmount,
         recipientId: recipient.id,
         timestamp: Date.now(),
+        ip: senderIp,
         notes: `P2P transfer sent to #${recipient.id}`
       };
 
@@ -1348,9 +1563,8 @@ async function startServer() {
         }
       };
 
-      if (!db.notifications) db.notifications = [];
-      db.notifications.unshift(recvNotif);
-      db.notifications.unshift(sentNotif);
+      pushNotification(db, recvNotif);
+      pushNotification(db, sentNotif);
 
       // Recalculate boost durations
       if (sender.boostState) {
@@ -1360,8 +1574,57 @@ async function startServer() {
         recipient.boostState.targetDurationMs = calculateDynamicDuration(recipient.balance, db.users, db.config);
       }
 
+      // ---- Automated Anti-Fraud Trigger -------------------------------------
+      // Same IP driving unusual transfer activity across multiple accounts
+      // (or very high velocity) freezes the involved senders automatically.
+      try {
+        const WINDOW_MS = 10 * 60 * 1000;
+        const nowTs = Date.now();
+        const recent = db.transactions.filter((t: any) =>
+          t.type === 'TRANSFER_SENT' && t.ip === senderIp && nowTs - t.timestamp < WINDOW_MS
+        );
+        const distinctSenders = new Set<string>(recent.map((t: any) => String(t.userId)));
+        const volume = recent.reduce((acc: number, t: any) => acc + (Number(t.amount) || 0), 0);
+        const suspicious = (distinctSenders.size >= 3 && recent.length >= 3) || (distinctSenders.size >= 2 && volume >= 500);
+        if (suspicious) {
+          const frozen: string[] = [];
+          for (const uid of distinctSenders) {
+            const u = (db.users || []).find((x: any) => String(x.id) === uid);
+            if (u && !u.isFrozen) {
+              u.isFrozen = true;
+              u.frozenReason = `Automated anti-fraud: unusual multi-account transfer velocity from one device/IP (${senderIp}).`;
+              frozen.push(uid);
+              pushNotification(db, {
+                id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+                userId: uid,
+                type: 'SECURITY_ALERT',
+                title: 'BOOSTPAY-SECURITY',
+                message: `SECURITY FREEZE: Your account was automatically frozen due to unusual transfer activity from your device/IP. If this was you, contact support from the in-app messenger.`,
+                timestamp: nowTs,
+                isRead: false
+              });
+            }
+          }
+          if (frozen.length) {
+            recordAuditLog(db, 'FRAUD_AUTO_FREEZE', 'SYSTEM', `Anti-fraud auto-froze ${frozen.join(', ')} — IP ${senderIp}, ${recent.length} transfers, $${volume.toFixed(2)} in 10 min`);
+            pushToAdmins({
+              type: 'fraud_alert',
+              ip: senderIp,
+              frozen,
+              transfers: recent.length,
+              volume,
+              timestamp: nowTs
+            });
+          }
+        }
+      } catch (fraudErr) {
+        console.error('Anti-fraud engine error:', fraudErr);
+      }
+
       writeDb(db);
-      res.json({ success: true, sender: publicUser(sender), recipient: publicUser(recipient), sentTx, recvTx, recvNotif, sentNotif });
+      broadcastUserUpdate(db, sender.id);
+      broadcastUserUpdate(db, recipient.id);
+      res.json({ success: true, sender: publicUser(sender), recipient: publicUser(recipient), sentTx, recvTx });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1432,32 +1695,118 @@ async function startServer() {
   });
 
   // 8. Full-Stack Admin API endpoints (Completely decoupled from user sessions)
-  app.post('/api/admin/login', (req, res) => {
+  // Admin accounts live in db.admins with granular roles:
+  //   SUPERADMIN - full control (money ops, freeze, delete, broadcast, backups)
+  //   SUPPORT    - read-only + support chat (no money mutations)
+  // The legacy environment credentials bootstrap a SUPERADMIN on first run.
+  function ensureAdminAccounts(db: any) {
+    if (!Array.isArray(db.admins)) db.admins = [];
+    if (db.admins.length === 0) {
+      const email = (process.env.ADMIN_EMAIL || 'admin@gmail.com').trim().toLowerCase();
+      const pass = (process.env.ADMIN_PASSWORD || '').trim();
+      db.admins.push({
+        email,
+        // Environment password is only used for the first-run bootstrap; after
+        // that the stored hash is authoritative (change it from the portal).
+        passwordHash: pass ? hashPassword(pass) : hashPassword('admin786'),
+        role: 'SUPERADMIN',
+        createdAt: Date.now()
+      });
+    }
+    return db.admins;
+  }
+
+  app.post('/api/admin/login', (req: any, res) => {
     try {
       const { email, password } = req.body;
       const cleanEmail = (email || '').trim().toLowerCase();
       const cleanPass = (password || '').trim();
-
-      const adminEmail = (process.env.ADMIN_EMAIL || 'admin@gmail.com').trim().toLowerCase();
-      const adminValidPasswords = ([
-        process.env.ADMIN_PASSWORD,
-        '123456',
-        'admin786'
-      ].filter(Boolean) as string[]).map(p => p.trim());
-
-      if (cleanEmail === adminEmail && cleanPass && adminValidPasswords.includes(cleanPass)) {
-        return res.json({
-          success: true,
-          token: issueToken(adminEmail, 'ADMIN'),
-          email: adminEmail,
-          role: 'SUPER_ADMIN',
-          loginTime: Date.now()
-        });
+      if (!cleanEmail || !cleanPass) {
+        return res.status(400).json({ error: 'Administrator email and password are required.' });
       }
-      return res.status(401).json({ error: 'Invalid administrator credentials' });
+
+      const db = readDb();
+      const admins = ensureAdminAccounts(db);
+      const admin = admins.find((a: any) => a.email === cleanEmail);
+      if (!admin || !verifyPassword(admin.passwordHash, cleanPass)) {
+        return res.status(401).json({ error: 'Invalid administrator credentials' });
+      }
+      if (needsRehash(admin.passwordHash)) {
+        admin.passwordHash = hashPassword(cleanPass);
+      }
+      const sess = createSession(db, cleanEmail, 'ADMIN', clientIp(req), String(req.headers['user-agent'] || ''));
+      recordAuditLog(db, 'ADMIN_LOGIN', cleanEmail, `Admin login from ${sess.ip}`);
+      writeDb(db);
+      return res.json({
+        success: true,
+        token: issueToken(cleanEmail, 'ADMIN', sess.id, admin.role || 'SUPERADMIN'),
+        email: cleanEmail,
+        role: admin.role || 'SUPERADMIN',
+        sessionId: sess.id,
+        loginTime: Date.now()
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // --- Admin account management (SUPERADMIN only) ---
+  app.get('/api/admin/accounts', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const db = readDb();
+    const admins = ensureAdminAccounts(db);
+    res.json({ admins: admins.map((a: any) => ({ email: a.email, role: a.role, createdAt: a.createdAt })) });
+  });
+
+  app.post('/api/admin/accounts', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const { email, password, role } = req.body;
+    const cleanEmail = (email || '').trim().toLowerCase();
+    const cleanPass = (password || '').trim();
+    const cleanRole = role === 'SUPPORT' ? 'SUPPORT' : 'SUPERADMIN';
+    if (!cleanEmail || cleanPass.length < 6) {
+      return res.status(400).json({ error: 'Email and a password of at least 6 characters are required.' });
+    }
+    const db = readDb();
+    const admins = ensureAdminAccounts(db);
+    if (admins.some((a: any) => a.email === cleanEmail)) {
+      return res.status(400).json({ error: 'An admin account with this email already exists.' });
+    }
+    admins.push({ email: cleanEmail, passwordHash: hashPassword(cleanPass), role: cleanRole, createdAt: Date.now() });
+    recordAuditLog(db, 'ADMIN_ACCOUNT_CREATE', req.authAdmin, `Created ${cleanRole} admin ${cleanEmail}`);
+    writeDb(db);
+    res.json({ success: true });
+  });
+
+  app.delete('/api/admin/accounts/:email', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const db = readDb();
+    const admins = ensureAdminAccounts(db);
+    const target = (req.params.email || '').trim().toLowerCase();
+    if (target === String(req.authAdmin).toLowerCase()) {
+      return res.status(400).json({ error: 'You cannot remove your own admin account.' });
+    }
+    const idx = admins.findIndex((a: any) => a.email === target);
+    if (idx < 0) return res.status(404).json({ error: 'Admin account not found.' });
+    admins.splice(idx, 1);
+    recordAuditLog(db, 'ADMIN_ACCOUNT_DELETE', req.authAdmin, `Removed admin ${target}`);
+    writeDb(db);
+    res.json({ success: true });
+  });
+
+  app.post('/api/admin/accounts/password', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const { currentPassword, newPassword } = req.body;
+    const db = readDb();
+    const admins = ensureAdminAccounts(db);
+    const admin = admins.find((a: any) => a.email === String(req.authAdmin).toLowerCase());
+    if (!admin) return res.status(404).json({ error: 'Admin account not found.' });
+    if (!verifyPassword(admin.passwordHash, String(currentPassword || ''))) {
+      return res.status(401).json({ error: 'Current admin password is incorrect.' });
+    }
+    if (!newPassword || String(newPassword).length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+    }
+    admin.passwordHash = hashPassword(String(newPassword));
+    recordAuditLog(db, 'ADMIN_PASSWORD_CHANGE', req.authAdmin, 'Admin changed their own password');
+    writeDb(db);
+    res.json({ success: true });
   });
 
   app.get('/api/admin/stats', (_req, res) => {
@@ -1525,7 +1874,7 @@ async function startServer() {
   });
 
   // Export full database snapshot
-  app.get('/api/admin/db/export', (_req, res) => {
+  app.get('/api/admin/db/export', requireSuperAdmin, (_req: any, res) => {
     try {
       const db = readDb();
       const filename = `boostpay_db_backup_${new Date().toISOString().slice(0, 10)}.json`;
@@ -1538,7 +1887,7 @@ async function startServer() {
   });
 
   // Import and restore database snapshot
-  app.post('/api/admin/db/import', (req, res) => {
+  app.post('/api/admin/db/import', requireSuperAdmin, (req: any, res) => {
     try {
       const payload = req.body;
       if (!payload || !Array.isArray(payload.users)) {
@@ -1583,7 +1932,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/adjust', (req, res) => {
+  app.post('/api/admin/adjust', requireSuperAdmin, (req: any, res) => {
     try {
       const { userId, type, amount, notes } = req.body;
       const db = readDb();
@@ -1661,7 +2010,7 @@ async function startServer() {
       recordAuditLog(
         db,
         `TREASURY_${type}`,
-        req.body.adminEmail || 'admin@boostpay.app',
+        String(req.authAdmin || 'admin@boostpay.app'),
         `Adjusted balance: ${type} $${numAmount.toFixed(2)} to User #${user.id}. Note: ${notes || 'Treasury ' + type}`,
         user.id
       );
@@ -1673,7 +2022,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/status', (req, res) => {
+  app.post('/api/admin/status', requireSuperAdmin, (req: any, res) => {
     try {
       const { userId, action, adminEmail } = req.body; // action: 'BLOCK' | 'UNBLOCK' | 'LOCK' | 'UNLOCK'
       const db = readDb();
@@ -1690,7 +2039,7 @@ async function startServer() {
       recordAuditLog(
         db,
         `USER_${action}`,
-        adminEmail || 'admin@boostpay.app',
+        String(req.authAdmin || adminEmail || 'admin@boostpay.app'),
         `User #${user.id} account status changed to ${action}`,
         user.id
       );
@@ -1703,7 +2052,7 @@ async function startServer() {
   });
 
   // Account freeze toggle endpoint
-  app.post('/api/admin/users/freeze', (req, res) => {
+  app.post('/api/admin/users/freeze', requireSuperAdmin, (req: any, res) => {
     try {
       const { userId, isFrozen, reason, adminEmail } = req.body;
       const db = readDb();
@@ -1713,16 +2062,29 @@ async function startServer() {
       }
 
       user.isFrozen = Boolean(isFrozen);
+      user.frozenReason = user.isFrozen ? String(reason || 'Administrative action') : undefined;
       const actionName = user.isFrozen ? 'FREEZE_USER' : 'UNFREEZE_USER';
       recordAuditLog(
         db,
         actionName,
-        adminEmail || 'admin@boostpay.app',
+        String(req.authAdmin || String(req.authAdmin || adminEmail || 'admin@boostpay.app')),
         `User #${user.id} account ${user.isFrozen ? 'frozen' : 'unfrozen'}. Reason: ${reason || 'Administrative action'}`,
         user.id
       );
+      if (user.isFrozen) {
+        pushNotification(db, {
+          id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+          userId: user.id,
+          type: 'SECURITY_ALERT',
+          title: 'BOOSTPAY-SECURITY',
+          message: `NOTICE: Your account has been frozen by administration. Reason: ${reason || 'Administrative action'}. Contact support for assistance.`,
+          timestamp: Date.now(),
+          isRead: false
+        });
+      }
 
       writeDb(db);
+      broadcastUserUpdate(db, user.id);
       res.json({ success: true, user: adminUserView(user) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -1739,7 +2101,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/users/password', (req, res) => {
+  app.post('/api/admin/users/password', requireSuperAdmin, (req: any, res) => {
     try {
       const { userId, newPassword, adminEmail } = req.body;
       const db = readDb();
@@ -1752,7 +2114,7 @@ async function startServer() {
       recordAuditLog(
         db,
         'PASSWORD_RESET',
-        adminEmail || 'admin@boostpay.app',
+        String(req.authAdmin || adminEmail || 'admin@boostpay.app'),
         `Password reset performed for User #${user.id}`,
         user.id
       );
@@ -1764,7 +2126,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/users/delete', (req, res) => {
+  app.post('/api/admin/users/delete', requireSuperAdmin, (req: any, res) => {
     try {
       const { userId } = req.body;
       const db = readDb();
@@ -1783,7 +2145,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/users/boost-override', (req, res) => {
+  app.post('/api/admin/users/boost-override', requireSuperAdmin, (req: any, res) => {
     try {
       const { userId, action } = req.body; // 'START' | 'PAUSE' | 'RESUME' | 'RESET'
       const db = readDb();
@@ -1832,7 +2194,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/rate', (req, res) => {
+  app.post('/api/admin/rate', requireSuperAdmin, (req: any, res) => {
     try {
       const { hourlyRatePercent } = req.body;
       const db = readDb();
@@ -1847,7 +2209,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/config', (req, res) => {
+  app.post('/api/admin/config', requireSuperAdmin, (req: any, res) => {
     try {
       const incomingConfig = req.body;
       const db = readDb();
@@ -1889,11 +2251,314 @@ async function startServer() {
     }
   });
 
-  app.get('/api/admin/backup', (_req, res) => {
+  app.get('/api/admin/backup', requireSuperAdmin, (_req: any, res) => {
     const db = readDb();
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', `attachment; filename=boostpay_backup_${Date.now()}.json`);
     res.send(JSON.stringify(db, null, 2));
+  });
+
+  // =========================================================================
+  // Session devices: see where the account is signed in, sign devices out
+  // =========================================================================
+  app.get('/api/users/me/sessions', requireUser, (req: any, res) => {
+    const db = readDb();
+    const list = sessionSnapshot(db)
+      .filter((x: SessionRecord) => x.userId === String(req.authUserId) && x.role === 'USER')
+      .map((x: SessionRecord) => ({
+        id: x.id,
+        ip: x.ip,
+        userAgent: x.userAgent,
+        createdAt: x.createdAt,
+        lastSeenAt: x.lastSeenAt,
+        revoked: !!x.revoked,
+        current: x.id === req.authSid
+      }));
+    res.json({ sessions: list });
+  });
+
+  app.delete('/api/users/me/sessions/:sessionId', requireUser, (req: any, res) => {
+    const db = readDb();
+    const sess = sessionSnapshot(db).find((x: SessionRecord) => x.id === req.params.sessionId);
+    if (!sess || sess.userId !== String(req.authUserId)) {
+      return res.status(404).json({ error: 'Session not found.' });
+    }
+    revokeSession(db, sess.id);
+    writeDb(db);
+    if (sess.id === req.authSid) {
+      return res.json({ success: true, signedOutSelf: true });
+    }
+    res.json({ success: true });
+  });
+
+  app.post('/api/users/me/sessions/revoke-others', requireUser, (req: any, res) => {
+    const db = readDb();
+    let count = 0;
+    for (const sess of sessionSnapshot(db)) {
+      if (sess.userId === String(req.authUserId) && sess.role === 'USER' && sess.id !== req.authSid && !sess.revoked) {
+        revokeSession(db, sess.id);
+        count++;
+      }
+    }
+    recordAuditLog(db, 'USER_REVOKE_SESSIONS', String(req.authUserId), `Signed out ${count} other device(s)`);
+    writeDb(db);
+    res.json({ success: true, revoked: count });
+  });
+
+  // =========================================================================
+  // Anti-phishing code: genuine server alerts always show this code
+  // =========================================================================
+  app.post('/api/users/me/anti-phishing', requireUser, (req: any, res) => {
+    const code = String(req.body && req.body.code || '').trim();
+    if (code && (code.length < 4 || code.length > 32)) {
+      return res.status(400).json({ error: 'Anti-phishing code must be 4-32 characters.' });
+    }
+    const db = readDb();
+    const user = db.users.find((u: any) => u.id === String(req.authUserId));
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    user.antiPhishingCode = code || undefined;
+    writeDb(db);
+    res.json({ success: true, antiPhishingCode: user.antiPhishingCode || '' });
+  });
+
+  // =========================================================================
+  // QR Code Pay & Receive
+  // =========================================================================
+  app.get('/api/users/me/qr', requireUser, (req: any, res) => {
+    const db = readDb();
+    const user = db.users.find((u: any) => u.id === String(req.authUserId));
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    // Public payment payload — contains only the payee identity, no secrets.
+    const payload = JSON.stringify({
+      t: 'boostpay:pay',
+      uid: String(user.id),
+      name: user.email ? String(user.email).split('@')[0] : `user-${user.id}`
+    });
+    res.json({ payload, userId: String(user.id), name: user.email ? String(user.email).split('@')[0] : `user-${user.id}` });
+  });
+
+  // =========================================================================
+  // Group chat
+  // =========================================================================
+  app.post('/api/chat/groups', requireUser, (req: any, res) => {
+    const { name, memberIds } = req.body || {};
+    const cleanName = String(name || '').trim().slice(0, 60);
+    const members = Array.isArray(memberIds)
+      ? [...new Set<string>(memberIds.map((x: any) => String(x)).filter(Boolean))]
+      : [];
+    if (!cleanName) return res.status(400).json({ error: 'Group name is required.' });
+    if (members.length < 2) {
+      return res.status(400).json({ error: 'Pick at least 2 other members for a group.' });
+    }
+    const db = readDb();
+    const me = String(req.authUserId);
+    const valid = members.filter((m) => db.users.some((u: any) => u.id === m));
+    if (valid.length < 2) return res.status(400).json({ error: 'Not enough valid members.' });
+    const convId = 'GROUP-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6).toString(36);
+    const conv = {
+      id: convId,
+      type: 'group',
+      name: cleanName,
+      createdBy: me,
+      participants: [me, ...valid],
+      lastMessage: 'Group created',
+      timestamp: Date.now()
+    };
+    if (!db.conversations) db.conversations = [];
+    db.conversations.unshift(conv);
+    if (!db.messages) db.messages = [];
+    const sysMsg = {
+      id: 'MSG-' + Math.floor(10000000 + Math.random() * 90000000),
+      conversationId: convId,
+      senderId: me,
+      text: `Group "${cleanName}" created with ${valid.length + 1} members`,
+      timestamp: Date.now(),
+      type: 'system',
+      reactions: {}
+    };
+    db.messages.push(sysMsg);
+    writeDb(db);
+    broadcastChatMessage(sysMsg, conv);
+    res.json({ success: true, conversation: conv });
+  });
+
+  app.get('/api/chat/groups/suggested', requireUser, (req: any, res) => {
+    const db = readDb();
+    const me = String(req.authUserId);
+    res.json({
+      users: db.users
+        .filter((u: any) => u.id !== me)
+        .slice(0, 200)
+        .map((u: any) => ({ id: u.id, email: u.email || '' }))
+    });
+  });
+
+  // =========================================================================
+  // Broadcast system announcements + urgent banner
+  // =========================================================================
+  app.post('/api/admin/broadcast', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const { title, message, banner, audience } = req.body || {};
+    const cleanTitle = String(title || 'BOOSTPAY-ALERTS').trim().slice(0, 80) || 'BOOSTPAY-ALERTS';
+    const cleanMsg = String(message || '').trim().slice(0, 1000);
+    if (!cleanMsg) return res.status(400).json({ error: 'Broadcast message is required.' });
+    const db = readDb();
+    const targets = audience === 'active'
+      ? db.users.filter((u: any) => !u.isBlocked && !u.isFrozen)
+      : db.users;
+    let sent = 0;
+    for (const u of targets) {
+      pushNotification(db, {
+        id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+        userId: u.id,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: cleanTitle,
+        message: cleanMsg,
+        timestamp: Date.now(),
+        isRead: false
+      });
+      sent++;
+    }
+    if (banner) {
+      db.config.activeBanner = {
+        message: cleanMsg.slice(0, 220),
+        title: cleanTitle,
+        createdAt: Date.now(),
+        createdBy: String(req.authAdmin)
+      };
+      for (const u of targets) {
+        pushToUser(String(u.id), { type: 'banner', banner: db.config.activeBanner, timestamp: Date.now() });
+      }
+    }
+    recordAuditLog(db, 'ADMIN_BROADCAST', String(req.authAdmin), `Broadcast to ${sent} user(s): "${cleanTitle}: ${cleanMsg.slice(0, 90)}"`);
+    writeDb(db);
+    res.json({ success: true, sent });
+  });
+
+  app.delete('/api/admin/banner', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const db = readDb();
+    if (db.config) delete db.config.activeBanner;
+    for (const u of db.users) pushToUser(String(u.id), { type: 'banner', banner: null, timestamp: Date.now() });
+    recordAuditLog(db, 'ADMIN_BANNER_CLEAR', String(req.authAdmin), 'Cleared the active system banner');
+    writeDb(db);
+    res.json({ success: true });
+  });
+
+  app.get('/api/banner', requireUser, (req: any, res) => {
+    const db = readDb();
+    res.json({ banner: (db.config && db.config.activeBanner) || null });
+  });
+
+  // =========================================================================
+  // Financial analytics & revenue charts (admin)
+  // =========================================================================
+  app.get('/api/admin/analytics', requireAdmin, (req: any, res) => {
+    const db = readDb();
+    const now = Date.now();
+    const DAY = 86400000;
+    const days = 30;
+    const daily: any[] = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const dayStart = now - (i + 1) * DAY;
+      const dayEnd = now - i * DAY;
+      const txs = db.transactions.filter((t: any) => t.timestamp >= dayStart && t.timestamp < dayEnd);
+      const credits = txs.filter((t: any) => t.type === 'TRANSFER_RECEIVED' || t.type === 'ADMIN_CREDIT')
+        .reduce((a: number, t: any) => a + (Number(t.amount) || 0), 0);
+      const debits = txs.filter((t: any) => t.type === 'TRANSFER_SENT' || t.type === 'ADMIN_DEBIT')
+        .reduce((a: number, t: any) => a + (Number(t.amount) || 0), 0);
+      const rewards = txs.filter((t: any) => t.type === 'REWARD')
+        .reduce((a: number, t: any) => a + (Number(t.amount) || 0), 0);
+      const activeUsers = new Set(txs.map((t: any) => String(t.userId))).size;
+      daily.push({
+        date: new Date(dayEnd).toISOString().slice(0, 10),
+        credits: Number(credits.toFixed(2)),
+        debits: Number(debits.toFixed(2)),
+        rewards: Number(rewards.toFixed(2)),
+        netFlow: Number((credits - debits).toFixed(2)),
+        activeUsers
+      });
+    }
+    const totalBalance = db.users.reduce((a: number, u: any) => a + (Number(u.balance) || 0), 0);
+    const totalProfit = db.users.reduce((a: number, u: any) => a + (Number(u.lifetimeProfit) || 0), 0);
+    const frozen = db.users.filter((u: any) => u.isFrozen).length;
+    const activeBoosts = db.users.filter((u: any) => u.boostState && u.boostState.isActive && !u.boostState.isPaused).length;
+    const todayRewards = daily[daily.length - 1] ? daily[daily.length - 1].rewards : 0;
+    res.json({
+      daily,
+      totals: {
+        totalBalance: Number(totalBalance.toFixed(2)),
+        totalProfit: Number(totalProfit.toFixed(2)),
+        userCount: db.users.length,
+        activeBoosts,
+        frozen,
+        todayRewards
+      }
+    });
+  });
+
+  // Fraud overview (admin): recent auto-freezes + current risk signals
+  app.get('/api/admin/fraud', requireAdmin, (req: any, res) => {
+    const db = readDb();
+    const now = Date.now();
+    const WINDOW_MS = 10 * 60 * 1000;
+    const byIp = new Map<string, { senders: Set<string>, volume: number, count: number }>();
+    for (const t of db.transactions) {
+      if (t.type !== 'TRANSFER_SENT' || !t.ip || now - t.timestamp > WINDOW_MS) continue;
+      const rec = byIp.get(t.ip) || { senders: new Set<string>(), volume: 0, count: 0 };
+      rec.senders.add(String(t.userId));
+      rec.volume += Number(t.amount) || 0;
+      rec.count++;
+      byIp.set(t.ip, rec);
+    }
+    const signals = [...byIp.entries()]
+      .map(([ip, r]) => ({ ip, senders: [...r.senders], volume: Number(r.volume.toFixed(2)), transfers: r.count }))
+      .filter((r) => r.senders.length >= 2 || r.transfers >= 3)
+      .sort((a, b) => b.volume - a.volume);
+    const frozenUsers = db.users.filter((u: any) => u.isFrozen).map(adminUserView);
+    const fraudLogs = (db.auditLogs || []).filter((l: any) => l.action && l.action.includes('FRAUD')).slice(0, 50);
+    res.json({ signals, frozenUsers, fraudLogs });
+  });
+
+  // Admin: live session overview + force sign-out (SUPERADMIN)
+  app.get('/api/admin/sessions', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const db = readDb();
+    const list = sessionSnapshot(db).slice(0, 300).map((x: SessionRecord) => ({
+      id: x.id, userId: x.userId, role: x.role, ip: x.ip, userAgent: x.userAgent,
+      createdAt: x.createdAt, lastSeenAt: x.lastSeenAt, revoked: !!x.revoked
+    }));
+    res.json({ sessions: list });
+  });
+
+  app.delete('/api/admin/sessions/:sessionId', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const db = readDb();
+    if (!revokeSession(db, req.params.sessionId)) return res.status(404).json({ error: 'Session not found.' });
+    recordAuditLog(db, 'ADMIN_REVOKE_SESSION', String(req.authAdmin), `Force-signed-out session ${req.params.sessionId}`);
+    writeDb(db);
+    res.json({ success: true });
+  });
+
+  // =========================================================================
+  // Ultra-light leaderboard endpoint (rank data only, no secrets, no messages)
+  // =========================================================================
+  app.get('/api/leaderboard', requireUserOrAdmin, (req: any, res) => {
+    const db = readDb();
+    const me = req.authUserId ? String(req.authUserId) : '';
+    const rows = db.users
+      .map((u: any) => ({
+        id: String(u.id),
+        email: u.email || '',
+        balance: Number(u.balance) || 0,
+        lifetimeProfit: Number(u.lifetimeProfit) || 0,
+        createdAt: u.createdAt || 0,
+        boostActive: !!(u.boostState && u.boostState.isActive && !u.boostState.isPaused),
+        isFrozen: !!u.isFrozen
+      }))
+      .sort((a: any, b: any) => b.balance - a.balance || b.lifetimeProfit - a.lifetimeProfit);
+    const meIdx = rows.findIndex((r: any) => r.id === me);
+    res.json({
+      users: rows.slice(0, 200),
+      me: meIdx >= 0 ? { ...rows[meIdx], rank: meIdx + 1 } : null,
+      total: rows.length
+    });
   });
 
   // Serve the built static app UNLESS explicitly running in development mode.

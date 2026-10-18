@@ -1,6 +1,8 @@
 export interface User {
   id: string; // Pure sequential numeric ID starting from 1 (e.g. "1", "2")
   email: string; // User email address
+  antiPhishingCode?: string; // Shown in every genuine server alert
+  frozenReason?: string;
   balance: number; // Main balance in USD
   lifetimeProfit: number;
   phrase?: string; // Optional legacy 12-word recovery mnemonic
@@ -49,14 +51,52 @@ export interface Message {
 }
 
 export interface Conversation {
-  id: string; // Format: "CONV-XXXXXX"
-  participants: string[]; // [userId1, userId2] or [userId, 'ADMIN_SUPPORT']
+  id: string; // Format: "CONV-XXXXXX" or "GROUP-XXXXXX"
+  type?: 'dm' | 'group';
+  name?: string; // Group display name
+  createdBy?: string;
+  participants: string[]; // [userId1, userId2], [userId, 'ADMIN_SUPPORT'] or group members
   lastMessage: string;
-  lastMessageAt: number;
+  lastMessageAt?: number;
+  timestamp?: number;
   hasUnread?: boolean;
 }
 
-export type NotificationType = 'TRANSFER_RECEIVED' | 'TRANSFER_SENT' | 'YIELD_REWARD' | 'SYSTEM_ALERT';
+export interface SessionDevice {
+  id: string;
+  ip: string;
+  userAgent: string;
+  createdAt: number;
+  lastSeenAt: number;
+  revoked?: boolean;
+  current?: boolean;
+}
+
+export interface SystemBanner {
+  message: string;
+  title?: string;
+  createdAt: number;
+  createdBy?: string;
+}
+
+export interface LeaderboardRow {
+  id: string;
+  email: string;
+  balance: number;
+  lifetimeProfit: number;
+  createdAt: number;
+  boostActive?: boolean;
+  isFrozen?: boolean;
+  rank?: number;
+}
+
+export type NotificationType =
+  | 'TRANSFER_RECEIVED'
+  | 'TRANSFER_SENT'
+  | 'YIELD_REWARD'
+  | 'SYSTEM_ALERT'
+  | 'SYSTEM_ANNOUNCEMENT'
+  | 'SECURITY_ALERT';
 
 export interface InboxNotification {
   id: string; // e.g. "NOTIF-748921"

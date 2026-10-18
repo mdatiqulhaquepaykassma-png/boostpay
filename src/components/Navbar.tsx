@@ -1,5 +1,5 @@
 import React, { FC, useState, memo } from 'react';
-import { Copy, Check, LogOut, Sparkles, ShieldCheck } from 'lucide-react';
+import { Copy, Check, LogOut, Sparkles, ShieldCheck, QrCode } from 'lucide-react';
 import { User } from '../types';
 import { copyToClipboard } from '../services/store';
 import { InstallButton } from './InstallButton';
@@ -8,9 +8,11 @@ interface Props {
   user: User | null;
   isAdmin?: boolean;
   onLogout: () => void;
+  onOpenSecurity?: () => void;
+  onOpenQR?: () => void;
 }
 
-export const Navbar: FC<Props> = memo(({ user, isAdmin = false, onLogout }) => {
+export const Navbar: FC<Props> = memo(({ user, isAdmin = false, onLogout, onOpenSecurity, onOpenQR }) => {
   const [copied, setCopied] = useState(false);
 
   const copyId = async () => {
@@ -44,6 +46,28 @@ export const Navbar: FC<Props> = memo(({ user, isAdmin = false, onLogout }) => {
         <div className="flex items-center gap-2">
           {/* In-app Install Button */}
           <InstallButton variant="compact" />
+
+          {/* QR Pay */}
+          {user && onOpenQR && (
+            <button
+              onClick={onOpenQR}
+              className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 hover:border-amber-500/50 hover:text-amber-400 active:scale-95 transition cursor-pointer"
+              title="QR Pay — show or scan"
+            >
+              <QrCode className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {/* Security Center */}
+          {user && onOpenSecurity && (
+            <button
+              onClick={onOpenSecurity}
+              className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 hover:border-amber-500/50 hover:text-amber-400 active:scale-95 transition cursor-pointer"
+              title="Security Center — anti-phishing code & devices"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+            </button>
+          )}
 
           {/* User ID copy button */}
           {user && (

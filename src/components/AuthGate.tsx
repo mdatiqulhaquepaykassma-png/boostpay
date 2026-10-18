@@ -30,8 +30,9 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
     setLoginError('');
 
     const cleanEmail = loginEmail.trim().toLowerCase();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
-      setLoginError('Please enter a valid email address.');
+    const isUserId = /^#?\d+$/.test(cleanEmail);
+    if (!cleanEmail || (!cleanEmail.includes('@') && !isUserId)) {
+      setLoginError('Please enter a valid email address or your numeric User ID.');
       return;
     }
 
@@ -126,13 +127,13 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
           <form onSubmit={handleUserLogin} className="space-y-3.5">
             <div>
               <label className="block text-[11px] font-medium text-zinc-300 mb-1.5 flex items-center gap-1.5">
-                <Mail className="w-3.5 h-3.5 text-amber-400" /> Email Address
+                <Mail className="w-3.5 h-3.5 text-amber-400" /> Email or User ID
               </label>
               <input
-                type="email"
+                type="text"
                 autoComplete="email"
                 required
-                placeholder="e.g. user@gmail.com"
+                placeholder="user@gmail.com or #890"
                 value={loginEmail}
                 onChange={(e) => setLoginEmail(e.target.value)}
                 className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
@@ -206,7 +207,7 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                 className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
               />
               <p className="text-[10px] text-zinc-500 mt-1">
-                Your sequential User ID will be auto-generated starting from #1 upon signup.
+                A sequential User ID (#1, #2, ...) is assigned automatically on signup. You can also sign in later with your User ID.
               </p>
             </div>
 

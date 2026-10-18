@@ -1,5 +1,5 @@
 import { FC, useState, useEffect } from 'react';
-import { Send, X, AlertTriangle, CheckCircle2, ArrowRight } from 'lucide-react';
+import { Send, X, AlertTriangle, CheckCircle2, ArrowRight, QrCode } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User } from '../types';
 
@@ -8,13 +8,18 @@ interface Props {
   onClose: () => void;
   currentUser: User;
   onSuccess: (updatedUser: User) => void;
+  /** Filled from a scanned BoostPay QR code. */
+  recipientPrefill?: { userId: string; name?: string } | null;
+  onOpenQR?: () => void;
 }
 
 export const P2PTransferModal: FC<Props> = ({
   isOpen,
   onClose,
   currentUser,
-  onSuccess
+  onSuccess,
+  recipientPrefill,
+  onOpenQR
 }) => {
   const [recipientId, setRecipientId] = useState('');
   const [amount, setAmount] = useState('');
@@ -25,13 +30,15 @@ export const P2PTransferModal: FC<Props> = ({
   // Reset state completely whenever modal is opened
   useEffect(() => {
     if (isOpen) {
-      setRecipientId('');
+      setRecipientId(recipientPrefill ? recipientPrefill.userId : '');
       setAmount('');
       setError('');
       setStep('INPUT');
       setIsProcessing(false);
+    } else {
+      setRecipientId('');
     }
-  }, [isOpen]);
+  }, [isOpen, recipientPrefill]);
 
   const handleClose = () => {
     setRecipientId('');

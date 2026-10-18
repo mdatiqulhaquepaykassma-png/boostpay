@@ -18,11 +18,18 @@ import { FloatingToastContainer } from './components/FloatingToast';
 import { PWAInstallHelp } from './components/PWAInstallHelp';
 import { P2PTransferModal } from './components/P2PTransferModal';
 import { WalletSkeleton } from './components/WalletSkeleton';
+import { SecurityModal } from './components/SecurityModal';
+import { QRPayModal } from './components/QRPayModal';
 import { usePWAInstall } from './hooks/usePWAInstall';
+import { AlertTriangle, X, QrCode, ShieldCheck } from 'lucide-react';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(() => BoostPayStore.getCurrentUser());
   const [isInitialSyncing, setIsInitialSyncing] = useState<boolean>(true);
+  const [isSecurityOpen, setIsSecurityOpen] = useState(false);
+  const [isQROpen, setIsQROpen] = useState(false);
+  const [qrPrefill, setQrPrefill] = useState<{ userId: string; name?: string } | null>(null);
+  const [systemBanner, setSystemBanner] = useState<{ message: string; title?: string } | null>(null);
   const [isOnAdminRoute, setIsOnAdminRoute] = useState<boolean>(() => {
     const path = window.location.pathname.toLowerCase();
     const hash = window.location.hash.toLowerCase();
@@ -117,19 +124,37 @@ export default function App() {
     };
   }, [currentUser?.id]);
 
-  // Periodic authoritative background synchronization with change-guarded updates
+  // Realtime SSE profile updates (instant) + slow authoritative fallback poll
   useEffect(() => {
     if (!currentUser) return;
+
+    const unsubUser = BoostPayStore.onUserUpdate((fresh) => {
+      setCurrentUser((prev) => {
+        if (!prev) return fresh;
+        if (
+          prev.balance !== fresh.balance ||
+          prev.lifetimeProfit !== fresh.lifetimeProfit ||
+          prev.boostState.isActive !== fresh.boostState.isActive ||
+          prev.boostState.isPaused !== fresh.boostState.isPaused ||
+          prev.boostState.startingBalance !== fresh.boostState.startingBalance ||
+          prev.boostState.targetDurationMs !== fresh.boostState.targetDurationMs ||
+          prev.isFrozen !== fresh.isFrozen
+        ) {
+          return fresh;
+        }
+        return prev;
+      });
+    });
+
+    const unsubBanner = BoostPayStore.onBanner((banner) => setSystemBanner(banner));
 
     const refreshState = async () => {
       const unread = BoostPayStore.getUnreadNotificationCount(currentUser.id);
       setUnreadNotifCount((prev) => (prev !== unread ? unread : prev));
-
       const synced = await BoostPayStore.syncUserFromServer(currentUser.id);
       if (synced) {
         setCurrentUser((prev) => {
           if (!prev) return synced;
-          // Only trigger React state update if key values actually changed
           if (
             prev.balance !== synced.balance ||
             prev.lifetimeProfit !== synced.lifetimeProfit ||
@@ -146,8 +171,14 @@ export default function App() {
     };
 
     refreshState();
-    const interval = setInterval(refreshState, 1000);
-    return () => clearInterval(interval);
+    BoostPayStore.getBanner().then(setSystemBanner);
+    // SSE pushes changes instantly; this poll is only a 15s safety net (was 1s).
+    const interval = setInterval(refreshState, 15000);
+    return () => {
+      unsubUser();
+      unsubBanner();
+      clearInterval(interval);
+    };
   }, [currentUser?.id]);
 
   const handleExitAdmin = () => {
@@ -157,13 +188,6 @@ export default function App() {
     }
     if (window.location.hash.includes('admin')) {
       window.location.hash = '';
-    }
-  };
-
-  const handleEnterAdmin = () => {
-    setIsOnAdminRoute(true);
-    if (!window.location.pathname.startsWith('/admin')) {
-      window.history.pushState({}, '', '/admin');
     }
   };
 
@@ -190,6 +214,29 @@ export default function App() {
       {/* Real-Time Floating Toast Alerts Container */}
       {/* PWA manual install guidance (iOS / Android / iframe fallback) */}
       <PWAInstallHelp />
+
+      {/* Security Center modal (anti-phishing code + session devices) */}
+      {currentUser && (
+        <SecurityModal
+          isOpen={isSecurityOpen}
+          onClose={() => setIsSecurityOpen(false)}
+          currentUser={currentUser}
+          onUserUpdated={(u) => setCurrentUser({ ...u })}
+        />
+      )}
+
+      {/* QR Pay modal (personal code + scanner) */}
+      {currentUser && (
+        <QRPayModal
+          isOpen={isQROpen}
+          onClose={() => setIsQROpen(false)}
+          currentUser={currentUser}
+          onScannedPayee={(userId, name) => {
+            setQrPrefill({ userId, name });
+            setIsSendMoneyOpen(true);
+          }}
+        />
+      )}
 
       <FloatingToastContainer
         toasts={toasts}
@@ -223,7 +270,29 @@ export default function App() {
             user={currentUser}
             isAdmin={false}
             onLogout={handleLogout}
+            onOpenSecurity={() => setIsSecurityOpen(true)}
+            onOpenQR={() => setIsQROpen(true)}
           />
+
+          {/* Urgent system banner (admin broadcasts) */}
+          {systemBanner && (
+            <div className="mx-4 mt-3 flex items-start gap-2.5 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                {systemBanner.title && (
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400">{systemBanner.title}</p>
+                )}
+                <p className="text-[11px] leading-relaxed text-amber-100 break-words">{systemBanner.message}</p>
+              </div>
+              <button
+                onClick={() => setSystemBanner(null)}
+                className="rounded-lg p-1 text-amber-400/70 hover:text-amber-300 hover:bg-amber-500/10 transition cursor-pointer"
+                title="Dismiss"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
 
           <main className={`flex-1 ${activeTab === 'MESSENGER' ? 'flex flex-col min-h-0 overflow-hidden' : 'overflow-y-auto'}`}>
             {activeTab === 'WALLET' && (
@@ -234,6 +303,7 @@ export default function App() {
                   user={currentUser}
                   onUpdateUser={(updated: User) => setCurrentUser({ ...updated })}
                   onOpenSendMoney={() => setIsSendMoneyOpen(true)}
+                  onOpenQR={() => setIsQROpen(true)}
                   config={config}
                 />
               )
@@ -364,11 +434,13 @@ export default function App() {
       {currentUser && (
         <P2PTransferModal
           isOpen={isSendMoneyOpen}
-          onClose={() => setIsSendMoneyOpen(false)}
+          onClose={() => { setIsSendMoneyOpen(false); setQrPrefill(null); }}
           currentUser={currentUser}
           onSuccess={(updated) => {
             setCurrentUser({ ...updated });
           }}
+          recipientPrefill={qrPrefill}
+          onOpenQR={() => { setIsSendMoneyOpen(false); setIsQROpen(true); }}
         />
       )}
 

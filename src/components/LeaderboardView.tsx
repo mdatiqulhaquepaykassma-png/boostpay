@@ -150,11 +150,25 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
   useEffect(() => {
     let active = true;
 
+    // Lightweight /api/leaderboard endpoint (no secrets, no chat payload) — fast polling
     const poll = async () => {
       while (active) {
-        const all = await BoostPayStore.syncAllUsers();
-        const sorted = [...all].sort((a, b) => b.balance - a.balance || b.lifetimeProfit - a.lifetimeProfit);
-        
+        const data = await BoostPayStore.fetchLeaderboard();
+        if (!active) break;
+        const sorted: User[] = (data.users || []).map((u: any) => ({
+          ...u,
+          boostState: {
+            isActive: !!u.boostActive,
+            isPaused: false,
+            startedAt: 0,
+            pausedAt: 0,
+            elapsedMs: 0,
+            targetDurationMs: 60000,
+            startingBalance: u.balance,
+            accumulatedYield: 0
+          }
+        }));
+
         const newChanges = new Map<string, number>();
         sorted.forEach((u, newIdx) => {
           const oldRank = prevRanksRef.current.get(u.id);
@@ -183,8 +197,8 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
           }
           return prevUsers;
         });
-        
-        await new Promise(r => setTimeout(r, 3000));
+
+        await new Promise(r => setTimeout(r, 5000));
       }
     };
 
