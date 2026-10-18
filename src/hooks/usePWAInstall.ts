@@ -12,6 +12,8 @@ declare global {
   }
 }
 
+export type InstallHelpMode = 'ios' | 'manual' | 'iframe';
+
 export function usePWAInstall() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(() => {
     if (typeof window !== 'undefined' && window.__boostpay_pwa_prompt) {
@@ -33,6 +35,9 @@ export function usePWAInstall() {
   const [isIOS, setIsIOS] = useState(false);
   const [isAndroid, setIsAndroid] = useState(false);
   const [isIframe, setIsIframe] = useState(false);
+
+  // Manual-install guidance (shown when the browser offers no native prompt)
+  const [installHelpMode, setInstallHelpMode] = useState<InstallHelpMode | null>(null);
 
   useEffect(() => {
     // Check true standalone display mode
@@ -104,6 +109,18 @@ export function usePWAInstall() {
    */
   const install = useCallback(async (): Promise<boolean> => {
     let promptEvent = deferredPrompt || window.__boostpay_pwa_prompt;
+
+    // Inside an embedded preview the browser blocks install prompts entirely —
+    // open a real top-level tab (where install works) and explain why.
+    if (!promptEvent && !isInstalled && typeof window !== 'undefined' && window.self !== window.top) {
+      try {
+        window.open(window.location.href, '_blank');
+      } catch {
+        // Popup blocked — fall through to guidance
+      }
+      setInstallHelpMode('iframe');
+      return false;
+    }
 
     // If deferredPrompt is not yet caught (e.g. Chrome on Android is still parsing manifest/SW),
     // wait with a fast poll and listener for up to 2500ms
@@ -184,8 +201,12 @@ export function usePWAInstall() {
       }
     }
 
+    // No native prompt available (iOS Safari, in-app browsers, a previously
+    // dismissed prompt, or an insecure context) — show step-by-step guidance
+    // instead of silently doing nothing.
+    setInstallHelpMode(isIOS ? 'ios' : 'manual');
     return false;
-  }, [deferredPrompt, isInstalled]);
+  }, [deferredPrompt, isInstalled, isIOS]);
 
   /**
    * Direct app open
@@ -207,6 +228,8 @@ export function usePWAInstall() {
     isInstallLoading,
     justInstalled,
     install,
-    openApp
+    openApp,
+    installHelpMode,
+    closeInstallHelp: () => setInstallHelpMode(null)
   };
 }

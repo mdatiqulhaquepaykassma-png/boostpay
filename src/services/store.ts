@@ -5,6 +5,7 @@ const STORAGE_USERS = 'boostpay_users_v4';
 const STORAGE_CURRENT_USER = 'boostpay_current_user_v4';
 const STORAGE_CURRENT_USER_ID = 'boostpay_current_user_id_v4';
 const STORAGE_ADMIN_SESSION = 'boostpay_admin_session_v4';
+const STORAGE_AUTH_TOKEN = 'boostpay_auth_token_v1';
 const STORAGE_TRANSACTIONS = 'boostpay_transactions_v4';
 const STORAGE_CONVERSATIONS = 'boostpay_conversations_v4';
 const STORAGE_MESSAGES = 'boostpay_messages_v4';
@@ -119,7 +120,7 @@ export class BoostPayStore {
    */
   static async initSync(): Promise<void> {
     try {
-      const res = await fetch('/api/db');
+      const res = await fetch('/api/db', { headers: this.authHeaders() });
       if (res.ok) {
         const data = await res.json();
         
@@ -155,7 +156,7 @@ export class BoostPayStore {
               needsPushToServer = true;
               fetch('/api/users/register', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: this.authHeaders(),
                 body: JSON.stringify({
                   id: localU.id,
                   phrase: localU.phrase,
@@ -259,7 +260,7 @@ export class BoostPayStore {
     try {
       await fetch('/api/sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({
           users: this.getUsers(),
           transactions: this.getTransactions(),
@@ -281,7 +282,7 @@ export class BoostPayStore {
    */
   static async syncAllUsers(): Promise<User[]> {
     try {
-      const res = await fetch('/api/db');
+      const res = await fetch('/api/db', { headers: this.authHeaders() });
       if (res.ok) {
         const data = await res.json();
         if (data.users && Array.isArray(data.users)) {
@@ -339,7 +340,8 @@ export class BoostPayStore {
     const connect = () => {
       if (isTerminated) return;
       try {
-        const es = new EventSource(`/api/chat/stream?userId=${encodeURIComponent(userId)}`);
+        const streamToken = this.getAuthToken();
+        const es = new EventSource(`/api/chat/stream?userId=${encodeURIComponent(userId)}${streamToken ? `&token=${encodeURIComponent(streamToken)}` : ''}`);
         this.chatEventSource = es;
 
         es.onmessage = (event) => {
@@ -440,7 +442,7 @@ export class BoostPayStore {
     try {
       const res = await fetch('/api/chat/react', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({ messageId, userId, emoji })
       });
       if (res.ok) {
@@ -510,7 +512,7 @@ export class BoostPayStore {
     try {
       const res = await fetch('/api/chat/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({
           senderId,
           senderRole: role,
@@ -703,6 +705,7 @@ export class BoostPayStore {
       localStorage.removeItem(STORAGE_CURRENT_USER_ID);
       for (const k of LEGACY_USER_KEYS) localStorage.removeItem(k);
       for (const k of LEGACY_USER_ID_KEYS) localStorage.removeItem(k);
+      this.setAuthToken(null);
     } else {
       const serialized = JSON.stringify(user);
       localStorage.setItem(STORAGE_CURRENT_USER, serialized);
@@ -764,6 +767,45 @@ export class BoostPayStore {
     localStorage.removeItem(STORAGE_ADMIN_SESSION);
   }
 
+  // --- Session tokens (sent as `Authorization: Bearer <token>` on API calls) ---
+
+  static getAuthToken(): string | null {
+    return localStorage.getItem(STORAGE_AUTH_TOKEN);
+  }
+
+  static setAuthToken(token: string | null | undefined): void {
+    if (token) {
+      localStorage.setItem(STORAGE_AUTH_TOKEN, token);
+    } else {
+      localStorage.removeItem(STORAGE_AUTH_TOKEN);
+    }
+  }
+
+  /** Headers for endpoints that require a signed user token. */
+  static authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const tok = this.getAuthToken();
+    if (tok) headers['Authorization'] = `Bearer ${tok}`;
+    return headers;
+  }
+
+  /** Headers for endpoints that require a signed admin token. */
+  static adminAuthHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const sess = this.getAdminSession();
+    if (sess && sess.token) headers['Authorization'] = `Bearer ${sess.token}`;
+    return headers;
+  }
+
+  /** The server strips credentials from responses — keep any local secrets. */
+  private static mergeServerUser(serverUser: User, localUser?: User | null): User {
+    return {
+      ...serverUser,
+      phrase: serverUser.phrase || (localUser ? localUser.phrase : undefined),
+      password: serverUser.password || (localUser ? localUser.password : undefined)
+    };
+  }
+
   /**
    * Authoritative Admin Balance Adjustment (Credit / Debit)
    */
@@ -776,7 +818,7 @@ export class BoostPayStore {
     try {
       const res = await fetch('/api/admin/adjust', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.adminAuthHeaders(),
         body: JSON.stringify({ userId, type, amount, notes })
       });
 
@@ -815,7 +857,7 @@ export class BoostPayStore {
     try {
       const res = await fetch('/api/admin/users/freeze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.adminAuthHeaders(),
         body: JSON.stringify({ userId, isFrozen, reason, adminEmail })
       });
       const data = await res.json();
@@ -843,7 +885,7 @@ export class BoostPayStore {
    */
   static async getAuditLogs(): Promise<AuditLog[]> {
     try {
-      const res = await fetch('/api/admin/audit-logs');
+      const res = await fetch('/api/admin/audit-logs', { headers: this.adminAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         return Array.isArray(data.logs) ? data.logs : [];
@@ -859,14 +901,15 @@ export class BoostPayStore {
    */
   static async syncUserFromServer(userId: string): Promise<User | null> {
     try {
-      const res = await fetch(`/api/users/${userId}`);
+      const res = await fetch(`/api/users/${userId}`, { headers: this.authHeaders() });
       if (res.ok) {
         const data = await res.json();
         if (data.user) {
-          const freshUser: User = data.user;
-          // Update in local users array
+          // Server responses omit credentials — preserve any local secrets
           const users = this.getUsers();
           const idx = users.findIndex(u => u.id === userId);
+          const freshUser: User = this.mergeServerUser(data.user, idx >= 0 ? users[idx] : this.getCurrentUser());
+          // Update in local users array
           if (idx >= 0) {
             users[idx] = freshUser;
           } else {
@@ -970,7 +1013,7 @@ export class BoostPayStore {
     try {
       const res = await fetch('/api/boost/start', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({ userId })
       });
       if (res.ok) {
@@ -1012,7 +1055,7 @@ export class BoostPayStore {
     try {
       const res = await fetch('/api/boost/pause', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({ userId })
       });
       if (res.ok) {
@@ -1043,7 +1086,7 @@ export class BoostPayStore {
     try {
       const res = await fetch('/api/boost/resume', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({ userId })
       });
       if (res.ok) {
@@ -1071,7 +1114,7 @@ export class BoostPayStore {
     const users = this.getUsers();
     const idx = users.findIndex(u => u.id === user.id);
     if (idx >= 0) {
-      users[idx] = user;
+      users[idx] = this.mergeServerUser(user, users[idx]);
     } else {
       users.push(user);
     }
@@ -1225,7 +1268,7 @@ export class BoostPayStore {
     try {
       const res = await fetch('/api/users/register', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({
           email: cleanEmail,
           password: cleanPass
@@ -1239,7 +1282,9 @@ export class BoostPayStore {
       }
 
       if (data.user) {
-        const newUser: User = data.user;
+        // Server strips credentials from responses — keep the typed password locally for offline use
+        const newUser: User = { ...data.user, password: cleanPass };
+        this.setAuthToken(data.token);
         const currentUsers = this.getUsers().filter(u => u.id !== newUser.id);
         currentUsers.push(newUser);
         this.saveUsers(currentUsers);
@@ -1307,7 +1352,9 @@ export class BoostPayStore {
       const data = await res.json().catch(() => ({}));
 
       if (res.ok && data.user) {
-        const user: User = data.user;
+        // Server strips credentials from responses — keep the typed password locally for offline use
+        const user: User = { ...data.user, password: cleanPass };
+        this.setAuthToken(data.token);
         // Cache user locally
         const localUsers = this.getUsers().filter(u => u.id !== user.id);
         localUsers.push(user);
@@ -1489,7 +1536,7 @@ export class BoostPayStore {
     try {
       await fetch('/api/notifications/mark-read', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({ userId, notificationId: notifId || 'ALL' })
       });
     } catch {}
@@ -1507,7 +1554,7 @@ export class BoostPayStore {
     try {
       await fetch('/api/notifications/delete', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.authHeaders(),
         body: JSON.stringify({ userId, notificationId: notifId })
       });
     } catch {}
@@ -1517,7 +1564,7 @@ export class BoostPayStore {
 
   static async probeDatabaseStorage(): Promise<any> {
     try {
-      const res = await fetch('/api/admin/storage/probe');
+      const res = await fetch('/api/admin/storage/probe', { headers: this.adminAuthHeaders() });
       if (res.ok) {
         return await res.json();
       }
@@ -1537,7 +1584,7 @@ export class BoostPayStore {
 
   static async exportDatabase(): Promise<Blob | null> {
     try {
-      const res = await fetch('/api/admin/db/export');
+      const res = await fetch('/api/admin/db/export', { headers: this.adminAuthHeaders() });
       if (res.ok) {
         return await res.blob();
       }
@@ -1562,7 +1609,7 @@ export class BoostPayStore {
     try {
       const res = await fetch('/api/admin/db/import', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this.adminAuthHeaders(),
         body: JSON.stringify(data)
       });
       if (res.ok) {

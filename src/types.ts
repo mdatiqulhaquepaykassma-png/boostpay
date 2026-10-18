@@ -18,6 +18,7 @@ export interface User {
     targetDurationMs: number; // Dynamic based on relative balance (1m - 24h)
     startingBalance: number;
     accumulatedYield: number; // Accrued reward
+    justCompletedReward?: number; // Set by server when a compounding cycle finishes
   };
 }
 

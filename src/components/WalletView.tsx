@@ -319,7 +319,7 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
         ) : (
           <button
             onClick={onPauseBoost}
-            className="w-full h-11 rounded-2xl border border-zinc-700 bg-zinc-800 text-xs font-semibold text-zinc-200 hover:bg-zinc-750 active:scale-[0.98] transition flex items-center justify-center gap-1.5 cursor-pointer"
+            className="w-full h-11 rounded-2xl border border-zinc-700 bg-zinc-800 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 active:scale-[0.98] transition flex items-center justify-center gap-1.5 cursor-pointer"
           >
             <Pause className="w-4 h-4" /> Pause (Unlocks Transfers)
           </button>

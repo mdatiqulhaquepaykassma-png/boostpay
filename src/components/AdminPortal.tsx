@@ -144,7 +144,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const refreshData = async (isManual = false) => {
     if (isManual) setIsRefreshing(true);
     try {
-      const res = await fetch('/api/admin/stats');
+      const res = await fetch('/api/admin/stats', { headers: BoostPayStore.adminAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
         setStats((prev) => {
@@ -193,7 +193,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         }
       }
       
-      const usersRes = await fetch('/api/admin/users');
+      const usersRes = await fetch('/api/admin/users', { headers: BoostPayStore.adminAuthHeaders() });
       if (usersRes.ok) {
         const data = await usersRes.json();
         setUsers((prev) => {
@@ -305,15 +305,10 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         setAdminSession(sess);
         return;
       }
-    } catch {
-      // Local fallback
-    }
-
-    if (emailClean === 'admin@gmail.com' && (passClean === '123456' || passClean === 'admin786')) {
-      const sess = BoostPayStore.setAdminSession(emailClean);
-      setAdminSession(sess);
-    } else {
+      // SECURITY: never fall back to hardcoded credentials in the client bundle
       setLoginError('Invalid administrator credentials.');
+    } catch {
+      setLoginError('Cannot reach the server. Please try again.');
     }
     setIsLoggingIn(false);
   };
@@ -399,7 +394,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     try {
       const res = await fetch('/api/admin/users/boost-override', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: BoostPayStore.adminAuthHeaders(),
         body: JSON.stringify({ userId, action })
       });
       if (res.ok) {
@@ -423,7 +418,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     try {
       const res = await fetch('/api/admin/status', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: BoostPayStore.adminAuthHeaders(),
         body: JSON.stringify({ userId, action })
       });
       if (res.ok) {
@@ -450,7 +445,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     try {
       const res = await fetch('/api/admin/users/password', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: BoostPayStore.adminAuthHeaders(),
         body: JSON.stringify({ userId: selectedUser.id, newPassword: newPasswordInput.trim() })
       });
       if (res.ok) {
@@ -474,7 +469,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     try {
       await fetch('/api/admin/users/delete', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: BoostPayStore.adminAuthHeaders(),
         body: JSON.stringify({ userId })
       });
       if (selectedUser?.id === userId) {
@@ -520,7 +515,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     try {
       const res = await fetch('/api/admin/config', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: BoostPayStore.adminAuthHeaders(),
         body: JSON.stringify(newConfig)
       });
       if (res.ok) {

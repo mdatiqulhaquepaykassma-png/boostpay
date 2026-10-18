@@ -79,7 +79,7 @@ export const P2PTransferModal: FC<Props> = ({
       // 1. Attempt server-side authoritative transfer
       const res = await fetch('/api/transfer', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: BoostPayStore.authHeaders(),
         body: JSON.stringify({
           senderId: currentUser.id,
           recipientId: cleanRecipient,
@@ -279,12 +279,11 @@ export const P2PTransferModal: FC<Props> = ({
                 </div>
               </div>
               <input
-                type="number"
-                step="any"
-                min="0.01"
+                type="text"
+                inputMode="decimal"
                 placeholder="0.00"
                 value={amount}
-                onChange={(e) => setAmount(e.target.value)}
+                onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ''))}
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-base font-mono text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
               />
             </div>

@@ -15,6 +15,7 @@ import { AdminPortal } from './components/AdminPortal';
 import { MessengerView } from './components/MessengerView';
 import { InboxView } from './components/InboxView';
 import { FloatingToastContainer } from './components/FloatingToast';
+import { PWAInstallHelp } from './components/PWAInstallHelp';
 import { P2PTransferModal } from './components/P2PTransferModal';
 import { WalletSkeleton } from './components/WalletSkeleton';
 import { usePWAInstall } from './hooks/usePWAInstall';
@@ -185,8 +186,11 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans antialiased">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans antialiased pt-[env(safe-area-inset-top)]">
       {/* Real-Time Floating Toast Alerts Container */}
+      {/* PWA manual install guidance (iOS / Android / iframe fallback) */}
+      <PWAInstallHelp />
+
       <FloatingToastContainer
         toasts={toasts}
         onDismiss={(id) => setToasts((prev) => prev.filter((t) => t.id !== id))}
@@ -214,7 +218,7 @@ export default function App() {
         </div>
       ) : (
         /* 3. LOGGED-IN MAIN USER INTERFACE */
-        <div className={`flex-1 flex flex-col max-w-md w-full mx-auto ${activeTab === 'MESSENGER' ? 'h-[100dvh] max-h-screen overflow-hidden pb-[58px]' : 'pb-20'}`}>
+        <div className={`flex-1 flex flex-col max-w-md w-full mx-auto ${activeTab === 'MESSENGER' ? 'h-[100dvh] max-h-screen overflow-hidden pb-[calc(58px+env(safe-area-inset-bottom))]' : 'pb-[calc(5rem+env(safe-area-inset-bottom))]'}`}>
           <Navbar
             user={currentUser}
             isAdmin={false}
@@ -256,7 +260,7 @@ export default function App() {
 
 
           {/* FIXED BOTTOM NAVIGATION BAR */}
-          <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-3 py-1.5">
+          <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-3 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))]">
             <div className="max-w-md mx-auto grid grid-cols-5 items-center gap-1">
               {/* 1. Wallet Tab */}
               <button
