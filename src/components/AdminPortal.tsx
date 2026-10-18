@@ -81,13 +81,17 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     pausedBoosters: 0,
     totalTransactions: 0,
     dokployStatus: {
-      host: 'boostpay-eoqehk',
-      port: 5432,
-      database: 'boostpaydb',
+      storageMode: 'json-file' as 'postgres' | 'json-file',
+      host: 'local',
+      database: 'boostpay_db.json',
       isConnected: true,
-      lastPingMs: 28
+      latencyMs: 0,
+      lastPingMs: 0,
+      lastError: ''
     }
   });
+  const [dbPing, setDbPing] = useState<{ ok: boolean; latencyMs: number; error?: string; storageMode?: string } | null>(null);
+  const [isPinging, setIsPinging] = useState(false);
 
   // Admin Portal input focus tracking
   const isEditing = useRef({
@@ -547,6 +551,20 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     if (res.success) {
       setSupportMessage('');
       await refreshData();
+    }
+  };
+
+  // Real database connection ping (SELECT 1)
+  const runDbPing = async () => {
+    setIsPinging(true);
+    try {
+      const res = await fetch('/api/admin/db/ping', { headers: BoostPayStore.adminAuthHeaders() });
+      const data = await res.json();
+      setDbPing(data);
+    } catch (e: any) {
+      setDbPing({ ok: false, latencyMs: 0, error: e.message || 'Ping failed' });
+    } finally {
+      setIsPinging(false);
     }
   };
 
@@ -1062,6 +1080,54 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     <span className="text-zinc-400">Dynamic Boost Window</span>
                     <span className="font-mono text-zinc-300">1m – 24h</span>
                   </div>
+                </div>
+              </div>
+
+              {/* Real Database Storage Status (no fake indicators) */}
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-900/90 p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-bold uppercase tracking-wider font-mono text-zinc-400">Database Storage</h4>
+                  <Database className={`w-4 h-4 ${stats.dokployStatus.storageMode === 'postgres' && stats.dokployStatus.isConnected ? 'text-emerald-400' : 'text-amber-400'}`} />
+                </div>
+                <div className="space-y-2 text-xs">
+                  <div className="flex justify-between items-center py-1 border-b border-zinc-800/60">
+                    <span className="text-zinc-400">Storage Mode</span>
+                    <span className={`font-mono font-bold ${stats.dokployStatus.storageMode === 'postgres' ? 'text-emerald-400' : 'text-amber-400'}`}>
+                      {stats.dokployStatus.storageMode === 'postgres' ? 'PostgreSQL' : 'JSON File (local)'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-zinc-800/60">
+                    <span className="text-zinc-400">Status</span>
+                    <span className={`font-mono font-bold ${stats.dokployStatus.isConnected ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {stats.dokployStatus.isConnected ? 'Connected' : 'Disconnected'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center py-1 border-b border-zinc-800/60">
+                    <span className="text-zinc-400">Host / Database</span>
+                    <span className="font-mono text-zinc-300 truncate max-w-[160px]">{stats.dokployStatus.host} · {stats.dokployStatus.database}</span>
+                  </div>
+                  {stats.dokployStatus.storageMode === 'postgres' && (
+                    <div className="flex justify-between items-center py-1">
+                      <span className="text-zinc-400">Connection</span>
+                      <button
+                        onClick={runDbPing}
+                        disabled={isPinging}
+                        className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[10px] font-mono text-zinc-300 hover:border-amber-500/50 hover:text-amber-400 cursor-pointer active:scale-95 transition disabled:opacity-50"
+                      >
+                        {isPinging ? 'Pinging…' : dbPing ? (dbPing.ok ? `✓ ${dbPing.latencyMs}ms` : '✗ Error') : 'Test Connection'}
+                      </button>
+                    </div>
+                  )}
+                  {stats.dokployStatus.storageMode !== 'postgres' && (
+                    <p className="text-[10px] text-amber-400/80 leading-relaxed pt-1">
+                      Set the DATABASE_URL environment variable in Dokploy to switch to PostgreSQL (data survives redeploys).
+                    </p>
+                  )}
+                  {stats.dokployStatus.lastError && (
+                    <p className="text-[10px] text-rose-400 leading-relaxed truncate" title={stats.dokployStatus.lastError}>
+                      Error: {stats.dokployStatus.lastError}
+                    </p>
+                  )}
                 </div>
               </div>
 

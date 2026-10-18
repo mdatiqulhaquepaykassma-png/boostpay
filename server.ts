@@ -3,6 +3,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { Pool } from 'pg';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 
@@ -175,6 +176,11 @@ function getNextSequentialUserId(users: any[]): string {
 
 let lastKnownConfig: any = null;
 function readDb() {
+  // When PostgreSQL holds the state, it is the single source of truth
+  if (pgDoc) {
+    if (pgDoc.config) lastKnownConfig = pgDoc.config;
+    return pgDoc;
+  }
   try {
     if (!fs.existsSync(DB_FILE)) {
       // If a rolling backup exists, restore it instead of seeding fresh data
@@ -312,6 +318,12 @@ function writeDb(data: any) {
         fs.writeFileSync(backupFile, payload, 'utf-8');
       }
     }
+
+    // Persist to PostgreSQL (debounced) when connected
+    if (pgPool) {
+      pgDoc = data;
+      schedulePgPersist(data);
+    }
   } catch (err) {
     console.error('Error writing db file:', err);
   }
@@ -325,6 +337,128 @@ function newestBackup(): string | null {
     return files.length ? path.join(BACKUP_DIR, files[files.length - 1]) : null;
   } catch {
     return null;
+  }
+}
+
+// ===========================================================================
+// PostgreSQL persistence (optional, enabled with DATABASE_URL)
+// The complete application state is stored as a JSON document in Postgres so
+// data survives container rebuilds and redeploys. When DATABASE_URL is not
+// configured the app keeps using the local JSON file (with rolling backups).
+// ===========================================================================
+const DATABASE_URL = (process.env.DATABASE_URL || '').trim();
+let pgPool: any = null;
+let pgDoc: any = null;
+let pgFlushTimer: any = null;
+let pgPending: any = null;
+export const pgStatus = {
+  mode: (DATABASE_URL ? 'postgres' : 'json-file') as 'postgres' | 'json-file',
+  connected: false,
+  host: '',
+  database: '',
+  latencyMs: 0,
+  lastError: '',
+  lastPersistAt: 0
+};
+
+async function initPostgres(): Promise<void> {
+  if (!DATABASE_URL) {
+    console.log('DATABASE_URL not set — using JSON file storage (data/boostpay_db.json)');
+    return;
+  }
+  try {
+    const u = new URL(DATABASE_URL);
+    pgPool = new Pool({
+      connectionString: DATABASE_URL,
+      max: 5,
+      connectionTimeoutMillis: 8000,
+      idleTimeoutMillis: 30000
+    });
+    pgPool.on('error', (err: any) => {
+      pgStatus.connected = false;
+      pgStatus.lastError = String(err?.message || err);
+      console.error('PostgreSQL pool error:', pgStatus.lastError);
+    });
+
+    const t0 = Date.now();
+    const client = await pgPool.connect();
+    await client.query(
+      `CREATE TABLE IF NOT EXISTS app_state (
+         id INTEGER PRIMARY KEY,
+         data JSONB NOT NULL,
+         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+       )`
+    );
+    client.release();
+
+    pgStatus.connected = true;
+    pgStatus.host = u.hostname;
+    pgStatus.database = (u.pathname || '/').slice(1) || 'postgres';
+    pgStatus.latencyMs = Date.now() - t0;
+    pgStatus.lastError = '';
+    console.log(`PostgreSQL connected: ${pgStatus.database}@${pgStatus.host} (${pgStatus.latencyMs}ms)`);
+
+    // Load state: Postgres is the source of truth when it has data.
+    const res = await pgPool.query('SELECT data FROM app_state WHERE id = 1');
+    if (res.rows.length && res.rows[0].data) {
+      pgDoc = res.rows[0].data;
+      // refresh the local file cache
+      try { fs.writeFileSync(DB_FILE, JSON.stringify(pgDoc, null, 2), 'utf-8'); } catch { /* ignore */ }
+      console.log(`State loaded from PostgreSQL (${(pgDoc.users || []).length} users, ${(pgDoc.transactions || []).length} transactions)`);
+    } else {
+      // First run with a fresh database: migrate the local file (or seed) into Postgres
+      const seed = readDb();
+      pgDoc = seed;
+      await pgPool.query('INSERT INTO app_state (id, data, updated_at) VALUES (1, $1, now())', [JSON.stringify(seed)]);
+      pgStatus.lastPersistAt = Date.now();
+      console.log(`State migrated into PostgreSQL (${(seed.users || []).length} users)`);
+    }
+  } catch (err: any) {
+    pgStatus.connected = false;
+    pgStatus.lastError = String(err?.message || err);
+    console.error('PostgreSQL connection FAILED — falling back to JSON file storage:', pgStatus.lastError);
+  }
+}
+
+function schedulePgPersist(data: any) {
+  if (!pgPool) return;
+  pgPending = data;
+  if (pgFlushTimer) return;
+  pgFlushTimer = setTimeout(async () => {
+    pgFlushTimer = null;
+    const doc = pgPending;
+    pgPending = null;
+    if (!doc) return;
+    try {
+      await pgPool.query(
+        `INSERT INTO app_state (id, data, updated_at) VALUES (1, $1, now())
+         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+        [JSON.stringify(doc)]
+      );
+      pgStatus.connected = true;
+      pgStatus.lastError = '';
+      pgStatus.lastPersistAt = Date.now();
+    } catch (err: any) {
+      pgStatus.connected = false;
+      pgStatus.lastError = String(err?.message || err);
+      console.error('PostgreSQL persist error:', pgStatus.lastError);
+    }
+  }, 400);
+}
+
+/** Real database latency probe (SELECT 1). */
+async function pingPostgres(): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+  if (!pgPool) return { ok: false, latencyMs: 0, error: 'DATABASE_URL not configured' };
+  const t0 = Date.now();
+  try {
+    await pgPool.query('SELECT 1');
+    pgStatus.connected = true;
+    pgStatus.lastError = '';
+    return { ok: true, latencyMs: Date.now() - t0 };
+  } catch (err: any) {
+    pgStatus.connected = false;
+    pgStatus.lastError = String(err?.message || err);
+    return { ok: false, latencyMs: Date.now() - t0, error: pgStatus.lastError };
   }
 }
 
@@ -1886,11 +2020,15 @@ async function startServer() {
       totalTransactions,
       config: db.config,
       dokployStatus: {
-        host: db.config?.dokploy?.host || 'boostpay-eoqehk',
-        port: db.config?.dokploy?.port || 5432,
-        database: db.config?.dokploy?.database || 'boostpaydb',
-        isConnected: true,
-        lastPingMs: 28
+        // REAL storage status — no more hardcoded "connected"
+        storageMode: pgStatus.mode,
+        isConnected: pgStatus.mode === 'json-file' ? true : pgStatus.connected,
+        host: pgStatus.host || 'local',
+        database: pgStatus.database || 'boostpay_db.json',
+        latencyMs: pgStatus.latencyMs,
+        lastPingMs: pgStatus.latencyMs,
+        lastPersistAt: pgStatus.lastPersistAt,
+        lastError: pgStatus.lastError
       }
     });
   });
@@ -2363,6 +2501,17 @@ async function startServer() {
     }
   });
 
+  // Real database connection probe (SELECT 1 with live latency)
+  app.get('/api/admin/db/ping', requireAdmin, async (_req: any, res) => {
+    const result = await pingPostgres();
+    res.json({
+      storageMode: pgStatus.mode,
+      ...result,
+      host: pgStatus.host,
+      database: pgStatus.database
+    });
+  });
+
   app.get('/api/admin/backup', requireSuperAdmin, (_req: any, res) => {
     const db = readDb();
     res.setHeader('Content-Type', 'application/json');
@@ -2750,6 +2899,8 @@ async function startServer() {
       res.sendFile(path.join(__dirname, 'dist', 'index.html'));
     });
   }
+
+  await initPostgres();
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`BoostPay Server listening on port ${PORT} [Version: ${SERVER_VERSION}]`);
