@@ -117,7 +117,8 @@ const INITIAL_DB = {
     }
   ],
   config: {
-    hourlyRatePercent: 1.0,
+    minuteRatePercent: 0.001605, // 0.001605% per minute
+    hourlyRatePercent: 0.09634, // ~0.0963% equivalent per hour
     minBoostMs: 60000, // 1 minute minimum
     maxBoostMs: 86400000, // 24 hours maximum
     dokploy: {
@@ -290,7 +291,11 @@ setInterval(() => {
     let updated = false;
     const now = Date.now();
     const config = db.config || INITIAL_DB.config;
-    const ratePerMs = (config.hourlyRatePercent / 100) / 3600000;
+    // 0.001605% per minute compounding engine rate
+    const minuteRate = config.minuteRatePercent !== undefined
+      ? config.minuteRatePercent
+      : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605);
+    const ratePerMs = (minuteRate / 100) / 60000;
 
     for (const user of db.users) {
       if (user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
@@ -360,7 +365,11 @@ setInterval(() => {
         } else {
           user.boostState.elapsedMs = elapsed;
           const startingBal = Number(user.boostState.startingBalance ?? user.balance);
-          user.boostState.accumulatedYield = startingBal * (Math.pow(1 + ratePerMs, elapsed) - 1);
+          user.boostState.accumulatedYield = ratePerMs > 0
+            ? (elapsed * ratePerMs < 1e-5
+                ? startingBal * elapsed * ratePerMs
+                : startingBal * Math.expm1(elapsed * Math.log1p(ratePerMs)))
+            : 0;
           updated = true;
         }
       }

@@ -53,3 +53,15 @@ export function formatRatePercent(value: number | string | undefined | null): st
   }
   return str;
 }
+
+/**
+ * Formats compounding rate display with both per-minute and equivalent hourly rates
+ * e.g. "0.001605%/min (~0.0963%/hr)"
+ */
+export function formatCompoundingRateDual(minuteRate: number | string | undefined | null): string {
+  const mRate = Number(minuteRate) || 0.001605;
+  const mRateStr = formatRatePercent(mRate);
+  const hRate = ((Math.pow(1 + mRate / 100, 60) - 1) * 100);
+  const hRateStr = hRate.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+  return `${mRateStr}%/min (~${hRateStr}%/hr)`;
+}

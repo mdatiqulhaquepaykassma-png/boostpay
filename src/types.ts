@@ -86,7 +86,8 @@ export interface DokployConfig {
 }
 
 export interface SystemConfig {
-  hourlyRatePercent: number; // Default 1.000% per hour
+  minuteRatePercent: number; // 0.001605% per minute
+  hourlyRatePercent?: number; // Equivalent or legacy rate
   minBoostMs: number; // 60,000 ms (1 minute)
   maxBoostMs: number; // 86,400,000 ms (24 hours)
   dokploy: DokployConfig;

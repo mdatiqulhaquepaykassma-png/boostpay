@@ -7,9 +7,10 @@ import { formatPrecisionAmount } from '../utils/format';
 interface Props {
   transactions: Transaction[];
   userId: string;
+  onViewAllTransactions?: () => void;
 }
 
-export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId }) => {
+export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId, onViewAllTransactions }) => {
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [copiedTx, setCopiedTx] = useState(false);
   const [visibleCount, setVisibleCount] = useState(5);
@@ -80,9 +81,18 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
           <Clock className="w-4 h-4 text-zinc-400" />
           <h3 className="font-bold text-sm text-white">Recent Transactions</h3>
         </div>
-        <span className="text-[11px] font-mono text-zinc-500">
-          Showing {displayedTxs.length} of {userTxs.length}
-        </span>
+        {onViewAllTransactions ? (
+          <button
+            onClick={onViewAllTransactions}
+            className="text-xs text-amber-400 hover:text-amber-300 font-semibold flex items-center gap-1 cursor-pointer transition"
+          >
+            All History →
+          </button>
+        ) : (
+          <span className="text-[11px] font-mono text-zinc-500">
+            Showing {displayedTxs.length} of {userTxs.length}
+          </span>
+        )}
       </div>
 
       <div className="space-y-2">
@@ -129,15 +139,23 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
           </div>
         )}
 
-        {/* Load More Button */}
+        {/* Load More or Open Transactions Tab */}
         {userTxs.length > displayedTxs.length && (
-          <div className="pt-2 text-center">
+          <div className="pt-2 text-center space-y-2">
             <button
               onClick={() => setVisibleCount(prev => prev + 5)}
               className="w-full rounded-xl border border-zinc-800 bg-zinc-950 py-2.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-900 hover:text-white transition flex items-center justify-center gap-1.5 cursor-pointer"
             >
               Load More <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
             </button>
+            {onViewAllTransactions && (
+              <button
+                onClick={onViewAllTransactions}
+                className="w-full rounded-xl border border-zinc-800 bg-zinc-950/60 py-2 text-xs font-semibold text-amber-400 hover:bg-zinc-900 transition flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                Open Full Paginated Transactions Tab →
+              </button>
+            )}
           </div>
         )}
       </div>

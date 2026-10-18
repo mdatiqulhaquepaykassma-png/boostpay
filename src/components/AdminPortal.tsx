@@ -111,7 +111,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [passwordResetSuccess, setPasswordResetSuccess] = useState('');
 
   // Rate config state
-  const [customHourlyRate, setCustomHourlyRate] = useState(formatRatePercent(config.hourlyRatePercent));
+  const [customMinuteRate, setCustomMinuteRate] = useState(
+    formatRatePercent(config.minuteRatePercent !== undefined ? config.minuteRatePercent : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605))
+  );
   const [minBoostMinutes, setMinBoostMinutes] = useState(Math.round((config.minBoostMs || 60000) / 60000).toString());
   const [maxBoostHours, setMaxBoostHours] = useState(Math.round((config.maxBoostMs || 86400000) / 3600000).toString());
   const [rateSuccess, setRateSuccess] = useState(false);
@@ -152,6 +154,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         if (data.config) {
           setConfig((prev) => {
             if (
+              prev.minuteRatePercent === data.config.minuteRatePercent &&
               prev.hourlyRatePercent === data.config.hourlyRatePercent &&
               prev.minBoostMs === data.config.minBoostMs &&
               prev.maxBoostMs === data.config.maxBoostMs
@@ -161,7 +164,12 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             return data.config;
           });
           BoostPayStore.saveConfig(data.config); 
-          if (!isEditing.current.hourlyRate) setCustomHourlyRate(formatRatePercent(data.config.hourlyRatePercent));
+          if (!isEditing.current.hourlyRate) {
+            const mRate = data.config.minuteRatePercent !== undefined
+              ? data.config.minuteRatePercent
+              : (data.config.hourlyRatePercent ? data.config.hourlyRatePercent / 60 : 0.001605);
+            setCustomMinuteRate(formatRatePercent(mRate));
+          }
           if (!isEditing.current.minBoost) setMinBoostMinutes(Math.round((data.config.minBoostMs || 60000) / 60000).toString());
           if (!isEditing.current.maxBoost) setMaxBoostHours(Math.round((data.config.maxBoostMs || 86400000) / 3600000).toString());
         }
@@ -440,14 +448,17 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   // Save System Configuration
   const handleSaveConfig = async (e: React.FormEvent) => {
     e.preventDefault();
-    const rate = parseFloat(customHourlyRate);
+    const minuteRate = parseFloat(customMinuteRate);
     const minMins = parseInt(minBoostMinutes, 10);
     const maxHrs = parseInt(maxBoostHours, 10);
 
-    if (isNaN(rate) || rate < 0) return;
+    if (isNaN(minuteRate) || minuteRate < 0) return;
+
+    const hourlyEquiv = ((Math.pow(1 + minuteRate / 100, 60) - 1) * 100);
 
     const newConfig: Partial<SystemConfig> = {
-      hourlyRatePercent: rate,
+      minuteRatePercent: minuteRate,
+      hourlyRatePercent: hourlyEquiv,
       minBoostMs: !isNaN(minMins) && minMins > 0 ? minMins * 60000 : 60000,
       maxBoostMs: !isNaN(maxHrs) && maxHrs > 0 ? maxHrs * 3600000 : 86400000
     };
@@ -1665,24 +1676,28 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
               <form onSubmit={handleSaveConfig} className="space-y-4">
                 <div>
                   <label className="block text-xs font-semibold text-zinc-300 mb-1">
-                    Global Hourly Rate Percent (%)
+                    Compounding Rate (% per min)
                   </label>
                   <div className="flex gap-3">
                     <input
                       type="number"
                       step="any"
                       min="0"
-                      value={customHourlyRate}
+                      value={customMinuteRate}
                       onFocus={() => isEditing.current.hourlyRate = true}
                       onBlur={() => isEditing.current.hourlyRate = false}
-                      onChange={(e) => setCustomHourlyRate(e.target.value)}
-                      placeholder="e.g. 0.000001 or 1.0"
+                      onChange={(e) => setCustomMinuteRate(e.target.value)}
+                      placeholder="e.g. 0.001605"
                       className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 font-mono focus:border-amber-500 focus:outline-none"
                     />
-                    <span className="self-center font-mono text-xs text-zinc-500">% / hr</span>
+                    <span className="self-center font-mono text-xs text-amber-400 font-bold">% / min</span>
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-zinc-400 mt-2 font-mono bg-zinc-950/60 p-2.5 rounded-xl border border-zinc-800/80">
+                    <span>Active: <strong className="text-amber-400">{customMinuteRate || '0.001605'}%/min</strong></span>
+                    <span>Hourly Equiv: <strong className="text-zinc-200">~{((Math.pow(1 + (parseFloat(customMinuteRate) || 0) / 100, 60) - 1) * 100).toFixed(4)}%/hr</strong></span>
                   </div>
                   <span className="text-[10px] text-zinc-500 mt-1 block">
-                    Supports high-precision decimals down to 0.000001% per hour (default benchmark is 1.0% / hr).
+                    High-precision minute compounding rate (standard: 0.001605% per minute). Live dynamic yield updates continuously every millisecond.
                   </span>
                 </div>
 

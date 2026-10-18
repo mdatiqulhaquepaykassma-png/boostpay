@@ -78,16 +78,28 @@ export default function App() {
     };
   }, []);
 
-  // Listen for real-time incoming transfer & chat toasts
+  // Listen for real-time incoming transfer toasts (chat popups disabled)
   useEffect(() => {
     const unsubscribe = BoostPayStore.onToastNotification((newToast) => {
-      setToasts((prev) => [newToast, ...prev]);
-      if (newToast.type === 'CHAT_MESSAGE' && activeTab !== 'MESSENGER') {
-        setHasUnreadChat(true);
+      if (newToast.type !== 'CHAT_MESSAGE') {
+        setToasts((prev) => [newToast, ...prev]);
       }
     });
     return unsubscribe;
-  }, [activeTab]);
+  }, []);
+
+  // Listen for real-time chat updates to toggle unread badge on Chat tab
+  useEffect(() => {
+    const unsubChat = BoostPayStore.subscribeToChat((_convs, msgs) => {
+      if (activeTab !== 'MESSENGER' && currentUser?.id) {
+        const last = msgs[msgs.length - 1];
+        if (last && last.senderId !== currentUser.id) {
+          setHasUnreadChat(true);
+        }
+      }
+    });
+    return unsubChat;
+  }, [activeTab, currentUser?.id]);
 
   // Connect user to real-time chat SSE stream
   useEffect(() => {
@@ -204,14 +216,14 @@ export default function App() {
         </div>
       ) : (
         /* 3. LOGGED-IN MAIN USER INTERFACE */
-        <div className="flex-1 flex flex-col max-w-md w-full mx-auto pb-20">
+        <div className={`flex-1 flex flex-col max-w-md w-full mx-auto ${activeTab === 'MESSENGER' ? 'h-[100dvh] max-h-screen overflow-hidden pb-[58px]' : 'pb-20'}`}>
           <Navbar
             user={currentUser}
             isAdmin={false}
             onLogout={handleLogout}
           />
 
-          <main className="flex-1 overflow-y-auto">
+          <main className={`flex-1 ${activeTab === 'MESSENGER' ? 'flex flex-col min-h-0 overflow-hidden' : 'overflow-y-auto'}`}>
             {activeTab === 'WALLET' && (
               <WalletView
                 user={currentUser}

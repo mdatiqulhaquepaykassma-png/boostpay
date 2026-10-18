@@ -144,11 +144,13 @@ export const FloatingToastContainer: FC<FloatingToastContainerProps> = ({
   onViewInbox,
   onOpenChat
 }) => {
-  if (toasts.length === 0) return null;
+  // Completely disable floating popups for chat messages
+  const activeToasts = toasts.filter(t => t.type !== 'CHAT_MESSAGE');
+  if (activeToasts.length === 0) return null;
 
   return (
     <div className="fixed top-4 left-0 right-0 z-50 pointer-events-none px-4 flex flex-col items-center gap-2 max-w-md mx-auto">
-      {toasts.map((toast) => (
+      {activeToasts.map((toast) => (
         <div key={toast.id} className="w-full pointer-events-auto animate-in slide-in-from-top-3 duration-200">
           <ToastItem
             toast={toast}

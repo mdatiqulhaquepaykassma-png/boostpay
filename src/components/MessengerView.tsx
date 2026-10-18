@@ -1,4 +1,4 @@
-import { FC, useState, useEffect, memo, useRef } from 'react';
+import React, { FC, useState, useEffect, memo, useRef } from 'react';
 import {
   MessageSquare,
   Search,
@@ -10,8 +10,7 @@ import {
   Headphones,
   Copy,
   Check,
-  Smile,
-  CheckCheck
+  Smile
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { User, Conversation, Message } from '../types';
@@ -22,7 +21,7 @@ interface Props {
   targetPeerId?: string | null;
 }
 
-const EMOJI_PALETTE = ['👍', '❤️', '🔥', '🚀', '💸'];
+const EMOJI_PALETTE = ['👍', '❤️', '🔥', '🚀', '💸', '✨', '⚡', '🎉'];
 
 // Helper to generate consistent vibrant avatar colors based on numeric ID
 function getAvatarGradient(id: string): string {
@@ -88,115 +87,99 @@ const MessageItem = memo(({
 
       {/* Main Glassmorphic Bubble */}
       <div
-        className={`relative px-4 py-3 text-xs leading-relaxed transition-all backdrop-blur-md ${
+        className={`relative px-3.5 py-2.5 text-xs leading-relaxed transition-all backdrop-blur-md ${
           isMe
-            ? 'bg-gradient-to-br from-amber-500 to-amber-600 text-zinc-950 font-medium rounded-2xl rounded-br-xs shadow-lg shadow-amber-500/10'
+            ? 'bg-gradient-to-br from-amber-500 to-amber-600 text-zinc-950 font-medium rounded-2xl rounded-br-xs shadow-md shadow-amber-500/10'
             : isAdmin
-            ? 'bg-gradient-to-br from-sky-950/80 via-sky-900/40 to-zinc-900/90 border border-sky-500/30 text-sky-100 rounded-2xl rounded-bl-xs shadow-lg shadow-sky-500/5'
-            : 'bg-zinc-900/90 border border-zinc-800/80 text-zinc-100 rounded-2xl rounded-bl-xs shadow-md'
+            ? 'bg-gradient-to-br from-sky-950/80 via-sky-900/40 to-zinc-900/90 border border-sky-500/30 text-sky-100 rounded-2xl rounded-bl-xs shadow-md shadow-sky-500/5'
+            : 'bg-zinc-900/90 border border-zinc-800/80 text-zinc-100 rounded-2xl rounded-bl-xs shadow-sm'
         }`}
       >
         <p className="break-words select-text font-normal">{m.text}</p>
 
-        {/* Timestamp & Sent Status */}
-        <div className={`flex items-center gap-1 mt-1 font-mono text-[9px] ${
-          isMe ? 'justify-end text-zinc-900/70' : 'justify-end text-zinc-500'
-        }`}>
+        {/* Timestamp Footer */}
+        <div className="flex items-center justify-end gap-1 mt-1 text-[9px] opacity-75 font-mono">
           <span>{new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-          {isMe && <CheckCheck className="w-3 h-3 stroke-[2.2] text-zinc-900/80 inline" />}
         </div>
+      </div>
 
-        {/* Floating Quick Actions Bar (Hover / Tap) */}
-        <div
-          className={`absolute -top-7 ${
-            isMe ? 'right-0' : 'left-0'
-          } z-20 flex items-center gap-1 rounded-full border border-zinc-700/80 bg-zinc-900/95 px-2 py-1 shadow-xl backdrop-blur-xl transition-opacity duration-150 ${
-            showActionBar ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-          }`}
-        >
-          {EMOJI_PALETTE.map((emoji) => {
-            const hasUserReacted = reactions[emoji]?.includes(currentUserId);
+      {/* Emoji Reactions Bar */}
+      {hasReactions && (
+        <div className={`flex flex-wrap gap-1 mt-1 ${isMe ? 'justify-end' : 'justify-start'}`}>
+          {Object.entries(reactions).map(([emoji, userIds]) => {
+            if (!userIds || userIds.length === 0) return null;
+            const userReacted = userIds.includes(currentUserId);
             return (
               <button
                 key={emoji}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onReact(m.id, emoji);
-                }}
-                className={`flex h-6 w-6 items-center justify-center rounded-full text-xs transition-transform hover:scale-125 cursor-pointer active:scale-95 ${
-                  hasUserReacted ? 'bg-amber-500/20 ring-1 ring-amber-400' : 'hover:bg-zinc-800'
+                type="button"
+                onClick={() => onReact(m.id, emoji)}
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] border transition cursor-pointer select-none ${
+                  userReacted
+                    ? 'bg-amber-500/20 border-amber-500/40 text-amber-300 font-bold'
+                    : 'bg-zinc-900/90 border-zinc-800 text-zinc-400 hover:border-zinc-700'
                 }`}
+              >
+                <span>{emoji}</span>
+                <span className="font-mono text-[9px]">{userIds.length}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Floating Hover Action Bar */}
+      {showActionBar && (
+        <div
+          className={`absolute -top-7 ${
+            isMe ? 'right-0' : 'left-0'
+          } z-20 flex items-center gap-1 bg-zinc-900/95 border border-zinc-800 px-2 py-1 rounded-xl shadow-xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-100`}
+        >
+          {/* Reaction Triggers */}
+          <div className="flex items-center gap-0.5 border-r border-zinc-800 pr-1.5 mr-0.5">
+            {EMOJI_PALETTE.slice(0, 4).map((emoji) => (
+              <button
+                key={emoji}
+                type="button"
+                onClick={() => onReact(m.id, emoji)}
+                className="hover:scale-125 transition-transform text-xs p-0.5 cursor-pointer"
                 title={`React ${emoji}`}
               >
                 {emoji}
               </button>
-            );
-          })}
+            ))}
+          </div>
 
-          <div className="h-3 w-px bg-zinc-700 mx-0.5" />
-
-          {/* Copy Message Button */}
+          {/* Copy Message Text */}
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onCopy(m.text);
-            }}
-            className="flex h-6 w-6 items-center justify-center rounded-full text-zinc-400 hover:text-white hover:bg-zinc-800 transition cursor-pointer"
-            title="Copy message"
+            type="button"
+            onClick={() => onCopy(m.text)}
+            className="text-zinc-400 hover:text-zinc-200 p-1 rounded transition cursor-pointer"
+            title="Copy Text"
           >
-            {isCopied ? (
-              <Check className="w-3 h-3 text-emerald-400" />
-            ) : (
-              <Copy className="w-3 h-3" />
-            )}
+            {isCopied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
           </button>
-        </div>
-      </div>
-
-      {/* Accumulated Reaction Badges Below Bubble */}
-      {hasReactions && (
-        <div className={`flex flex-wrap gap-1 mt-1 px-1 ${isMe ? 'justify-end' : 'justify-start'}`}>
-          {Object.entries(reactions).map(([emoji, userIds]) => {
-            if (!userIds || userIds.length === 0) return null;
-            const hasUserReacted = userIds.includes(currentUserId);
-            return (
-              <button
-                key={emoji}
-                onClick={() => onReact(m.id, emoji)}
-                className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-mono transition-all cursor-pointer ${
-                  hasUserReacted
-                    ? 'border border-amber-500/40 bg-amber-500/15 text-amber-300 font-bold shadow-sm shadow-amber-500/10'
-                    : 'border border-zinc-800 bg-zinc-900/90 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
-                }`}
-                title={`${userIds.length} reaction${userIds.length > 1 ? 's' : ''}`}
-              >
-                <span>{emoji}</span>
-                <span>{userIds.length}</span>
-              </button>
-            );
-          })}
         </div>
       )}
     </div>
   );
 });
 
+MessageItem.displayName = 'MessageItem';
+
 export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPeerId }) => {
   const [conversations, setConversations] = useState<Conversation[]>(() => BoostPayStore.getConversations());
   const [messages, setMessages] = useState<Message[]>(() => BoostPayStore.getMessages());
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
-  const [searchTerm, setSearchTerm] = useState('');
   const [inputMsg, setInputMsg] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-
-  // New Chat Dialog
+  const [searchTerm, setSearchTerm] = useState('');
   const [isNewChatOpen, setIsNewChatOpen] = useState(false);
   const [newPeerId, setNewPeerId] = useState('');
   const [newChatError, setNewChatError] = useState('');
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
 
-  // Auto-scroll ref
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -301,14 +284,14 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     }
 
     if (cleanId === currentUser.id) {
-      setNewChatError('You cannot start a conversation with your own User ID');
+      setNewChatError('You cannot chat with yourself');
       return;
     }
 
     const allUsers = BoostPayStore.getUsers();
-    const peer = allUsers.find(u => u.id === cleanId);
-    if (!peer && cleanId !== 'ADMIN_SUPPORT') {
-      setNewChatError(`User ID #${cleanId} not found`);
+    const peerExists = allUsers.some(u => u.id === cleanId);
+    if (!peerExists) {
+      setNewChatError(`User #${cleanId} not found in system.`);
       return;
     }
 
@@ -322,11 +305,11 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     if (!activeConv || !inputMsg.trim() || isSending) return;
 
     const textToSend = inputMsg.trim();
-    const otherParticipant = getOtherParticipant(activeConv);
-
     setInputMsg('');
     setShowEmojiPicker(false);
     setIsSending(true);
+
+    const otherParticipant = getOtherParticipant(activeConv);
 
     try {
       await BoostPayStore.sendChatMessage(otherParticipant, textToSend, 'USER');
@@ -356,23 +339,23 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   };
 
   return (
-    <div className="mx-auto max-w-xl px-4 py-5 text-zinc-100 flex flex-col min-h-[82vh]">
-      {/* If active conversation is selected */}
+    <div className="w-full flex-1 flex flex-col min-h-0 overflow-hidden text-zinc-100">
+      {/* 1. ACTIVE CHAT THREAD (FIXED FULLSCREEN VIEWPORT WITH LOCKED BOTTOM DOCK) */}
       {activeConv ? (
-        <div className="flex flex-col flex-1 rounded-3xl border border-zinc-800/80 bg-zinc-950/80 shadow-2xl backdrop-blur-2xl overflow-hidden min-h-[75vh]">
-          {/* Conversation Top Header */}
-          <div className="flex items-center justify-between border-b border-zinc-800/80 bg-zinc-900/60 backdrop-blur-md px-4 py-3">
-            <div className="flex items-center gap-3">
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-zinc-950">
+          {/* Pinned Top Navigation Bar */}
+          <div className="shrink-0 flex items-center justify-between border-b border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-3.5 py-2.5 z-10">
+            <div className="flex items-center gap-2.5 min-w-0">
               <button
                 onClick={() => setActiveConv(null)}
-                className="rounded-xl p-2 text-zinc-400 hover:bg-zinc-800 hover:text-white transition cursor-pointer min-w-[44px] min-h-[44px] flex items-center justify-center -ml-1"
-                title="Back to inbox"
+                className="rounded-xl p-2 text-zinc-400 hover:bg-zinc-800 hover:text-white transition cursor-pointer min-w-[44px] min-h-[44px] flex items-center justify-center -ml-1 shrink-0"
+                title="Back to conversations"
               >
                 <ArrowLeft className="w-5 h-5" />
               </button>
 
               {/* Participant Avatar with Presence Dot */}
-              <div className="relative">
+              <div className="relative shrink-0">
                 <div className={`h-10 w-10 rounded-2xl bg-gradient-to-tr ${getAvatarGradient(getOtherParticipant(activeConv))} flex items-center justify-center text-white font-mono font-bold text-xs shadow-md`}>
                   {getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? (
                     <ShieldCheck className="w-5 h-5 text-white stroke-[2.2]" />
@@ -380,17 +363,13 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                     `#${getOtherParticipant(activeConv)}`
                   )}
                 </div>
-                {/* Real-time Online Presence Dot */}
-                <span className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500 ring-2 ring-zinc-950" />
-                </span>
+                <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-500 ring-2 ring-zinc-950" />
               </div>
 
-              <div>
-                <div className="flex items-center gap-1.5">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 truncate">
                   {getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? (
-                    <span className="flex items-center gap-1 text-xs font-bold text-sky-400 font-mono">
+                    <span className="text-xs font-bold text-sky-400 font-mono flex items-center gap-1">
                       Official Verified Support
                     </span>
                   ) : (
@@ -404,23 +383,22 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                     <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" /> Active now
                   </span>
                   <span>·</span>
-                  <span className="text-zinc-500">{activeConv.id}</span>
+                  <span className="text-zinc-500 truncate">{activeConv.id}</span>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* Scam Protection Alert Warning */}
-          <div className="mx-4 mt-3 rounded-2xl border border-red-500/20 bg-red-950/25 px-3 py-2 flex items-center gap-2.5 text-[11px] text-red-300 backdrop-blur-md">
-            <ShieldAlert className="w-4 h-4 text-red-400 shrink-0" />
-            <span>Protect credentials: Official staff will never ask for your recovery phrase or transfer passwords.</span>
+          {/* Compact Security Header */}
+          <div className="shrink-0 mx-3 my-1.5 rounded-xl border border-red-500/20 bg-red-950/20 px-3 py-1.5 flex items-center gap-2 text-[10px] text-red-300">
+            <ShieldAlert className="w-3.5 h-3.5 text-red-400 shrink-0" />
+            <span className="truncate">Staff will never ask for your recovery phrase or transfer passwords.</span>
           </div>
 
-          {/* Messages Stream Viewport */}
-          <div className="flex-1 overflow-y-auto space-y-3.5 p-4 pr-3">
-            {/* Date separator pill */}
-            <div className="flex items-center justify-center my-2">
-              <span className="rounded-full bg-zinc-900/90 border border-zinc-800 px-3 py-0.5 text-[10px] font-mono text-zinc-400 shadow-sm backdrop-blur-md">
+          {/* Messages Stream Viewport (Strictly Scrollable Middle Section) */}
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-3 px-3.5 py-2">
+            <div className="flex items-center justify-center my-1.5">
+              <span className="rounded-full bg-zinc-900/90 border border-zinc-800 px-3 py-0.5 text-[10px] font-mono text-zinc-400 shadow-sm">
                 Secure Encrypted Stream
               </span>
             </div>
@@ -441,25 +419,25 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               ))}
 
             {messages.filter(m => m.conversationId === activeConv.id).length === 0 && (
-              <div className="h-48 flex flex-col items-center justify-center text-center px-6">
-                <div className="h-12 w-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-amber-400 mb-3">
-                  <MessageSquare className="w-6 h-6 stroke-[1.8]" />
+              <div className="h-44 flex flex-col items-center justify-center text-center px-4">
+                <div className="h-10 w-10 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-amber-400 mb-2">
+                  <MessageSquare className="w-5 h-5 stroke-[1.8]" />
                 </div>
                 <h4 className="text-xs font-bold text-zinc-200">Start the conversation</h4>
-                <p className="text-[11px] text-zinc-500 mt-1 max-w-xs">
-                  Say hello to initiate real-time communication. All messages are synchronized instantly.
+                <p className="text-[11px] text-zinc-500 mt-0.5 max-w-xs">
+                  Say hello to initiate real-time communication.
                 </p>
               </div>
             )}
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Quick Emoji Bar (Collapsible) */}
+          {/* Collapsible Quick Emoji Bar */}
           {showEmojiPicker && (
-            <div className="px-4 py-2 border-t border-zinc-800/80 bg-zinc-900/70 backdrop-blur-md flex items-center gap-2 animate-in fade-in duration-150">
-              <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider">Quick:</span>
-              <div className="flex items-center gap-1.5">
-                {['👍', '❤️', '🔥', '🚀', '💸', '✨', '⚡', '🎉'].map((emoji) => (
+            <div className="shrink-0 px-3 py-1.5 border-t border-zinc-800/80 bg-zinc-900/90 backdrop-blur-md flex items-center gap-1.5 animate-in fade-in duration-100">
+              <span className="text-[9px] font-mono text-zinc-400 uppercase tracking-wider">Quick:</span>
+              <div className="flex items-center gap-1">
+                {EMOJI_PALETTE.map((emoji) => (
                   <button
                     key={emoji}
                     type="button"
@@ -473,18 +451,18 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             </div>
           )}
 
-          {/* Message Input Dock */}
+          {/* LOCKED BOTTOM INPUT DOCK (Permanently pinned at bottom above nav bar) */}
           <form
             onSubmit={handleSendMessage}
-            className="p-3 border-t border-zinc-800/80 bg-zinc-900/80 backdrop-blur-xl flex items-center gap-2"
+            className="shrink-0 p-2.5 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-xl flex items-center gap-2 z-10"
           >
             <button
               type="button"
               onClick={() => setShowEmojiPicker(prev => !prev)}
-              className={`p-2.5 rounded-2xl border transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center ${
+              className={`p-2.5 rounded-2xl border transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0 ${
                 showEmojiPicker
                   ? 'border-amber-500/50 bg-amber-500/15 text-amber-400'
-                  : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                  : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
               }`}
               title="Insert Emoji"
             >
@@ -497,13 +475,13 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               placeholder={`Message ${getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? 'Official Support' : `User #${getOtherParticipant(activeConv)}`}...`}
               value={inputMsg}
               onChange={(e) => setInputMsg(e.target.value)}
-              className="flex-1 rounded-2xl border border-zinc-800 bg-zinc-950/90 px-4 py-3 text-xs text-white placeholder-zinc-500 focus:border-amber-500 focus:outline-none transition-colors"
+              className="flex-1 rounded-2xl border border-zinc-800 bg-zinc-900 px-3.5 py-2.5 text-xs text-white placeholder-zinc-500 focus:border-amber-500 focus:outline-none transition-colors"
             />
 
             <button
               type="submit"
               disabled={!inputMsg.trim() || isSending}
-              className="rounded-2xl bg-amber-500 px-4 py-3 text-zinc-950 hover:bg-amber-400 transition font-bold disabled:opacity-40 disabled:hover:bg-amber-500 cursor-pointer active:scale-95 shadow-lg shadow-amber-500/20 min-h-[44px] min-w-[44px] flex items-center justify-center"
+              className="rounded-2xl bg-amber-500 px-4 py-2.5 text-zinc-950 hover:bg-amber-400 transition font-bold disabled:opacity-40 disabled:hover:bg-amber-500 cursor-pointer active:scale-95 shadow-md shadow-amber-500/20 min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
               title="Send message"
             >
               <Send className="w-4 h-4 stroke-[2.2]" />
@@ -511,18 +489,18 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
           </form>
         </div>
       ) : (
-        /* Conversations Inbox List View */
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
+        /* 2. CONVERSATION INBOX LIST VIEW */
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden px-4 pt-3">
+          <div className="shrink-0 flex items-center justify-between mb-3">
             <div>
-              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
                 <MessageSquare className="w-5 h-5 text-amber-400" /> Messenger Inbox
               </h2>
-              <p className="text-xs text-zinc-400">Direct peer communication & Verified Support</p>
+              <p className="text-[11px] text-zinc-400">Direct peer communication & Verified Support</p>
             </div>
             <button
               onClick={() => setIsNewChatOpen(true)}
-              className="flex items-center gap-1.5 rounded-2xl bg-amber-500 px-3.5 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 transition shadow-lg shadow-amber-500/20 cursor-pointer active:scale-95 min-h-[44px]"
+              className="flex items-center gap-1.5 rounded-2xl bg-amber-500 px-3 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 transition shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 min-h-[44px]"
             >
               <Plus className="w-4 h-4" /> New Chat
             </button>
@@ -531,44 +509,44 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
           {/* 1-Tap Official Verified Support Glass Banner */}
           <div
             onClick={() => openConversationWithPeer('ADMIN_SUPPORT')}
-            className="relative overflow-hidden rounded-3xl border border-sky-500/30 bg-gradient-to-r from-sky-950/60 via-zinc-900/80 to-zinc-950 p-4 shadow-xl backdrop-blur-xl hover:border-sky-500/60 hover:shadow-sky-500/10 transition-all cursor-pointer group"
+            className="shrink-0 mb-3 relative overflow-hidden rounded-2xl border border-sky-500/30 bg-gradient-to-r from-sky-950/60 via-zinc-900/80 to-zinc-950 p-3.5 shadow-lg backdrop-blur-xl hover:border-sky-500/60 transition-all cursor-pointer group"
           >
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3.5">
-                <div className="rounded-2xl p-3 bg-sky-500/20 text-sky-400 border border-sky-500/30 group-hover:scale-105 transition-transform shadow-md shadow-sky-500/10">
-                  <Headphones className="w-5 h-5 stroke-[2.2]" />
+              <div className="flex items-center gap-3">
+                <div className="rounded-xl p-2.5 bg-sky-500/20 text-sky-400 border border-sky-500/30 group-hover:scale-105 transition-transform">
+                  <Headphones className="w-4 h-4 stroke-[2.2]" />
                 </div>
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5">
                     <span className="text-xs font-bold text-sky-400 font-mono flex items-center gap-1">
-                      <ShieldCheck className="w-4 h-4 text-sky-400" /> Official Verified Support
+                      <ShieldCheck className="w-3.5 h-3.5 text-sky-400" /> Official Verified Support
                     </span>
                   </div>
                   <p className="text-[11px] text-zinc-300 mt-0.5">
-                    Need instant help with transfers, rates or boosts? Tap for 24/7 direct assistance.
+                    Need instant help with transfers or rates? Tap for 24/7 direct assistance.
                   </p>
                 </div>
               </div>
-              <span className="shrink-0 text-[10px] font-mono text-sky-400 font-bold bg-sky-500/15 border border-sky-500/30 px-2.5 py-1 rounded-xl">
+              <span className="shrink-0 text-[10px] font-mono text-sky-400 font-bold bg-sky-500/15 border border-sky-500/30 px-2 py-0.5 rounded-lg">
                 Live
               </span>
             </div>
           </div>
 
-          {/* Search bar with glass styling */}
-          <div className="relative">
+          {/* Search bar */}
+          <div className="shrink-0 relative mb-3">
             <Search className="absolute left-3.5 top-3 w-4 h-4 text-zinc-500" />
             <input
               type="text"
               placeholder="Search by User ID..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full rounded-2xl border border-zinc-800/80 bg-zinc-900/80 backdrop-blur-md pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-500 focus:border-amber-500 focus:outline-none font-mono transition-colors"
+              className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-500 focus:border-amber-500 focus:outline-none font-mono transition-colors"
             />
           </div>
 
-          {/* Conversations list */}
-          <div className="space-y-2.5">
+          {/* Scrollable Conversations list */}
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pb-4">
             {filteredConversations.map((conv) => {
               const other = getOtherParticipant(conv);
               const isSupport = other === 'ADMIN_SUPPORT';
@@ -578,19 +556,18 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                 <button
                   key={conv.id}
                   onClick={() => setActiveConv(conv)}
-                  className="w-full flex items-center justify-between rounded-3xl border border-zinc-800/80 bg-zinc-900/70 p-3.5 hover:border-zinc-700 hover:bg-zinc-900/90 transition-all text-left cursor-pointer backdrop-blur-md shadow-sm hover:shadow-md"
+                  className="w-full flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900/80 p-3 hover:border-zinc-700 hover:bg-zinc-900 transition-all text-left cursor-pointer shadow-sm"
                 >
-                  <div className="flex items-center gap-3.5 min-w-0 pr-2">
-                    {/* Circle Avatar with Initials & Online Dot */}
+                  <div className="flex items-center gap-3 min-w-0 pr-2">
                     <div className="relative shrink-0">
-                      <div className={`h-11 w-11 rounded-2xl bg-gradient-to-tr ${gradient} flex items-center justify-center text-white font-mono font-bold text-xs shadow-md`}>
+                      <div className={`h-10 w-10 rounded-xl bg-gradient-to-tr ${gradient} flex items-center justify-center text-white font-mono font-bold text-xs shadow-md`}>
                         {isSupport ? (
-                          <ShieldCheck className="w-5 h-5 text-white stroke-[2.2]" />
+                          <ShieldCheck className="w-4 h-4 text-white stroke-[2.2]" />
                         ) : (
                           `#${other}`
                         )}
                       </div>
-                      <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-500 ring-2 ring-zinc-950" />
+                      <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-zinc-950" />
                     </div>
 
                     <div className="min-w-0">
@@ -599,13 +576,13 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                           {isSupport ? 'Official Verified Support' : `User #${other}`}
                         </span>
                       </div>
-                      <p className="text-[11px] text-zinc-400 truncate max-w-[220px] sm:max-w-xs mt-0.5">
+                      <p className="text-[11px] text-zinc-400 truncate max-w-[200px] sm:max-w-xs mt-0.5">
                         {conv.lastMessage || 'No messages yet'}
                       </p>
                     </div>
                   </div>
 
-                  <span className="text-[10px] font-mono text-zinc-500 shrink-0 self-start mt-1">
+                  <span className="text-[10px] font-mono text-zinc-500 shrink-0 self-start mt-0.5">
                     {new Date(conv.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
                 </button>
@@ -613,18 +590,18 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             })}
 
             {filteredConversations.length === 0 && (
-              <div className="py-12 text-center text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-3xl">
+              <div className="py-10 text-center text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-2xl">
                 No conversations found. Tap &quot;New Chat&quot; above to message a peer by numeric ID.
               </div>
             )}
           </div>
 
-          {/* New Chat Modal with Frosted Glass Overlay */}
+          {/* New Chat Modal */}
           {isNewChatOpen && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-150">
-              <div className="relative w-full max-w-sm rounded-3xl border border-zinc-800 bg-zinc-900/95 p-6 shadow-2xl text-zinc-100 backdrop-blur-2xl">
+              <div className="relative w-full max-w-sm rounded-3xl border border-zinc-800 bg-zinc-900/95 p-5 shadow-2xl text-zinc-100 backdrop-blur-2xl">
                 <h3 className="font-bold text-sm text-white mb-1">Start New Conversation</h3>
-                <p className="text-xs text-zinc-400 mb-5">Enter recipient&apos;s numeric User ID (e.g. 1, 2, 3)</p>
+                <p className="text-xs text-zinc-400 mb-4">Enter recipient&apos;s numeric User ID (e.g. 1, 2, 3)</p>
 
                 <form onSubmit={handleStartNewConversation} className="space-y-4">
                   <div>
@@ -645,7 +622,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                     <p className="text-xs text-red-400 font-medium">{newChatError}</p>
                   )}
 
-                  <div className="flex gap-2.5 pt-2">
+                  <div className="flex gap-2.5 pt-1">
                     <button
                       type="button"
                       onClick={() => setIsNewChatOpen(false)}

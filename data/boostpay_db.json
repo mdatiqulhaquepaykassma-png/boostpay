@@ -209,5 +209,21 @@
         "balanceAfter": 250
       }
     }
-  ]
+  ],
+  "config": {
+    "minuteRatePercent": 0.001605,
+    "hourlyRatePercent": 0.09634,
+    "minBoostMs": 60000,
+    "maxBoostMs": 86400000,
+    "dokploy": {
+      "host": "boostpay-eoqehk",
+      "port": 5432,
+      "database": "boostpaydb",
+      "user": "boostpaydbuser",
+      "externalIp": "72.60.42.18",
+      "dockerHostname": "boostpay-eoqehk",
+      "isConnected": true,
+      "lastPingMs": 42
+    }
+  }
 }

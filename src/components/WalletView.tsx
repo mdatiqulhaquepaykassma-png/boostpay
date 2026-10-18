@@ -1,10 +1,11 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
-import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles } from 'lucide-react';
+import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User, BoostState, SystemConfig } from '../types';
 import { RecentTransactionsSection } from './RecentTransactionsSection';
+import { PaginatedTransactionsView } from './PaginatedTransactionsView';
 import { SmoothNumericTicker } from './SmoothNumericTicker';
-import { formatPrecisionAmount, formatRatePercent } from '../utils/format';
+import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
 
 function formatDuration(ms: number): string {
   const totalSecs = Math.max(0, Math.floor(ms / 1000));
@@ -28,7 +29,7 @@ interface BalanceCardProps {
   baseBalance: number;
   boostState: BoostState;
   dynamicTargetDurationMs: number;
-  hourlyRatePercent: number;
+  minuteRatePercent: number;
   onOpenSendMoney: () => void;
 }
 
@@ -36,7 +37,7 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   baseBalance,
   boostState,
   dynamicTargetDurationMs,
-  hourlyRatePercent,
+  minuteRatePercent,
   onOpenSendMoney
 }) => {
   const isRunning = boostState.isActive && !boostState.isPaused;
@@ -50,7 +51,7 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
 
     let rafId: number;
     let lastRender = 0;
-    const ratePerMs = (hourlyRatePercent / 100) / 3600000;
+    const ratePerMs = (minuteRatePercent / 100) / 60000;
     const startingBal = Number(boostState.startingBalance ?? baseBalance);
     const targetMs = boostState.targetDurationMs || dynamicTargetDurationMs;
     const initialElapsed = boostState.elapsedMs || 0;
@@ -88,7 +89,7 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
     boostState.elapsedMs,
     boostState.targetDurationMs,
     dynamicTargetDurationMs,
-    hourlyRatePercent
+    minuteRatePercent
   ]);
 
   const currentTotal = baseBalance + liveAccrued;
@@ -145,7 +146,7 @@ interface CompoundingCardProps {
   baseBalance: number;
   boostState: BoostState;
   dynamicTargetDurationMs: number;
-  hourlyRatePercent: number;
+  minuteRatePercent: number;
   onStartBoost: () => void;
   onPauseBoost: () => void;
   onResumeBoost: () => void;
@@ -157,7 +158,7 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
   baseBalance,
   boostState,
   dynamicTargetDurationMs,
-  hourlyRatePercent,
+  minuteRatePercent,
   onStartBoost,
   onPauseBoost,
   onResumeBoost,
@@ -181,7 +182,7 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
 
     let rafId: number;
     let lastRender = 0;
-    const ratePerMs = (hourlyRatePercent / 100) / 3600000;
+    const ratePerMs = (minuteRatePercent / 100) / 60000;
     const targetMs = boostState.targetDurationMs || dynamicTargetDurationMs;
     const startingBal = Number(boostState.startingBalance ?? baseBalance);
     const initialElapsed = boostState.elapsedMs || 0;
@@ -227,12 +228,15 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
     boostState.elapsedMs,
     boostState.targetDurationMs,
     dynamicTargetDurationMs,
-    hourlyRatePercent,
+    minuteRatePercent,
     onBoostFinished
   ]);
 
   const targetDuration = boostState.targetDurationMs || dynamicTargetDurationMs || 1;
   const progressPercent = Math.min(100, Math.max(0, (elapsedMs / targetDuration) * 100));
+
+  // Compute equivalent hourly rate for dual display
+  const hourlyEquiv = ((Math.pow(1 + minuteRatePercent / 100, 60) - 1) * 100);
 
   return (
     <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-5 shadow-xl relative">
@@ -244,7 +248,7 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
           <div>
             <h3 className="font-bold text-sm text-white">Dynamic Compounding</h3>
             <p className="text-[11px] text-zinc-400">
-              Rate: <span className="font-mono text-amber-400">{formatRatePercent(hourlyRatePercent)}%/hr</span> · Duration: <span className="font-mono text-zinc-300">{formatDuration(targetDuration)}</span>
+              Rate: <span className="font-mono text-amber-400 font-semibold">{formatRatePercent(minuteRatePercent)}%/min</span> <span className="text-zinc-500 font-mono text-[10px]">(~{hourlyEquiv.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}%/hr)</span> · Duration: <span className="font-mono text-zinc-300">{formatDuration(targetDuration)}</span>
             </p>
           </div>
         </div>
@@ -401,6 +405,7 @@ export const WalletView: FC<Props> = ({
   onOpenSendMoney,
   config
 }) => {
+  const [walletTab, setWalletTab] = useState<'OVERVIEW' | 'TRANSACTIONS'>('OVERVIEW');
   const [zeroBalanceWarning, setZeroBalanceWarning] = useState(false);
   const [completionBanner, setCompletionBanner] = useState<{ amount: number } | null>(null);
 
@@ -488,34 +493,71 @@ export const WalletView: FC<Props> = ({
         baseBalance={user.balance}
         boostState={user.boostState}
         dynamicTargetDurationMs={dynamicTargetDurationMs}
-        hourlyRatePercent={config.hourlyRatePercent}
+        minuteRatePercent={config.minuteRatePercent !== undefined ? config.minuteRatePercent : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605)}
         onOpenSendMoney={onOpenSendMoney}
       />
 
-      {/* 2. MEMOIZED ISOLATED DYNAMIC COMPOUNDING CARD (Holds progress bar and accruing reward ticker) */}
-      <IsolatedCompoundingCard
-        userId={user.id}
-        baseBalance={user.balance}
-        boostState={user.boostState}
-        dynamicTargetDurationMs={dynamicTargetDurationMs}
-        hourlyRatePercent={config.hourlyRatePercent}
-        onStartBoost={handleStartBoost}
-        onPauseBoost={handlePauseBoost}
-        onResumeBoost={handleResumeBoost}
-        onBoostFinished={handleBoostFinished}
-      />
+      {/* 2. SUB-TAB SWITCHER: OVERVIEW (COMPOUNDING) vs TRANSACTIONS */}
+      <div className="flex rounded-2xl bg-zinc-900 border border-zinc-800 p-1">
+        <button
+          onClick={() => setWalletTab('OVERVIEW')}
+          className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-semibold transition cursor-pointer min-h-[44px] ${
+            walletTab === 'OVERVIEW'
+              ? 'bg-zinc-800 text-amber-400 font-bold shadow-sm'
+              : 'text-zinc-400 hover:text-zinc-200'
+          }`}
+        >
+          <Zap className="w-4 h-4" />
+          <span>Compounding</span>
+        </button>
+        <button
+          onClick={() => setWalletTab('TRANSACTIONS')}
+          className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-semibold transition cursor-pointer min-h-[44px] ${
+            walletTab === 'TRANSACTIONS'
+              ? 'bg-zinc-800 text-amber-400 font-bold shadow-sm'
+              : 'text-zinc-400 hover:text-zinc-200'
+          }`}
+        >
+          <History className="w-4 h-4" />
+          <span>Transactions</span>
+        </button>
+      </div>
 
-      {/* 3. MEMOIZED PROFIT METRICS SECTION */}
-      <IsolatedProfitMetrics
-        userId={user.id}
-        lifetimeProfit={user.lifetimeProfit}
-      />
+      {walletTab === 'OVERVIEW' ? (
+        <>
+          {/* 3. MEMOIZED ISOLATED DYNAMIC COMPOUNDING CARD (Holds progress bar and accruing reward ticker) */}
+          <IsolatedCompoundingCard
+            userId={user.id}
+            baseBalance={user.balance}
+            boostState={user.boostState}
+            dynamicTargetDurationMs={dynamicTargetDurationMs}
+            minuteRatePercent={config.minuteRatePercent !== undefined ? config.minuteRatePercent : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605)}
+            onStartBoost={handleStartBoost}
+            onPauseBoost={handlePauseBoost}
+            onResumeBoost={handleResumeBoost}
+            onBoostFinished={handleBoostFinished}
+          />
 
-      {/* 4. MEMOIZED RECENT TRANSACTIONS SECTION */}
-      <RecentTransactionsSection
-        transactions={BoostPayStore.getTransactions()}
-        userId={user.id}
-      />
+          {/* 4. MEMOIZED PROFIT METRICS SECTION */}
+          <IsolatedProfitMetrics
+            userId={user.id}
+            lifetimeProfit={user.lifetimeProfit}
+          />
+
+          {/* 5. MEMOIZED RECENT TRANSACTIONS SECTION */}
+          <RecentTransactionsSection
+            transactions={BoostPayStore.getTransactions()}
+            userId={user.id}
+            onViewAllTransactions={() => setWalletTab('TRANSACTIONS')}
+          />
+        </>
+      ) : (
+        /* TRANSACTIONS TAB: SCROLLABLE, PAGINATED P2P TRANSFERS AND YIELD EVENTS */
+        <PaginatedTransactionsView
+          transactions={BoostPayStore.getTransactions()}
+          userId={user.id}
+        />
+      )}
     </div>
   );
 };

@@ -90,7 +90,8 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 
 export function getDefaultConfig(): SystemConfig {
   return {
-    hourlyRatePercent: 1.0,
+    minuteRatePercent: 0.001605, // 0.001605% per minute
+    hourlyRatePercent: 0.09634, // ~0.0963% equivalent per hour
     minBoostMs: 60 * 1000, // 1 minute
     maxBoostMs: 24 * 60 * 60 * 1000, // 24 hours
     dokploy: {
@@ -365,22 +366,8 @@ export class BoostPayStore {
               }
               localStorage.setItem(STORAGE_CONVERSATIONS, JSON.stringify(convs));
 
-              // 3. Notify chat listeners immediately
+              // 3. Notify chat listeners immediately (unread badge on tab bar)
               this.triggerChatUpdate(convs, msgs);
-
-              // 4. Trigger incoming toast alert if message is from a peer or support
-              if (incomingMsg.senderId !== userId) {
-                const isFromAdmin = incomingMsg.senderId === 'ADMIN_SUPPORT' || incomingMsg.senderRole === 'ADMIN';
-                this.triggerToast({
-                  id: incomingMsg.id,
-                  type: 'CHAT_MESSAGE',
-                  title: isFromAdmin ? 'Verified Support' : `User #${incomingMsg.senderId}`,
-                  senderId: incomingMsg.senderId,
-                  conversationId: incomingConv.id,
-                  timestamp: incomingMsg.timestamp,
-                  message: incomingMsg.text
-                });
-              }
             } else if (data.type === 'reaction_update' && data.messageId) {
               const msgs = this.getMessages();
               const idx = msgs.findIndex(m => m.id === data.messageId);
@@ -1048,7 +1035,13 @@ export class BoostPayStore {
     const raw = localStorage.getItem(STORAGE_CONFIG);
     if (!raw) return getDefaultConfig();
     try {
-      return JSON.parse(raw);
+      const parsed: SystemConfig = JSON.parse(raw);
+      if (parsed && parsed.minuteRatePercent === undefined) {
+        parsed.minuteRatePercent = 0.001605;
+        parsed.hourlyRatePercent = 0.09634;
+        localStorage.setItem(STORAGE_CONFIG, JSON.stringify(parsed));
+      }
+      return parsed;
     } catch {
       return getDefaultConfig();
     }
