@@ -9,3 +9,9 @@ coverage/
 # Never commit the API token signing secret
 data/.api-secret
 .api-secret
+
+# Live database + backups must NEVER be tracked by git (a stale commit
+# overwrites real user data on every deploy/checkout).
+data/boostpay_db.json
+data/backups/
+data/*.tmp

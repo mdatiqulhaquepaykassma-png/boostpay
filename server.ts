@@ -177,6 +177,18 @@ let lastKnownConfig: any = null;
 function readDb() {
   try {
     if (!fs.existsSync(DB_FILE)) {
+      // If a rolling backup exists, restore it instead of seeding fresh data
+      const backup = newestBackup();
+      if (backup) {
+        try {
+          const restored = JSON.parse(fs.readFileSync(backup, 'utf-8'));
+          if (restored && Array.isArray(restored.users) && restored.users.length > 0) {
+            fs.writeFileSync(DB_FILE, JSON.stringify(restored, null, 2), 'utf-8');
+            console.log(`Data restored from backup: ${path.basename(backup)} (${restored.users.length} users)`);
+            return restored;
+          }
+        } catch { /* fall through to seed */ }
+      }
       fs.writeFileSync(DB_FILE, JSON.stringify(INITIAL_DB, null, 2), 'utf-8');
       return INITIAL_DB;
     }
@@ -259,13 +271,60 @@ function readDb() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Rolling data backups: the live db is the source of truth, but every N writes
+// a timestamped snapshot is kept in data/backups/ so data loss is always
+// recoverable (and a lost/empty db auto-restores from the newest snapshot).
+// ---------------------------------------------------------------------------
+const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+let writeCount = 0;
+
+function rotateBackups() {
+  try {
+    if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const files = fs.readdirSync(BACKUP_DIR).filter((f) => f.startsWith('boostpay_db.')).sort();
+    // keep at most 40 snapshots
+    while (files.length >= 40) {
+      const oldest = files.shift();
+      if (oldest) {
+        try { fs.unlinkSync(path.join(BACKUP_DIR, oldest)); } catch { /* ignore */ }
+      }
+    }
+    return path.join(BACKUP_DIR, `boostpay_db.${stamp}.json`);
+  } catch {
+    return null;
+  }
+}
+
 function writeDb(data: any) {
   try {
     const tempFile = `${DB_FILE}.tmp`;
-    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), 'utf-8');
+    const payload = JSON.stringify(data, null, 2);
+    fs.writeFileSync(tempFile, payload, 'utf-8');
     fs.renameSync(tempFile, DB_FILE);
+
+    // Rolling safety backup (snapshot every 10 writes)
+    writeCount++;
+    if (writeCount % 10 === 0) {
+      const backupFile = rotateBackups();
+      if (backupFile) {
+        fs.writeFileSync(backupFile, payload, 'utf-8');
+      }
+    }
   } catch (err) {
     console.error('Error writing db file:', err);
+  }
+}
+
+/** Newest available backup file path, or null. */
+function newestBackup(): string | null {
+  try {
+    if (!fs.existsSync(BACKUP_DIR)) return null;
+    const files = fs.readdirSync(BACKUP_DIR).filter((f) => f.startsWith('boostpay_db.')).sort();
+    return files.length ? path.join(BACKUP_DIR, files[files.length - 1]) : null;
+  } catch {
+    return null;
   }
 }
 
@@ -2246,6 +2305,59 @@ async function startServer() {
 
       writeDb(db);
       res.json({ success: true, config: db.config });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Manual snapshot + backup list/restore (superadmin) — instant safety copies
+  app.post('/api/admin/backup/save', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const db = readDb();
+    if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupFile = path.join(BACKUP_DIR, `boostpay_db.manual-${stamp}.json`);
+    fs.writeFileSync(backupFile, JSON.stringify(db, null, 2), 'utf-8');
+    recordAuditLog(db, 'ADMIN_BACKUP_SAVE', String(req.authAdmin), `Manual data snapshot saved (${db.users.length} users)`);
+    writeDb(db);
+    res.json({ success: true, file: path.basename(backupFile), users: db.users.length });
+  });
+
+  app.get('/api/admin/backup/list', requireAdmin, requireSuperAdmin, (_req: any, res) => {
+    try {
+      const files = fs.existsSync(BACKUP_DIR)
+        ? fs.readdirSync(BACKUP_DIR).filter((f) => f.startsWith('boostpay_db.')).sort().reverse().slice(0, 40)
+        : [];
+      const withSizes = files.map((f) => {
+        const stat = fs.statSync(path.join(BACKUP_DIR, f));
+        return { name: f, size: stat.size, mtime: stat.mtimeMs };
+      });
+      res.json({ backups: withSizes });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/admin/backup/restore', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const name = String((req.body && req.body.name) || '');
+    if (!name.startsWith('boostpay_db.') || name.includes('..') || name.includes('/')) {
+      return res.status(400).json({ error: 'Invalid backup name.' });
+    }
+    const filePath = path.join(BACKUP_DIR, name);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Backup file not found.' });
+    }
+    try {
+      const restored = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (!restored || !Array.isArray(restored.users)) {
+        return res.status(400).json({ error: 'Backup file is not a valid database.' });
+      }
+      // Keep a snapshot of the current state before overwriting it
+      const db = readDb();
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      fs.writeFileSync(path.join(BACKUP_DIR, `boostpay_db.pre-restore-${stamp}.json`), JSON.stringify(db, null, 2), 'utf-8');
+      recordAuditLog(restored, 'ADMIN_BACKUP_RESTORE', String(req.authAdmin), `Restored data from ${name} (${restored.users.length} users)`);
+      writeDb(restored);
+      res.json({ success: true, users: restored.users.length });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
