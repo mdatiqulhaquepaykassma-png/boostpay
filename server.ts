@@ -2566,16 +2566,146 @@ async function startServer() {
       const name = String(req.params.name || '');
       const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit || '200'), 10) || 200));
       const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
+      const reveal = String(req.query.reveal || '') === '1';
+      if (reveal && (req.authAdminRole || 'SUPERADMIN') !== 'SUPERADMIN') {
+        return res.status(403).json({ error: 'Revealing secret fields requires a SUPERADMIN account.' });
+      }
       const table = collectDbTables(db).find((t) => t.name === name);
       if (!table) return res.status(404).json({ error: 'Table not found.' });
+      if (reveal) {
+        recordAuditLog(db, 'DB_REVEAL', String(req.authAdmin), `Revealed secret fields in table "${name}"`);
+        writeDb(db);
+      }
       res.json({
         name,
         count: table.rows.length,
         columns: collectDbColumns(table.rows),
-        rows: table.rows.slice(offset, offset + limit).map(maskDbRow),
+        rows: table.rows.slice(offset, offset + limit).map((r) => (reveal ? r : maskDbRow(r))),
         limit,
         offset
       });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Firebase-style mutations (SUPERADMIN only; every change is audit-logged) ---
+  const SAFE_FIELD_KEY = (k: any) =>
+    typeof k === 'string' && k.length >= 1 && k.length <= 64 && !['__proto__', 'constructor', 'prototype'].includes(k);
+
+  app.post('/api/admin/db/tables', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const name = String((req.body && req.body.name) || '').trim();
+      if (!/^[A-Za-z][A-Za-z0-9_]{0,32}$/.test(name)) {
+        return res.status(400).json({ error: 'Invalid collection name.' });
+      }
+      const db = readDb();
+      if (db[name] !== undefined) return res.status(400).json({ error: 'Collection already exists.' });
+      db[name] = [];
+      recordAuditLog(db, 'DB_COLLECTION_CREATE', String(req.authAdmin), `Created collection "${name}"`);
+      writeDb(db);
+      res.json({ success: true, name, count: 0 });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/admin/db/tables/:name/rows', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const name = String(req.params.name || '');
+      const db = readDb();
+      if (!Array.isArray(db[name])) return res.status(400).json({ error: 'Collection not found (rows can only be added to array collections).' });
+      const row = (req.body && req.body.row) || {};
+      if (typeof row !== 'object' || Array.isArray(row)) return res.status(400).json({ error: 'Row must be an object.' });
+      for (const k of Object.keys(row)) if (!SAFE_FIELD_KEY(k)) return res.status(400).json({ error: `Invalid field name: ${k}` });
+      if (row.id !== undefined && db[name].some((r: any) => String(r && r.id) === String(row.id))) {
+        return res.status(400).json({ error: 'A row with this id already exists.' });
+      }
+      if (row.id === undefined) row.id = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+      db[name].push(row);
+      recordAuditLog(db, 'DB_ROW_CREATE', String(req.authAdmin), `Created row ${row.id} in "${name}"`);
+      writeDb(db);
+      res.json({ success: true, row: maskDbRow(row) });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.patch('/api/admin/db/tables/:name/rows/:id', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const name = String(req.params.name || '');
+      const id = String(req.params.id || '');
+      const db = readDb();
+      if (!Array.isArray(db[name])) return res.status(400).json({ error: 'Collection not found.' });
+      const idx = db[name].findIndex((r: any) => String(r && r.id) === id);
+      if (idx < 0) return res.status(404).json({ error: 'Row not found.' });
+      const set = (req.body && req.body.set) || {};
+      const unset = Array.isArray(req.body && req.body.unset) ? req.body.unset : [];
+      for (const k of Object.keys(set)) if (!SAFE_FIELD_KEY(k)) return res.status(400).json({ error: `Invalid field name: ${k}` });
+      for (const k of unset) if (!SAFE_FIELD_KEY(k)) return res.status(400).json({ error: `Invalid field name: ${k}` });
+      if (set.id !== undefined && String(set.id) !== id) return res.status(400).json({ error: 'Changing the id is not allowed.' });
+      const row = db[name][idx];
+      for (const [k, v] of Object.entries(set)) row[k] = v;
+      for (const k of unset) delete row[k];
+      recordAuditLog(db, 'DB_ROW_UPDATE', String(req.authAdmin), `Updated row ${id} in "${name}" (set: ${Object.keys(set).join(',') || '-'}, unset: ${unset.join(',') || '-'})`);
+      writeDb(db);
+      res.json({ success: true, row: maskDbRow(row) });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/admin/db/tables/:name/rows/:id', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const name = String(req.params.name || '');
+      const id = String(req.params.id || '');
+      const db = readDb();
+      if (!Array.isArray(db[name])) return res.status(400).json({ error: 'Collection not found.' });
+      const idx = db[name].findIndex((r: any) => String(r && r.id) === id);
+      if (idx < 0) return res.status(404).json({ error: 'Row not found.' });
+      db[name].splice(idx, 1);
+      recordAuditLog(db, 'DB_ROW_DELETE', String(req.authAdmin), `Deleted row ${id} from "${name}"`);
+      writeDb(db);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/admin/db/tables/:name', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const name = String(req.params.name || '');
+      const CORE = new Set(['users', 'transactions', 'messages', 'conversations', 'notifications', 'sessions', 'auditLogs', 'admins', 'config']);
+      if (CORE.has(name)) return res.status(400).json({ error: 'Core collections cannot be deleted.' });
+      const db = readDb();
+      if (db[name] === undefined) return res.status(404).json({ error: 'Collection not found.' });
+      const count = Array.isArray(db[name]) ? db[name].length : 1;
+      delete db[name];
+      recordAuditLog(db, 'DB_COLLECTION_DELETE', String(req.authAdmin), `Deleted collection "${name}" (${count} rows)`);
+      writeDb(db);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.patch('/api/admin/db/tables/:name', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const name = String(req.params.name || '');
+      const db = readDb();
+      const target = db[name];
+      if (!target || typeof target !== 'object' || Array.isArray(target)) {
+        return res.status(400).json({ error: 'Only object tables (like config) can be patched directly.' });
+      }
+      const set = (req.body && req.body.set) || {};
+      const unset = Array.isArray(req.body && req.body.unset) ? req.body.unset : [];
+      for (const k of Object.keys(set)) if (!SAFE_FIELD_KEY(k)) return res.status(400).json({ error: `Invalid field name: ${k}` });
+      for (const k of unset) if (!SAFE_FIELD_KEY(k)) return res.status(400).json({ error: `Invalid field name: ${k}` });
+      for (const [k, v] of Object.entries(set)) target[k] = v;
+      for (const k of unset) delete target[k];
+      recordAuditLog(db, 'DB_CONFIG_UPDATE', String(req.authAdmin), `Updated object table "${name}" (set: ${Object.keys(set).join(',') || '-'}, unset: ${unset.join(',') || '-'})`);
+      writeDb(db);
+      res.json({ success: true, row: maskDbRow(target) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
