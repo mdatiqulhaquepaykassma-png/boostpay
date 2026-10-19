@@ -49,7 +49,7 @@ export interface Message {
   timestamp: number;
   reactions?: Record<string, string[]>; // emoji -> userIds
   /** 'call' renders as a centered call-history row (Telegram style). */
-  kind?: 'text' | 'call' | 'voice' | 'photo';
+  kind?: 'text' | 'call' | 'voice' | 'photo' | 'file' | 'contact' | 'poll' | 'sticker';
   callInfo?: {
     media: 'audio' | 'video';
     outcome: 'completed' | 'missed' | 'declined';
@@ -60,6 +60,20 @@ export interface Message {
   voiceDurationMs?: number;
   /** 'photo' renders as an image bubble. */
   photoData?: string;
+  /** 'file' renders as a downloadable document bubble. */
+  fileData?: string;
+  fileName?: string;
+  fileSize?: number;
+  /** 'contact' renders as a shared contact card. */
+  contactId?: string;
+  /** 'poll' renders as a votable poll. */
+  poll?: {
+    question: string;
+    options: { text: string; votes: string[] }[];
+    closed?: boolean;
+  };
+  /** 'sticker' renders as a big emoji sticker. */
+  stickerEmoji?: string;
   replyTo?: { id: string; text: string; senderId: string };
   forwardedFrom?: string;
   editedAt?: number;
@@ -76,6 +90,11 @@ export interface Conversation {
   mutedBy?: string[];
   members?: string[];
   participants: string[]; // [userId1, userId2], [userId, 'ADMIN_SUPPORT'] or group members
+  /** Group discovery & joining (Telegram-style). */
+  isPublic?: boolean;
+  joinApprovalRequired?: boolean;
+  inviteToken?: string;
+  joinRequests?: { userId: string; at: number }[];
   lastMessage: string;
   lastMessageAt?: number;
   timestamp?: number;

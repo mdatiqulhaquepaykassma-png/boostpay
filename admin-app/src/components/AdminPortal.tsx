@@ -2279,6 +2279,45 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             </div>
                           );
                         }
+                        if (m.kind === 'sticker' && !m.deleted) {
+                          return (
+                            <div key={m.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>
+                              <div className="text-4xl select-none">{m.stickerEmoji || m.text}</div>
+                            </div>
+                          );
+                        }
+                        if (m.kind === 'file' && m.fileData && !m.deleted) {
+                          return (
+                            <div key={m.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>
+                              <a href={m.fileData} download={m.fileName || 'file'} className="max-w-[75%] rounded-2xl border border-zinc-700 bg-zinc-800 px-3 py-2 text-xs text-amber-300 hover:border-amber-500/50">
+                                📎 {m.fileName || 'File'} {m.fileSize ? `(${Math.round(m.fileSize / 1024)} KB)` : ''}
+                              </a>
+                            </div>
+                          );
+                        }
+                        if (m.kind === 'contact' && !m.deleted) {
+                          return (
+                            <div key={m.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>
+                              <div className="max-w-[75%] rounded-2xl border border-sky-500/30 bg-sky-950/40 px-3 py-2 text-xs text-sky-200">
+                                👤 Contact card · User #{m.contactId}
+                              </div>
+                            </div>
+                          );
+                        }
+                        if (m.kind === 'poll' && m.poll && !m.deleted) {
+                          return (
+                            <div key={m.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>
+                              <div className="max-w-[75%] rounded-2xl border border-emerald-500/30 bg-zinc-900 px-3 py-2 text-xs">
+                                <div className="font-bold text-emerald-300 mb-1">📊 {m.poll.question}</div>
+                                {m.poll.options.map((o, oi) => (
+                                  <div key={oi} className="text-zinc-300 text-[11px]">
+                                    · {o.text} <span className="text-zinc-500 font-mono">({o.votes?.length || 0})</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        }
                         if (m.kind === 'photo' && m.photoData && !m.deleted) {
                           return (
                             <div key={m.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>

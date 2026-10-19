@@ -223,6 +223,26 @@ export default function App() {
     };
   }, [activeTab, currentUser?.id]);
 
+  // Deep link: #/join/<token> — Telegram-style group invite links
+  useEffect(() => {
+    if (!currentUser) return;
+    const m = window.location.hash.match(/^#\/join\/([\w-]+)/);
+    if (!m) return;
+    const token = m[1];
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    void (async () => {
+      const res = await BoostPayStore.groupJoin({ token });
+      if (res.ok && res.conversation) {
+        BoostPayStore.triggerToast(`Joined ${res.conversation.name || 'group'}`);
+        setActiveTab('MESSENGER');
+      } else if (res.ok && res.pending) {
+        BoostPayStore.triggerToast('Join request sent — waiting for approval.');
+      } else {
+        BoostPayStore.triggerToast(res.error || 'Invalid invite link.');
+      }
+    })();
+  }, [currentUser?.id]);
+
   // Session expiry: any API 401 while logged in bounces to the login screen
   useEffect(() => {
     const origFetch = window.fetch.bind(window);

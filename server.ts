@@ -1599,12 +1599,20 @@ async function startServer() {
 
   app.post('/api/chat/send', (req: any, res) => {
     try {
-      const { senderId, senderRole, recipientId, text, voiceData, voiceDurationMs, photoData, replyTo, forwardedFrom } = req.body;
+      const { senderId, senderRole, recipientId, text, voiceData, voiceDurationMs, photoData, replyTo, forwardedFrom, fileData, fileName, fileSize, contactId, poll, stickerEmoji } = req.body;
       const rawKind = String((req.body && req.body.kind) || '');
       const isVoice = rawKind === 'voice';
       const isPhoto = rawKind === 'photo';
+      const isFile = rawKind === 'file';
+      const isContact = rawKind === 'contact';
+      const isPoll = rawKind === 'poll';
+      const isSticker = rawKind === 'sticker';
       const cleanVoice = isVoice && typeof voiceData === 'string' ? voiceData : '';
       const cleanPhoto = isPhoto && typeof photoData === 'string' ? photoData : '';
+      const cleanFile = isFile && typeof fileData === 'string' ? fileData : '';
+      const cleanFileName = isFile ? String(fileName || 'file').slice(0, 120) : '';
+      const cleanContact = isContact ? String(contactId || '').trim() : '';
+      const cleanSticker = isSticker ? String(stickerEmoji || '').trim().slice(0, 16) : '';
       const cleanReplyTo = replyTo && typeof replyTo === 'object'
         ? {
             id: String(replyTo.id || '').slice(0, 64),
@@ -1613,7 +1621,14 @@ async function startServer() {
           }
         : null;
       const cleanForwarded = forwardedFrom ? String(forwardedFrom).slice(0, 32) : '';
-      const cleanText = (text || (isVoice ? '🎤 Voice message' : '') || (isPhoto ? '📷 Photo' : '')).trim();
+      const cleanText = (text
+        || (isVoice ? '🎤 Voice message' : '')
+        || (isPhoto ? '📷 Photo' : '')
+        || (isFile ? `📎 ${cleanFileName}` : '')
+        || (isContact ? '👤 Contact card' : '')
+        || (isPoll ? `📊 Poll: ${String((poll && poll.question) || '').slice(0, 80)}` : '')
+        || (isSticker ? cleanSticker : '')
+      ).trim();
       const cleanSender = String(senderId || '').trim();
       const cleanRecipient = String(recipientId || '').trim();
 
@@ -1624,6 +1639,24 @@ async function startServer() {
       } else if (isPhoto) {
         if (!cleanPhoto.startsWith('data:image/') || cleanPhoto.length > 5200000) {
           return res.status(400).json({ error: 'Invalid photo.' });
+        }
+      } else if (isFile) {
+        if (!cleanFile.startsWith('data:') || cleanFile.length > 5200000) {
+          return res.status(400).json({ error: 'Invalid file (max ~4MB).' });
+        }
+      } else if (isContact) {
+        if (!cleanContact) {
+          return res.status(400).json({ error: 'contactId is required.' });
+        }
+      } else if (isPoll) {
+        const pq = poll && typeof poll === 'object' ? String(poll.question || '').trim() : '';
+        const popts = poll && Array.isArray(poll.options) ? poll.options : [];
+        if (!pq || popts.length < 2 || popts.length > 10) {
+          return res.status(400).json({ error: 'Poll needs a question and 2-10 options.' });
+        }
+      } else if (isSticker) {
+        if (!cleanSticker) {
+          return res.status(400).json({ error: 'Sticker emoji is required.' });
         }
       } else if (!cleanText) {
         return res.status(400).json({ error: 'Message cannot be empty.' });
@@ -1674,9 +1707,39 @@ async function startServer() {
           gMsg.voiceData = cleanVoice;
           gMsg.voiceDurationMs = Math.max(0, Math.min(180000, Number(voiceDurationMs) || 0));
           gMsg.text = '🎤 Voice message';
+        } else if (isPhoto && cleanPhoto) {
+          gMsg.kind = 'photo';
+          gMsg.photoData = cleanPhoto;
+          gMsg.text = text && String(text).trim() ? String(text).trim().slice(0, 500) : '📷 Photo';
+        } else if (isFile && cleanFile) {
+          gMsg.kind = 'file';
+          gMsg.fileData = cleanFile;
+          gMsg.fileName = cleanFileName;
+          gMsg.fileSize = Math.max(0, Math.min(5200000, Number(fileSize) || cleanFile.length));
+          gMsg.text = `📎 ${cleanFileName}`;
+        } else if (isContact && cleanContact) {
+          gMsg.kind = 'contact';
+          gMsg.contactId = cleanContact;
+          gMsg.text = '👤 Contact card';
+        } else if (isPoll) {
+          gMsg.kind = 'poll';
+          gMsg.poll = {
+            question: String(poll.question).trim().slice(0, 300),
+            options: poll.options.slice(0, 10).map((o: any) => ({ text: String((o && o.text) || '').trim().slice(0, 120), votes: [] })),
+            closed: false
+          };
+          gMsg.text = `📊 Poll: ${gMsg.poll.question.slice(0, 80)}`;
+        } else if (isSticker && cleanSticker) {
+          gMsg.kind = 'sticker';
+          gMsg.stickerEmoji = cleanSticker;
+          gMsg.text = cleanSticker;
         }
+        if (cleanReplyTo) gMsg.replyTo = cleanReplyTo;
+        if (cleanForwarded) gMsg.forwardedFrom = cleanForwarded;
+        gMsg.pinned = false;
+        gMsg.deleted = false;
         db.messages.push(gMsg);
-        groupConv.lastMessage = cleanText.slice(0, 120);
+        groupConv.lastMessage = (isSticker ? `${cleanSticker} Sticker` : cleanText).slice(0, 120);
         groupConv.timestamp = nowG;
         writeDb(db);
         broadcastChatMessage(gMsg, groupConv);
@@ -1700,15 +1763,17 @@ async function startServer() {
       // Find or create conversation
       let conv = db.conversations.find((c: any) => c.id === convId);
       if (!conv) {
-        // Also check if any existing conversation matches both participants
+        // Also check if any existing conversation matches the exact participant
+        // multiset (sorted-join compare handles self-DMs like ['1','1'] safely).
+        const wantKey = [...participants].sort().join('|');
         conv = db.conversations.find((c: any) =>
           Array.isArray(c.participants) &&
           c.participants.length === participants.length &&
-          participants.every((p: string) => c.participants.includes(p))
+          [...c.participants].sort().join('|') === wantKey
         );
       }
 
-      const previewText = isPhoto ? '📷 Photo' : isVoice ? '🎤 Voice message' : cleanText.slice(0, 120);
+      const previewText = isPhoto ? '📷 Photo' : isVoice ? '🎤 Voice message' : isFile ? `📎 ${cleanFileName}` : isSticker ? `${cleanSticker} Sticker` : cleanText.slice(0, 120);
       if (!conv) {
         conv = {
           id: convId,
@@ -1752,6 +1817,28 @@ async function startServer() {
         newMsg.kind = 'photo';
         newMsg.photoData = cleanPhoto;
         newMsg.text = text && String(text).trim() ? String(text).trim().slice(0, 500) : '📷 Photo';
+      } else if (isFile && cleanFile) {
+        newMsg.kind = 'file';
+        newMsg.fileData = cleanFile;
+        newMsg.fileName = cleanFileName;
+        newMsg.fileSize = Math.max(0, Math.min(5200000, Number(fileSize) || cleanFile.length));
+        newMsg.text = `📎 ${cleanFileName}`;
+      } else if (isContact && cleanContact) {
+        newMsg.kind = 'contact';
+        newMsg.contactId = cleanContact;
+        newMsg.text = '👤 Contact card';
+      } else if (isPoll) {
+        newMsg.kind = 'poll';
+        newMsg.poll = {
+          question: String(poll.question).trim().slice(0, 300),
+          options: poll.options.slice(0, 10).map((o: any) => ({ text: String((o && o.text) || '').trim().slice(0, 120), votes: [] })),
+          closed: false
+        };
+        newMsg.text = `📊 Poll: ${newMsg.poll.question.slice(0, 80)}`;
+      } else if (isSticker && cleanSticker) {
+        newMsg.kind = 'sticker';
+        newMsg.stickerEmoji = cleanSticker;
+        newMsg.text = cleanSticker;
       }
       if (cleanReplyTo) newMsg.replyTo = cleanReplyTo;
       if (cleanForwarded) newMsg.forwardedFrom = cleanForwarded;
@@ -2056,6 +2143,271 @@ async function startServer() {
       writeDb(db);
       broadcastConvEvent(conv, { type: 'chat_event', event: 'conversation_updated', conversation: conv, conversationId: conv.id });
       res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Telegram-style group features: discovery, invite links, join requests,
+  // public/private groups, polls and GROUP VOICE CALLS (mesh via call-signal).
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // In-memory group call rooms (ephemeral — not persisted to the DB)
+  const groupCalls = new Map<string, { callId: string; conversationId: string; hostId: string; startedAt: number; participants: { userId: string; joinedAt: number; muted: boolean }[] }>();
+
+  function gcSnapshot(gc: any) {
+    return {
+      callId: gc.callId,
+      conversationId: gc.conversationId,
+      hostId: gc.hostId,
+      startedAt: gc.startedAt,
+      participants: gc.participants
+    };
+  }
+
+  // Public groups the caller has not joined yet (discover tab)
+  app.get('/api/chat/groups/discover', (req: any, res) => {
+    try {
+      const who = String(req.authUserId || '');
+      const db = readDb();
+      const groups = (db.conversations || [])
+        .filter((c: any) => c.type === 'group' && c.isPublic && !(c.participants || []).includes(who))
+        .map((c: any) => ({
+          id: c.id,
+          name: c.name || 'Unnamed Group',
+          memberCount: (c.participants || []).length,
+          joinApprovalRequired: !!c.joinApprovalRequired
+        }));
+      res.json({ groups });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Creator-only: create/regenerate the group invite link
+  app.post('/api/chat/group/invite', (req: any, res) => {
+    try {
+      const { conversationId } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const who = String(req.authUserId || '');
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId && c.type === 'group');
+      if (!conv) return res.status(404).json({ error: 'Group not found.' });
+      if (String(conv.createdBy) !== who) {
+        return res.status(403).json({ error: 'Only the group creator can manage invite links.' });
+      }
+      conv.inviteToken = 'inv-' + Math.random().toString(36).slice(2, 12);
+      writeDb(db);
+      broadcastConvEvent(conv, { type: 'chat_event', event: 'conversation_updated', conversation: conv, conversationId: conv.id });
+      res.json({ success: true, token: conv.inviteToken, url: `${req.protocol}://${req.get('host')}/#/join/${conv.inviteToken}` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Join a group by invite link token or by id (public discover)
+  app.post('/api/chat/group/join', (req: any, res) => {
+    try {
+      const { token, conversationId } = req.body;
+      const who = String(req.authUserId || '');
+      const cleanToken = String(token || '').trim();
+      const cleanId = String(conversationId || '').trim();
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) =>
+        c.type === 'group' && (cleanToken ? c.inviteToken === cleanToken : c.id === cleanId)
+      );
+      if (!conv) return res.status(404).json({ error: 'Group or invite link not found.' });
+      if ((conv.participants || []).includes(who)) {
+        return res.json({ success: true, conversation: conv, alreadyMember: true });
+      }
+      // Invite-link joins always get in immediately (private) — Telegram semantics:
+      // approval is required only for discover-based joins on groups that enabled it.
+      const needsApproval = !cleanToken && !!conv.joinApprovalRequired;
+      if (needsApproval) {
+        if (!Array.isArray(conv.joinRequests)) conv.joinRequests = [];
+        if (!conv.joinRequests.some((r: any) => r.userId === who)) {
+          conv.joinRequests.push({ userId: who, at: Date.now() });
+        }
+        writeDb(db);
+        broadcastConvEvent(conv, { type: 'chat_event', event: 'conversation_updated', conversation: conv, conversationId: conv.id });
+        return res.json({ success: true, pending: true });
+      }
+      conv.participants = Array.isArray(conv.participants) ? conv.participants : [];
+      conv.participants.push(who);
+      if (!conv.lastRead) conv.lastRead = {};
+      if (!conv.mutedBy) conv.mutedBy = [];
+      conv.joinRequests = (conv.joinRequests || []).filter((r: any) => r.userId !== who);
+      writeDb(db);
+      broadcastConvEvent(conv, { type: 'chat_event', event: 'conversation_updated', conversation: conv, conversationId: conv.id });
+      res.json({ success: true, conversation: conv });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Creator: approve/decline a join request
+  app.post('/api/chat/group/requests', (req: any, res) => {
+    try {
+      const { conversationId, userId, approve } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const cleanUser = String(userId || '').trim();
+      const who = String(req.authUserId || '');
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId && c.type === 'group');
+      if (!conv) return res.status(404).json({ error: 'Group not found.' });
+      if (String(conv.createdBy) !== who) {
+        return res.status(403).json({ error: 'Only the group creator can manage join requests.' });
+      }
+      conv.joinRequests = (conv.joinRequests || []).filter((r: any) => r.userId !== cleanUser);
+      if (approve) {
+        conv.participants = Array.isArray(conv.participants) ? conv.participants : [];
+        if (!conv.participants.includes(cleanUser)) conv.participants.push(cleanUser);
+        if (!conv.lastRead) conv.lastRead = {};
+      }
+      writeDb(db);
+      broadcastConvEvent(conv, { type: 'chat_event', event: 'conversation_updated', conversation: conv, conversationId: conv.id });
+      res.json({ success: true, conversation: conv });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Creator: toggle public/private + join-approval
+  app.post('/api/chat/group/privacy', (req: any, res) => {
+    try {
+      const { conversationId, isPublic, joinApprovalRequired } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const who = String(req.authUserId || '');
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId && c.type === 'group');
+      if (!conv) return res.status(404).json({ error: 'Group not found.' });
+      if (String(conv.createdBy) !== who) {
+        return res.status(403).json({ error: 'Only the group creator can change privacy.' });
+      }
+      if (typeof isPublic === 'boolean') conv.isPublic = isPublic;
+      if (typeof joinApprovalRequired === 'boolean') conv.joinApprovalRequired = joinApprovalRequired;
+      writeDb(db);
+      broadcastConvEvent(conv, { type: 'chat_event', event: 'conversation_updated', conversation: conv, conversationId: conv.id });
+      res.json({ success: true, conversation: conv });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Poll voting
+  app.post('/api/chat/poll/vote', (req: any, res) => {
+    try {
+      const { messageId, optionIndex } = req.body;
+      const cleanMsg = String(messageId || '').trim();
+      const who = String(req.authUserId || '');
+      const idx = Number(optionIndex);
+      const db = readDb();
+      const msg = (db.messages || []).find((m: any) => m.id === cleanMsg && m.kind === 'poll' && m.poll);
+      if (!msg) return res.status(404).json({ error: 'Poll not found.' });
+      if (msg.deleted) return res.status(400).json({ error: 'This poll was deleted.' });
+      if (msg.poll.closed) return res.status(400).json({ error: 'This poll is closed.' });
+      if (!Number.isInteger(idx) || idx < 0 || idx >= msg.poll.options.length) {
+        return res.status(400).json({ error: 'Invalid option.' });
+      }
+      // one vote per user; switching sides allowed (Telegram behaviour)
+      for (const opt of msg.poll.options) {
+        opt.votes = (opt.votes || []).filter((v: string) => v !== who);
+      }
+      msg.poll.options[idx].votes.push(who);
+      writeDb(db);
+      const conv = (db.conversations || []).find((c: any) => c.id === msg.conversationId);
+      if (conv) broadcastConvEvent(conv, { type: 'chat_event', event: 'poll_updated', messageId: msg.id, poll: msg.poll, conversationId: conv.id });
+      res.json({ success: true, poll: msg.poll });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── GROUP VOICE CALLS (mesh WebRTC; SDP/ICE rides /api/chat/call-signal) ──
+  app.post('/api/chat/group-call/start', (req: any, res) => {
+    try {
+      const { conversationId } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const who = String(req.authUserId || '');
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId && c.type === 'group');
+      if (!conv) return res.status(404).json({ error: 'Group not found.' });
+      if (!(conv.participants || []).includes(who)) {
+        return res.status(403).json({ error: 'You are not a member of this group.' });
+      }
+      let gc = groupCalls.get(cleanId);
+      if (!gc) {
+        gc = {
+          callId: 'GC-' + Math.floor(10000000 + Math.random() * 90000000),
+          conversationId: cleanId,
+          hostId: who,
+          startedAt: Date.now(),
+          participants: [{ userId: who, joinedAt: Date.now(), muted: false }]
+        };
+        groupCalls.set(cleanId, gc);
+        broadcastConvEvent(conv, { type: 'chat_event', event: 'group_call', action: 'started', call: gcSnapshot(gc), conversationId: cleanId });
+      } else if (!gc.participants.some((pt) => pt.userId === who)) {
+        gc.participants.push({ userId: who, joinedAt: Date.now(), muted: false });
+        broadcastConvEvent(conv, { type: 'chat_event', event: 'group_call', action: 'joined', call: gcSnapshot(gc), conversationId: cleanId });
+      }
+      res.json({ success: true, call: gcSnapshot(gc!) });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/chat/group-call/join', (req: any, res) => {
+    try {
+      const { conversationId, callId } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const who = String(req.authUserId || '');
+      const gc = groupCalls.get(cleanId);
+      if (!gc || (callId && gc.callId !== callId)) {
+        return res.status(404).json({ error: 'No active group call.' });
+      }
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId);
+      if (!conv || !(conv.participants || []).includes(who)) {
+        return res.status(403).json({ error: 'You are not a member of this group.' });
+      }
+      if (!gc.participants.some((pt) => pt.userId === who)) {
+        gc.participants.push({ userId: who, joinedAt: Date.now(), muted: false });
+        broadcastConvEvent(conv, { type: 'chat_event', event: 'group_call', action: 'joined', call: gcSnapshot(gc), conversationId: cleanId });
+      }
+      res.json({ success: true, call: gcSnapshot(gc) });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/chat/group-call/leave', (req: any, res) => {
+    try {
+      const { conversationId } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const who = String(req.authUserId || '');
+      const gc = groupCalls.get(cleanId);
+      if (!gc) return res.json({ success: true });
+      gc.participants = gc.participants.filter((pt) => pt.userId !== who);
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId);
+      if (gc.participants.length === 0) {
+        groupCalls.delete(cleanId);
+        if (conv) broadcastConvEvent(conv, { type: 'chat_event', event: 'group_call', action: 'ended', call: gcSnapshot(gc), conversationId: cleanId });
+      } else {
+        if (conv) broadcastConvEvent(conv, { type: 'chat_event', event: 'group_call', action: 'left', call: gcSnapshot(gc), conversationId: cleanId });
+      }
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/chat/group-call/state', (req: any, res) => {
+    try {
+      const cleanId = String(req.query.conversationId || '').trim();
+      const gc = groupCalls.get(cleanId);
+      res.json({ call: gc ? gcSnapshot(gc) : null });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -3230,7 +3582,7 @@ async function startServer() {
   // Group chat
   // =========================================================================
   app.post('/api/chat/groups', requireUser, (req: any, res) => {
-    const { name, memberIds } = req.body || {};
+    const { name, memberIds, isPublic, joinApprovalRequired } = req.body || {};
     const cleanName = String(name || '').trim().slice(0, 60);
     const members = Array.isArray(memberIds)
       ? [...new Set<string>(memberIds.map((x: any) => String(x)).filter(Boolean))]
@@ -3251,7 +3603,11 @@ async function startServer() {
       createdBy: me,
       participants: [me, ...valid],
       lastMessage: 'Group created',
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      lastRead: {},
+      mutedBy: [],
+      isPublic: !!isPublic,
+      joinApprovalRequired: !!joinApprovalRequired
     };
     if (!db.conversations) db.conversations = [];
     db.conversations.unshift(conv);

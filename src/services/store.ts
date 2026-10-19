@@ -364,6 +364,16 @@ export class BoostPayStore {
         convs[idx] = { ...convs[idx], lastRead: { ...(convs[idx].lastRead || {}), [data.userId]: data.at } } as any;
         convsChanged = true;
       }
+    } else if (ev === 'poll_updated') {
+      const idx = msgs.findIndex((m) => m.id === data.messageId);
+      if (idx >= 0) {
+        msgs[idx] = { ...msgs[idx], poll: data.poll } as any;
+        msgsChanged = true;
+      }
+    } else if (ev === 'group_call') {
+      for (const cb of this.groupCallListeners) {
+        try { cb(data); } catch { /* listener error */ }
+      }
     } else if (ev === 'conversation_updated' && data.conversation) {
       const idx = convs.findIndex((c) => c.id === data.conversation.id);
       if (idx >= 0) {
@@ -674,6 +684,12 @@ export class BoostPayStore {
       replyTo?: { id: string; text: string; senderId: string } | null;
       photoData?: string;
       forwardedFrom?: string;
+      fileData?: string;
+      fileName?: string;
+      fileSize?: number;
+      contactId?: string;
+      poll?: { question: string; options: { text: string; votes: string[] }[] };
+      stickerEmoji?: string;
     }
   ): Promise<{ success: boolean; message?: Message; conversation?: Conversation; error?: string }> {
     const cur = this.getCurrentUser();
@@ -697,6 +713,10 @@ export class BoostPayStore {
       ...(callInfo ? { kind: 'call' as const, callInfo } : {}),
       ...(voice ? { kind: 'voice' as const, voiceData: voice.data, voiceDurationMs: voice.durationMs, text: '🎤 Voice message' } : {}),
       ...(extra?.photoData ? { kind: 'photo' as const, photoData: extra.photoData, text: text || '📷 Photo' } : {}),
+      ...(extra?.fileData ? { kind: 'file' as const, fileData: extra.fileData, fileName: extra.fileName, fileSize: extra.fileSize, text: text || `📎 ${extra.fileName || 'file'}` } : {}),
+      ...(extra?.contactId ? { kind: 'contact' as const, contactId: extra.contactId, text: text || '👤 Contact card' } : {}),
+      ...(extra?.poll ? { kind: 'poll' as const, poll: extra.poll, text: text || `📊 Poll: ${extra.poll.question}` } : {}),
+      ...(extra?.stickerEmoji ? { kind: 'sticker' as const, stickerEmoji: extra.stickerEmoji, text: extra.stickerEmoji } : {}),
       ...(extra?.replyTo ? { replyTo: extra.replyTo } : {}),
       ...(extra?.forwardedFrom ? { forwardedFrom: extra.forwardedFrom } : {})
     };
@@ -739,6 +759,10 @@ export class BoostPayStore {
           ...(callInfo ? { kind: 'call', callInfo } : {}),
           ...(voice ? { kind: 'voice', voiceData: voice.data, voiceDurationMs: voice.durationMs } : {}),
           ...(extra?.photoData ? { kind: 'photo', photoData: extra.photoData } : {}),
+          ...(extra?.fileData ? { kind: 'file', fileData: extra.fileData, fileName: extra.fileName, fileSize: extra.fileSize } : {}),
+          ...(extra?.contactId ? { kind: 'contact', contactId: extra.contactId } : {}),
+          ...(extra?.poll ? { kind: 'poll', poll: extra.poll } : {}),
+          ...(extra?.stickerEmoji ? { kind: 'sticker', stickerEmoji: extra.stickerEmoji } : {}),
           ...(extra?.replyTo ? { replyTo: extra.replyTo } : {}),
           ...(extra?.forwardedFrom ? { forwardedFrom: extra.forwardedFrom } : {})
         })
@@ -1629,6 +1653,126 @@ export class BoostPayStore {
 
   // --- WebRTC call signaling (ephemeral, rides the SSE stream) ---
   private static callSignalListeners: ((ev: { from: string; signal: any }) => void)[] = [];
+  private static groupCallListeners: ((ev: any) => void)[] = [];
+
+  /** Live group-call room events (started/joined/left/ended). */
+  static onGroupCall(listener: (ev: any) => void): () => void {
+    this.groupCallListeners.push(listener);
+    return () => {
+      this.groupCallListeners = this.groupCallListeners.filter((l) => l !== listener);
+    };
+  }
+
+  // ── Telegram-style group features ──
+  static async discoverGroups(): Promise<{ id: string; name: string; memberCount: number; joinApprovalRequired: boolean }[]> {
+    try {
+      const res = await fetch('/api/chat/groups/discover', { headers: this.authHeaders() });
+      const data = await res.json().catch(() => ({}));
+      return res.ok ? (data.groups || []) : [];
+    } catch { return []; }
+  }
+
+  static async groupInvite(conversationId: string): Promise<{ token: string; url: string } | null> {
+    try {
+      const res = await fetch('/api/chat/group/invite', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId })
+      });
+      const data = await res.json().catch(() => ({}));
+      return res.ok ? { token: data.token, url: data.url } : null;
+    } catch { return null; }
+  }
+
+  static async groupJoin(opts: { token?: string; conversationId?: string }): Promise<{ ok: boolean; pending?: boolean; conversation?: any; error?: string }> {
+    try {
+      const res = await fetch('/api/chat/group/join', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify(opts)
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, error: data.error || 'Failed to join group.' };
+      return { ok: true, pending: !!data.pending, conversation: data.conversation };
+    } catch { return { ok: false, error: 'Network error.' }; }
+  }
+
+  static async groupRequestResolve(conversationId: string, userId: string, approve: boolean): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/group/requests', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId, userId, approve })
+      });
+      return res.ok;
+    } catch { return false; }
+  }
+
+  static async groupPrivacy(conversationId: string, isPublic: boolean, joinApprovalRequired: boolean): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/group/privacy', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId, isPublic, joinApprovalRequired })
+      });
+      return res.ok;
+    } catch { return false; }
+  }
+
+  static async pollVote(messageId: string, optionIndex: number): Promise<any | null> {
+    try {
+      const res = await fetch('/api/chat/poll/vote', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ messageId, optionIndex })
+      });
+      const data = await res.json().catch(() => ({}));
+      return res.ok ? (data.poll || null) : null;
+    } catch { return null; }
+  }
+
+  // ── Group voice calls (mesh) ──
+  static async gcStart(conversationId: string): Promise<any | null> {
+    try {
+      const res = await fetch('/api/chat/group-call/start', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId })
+      });
+      const data = await res.json().catch(() => ({}));
+      return res.ok ? (data.call || null) : null;
+    } catch { return null; }
+  }
+
+  static async gcJoin(conversationId: string, callId: string): Promise<any | null> {
+    try {
+      const res = await fetch('/api/chat/group-call/join', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId, callId })
+      });
+      const data = await res.json().catch(() => ({}));
+      return res.ok ? (data.call || null) : null;
+    } catch { return null; }
+  }
+
+  static async gcLeave(conversationId: string): Promise<void> {
+    try {
+      await fetch('/api/chat/group-call/leave', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId })
+      });
+    } catch { /* ignore */ }
+  }
+
+  static async gcState(conversationId: string): Promise<any | null> {
+    try {
+      const res = await fetch(`/api/chat/group-call/state?conversationId=${encodeURIComponent(conversationId)}`, { headers: this.authHeaders() });
+      const data = await res.json().catch(() => ({}));
+      return res.ok ? (data.call || null) : null;
+    } catch { return null; }
+  }
 
   static onCallSignal(listener: (ev: { from: string; signal: any }) => void): () => void {
     this.callSignalListeners.push(listener);
@@ -1732,10 +1876,19 @@ export class BoostPayStore {
     };
   }
 
-  static triggerToast(toast: ToastData): void {
+  static triggerToast(toast: ToastData | string): void {
+    const data: ToastData = typeof toast === 'string'
+      ? {
+          id: `T-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          type: 'SYSTEM_ALERT',
+          title: 'Notice',
+          message: toast,
+          timestamp: Date.now()
+        }
+      : toast;
     for (const listener of this.toastListeners) {
       try {
-        listener(toast);
+        listener(data);
       } catch (e) {
         console.warn('Toast listener execution note:', e);
       }

@@ -49,7 +49,7 @@ export interface Message {
   text: string;
   timestamp: number;
   reactions?: Record<string, string[]>; // emoji -> userIds
-  kind?: 'text' | 'call' | 'voice' | 'photo'; // call-history / voice-note / photo entries
+  kind?: 'text' | 'call' | 'voice' | 'photo' | 'file' | 'contact' | 'poll' | 'sticker'; // call-history / voice-note / photo / file / contact / poll / sticker entries
   callInfo?: {
     media?: 'audio' | 'video';
     outcome?: 'completed' | 'missed' | 'declined';
@@ -58,6 +58,12 @@ export interface Message {
   voiceData?: string;
   voiceDurationMs?: number;
   photoData?: string;
+  fileData?: string;
+  fileName?: string;
+  fileSize?: number;
+  contactId?: string;
+  poll?: { question: string; options: { text: string; votes: string[] }[]; closed?: boolean };
+  stickerEmoji?: string;
   replyTo?: { id: string; text: string; senderId: string };
   forwardedFrom?: string;
   editedAt?: number;
@@ -71,6 +77,10 @@ export interface Conversation {
   name?: string; // Group display name
   createdBy?: string;
   participants: string[]; // [userId1, userId2], [userId, 'ADMIN_SUPPORT'] or group members
+  isPublic?: boolean;
+  joinApprovalRequired?: boolean;
+  inviteToken?: string;
+  joinRequests?: { userId: string; at: number }[];
   lastMessage: string;
   lastMessageAt?: number;
   timestamp?: number;
