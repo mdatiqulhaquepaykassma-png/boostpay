@@ -386,8 +386,9 @@ export const FraudView: FC = () => {
 
   return (
     <div className="space-y-5">
-      <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
-        <span className="font-bold">📍 Kon feature ON/OFF kothay pabo?</span> → Ekhane <b>Antifraud Config</b> card e <b>Feature ON/OFF</b> toggle gulo ache (Velocity, Multi-IP, Device Fingerprint, Login Spam, Chat Spam, Scam). Niche <b>Per-reason freeze time (minutes)</b> list e protita karon er jonno koto min freeze hobe set korte parben + live countdown frozen accounts e dekhabe.
+      <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 flex items-center justify-between gap-3">
+        <div><span className="font-bold">📍 Kon feature ON/OFF kothay pabo?</span> → Ekhane <b>Antifraud Config</b> card e <b>Feature ON/OFF</b> toggle gulo ache (Velocity, Multi-IP, Device Fingerprint, Login Spam, Chat Spam, Scam). Niche <b>Per-reason freeze time (minutes)</b> list e protita karon er jonno koto min freeze hobe set korte parben + live countdown frozen accounts e dekhabe.</div>
+        <button onClick={()=> document.getElementById('antifraud-config-section')?.scrollIntoView({behavior:'smooth', block:'start'})} className="shrink-0 rounded-xl bg-amber-500 px-3 py-1.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer">Antifraud Config ↓</button>
       </div>
       <div className="flex items-center justify-between">
         <div>
@@ -506,15 +507,15 @@ const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = 
     maxLoginsPer10Min: config.maxLoginsPer10Min ?? 5,
     maxMessagesPerMin: config.maxMessagesPerMin ?? 10,
     newAccountLargeTransferThreshold: config.newAccountLargeTransferThreshold ?? 100,
-    freezeDurations: config.freezeDurations || { velocity:60, multiIp:60, newAccountLarge:30, deviceFingerprint:120, loginSpam:60, chatSpam:30, scam:120 },
+    freezeDurations: (()=>{ if(config.freezeDurations){ const o:any={}; for(const k in config.freezeDurations) o[k]=Math.round((config.freezeDurations[k]||0)/60000); return o; } return { velocity:60, multiIp:60, newAccountLarge:30, deviceFingerprint:120, loginSpam:60, chatSpam:30, scam:120 }; })(),
     features: config.features || { velocity:true, multiIp:true, newAccountLarge:true, deviceFingerprint:true, loginSpam:true, chatSpam:true, scam:true }
   }));
-  useEffect(()=>{ setForm({ enabled: config.enabled!==false, velocityEnabled: config.velocityEnabled!==false, maxTransfersPer10Min: config.maxTransfersPer10Min, maxLoginsPer10Min: config.maxLoginsPer10Min, maxMessagesPerMin: config.maxMessagesPerMin, newAccountLargeTransferThreshold: config.newAccountLargeTransferThreshold, freezeDurations: config.freezeDurations, features: config.features || { velocity:true, multiIp:true, newAccountLarge:true, deviceFingerprint:true, loginSpam:true, chatSpam:true, scam:true } }); },[config]);
+  useEffect(()=>{ const fd:any={}; if(config.freezeDurations) for(const k in config.freezeDurations) fd[k]=Math.round((config.freezeDurations[k]||0)/60000); setForm({ enabled: config.enabled!==false, velocityEnabled: config.velocityEnabled!==false, maxTransfersPer10Min: config.maxTransfersPer10Min, maxLoginsPer10Min: config.maxLoginsPer10Min, maxMessagesPerMin: config.maxMessagesPerMin, newAccountLargeTransferThreshold: config.newAccountLargeTransferThreshold, freezeDurations: Object.keys(fd).length?fd:{ velocity:60, multiIp:60, newAccountLarge:30, deviceFingerprint:120, loginSpam:60, chatSpam:30, scam:120 }, features: config.features || { velocity:true, multiIp:true, newAccountLarge:true, deviceFingerprint:true, loginSpam:true, chatSpam:true, scam:true } }); },[config]);
   const save = async () => {
     setSaving(true); setMsg(''); setErr('');
     try{
       const payload:any = { enabled: !!form.enabled, velocityEnabled: !!form.velocityEnabled, maxTransfersPer10Min: Number(form.maxTransfersPer10Min), maxLoginsPer10Min: Number(form.maxLoginsPer10Min), maxMessagesPerMin: Number(form.maxMessagesPerMin), newAccountLargeTransferThreshold: Number(form.newAccountLargeTransferThreshold), freezeDurations: {}, features: form.features };
-      for(const k in form.freezeDurations) payload.freezeDurations[k]=Number(form.freezeDurations[k]);
+      for(const k in form.freezeDurations) { let v=parseInt(String(form.freezeDurations[k]),10); if(!isNaN(v)&&v>=1) payload.freezeDurations[k]=v*60000; }
       await BoostPayStore.adminApi('/api/admin/antifraud/config', { method:'POST', body: payload });
       setMsg('Antifraud config saved ✅'); onSaved();
     }catch(e:any){ setErr(e.message||'Save failed'); }
@@ -523,7 +524,7 @@ const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = 
   const labels:any = { velocity:'Velocity (same IP rapid)', multiIp:'Multi-IP cluster', newAccountLarge:'New account large', deviceFingerprint:'Device multi-account', loginSpam:'Login spam', chatSpam:'Chat spam', scam:'Scam' };
   const desc:any = { velocity:'High velocity transfers from same user (10m window)', multiIp:'Multiple users sharing same IP doing transfers', newAccountLarge:'New account <24h sending large amount', deviceFingerprint:'Same device/browser with multiple accounts', loginSpam:'Many login attempts in 10 min (brute force)', chatSpam:'Flooding chat with many messages per minute', scam:'General scam / suspicious pattern' };
   return (
-    <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
+    <div id="antifraud-config-section" className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
       <h3 className="text-xs font-bold text-white flex items-center justify-between">Antifraud Config — features & per-reason freeze {msg && <span className="text-emerald-400 text-[11px]">{msg}</span>} {err && <span className="text-red-400 text-[11px]">{err}</span>}</h3>
       <div className="flex flex-wrap gap-2 p-2 rounded-xl bg-zinc-950 border border-zinc-800">
         <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" checked={!!form.enabled} onChange={e=> setForm((f:any)=>({...f, enabled: e.target.checked}))} className="h-4 w-4 accent-amber-500"/> Antifraud Master ON</label>
@@ -693,7 +694,7 @@ export const AdminSystemSettingsView: FC = () => {
               <div key={k} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2">
                 <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">{k}</div>
                 <div className="flex items-center gap-1 mt-1">
-                  <input type="number" value={Math.round((cfg.antifraud.freezeDurations[k]||0)/60000)} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, freezeDurations:{...cfg.antifraud.freezeDurations, [k]: parseInt(e.target.value)||0}}})} className="w-16 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs font-mono text-white"/>
+                  <input type="number" value={Math.round((cfg.antifraud.freezeDurations[k]||0)/60000)} onChange={e=> { const mv=parseInt(e.target.value)||0; setCfg({...cfg, antifraud:{...cfg.antifraud, freezeDurations:{...cfg.antifraud.freezeDurations, [k]: mv*60000}}}); }} className="w-16 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs font-mono text-white"/>
                   <span className="text-[10px] text-zinc-500">min</span>
                 </div>
               </div>

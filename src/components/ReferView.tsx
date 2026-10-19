@@ -24,6 +24,7 @@ export const ReferView: FC<{ userId: string }> = ({ userId }) => {
   const [countdown, setCountdown] = useState('');
   const [nowTick, setNowTick] = useState(Date.now());
   const [lastFetch, setLastFetch] = useState(Date.now());
+  const [selectedCommission, setSelectedCommission] = useState<any>(null);
 
   const refresh = async () => {
     const d = await BoostPayStore.getReferMy();
@@ -251,14 +252,36 @@ export const ReferView: FC<{ userId: string }> = ({ userId }) => {
           <h3 className="text-xs font-bold text-white flex items-center gap-2 mb-3"><DollarSign className="w-4 h-4 text-emerald-400"/> Recent Referral Earnings</h3>
           <div className="space-y-2">
             {recent.slice(0,10).map((c:any)=>(
-              <div key={c.id} className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2">
+              <button key={c.id} onClick={()=> setSelectedCommission(c)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 hover:border-amber-500/30 hover:bg-zinc-900 transition text-left cursor-pointer">
                 <div>
                   <div className="text-xs font-mono font-bold text-emerald-400">+${formatPrecisionAmount(c.amount,8)}</div>
                   <div className="text-[10px] text-zinc-500">From #{c.referredId} @ {c.rate}% • {new Date(c.timestamp).toLocaleDateString()}</div>
                 </div>
                 <span className="rounded-full bg-amber-500/15 text-amber-400 px-2 py-1 text-[10px] font-mono font-bold">{c.rate}%</span>
-              </div>
+              </button>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Commission Detail Modal */}
+      {selectedCommission && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={()=> setSelectedCommission(null)}>
+          <div onClick={e=> e.stopPropagation()} className="w-full max-w-sm rounded-3xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl space-y-3">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <h3 className="text-sm font-bold text-white">Referral Commission Details</h3>
+              <button onClick={()=> setSelectedCommission(null)} className="rounded-xl p-1 text-zinc-500 hover:text-white cursor-pointer">✕</button>
+            </div>
+            <div className="space-y-2 text-xs">
+              <div className="flex justify-between"><span className="text-zinc-500">Amount</span><span className="font-mono font-bold text-emerald-400">+${formatPrecisionAmount(selectedCommission.amount,8)}</span></div>
+              <div className="flex justify-between"><span className="text-zinc-500">Rate</span><span className="font-mono text-amber-400">{selectedCommission.rate}%</span></div>
+              <div className="flex justify-between"><span className="text-zinc-500">From User</span><span className="font-mono text-white">#{selectedCommission.referredId}</span></div>
+              <div className="flex justify-between"><span className="text-zinc-500">Date</span><span className="text-zinc-300">{new Date(selectedCommission.timestamp).toLocaleString()}</span></div>
+              {selectedCommission.sourceTxId && <div className="flex justify-between"><span className="text-zinc-500">Source TX</span><span className="font-mono text-xs text-zinc-400">{selectedCommission.sourceTxId}</span></div>}
+              {selectedCommission.dayKey && <div className="flex justify-between"><span className="text-zinc-500">Day Key</span><span className="font-mono text-zinc-400">{selectedCommission.dayKey}</span></div>}
+              <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-[11px] text-zinc-400">This commission was earned when User #{selectedCommission.referredId} completed a compounding cycle. Your rate {selectedCommission.rate}% was applied to their yield.</div>
+            </div>
+            <button onClick={()=> setSelectedCommission(null)} className="w-full rounded-xl bg-zinc-800 py-2 text-xs font-semibold text-white hover:bg-zinc-700 cursor-pointer">Close</button>
           </div>
         </div>
       )}

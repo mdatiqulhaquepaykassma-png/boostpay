@@ -927,13 +927,14 @@ export class BoostPayStore {
     userId: string,
     isFrozen: boolean,
     reason?: string,
-    adminEmail?: string
+    adminEmail?: string,
+    extra?: { isPermanent?:boolean; durationMs?:number }
   ): Promise<{ success: boolean; user?: User; error?: string }> {
     try {
       const res = await fetch('/api/admin/users/freeze', {
         method: 'POST',
         headers: this.adminAuthHeaders(),
-        body: JSON.stringify({ userId, isFrozen, reason, adminEmail })
+        body: JSON.stringify({ userId, isFrozen, reason, adminEmail, ...(extra||{}) })
       });
       const data = await res.json();
       if (res.ok && data.user) {

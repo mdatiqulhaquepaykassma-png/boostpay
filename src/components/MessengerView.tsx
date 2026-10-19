@@ -107,6 +107,7 @@ interface MessageItemProps {
   onPin: (m: Message) => void;
   onEdit: (m: Message) => void;
   onDelete: (m: Message) => void;
+  onForwardSms?: (m: Message) => void;
   showSeen?: boolean;
   onOpenImage?: (dataUrl: string) => void;
   onVotePoll?: (m: Message, optionIndex: number) => void;
@@ -123,6 +124,7 @@ const MessageItem = memo(({
   copiedMsgId,
   onReply,
   onForward,
+  onForwardSms,
   onPin,
   onEdit,
   onDelete,
@@ -375,6 +377,9 @@ const MessageItem = memo(({
           <button type="button" onClick={() => onForward(m)} className="text-zinc-400 hover:text-sky-300 p-1 rounded transition cursor-pointer" title="Forward">
             <Forward className="w-3 h-3" />
           </button>
+          <button type="button" onClick={() => onForwardSms?.(m)} className="text-zinc-400 hover:text-emerald-300 p-1 rounded transition cursor-pointer" title="Forward via SMS">
+            <span className="text-[9px] font-bold border border-current rounded px-1 py-0.5">SMS</span>
+          </button>
           <button type="button" onClick={() => onPin(m)} className={`p-1 rounded transition cursor-pointer ${m.pinned ? 'text-amber-400' : 'text-zinc-400 hover:text-amber-300'}`} title={m.pinned ? 'Unpin' : 'Pin'}>
             <Pin className="w-3 h-3" />
           </button>
@@ -446,10 +451,24 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const [peerStatus, setPeerStatus] = useState<{lastSeen:number, allowMessages:boolean, allowVoiceCall:boolean}|null>(null);
   const fetchNearby = async () => {
     setShowNearby(true);
+    // Request location permission, save to settings, then fetch nearby sorted by distance
+    try {
+      if (navigator.geolocation) {
+        await new Promise<void>((resolve) => {
+          navigator.geolocation.getCurrentPosition(async (pos) => {
+            try { await BoostPayStore.updateMyChatSettings({ lat: pos.coords.latitude, lng: pos.coords.longitude } as any); } catch {}
+            resolve();
+          }, () => resolve(), { enableHighAccuracy: false, timeout: 5000 });
+        });
+      }
+    } catch {}
     const n = await BoostPayStore.getNearbyUsers();
+    // Sort nearest-first if distance present
+    n.sort((a:any,b:any)=> (a.distanceKm ?? a.distance ?? 9999) - (b.distanceKm ?? b.distance ?? 9999));
     setNearbyUsers(n);
   };
   const [infoMsg, setInfoMsg] = useState<Message | null>(null);
+  const [msgFilter, setMsgFilter] = useState<'all'|'p2p'|'support'|'groups'>('all');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Public group discovery + join requests + invite links
@@ -596,10 +615,14 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     Array.isArray(c.participants) && c.participants.includes(currentUser.id)
   );
 
-  const filteredConversations = userConversations.filter(c =>
-    c.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    c.participants.some(p => p.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
+  const filteredConversations = userConversations.filter(c =>{
+    const hay = (c.id.toLowerCase().includes(searchTerm.toLowerCase()) || c.participants.some(p => p.toLowerCase().includes(searchTerm.toLowerCase())));
+    if (!hay) return false;
+    if (msgFilter==='p2p') return c.type!=='group' && !c.participants.includes('ADMIN_SUPPORT') && !c.participants.every(p=>p===currentUser.id);
+    if (msgFilter==='support') return c.participants.includes('ADMIN_SUPPORT');
+    if (msgFilter==='groups') return c.type==='group';
+    return true;
+  });
 
   const getOtherParticipant = (conv: Conversation): string => {
     if (conv.type === 'group') return conv.id;
@@ -850,6 +873,14 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     }
   };
   const isPeerBlocked = activeConv && activeConv.type !== 'group' ? blockedIds.includes(getOtherParticipant(activeConv)) : false;
+  const handleForwardViaSms = (m: Message) => {
+    const body = encodeURIComponent(m.text || '');
+    // sms: URI opens native SMS app; fallback to share API
+    try { window.location.href = `sms:?&body=${body}`; } catch {}
+    // also copy to clipboard as fallback
+    try { navigator.clipboard?.writeText(m.text || ''); } catch {}
+    BoostPayStore.triggerToast('SMS app opened — message copied');
+  };
 
   // ───────────────── GROUP CALL (MESH) ─────────────────
   const gcEnsurePeer = (peerId: string): RTCPeerConnection => {
@@ -1490,6 +1521,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                       copiedMsgId={copiedMsgId}
                       onReply={handleReply}
                       onForward={handleForwardStart}
+                      onForwardSms={handleForwardViaSms}
                       onPin={handlePin}
                       onEdit={handleEdit}
                       onDelete={handleDelete}
@@ -1756,6 +1788,12 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             <Users className="w-3.5 h-3.5"/> Nearby Users
           </button>
 
+          {/* P2P vs Support tabs */}
+          <div className="shrink-0 flex gap-1.5 mb-3 bg-zinc-900 border border-zinc-800 rounded-2xl p-1">
+            {(['all','p2p','support','groups'] as const).map(tab=>(
+              <button key={tab} onClick={()=>setMsgFilter(tab)} className={`flex-1 rounded-xl py-1.5 text-[11px] font-bold capitalize transition cursor-pointer ${msgFilter===tab ? 'bg-amber-500 text-zinc-950 shadow' : 'text-zinc-400 hover:text-zinc-200'}`}>{tab==='p2p'?'P2P': tab.charAt(0).toUpperCase()+tab.slice(1)}</button>
+            ))}
+          </div>
           {/* Scrollable Conversations list */}
           <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-2 pb-4">
             {filteredConversations.map((conv) => {

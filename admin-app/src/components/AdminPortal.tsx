@@ -156,6 +156,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [freezeModalUser, setFreezeModalUser] = useState<User | null>(null);
   const [freezeReason, setFreezeReason] = useState('');
   const [freezeLoading, setFreezeLoading] = useState(false);
+  const [freezeType, setFreezeType] = useState<'permanent'|'temporary'>('permanent');
+  const [freezeDurationMin, setFreezeDurationMin] = useState('60');
 
   // Password reset modal
   const [newPasswordInput, setNewPasswordInput] = useState('');
@@ -314,11 +316,34 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     }
   };
 
+  const refreshStatsOnly = async () => {
+    try {
+      const res = await fetch('/api/admin/stats', { headers: BoostPayStore.adminAuthHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        setStats(prev=> (prev.totalUsers===data.totalUsers&&prev.totalLiquidity===data.totalLiquidity&&prev.totalProfitPaid===data.totalProfitPaid&&prev.activeBoosters===data.activeBoosters&&prev.pausedBoosters===data.pausedBoosters&&prev.totalTransactions===data.totalTransactions) ? prev : { totalUsers:data.totalUsers, totalLiquidity:data.totalLiquidity, totalProfitPaid:data.totalProfitPaid, activeBoosters:data.activeBoosters, pausedBoosters:data.pausedBoosters, totalTransactions:data.totalTransactions, dokployStatus:data.dokployStatus||prev.dokployStatus });
+        if (data.config) { setConfig(prev=> (prev.minuteRatePercent===data.config.minuteRatePercent&&prev.hourlyRatePercent===data.config.hourlyRatePercent&&prev.minBoostMs===data.config.minBoostMs&&prev.maxBoostMs===data.config.maxBoostMs) ? prev : data.config); }
+      }
+    } catch {}
+  };
+  const refreshTabData = async (tab:string) => {
+    try {
+      if (tab==='USERS' || tab==='OVERVIEW') {
+        const r=await fetch('/api/admin/users', { headers: BoostPayStore.adminAuthHeaders() });
+        if(r.ok){ const d=await r.json(); setUsers(d.users); BoostPayStore.saveUsers(d.users); }
+      }
+      if (tab==='AUDIT') { const logs=await BoostPayStore.getAuditLogs(); if(logs) setAuditLogs(logs); }
+      if (tab==='TRANSACTIONS') { try{ const dbRes=await fetch('/api/db',{headers:BoostPayStore.adminAuthHeaders()}); if(dbRes.ok){ const dbData=await dbRes.json(); if(Array.isArray(dbData.transactions)) setTransactions(dbData.transactions); } }catch{} }
+      if (tab==='SUPPORT' || tab==='OVERVIEW') { await BoostPayStore.syncChatState('ADMIN_SUPPORT'); setConversations(BoostPayStore.getConversations()); setMessages(BoostPayStore.getMessages()); }
+    } catch(e){ console.warn('Tab refresh failed',e); }
+  };
+  useEffect(()=>{ if(adminSession?.isLoggedIn) refreshTabData(activeTab); },[activeTab, adminSession?.isLoggedIn]);
   // Lazy load: only poll lightweight stats every 10s, heavy data on demand per tab
   useEffect(() => {
     if (adminSession?.isLoggedIn) {
-      refreshData(false);
-      const interval = setInterval(() => refreshData(false), 10000);
+      refreshStatsOnly();
+      refreshTabData(activeTab);
+      const interval = setInterval(() => refreshStatsOnly(), 10000);
 
       // Connect to real-time chat SSE stream for Admin Support
       const unsubStream = BoostPayStore.initChatStream('ADMIN_SUPPORT');
@@ -434,11 +459,13 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     if (!freezeModalUser) return;
     setFreezeLoading(true);
     const newFreezeStatus = !freezeModalUser.isFrozen;
+    const durationMs = freezeType==='temporary' ? (parseInt(freezeDurationMin,10)||60)*60000 : undefined;
     const res = await BoostPayStore.adminToggleFreezeUser(
       freezeModalUser.id,
       newFreezeStatus,
       freezeReason.trim() || (newFreezeStatus ? 'Administrative security freeze' : 'Account unfreezing by admin'),
-      adminSession?.email
+      adminSession?.email,
+      { isPermanent: freezeType==='permanent', durationMs }
     );
     setFreezeLoading(false);
     if (res.success && res.user) {
@@ -770,6 +797,10 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     return true;
   });
 
+  const [usersPage, setUsersPage] = useState(0);
+  const usersPageSize = 25;
+  const paginatedUsers = filteredUsers.slice(usersPage*usersPageSize, (usersPage+1)*usersPageSize);
+  const totalUsersPages = Math.max(1, Math.ceil(filteredUsers.length / usersPageSize));
   // Filter Transactions — with pagination to avoid loading all at once
   const [txPage, setTxPage] = useState(0);
   const txPageSize = 25;
@@ -1736,6 +1767,13 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {/* ======================================================== */}
         {/* TAB 3: AUDIT ACTION LOG TRAIL                            */}
         {/* ======================================================== */}
+          <div className="flex items-center justify-between mt-3 text-xs">
+            <span className="text-zinc-500">Page {usersPage+1} / {totalUsersPages} — {filteredUsers.length} users</span>
+            <div className="flex gap-2">
+              <button disabled={usersPage===0} onClick={()=>setUsersPage(p=>Math.max(0,p-1))} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1 disabled:opacity-40 cursor-pointer">Prev</button>
+              <button disabled={usersPage+1>=totalUsersPages} onClick={()=>setUsersPage(p=>p+1)} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1 disabled:opacity-40 cursor-pointer">Next</button>
+            </div>
+          </div>
         {activeTab === 'AUDIT' && (
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
@@ -2274,6 +2312,20 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       </h4>
                     </div>
                     <div className="flex items-center gap-2">
+                      {(() => {
+                        const peer = activeConv.participants.find(p => p !== 'ADMIN_SUPPORT');
+                        const peerUser = users.find(u => u.id === peer);
+                        const frozen = !!peerUser?.isFrozen;
+                        return peer ? (
+                          <button
+                            onClick={() => { if (peerUser) { setFreezeModalUser(peerUser); setFreezeReason(''); } }}
+                            title={frozen ? "Unfreeze account" : "Freeze account"}
+                            className={`px-2.5 py-1.5 rounded-full border text-[11px] font-bold flex items-center gap-1 transition cursor-pointer ${frozen ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/25' : 'bg-sky-500/15 border-sky-500/30 text-sky-400 hover:bg-sky-500/25'}`}
+                          >
+                            <Snowflake className="w-3 h-3" />{frozen ? 'Unfreeze' : 'Freeze'}
+                          </button>
+                        ) : null;
+                      })()}
                       <button
                         onClick={() => {
                           const peer = activeConv.participants.find(p => p !== 'ADMIN_SUPPORT');
@@ -2517,7 +2569,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   }}
                   className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
                 >
-                  {users.map(u => (
+                  {paginatedUsers.map(u => (
                     <option key={u.id} value={u.id}>
                       User #{u.id} — Current Balance: ${u.balance.toFixed(2)} ({u.email || 'No email'})
                     </option>
@@ -2682,6 +2734,22 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   autoFocus
                 />
               </div>
+              {!freezeModalUser.isFrozen && (
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 space-y-2">
+                  <div className="text-[10px] font-bold text-zinc-400 uppercase">Freeze type — kon dhoroner lock</div>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={()=>setFreezeType('permanent')} className={`flex-1 rounded-xl py-2 text-xs font-bold border transition cursor-pointer ${freezeType==='permanent' ? 'bg-cyan-500 border-cyan-400 text-zinc-950' : 'bg-zinc-900 border-zinc-800 text-zinc-300'}`}>Permanent (manual unfreeze)</button>
+                    <button type="button" onClick={()=>setFreezeType('temporary')} className={`flex-1 rounded-xl py-2 text-xs font-bold border transition cursor-pointer ${freezeType==='temporary' ? 'bg-amber-500 border-amber-400 text-zinc-950' : 'bg-zinc-900 border-zinc-800 text-zinc-300'}`}>Temporary (auto-unfreeze)</button>
+                  </div>
+                  {freezeType==='temporary' && (
+                    <div className="flex items-center gap-2">
+                      <input type="number" min="1" value={freezeDurationMin} onChange={e=>setFreezeDurationMin(e.target.value)} className="w-20 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs font-mono text-white"/>
+                      <span className="text-[11px] text-zinc-400">minutes — {Math.floor((parseInt(freezeDurationMin)||0)/60)}h {(parseInt(freezeDurationMin)||0)%60}m auto-unfreeze</span>
+                    </div>
+                  )}
+                  {freezeType==='permanent' && <p className="text-[11px] text-zinc-500">Permanent freeze kokhono auto-unfreeze hobe na — admin manually unfreeze korte hobe.</p>}
+                </div>
+              )}
 
               <div className="flex gap-2 pt-2">
                 <button

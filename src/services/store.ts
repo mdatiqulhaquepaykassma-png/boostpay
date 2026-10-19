@@ -1064,9 +1064,9 @@ export class BoostPayStore {
       return { success:false, error: j.error||'Failed' };
     } catch(e:any){ return { success:false, error: e.message } }
   }
-  static async adminToggleFreezeUser(userId:string, isFrozen:boolean, reason:string, adminEmail?:string): Promise<any>{
+  static async adminToggleFreezeUser(userId:string, isFrozen:boolean, reason:string, adminEmail?:string, extra?: { isPermanent?:boolean; durationMs?:number }): Promise<any>{
     try{
-      const res = await fetch('/api/admin/users/freeze', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId, isFrozen, reason, adminEmail }) });
+      const res = await fetch('/api/admin/users/freeze', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId, isFrozen, reason, adminEmail, ...(extra||{}) }) });
       if (res.ok) return await res.json();
       const j=await res.json().catch(()=>({}));
       return { success:false, error: j.error||'Failed' };

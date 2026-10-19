@@ -341,6 +341,29 @@ function readDb() {
       }
     }
     if (!parsed.notifications) parsed.notifications = INITIAL_DB.notifications || [];
+    // FIX #8: migrate old permanently frozen users that were auto-freeze but missing temp flags
+    if (Array.isArray(parsed.users)) {
+      const nowTmp = Date.now();
+      for (const u of parsed.users) {
+        if ((u as any).isFrozen) {
+          const reason = String((u as any).frozenReason||'');
+          const isAuto = reason.includes('Auto anti-fraud') || reason.includes('Auto anti-fraud 1h freeze') || reason.includes('Device fingerprint') || reason.includes('High velocity') || reason.includes('Multi-account');
+          const hasUntil = !!(u as any).frozenUntil;
+          const isTemp = !!(u as any).isTempFreeze;
+          if (isAuto && !hasUntil) {
+            // old auto freeze without expiry — convert to temp 1h from now
+            (u as any).frozenUntil = nowTmp + 3600000;
+            (u as any).isTempFreeze = true;
+            if (!reason) (u as any).frozenReason = 'Auto anti-fraud 1h freeze (migrated)';
+          }
+          // also ensure any temp freeze older than 24h gets corrected to not stay forever
+          if (isTemp && hasUntil && (u as any).frozenUntil < nowTmp - 24*3600000) {
+            (u as any).frozenUntil = nowTmp + 3600000;
+          }
+        }
+        // ensure allowMessages etc exist (from earlier backfill) — already handled elsewhere
+      }
+    }
     if (Array.isArray(parsed.users)) for (const u of parsed.users) { if ((u as any).allowMessages===undefined) (u as any).allowMessages=true; if ((u as any).allowVoiceCall===undefined) (u as any).allowVoiceCall=true; if (!(u as any).lastSeen) (u as any).lastSeen = (u as any).createdAt||Date.now(); }
     if (!parsed.config) parsed.config = INITIAL_DB.config;
     if (!parsed.auditLogs) parsed.auditLogs = INITIAL_DB.auditLogs || [];
@@ -1034,7 +1057,12 @@ setInterval(() => {
 
     for (const user of db.users) {
       // Auto-unfreeze 1h temp locks + freeze pause
-      if (user.isFrozen && (user as any).isTempFreeze && (user as any).frozenUntil && now >= (user as any).frozenUntil) {
+      // FIX #8: auto-unfreeze temp, and also migrate permanent auto-freezes that should be temp
+      if (user.isFrozen && (user as any).frozenUntil && now >= (user as any).frozenUntil) {
+        // if isTempFreeze false but reason is auto, still unfreeze (fix old permanent bug)
+        const reasonTmp = String((user as any).frozenReason||'');
+        const isAutoTmp = reasonTmp.includes('Auto anti-fraud') || reasonTmp.includes('Auto anti-fraud 1h freeze');
+        if ((user as any).isTempFreeze || isAutoTmp) {
         user.isFrozen = false;
         (user as any).isTempFreeze = false;
         (user as any).frozenUntil = undefined;
@@ -1043,6 +1071,7 @@ setInterval(() => {
         recordAuditLog(db, 'FRAUD_AUTO_UNFREEZE', 'SYSTEM', `Auto-unfroze User #${user.id} after 1h temp lock expired`, user.id);
         pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: user.id, type: 'SECURITY_ALERT', title: 'BOOSTPAY-SECURITY', message: 'Your temporary 1-hour security freeze has been lifted. You may now transact and resume compounding.', timestamp: now, isRead: false });
         broadcastUserUpdate(db, user.id);
+      }
       }
       // Frozen accounts: compounding is paused (can never progress while frozen)
       if (user.isFrozen && user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
@@ -3446,6 +3475,26 @@ async function startServer() {
 
       user.isFrozen = Boolean(isFrozen);
       user.frozenReason = user.isFrozen ? String(reason || 'Administrative action') : undefined;
+      // Handle permanent vs temporary freeze: durationMs => temp, no duration => permanent
+      if (user.isFrozen) {
+        const durMs = (req.body as any).durationMs !== undefined ? parseInt(String((req.body as any).durationMs),10) : undefined;
+        const isPermanent = (req.body as any).isPermanent === true || ((req.body as any).freezeType === 'permanent');
+        if (!isNaN(durMs as any) && (durMs as number) >= 60000) {
+          (user as any).frozenUntil = Date.now() + (durMs as number);
+          (user as any).isTempFreeze = true;
+        } else if (isPermanent) {
+          (user as any).frozenUntil = undefined;
+          (user as any).isTempFreeze = false;
+        } else if (!isPermanent && durMs === undefined) {
+          // default: permanent if no duration supplied and not explicitly temp
+          // For backward compat: treat as permanent (no auto-unfreeze)
+          (user as any).frozenUntil = undefined;
+          (user as any).isTempFreeze = false;
+        }
+      } else {
+        (user as any).frozenUntil = undefined;
+        (user as any).isTempFreeze = false;
+      }
       // Frozen accounts must not keep compounding — pause any active boost
       if (user.isFrozen && user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
         user.boostState.isPaused = true;
