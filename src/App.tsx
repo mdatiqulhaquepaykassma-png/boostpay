@@ -21,7 +21,7 @@ import { WalletSkeleton } from './components/WalletSkeleton';
 import { SecurityModal } from './components/SecurityModal';
 import { QRPayModal } from './components/QRPayModal';
 import { usePWAInstall } from './hooks/usePWAInstall';
-import { AlertTriangle, X, QrCode, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, X, QrCode } from 'lucide-react';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(() => BoostPayStore.getCurrentUser());
@@ -30,11 +30,6 @@ export default function App() {
   const [isQROpen, setIsQROpen] = useState(false);
   const [qrPrefill, setQrPrefill] = useState<{ userId: string; name?: string } | null>(null);
   const [systemBanner, setSystemBanner] = useState<{ message: string; title?: string } | null>(null);
-  const [isOnAdminRoute, setIsOnAdminRoute] = useState<boolean>(() => {
-    const path = window.location.pathname.toLowerCase();
-    const hash = window.location.hash.toLowerCase();
-    return path === '/admin' || path.startsWith('/admin/') || hash === '#/admin' || hash === '#admin';
-  });
   const [activeTab, setActiveTab] = useState<'WALLET' | 'LEADERBOARD' | 'INBOX' | 'MESSENGER'>('WALLET');
   const [chatTargetPeerId, setChatTargetPeerId] = useState<string | null>(null);
 
@@ -56,20 +51,8 @@ export default function App() {
     await install();
   };
 
-  // Listen to /admin URL route changes
+  // Initialize backend sync without logging out the user
   useEffect(() => {
-    const checkAdminRoute = () => {
-      const path = window.location.pathname.toLowerCase();
-      const hash = window.location.hash.toLowerCase();
-      const isAdminPath = path === '/admin' || path.startsWith('/admin/') || hash === '#/admin' || hash === '#admin';
-      setIsOnAdminRoute(isAdminPath);
-    };
-
-    checkAdminRoute();
-    window.addEventListener('popstate', checkAdminRoute);
-    window.addEventListener('hashchange', checkAdminRoute);
-
-    // Initialize backend sync without logging out the user
     BoostPayStore.initSync()
       .then(async () => {
         const freshUser = BoostPayStore.getCurrentUser();
@@ -85,11 +68,6 @@ export default function App() {
       .catch(() => {
         setIsInitialSyncing(false);
       });
-
-    return () => {
-      window.removeEventListener('popstate', checkAdminRoute);
-      window.removeEventListener('hashchange', checkAdminRoute);
-    };
   }, []);
 
   // Listen for real-time incoming transfer toasts (chat popups disabled)
@@ -181,16 +159,6 @@ export default function App() {
     };
   }, [currentUser?.id]);
 
-  const handleExitAdmin = () => {
-    setIsOnAdminRoute(false);
-    if (window.location.pathname.startsWith('/admin')) {
-      window.history.pushState({}, '', '/');
-    }
-    if (window.location.hash.includes('admin')) {
-      window.location.hash = '';
-    }
-  };
-
   const handleLogout = () => {
     BoostPayStore.setCurrentUser(null);
     setCurrentUser(null);
@@ -255,32 +223,7 @@ export default function App() {
         }}
       />
 
-      {/* 1. Admin console moved to its own separate, secure application */}
-      {isOnAdminRoute ? (
-        <div className="flex-1 flex flex-col items-center justify-center p-6">
-          <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-8 max-w-sm text-center shadow-2xl">
-            <div className="mx-auto mb-4 w-12 h-12 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
-              <ShieldCheck className="w-6 h-6 text-amber-400" />
-            </div>
-            <h2 className="text-lg font-black text-white mb-2">Admin Console Moved 🔒</h2>
-            <p className="text-sm text-zinc-400 mb-5 leading-relaxed">
-              For security, the admin panel now lives in its own separate application — user and admin are fully isolated.
-            </p>
-            <a
-              href="https://admin.72-60-42-18.sslip.io"
-              className="inline-flex items-center gap-2 rounded-xl bg-amber-500 px-5 py-2.5 text-sm font-bold text-zinc-950 hover:bg-amber-400 transition"
-            >
-              Open Admin Console →
-            </a>
-            <button
-              onClick={handleExitAdmin}
-              className="mt-4 block w-full text-xs text-zinc-500 hover:text-zinc-300 cursor-pointer"
-            >
-              Back to BoostPay
-            </button>
-          </div>
-        </div>
-      ) : !currentUser ? (
+      {!currentUser ? (
         /* 2. AUTHENTICATION GATE */
         <div className="flex-1 flex flex-col justify-center">
           <AuthGate onLoginUser={handleUserLogin} />

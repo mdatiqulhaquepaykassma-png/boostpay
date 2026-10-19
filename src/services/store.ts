@@ -4,7 +4,6 @@ import { copyToClipboard as clipboardHelper } from '../utils/clipboard';
 const STORAGE_USERS = 'boostpay_users_v4';
 const STORAGE_CURRENT_USER = 'boostpay_current_user_v4';
 const STORAGE_CURRENT_USER_ID = 'boostpay_current_user_id_v4';
-const STORAGE_ADMIN_SESSION = 'boostpay_admin_session_v4';
 const STORAGE_AUTH_TOKEN = 'boostpay_auth_token_v1';
 const STORAGE_TRANSACTIONS = 'boostpay_transactions_v4';
 const STORAGE_CONVERSATIONS = 'boostpay_conversations_v4';
@@ -39,13 +38,6 @@ const LEGACY_USER_ID_KEYS = [
   'boostpay_user_id'
 ];
 
-export interface AdminSession {
-  isLoggedIn: boolean;
-  email: string;
-  token: string;
-  loginTime: number;
-  role?: 'SUPERADMIN' | 'SUPPORT';
-}
 
 export const MNEMONIC_WORDS = [
   'alpha', 'beacon', 'crypto', 'dynamic', 'ember', 'falcon',
@@ -757,46 +749,8 @@ export class BoostPayStore {
     }
   }
 
-  /**
-   * Admin session management: completely decoupled from user state!
-   * Persists across page reload and reboots.
-   */
-  static getAdminSession(): AdminSession | null {
-    try {
-      const raw = localStorage.getItem(STORAGE_ADMIN_SESSION);
-      if (!raw) return null;
-      const parsed: AdminSession = JSON.parse(raw);
-      if (parsed && parsed.isLoggedIn) {
-        return parsed;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }
 
-  static setAdminSession(emailOrSession: string | Partial<AdminSession>): AdminSession {
-    const session: AdminSession = typeof emailOrSession === 'string'
-      ? {
-          isLoggedIn: true,
-          email: emailOrSession,
-          token: 'admin_tok_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9),
-          loginTime: Date.now()
-        }
-      : {
-          isLoggedIn: true,
-          email: emailOrSession.email || 'admin@gmail.com',
-          token: emailOrSession.token || ('admin_tok_' + Date.now()),
-          loginTime: emailOrSession.loginTime || Date.now()
-        };
 
-    localStorage.setItem(STORAGE_ADMIN_SESSION, JSON.stringify(session));
-    return session;
-  }
-
-  static clearAdminSession(): void {
-    localStorage.removeItem(STORAGE_ADMIN_SESSION);
-  }
 
   // --- Session tokens (sent as `Authorization: Bearer <token>` on API calls) ---
 
@@ -820,13 +774,6 @@ export class BoostPayStore {
     return headers;
   }
 
-  /** Headers for endpoints that require a signed admin token. */
-  static adminAuthHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    const sess = this.getAdminSession();
-    if (sess && sess.token) headers['Authorization'] = `Bearer ${sess.token}`;
-    return headers;
-  }
 
   /** The server strips credentials from responses — keep any local secrets. */
   private static mergeServerUser(serverUser: User, localUser?: User | null): User {
@@ -837,95 +784,8 @@ export class BoostPayStore {
     };
   }
 
-  /**
-   * Authoritative Admin Balance Adjustment (Credit / Debit)
-   */
-  static async adminAdjustBalance(
-    userId: string,
-    type: 'CREDIT' | 'DEBIT',
-    amount: number,
-    notes?: string
-  ): Promise<{ success: boolean; user?: User; error?: string }> {
-    try {
-      const res = await fetch('/api/admin/adjust', {
-        method: 'POST',
-        headers: this.adminAuthHeaders(),
-        body: JSON.stringify({ userId, type, amount, notes })
-      });
 
-      const data = await res.json();
-      if (res.ok && data.user) {
-        const users = this.getUsers();
-        const idx = users.findIndex(u => String(u.id) === String(userId));
-        if (idx >= 0) {
-          users[idx] = data.user;
-          localStorage.setItem(STORAGE_USERS, JSON.stringify(users));
-          localStorage.setItem('boostpay_users', JSON.stringify(users));
-        }
 
-        const cur = this.getCurrentUser();
-        if (cur && String(cur.id) === String(userId)) {
-          this.setCurrentUser(data.user);
-        }
-
-        return { success: true, user: data.user };
-      }
-      return { success: false, error: data.error || 'Server rejected balance adjustment' };
-    } catch (err: any) {
-      return { success: false, error: err.message || 'Network error during balance adjustment' };
-    }
-  }
-
-  /**
-   * Toggle account freeze status (Admin security control)
-   */
-  static async adminToggleFreezeUser(
-    userId: string,
-    isFrozen: boolean,
-    reason?: string,
-    adminEmail?: string
-  ): Promise<{ success: boolean; user?: User; error?: string }> {
-    try {
-      const res = await fetch('/api/admin/users/freeze', {
-        method: 'POST',
-        headers: this.adminAuthHeaders(),
-        body: JSON.stringify({ userId, isFrozen, reason, adminEmail })
-      });
-      const data = await res.json();
-      if (res.ok && data.user) {
-        const users = this.getUsers();
-        const idx = users.findIndex(u => String(u.id) === String(userId));
-        if (idx >= 0) {
-          users[idx] = data.user;
-          localStorage.setItem(STORAGE_USERS, JSON.stringify(users));
-        }
-        const cur = this.getCurrentUser();
-        if (cur && String(cur.id) === String(userId)) {
-          this.setCurrentUser(data.user);
-        }
-        return { success: true, user: data.user };
-      }
-      return { success: false, error: data.error || 'Failed to toggle account freeze' };
-    } catch (err: any) {
-      return { success: false, error: err.message || 'Network error during freeze action' };
-    }
-  }
-
-  /**
-   * Retrieve immutable system audit log entries
-   */
-  static async getAuditLogs(): Promise<AuditLog[]> {
-    try {
-      const res = await fetch('/api/admin/audit-logs', { headers: this.adminAuthHeaders() });
-      if (res.ok) {
-        const data = await res.json();
-        return Array.isArray(data.logs) ? data.logs : [];
-      }
-    } catch (err) {
-      console.warn('Failed to fetch audit logs:', err);
-    }
-    return [];
-  }
 
   /**
    * Real-time server sync for a single user (keeps boost state and balance 100% accurate)
@@ -1593,17 +1453,6 @@ export class BoostPayStore {
     return [];
   }
 
-  /** Authenticated admin API helper (throws on error responses). */
-  static async adminApi(path: string, options: { method?: string; body?: any } = {}): Promise<any> {
-    const res = await fetch(path, {
-      method: options.method || 'GET',
-      headers: this.adminAuthHeaders(),
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-    return data;
-  }
 
   static async getBanner(): Promise<any | null> {
     try {
@@ -1756,77 +1605,6 @@ export class BoostPayStore {
 
   // --- Database Storage Health, Export & Disaster Recovery ---
 
-  static async probeDatabaseStorage(): Promise<any> {
-    try {
-      const res = await fetch('/api/admin/storage/probe', { headers: this.adminAuthHeaders() });
-      if (res.ok) {
-        return await res.json();
-      }
-    } catch (err) {
-      console.warn('probeDatabaseStorage network error:', err);
-    }
-    return {
-      success: false,
-      storageType: 'LOCAL_FALLBACK',
-      totalUsers: this.getUsers().length,
-      totalTransactions: this.getTransactions().length,
-      totalNotifications: this.getNotifications().length,
-      isWritable: true,
-      latencyMs: 0
-    };
-  }
 
-  static async exportDatabase(): Promise<Blob | null> {
-    try {
-      const res = await fetch('/api/admin/db/export', { headers: this.adminAuthHeaders() });
-      if (res.ok) {
-        return await res.blob();
-      }
-    } catch (err) {
-      console.warn('exportDatabase network error:', err);
-    }
 
-    // Fallback: package from local storage
-    const fallbackDb = {
-      users: this.getUsers(),
-      transactions: this.getTransactions(),
-      conversations: this.getConversations(),
-      messages: this.getMessages(),
-      notifications: this.getNotifications(),
-      config: this.getConfig(),
-      exportedAt: Date.now()
-    };
-    return new Blob([JSON.stringify(fallbackDb, null, 2)], { type: 'application/json' });
-  }
-
-  static async importDatabase(data: any): Promise<{ success: boolean; restoredUsers?: number; error?: string }> {
-    try {
-      const res = await fetch('/api/admin/db/import', {
-        method: 'POST',
-        headers: this.adminAuthHeaders(),
-        body: JSON.stringify(data)
-      });
-      if (res.ok) {
-        const result = await res.json();
-        // Refresh local cache with imported data
-        await this.initSync();
-        return result;
-      } else {
-        const err = await res.json().catch(() => null);
-        return { success: false, error: err?.error || 'Failed to restore database.' };
-      }
-    } catch (err: any) {
-      // Local fallback restore
-      if (data && Array.isArray(data.users)) {
-        this.saveUsers(data.users);
-        if (data.transactions) this.saveTransactions(data.transactions);
-        if (data.conversations) this.saveConversations(data.conversations);
-        if (data.messages) this.saveMessages(data.messages);
-        if (data.notifications) this.saveNotifications(data.notifications);
-        if (data.config) this.saveConfig(data.config);
-        return { success: true, restoredUsers: data.users.length };
-      }
-      return { success: false, error: err.message || 'Error importing database.' };
-    }
-  }
 }
