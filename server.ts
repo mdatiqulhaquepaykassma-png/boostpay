@@ -203,8 +203,8 @@ function getReferTierRate(dailyCount: number, cfg: any): number {
 }
 function getReferCommissionRate(db: any, referrerId: string, now?: number): number {
   const cfg = db.config || INITIAL_DB.config;
-  if (!cfg?.referral?.enabled) return 0;
-  if (cfg.referral.dailyTierEnabled) {
+  if (cfg?.referral && cfg.referral.enabled === false) return 0;
+  if (cfg.referral.dailyTierEnabled !== false) {
     const cnt = getReferDailyCount(db, referrerId, getDayKey(now));
     return getReferTierRate(cnt, cfg);
   }
