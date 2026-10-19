@@ -890,6 +890,12 @@ setInterval(() => {
     const ratePerMs = (minuteRate / 100) / 60000;
 
     for (const user of db.users) {
+      // Frozen accounts: compounding is paused (can never progress while frozen)
+      if (user.isFrozen && user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
+        user.boostState.isPaused = true;
+        user.boostState.pausedAt = now;
+        updated = true;
+      }
       if (user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
         if (!user.boostState.startedAt) {
           user.boostState.startedAt = now - (user.boostState.elapsedMs || 0);
@@ -937,15 +943,15 @@ setInterval(() => {
             }
           });
 
-          // Calculate new duration based on latest balance
+          // Calculate new duration based on latest balance (for the NEXT manual cycle)
           const nextDuration = calculateDynamicDuration(user.balance, db.users, config);
 
-          // Auto-compounding: the next cycle starts immediately from the new
-          // (larger) balance. The engine only stops when the user pauses/stops.
+          // Cycle is COMPLETE — compounding stays stopped until the user
+          // explicitly starts a new cycle (never auto-restarts).
           user.boostState = {
-            isActive: true,
+            isActive: false,
             isPaused: false,
-            startedAt: now,
+            startedAt: 0,
             pausedAt: 0,
             elapsedMs: 0,
             targetDurationMs: nextDuration,
@@ -1250,6 +1256,12 @@ async function startServer() {
         return res.status(404).json({ error: 'User not found' });
       }
 
+      if (user.isFrozen) {
+        return res.status(403).json({ error: 'Your account is frozen. Compounding is disabled — contact support.' });
+      }
+      if (user.isBlocked) {
+        return res.status(403).json({ error: 'Your account is suspended.' });
+      }
       if (Number(user.balance) <= 0) {
         return res.status(400).json({ error: 'Cannot boost with zero balance' });
       }
@@ -1324,6 +1336,12 @@ async function startServer() {
         return res.status(404).json({ error: 'User not found' });
       }
 
+      if (user.isFrozen) {
+        return res.status(403).json({ error: 'Your account is frozen. Compounding is disabled — contact support.' });
+      }
+      if (user.isBlocked) {
+        return res.status(403).json({ error: 'Your account is suspended.' });
+      }
       user.boostState.isPaused = false;
       user.boostState.startedAt = Date.now() - (user.boostState.elapsedMs || 0);
       user.boostState.pausedAt = 0;
@@ -1558,12 +1576,19 @@ async function startServer() {
 
   app.post('/api/chat/send', (req: any, res) => {
     try {
-      const { senderId, senderRole, recipientId, text } = req.body;
-      const cleanText = (text || '').trim();
+      const { senderId, senderRole, recipientId, text, voiceData, voiceDurationMs } = req.body;
+      const rawKind = String((req.body && req.body.kind) || '');
+      const isVoice = rawKind === 'voice';
+      const cleanVoice = isVoice && typeof voiceData === 'string' ? voiceData : '';
+      const cleanText = (text || (isVoice ? '🎤 Voice message' : '')).trim();
       const cleanSender = String(senderId || '').trim();
       const cleanRecipient = String(recipientId || '').trim();
 
-      if (!cleanText) {
+      if (isVoice) {
+        if (!cleanVoice.startsWith('data:audio/') || cleanVoice.length > 2600000) {
+          return res.status(400).json({ error: 'Invalid voice recording.' });
+        }
+      } else if (!cleanText) {
         return res.status(400).json({ error: 'Message cannot be empty.' });
       }
       if (!cleanSender) {
@@ -1599,7 +1624,7 @@ async function startServer() {
           return res.status(403).json({ error: 'You are not a member of this group.' });
         }
         const nowG = Date.now();
-        const gMsg = {
+        const gMsg: any = {
           id: 'MSG-' + Math.floor(10000000 + Math.random() * 90000000),
           conversationId: groupConv.id,
           senderId: cleanSender,
@@ -1607,6 +1632,12 @@ async function startServer() {
           timestamp: nowG,
           reactions: {}
         };
+        if (isVoice && cleanVoice) {
+          gMsg.kind = 'voice';
+          gMsg.voiceData = cleanVoice;
+          gMsg.voiceDurationMs = Math.max(0, Math.min(180000, Number(voiceDurationMs) || 0));
+          gMsg.text = '🎤 Voice message';
+        }
         db.messages.push(gMsg);
         groupConv.lastMessage = cleanText.slice(0, 120);
         groupConv.timestamp = nowG;
@@ -1662,7 +1693,6 @@ async function startServer() {
         timestamp: now
       };
       // Call-log rows (Telegram-style call history inside the chat thread)
-      const rawKind = (req.body && req.body.kind) || '';
       const rawCi = (req.body && req.body.callInfo) || null;
       if (rawKind === 'call' && rawCi && typeof rawCi === 'object') {
         newMsg.kind = 'call';
@@ -1671,6 +1701,11 @@ async function startServer() {
           outcome: ['completed', 'missed', 'declined'].includes(rawCi.outcome) ? rawCi.outcome : 'completed',
           durationMs: Math.max(0, Math.min(24 * 3600 * 1000, Number(rawCi.durationMs) || 0))
         };
+      } else if (isVoice && cleanVoice) {
+        newMsg.kind = 'voice';
+        newMsg.voiceData = cleanVoice;
+        newMsg.voiceDurationMs = Math.max(0, Math.min(180000, Number(voiceDurationMs) || 0));
+        newMsg.text = '🎤 Voice message';
       }
 
       db.messages.push(newMsg);
@@ -2385,6 +2420,11 @@ async function startServer() {
 
       user.isFrozen = Boolean(isFrozen);
       user.frozenReason = user.isFrozen ? String(reason || 'Administrative action') : undefined;
+      // Frozen accounts must not keep compounding — pause any active boost
+      if (user.isFrozen && user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
+        user.boostState.isPaused = true;
+        user.boostState.pausedAt = Date.now();
+      }
       const actionName = user.isFrozen ? 'FREEZE_USER' : 'UNFREEZE_USER';
       recordAuditLog(
         db,

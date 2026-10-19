@@ -1,5 +1,5 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
-import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, LogOut, CheckCircle2
+import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2
 } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User, BoostState, SystemConfig } from '../types';
@@ -180,6 +180,7 @@ interface CompoundingCardProps {
   onPauseBoost: () => void;
   onResumeBoost: () => void;
   onBoostFinished: (freshUser: User) => void;
+  isFrozen?: boolean;
 }
 
 const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
@@ -191,7 +192,8 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
   onStartBoost,
   onPauseBoost,
   onResumeBoost,
-  onBoostFinished
+  onBoostFinished,
+  isFrozen
 }) => {
   const isRunning = boostState.isActive && !boostState.isPaused;
   const isPaused = boostState.isActive && boostState.isPaused;
@@ -333,16 +335,20 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
         {!boostState.isActive ? (
           <button
             onClick={onStartBoost}
-            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20"
+            disabled={isFrozen}
+            title={isFrozen ? 'Account frozen — compounding disabled' : 'Start a compounding cycle'}
+            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-amber-500"
           >
-            <Zap className="w-4 h-4 fill-current" /> Start Compounding
+            <Zap className="w-4 h-4 fill-current" /> {isFrozen ? 'Compounding Disabled (Frozen)' : 'Start Compounding'}
           </button>
         ) : isPaused ? (
           <button
             onClick={onResumeBoost}
-            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20"
+            disabled={isFrozen}
+            title={isFrozen ? 'Account frozen — compounding disabled' : 'Resume compounding'}
+            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-amber-500"
           >
-            <Play className="w-4 h-4 fill-current" /> Resume Compounding
+            <Play className="w-4 h-4 fill-current" /> {isFrozen ? 'Compounding Disabled (Frozen)' : 'Resume Compounding'}
           </button>
         ) : (
           <>
@@ -429,7 +435,6 @@ interface Props {
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
   onOpenSecurity?: () => void;
-  onLogout?: () => void;
   config: SystemConfig;
 }
 
@@ -439,7 +444,6 @@ export const WalletView: FC<Props> = ({
   onOpenSendMoney,
   onOpenQR,
   onOpenSecurity,
-  onLogout,
   config
 }) => {
   const [idCopied, setIdCopied] = useState(false);
@@ -465,6 +469,7 @@ export const WalletView: FC<Props> = ({
   );
 
   const handleStartBoost = useCallback(async () => {
+    if (user.isFrozen) return;
     if (user.balance <= 0) {
       setZeroBalanceWarning(true);
       setTimeout(() => setZeroBalanceWarning(false), 3500);
@@ -485,6 +490,7 @@ export const WalletView: FC<Props> = ({
   }, [user.id, onUpdateUser]);
 
   const handleResumeBoost = useCallback(async () => {
+    if (user.isFrozen) return;
     const updatedUser = await BoostPayStore.resumeServerBoost(user.id);
     if (updatedUser) {
       onUpdateUser(updatedUser);
@@ -497,7 +503,19 @@ export const WalletView: FC<Props> = ({
 
   return (
     <div className="w-full px-4 py-4 space-y-4">
-      {/* Account actions strip (header stays logo-only) */}
+      {/* Frozen account banner */}
+      {user.isFrozen && (
+        <div className="rounded-2xl border border-red-500/40 bg-red-950/40 p-3.5 flex items-start gap-2.5 shadow-lg">
+          <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+          <div className="text-xs text-red-200">
+            <span className="font-bold text-red-400 block">Account Frozen</span>
+            Compounding is paused and transfers are locked
+            {user.frozenReason ? ` — ${user.frozenReason}` : ''}. Contact support for assistance.
+          </div>
+        </div>
+      )}
+
+      {/* Account actions strip (header: logo + sign-out) */}
       <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900/70 px-3 py-2">
         <button
           onClick={() => {
@@ -530,14 +548,10 @@ export const WalletView: FC<Props> = ({
               <ShieldCheck className="w-3.5 h-3.5" />
             </button>
           )}
-          {onLogout && (
-            <button
-              onClick={onLogout}
-              className="w-8 h-8 rounded-full bg-zinc-800/80 flex items-center justify-center text-red-400 cursor-pointer active:scale-95 transition"
-              title="Sign out"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-            </button>
+          {user.isFrozen && (
+            <span className="ml-1 rounded-full bg-red-500/15 border border-red-500/40 px-2 py-1 text-[9px] font-bold text-red-400 font-mono">
+              FROZEN
+            </span>
           )}
         </div>
       </div>
@@ -619,6 +633,7 @@ export const WalletView: FC<Props> = ({
             onStartBoost={handleStartBoost}
             onPauseBoost={handlePauseBoost}
             onResumeBoost={handleResumeBoost}
+            isFrozen={user.isFrozen}
             onBoostFinished={handleBoostFinished}
           />
 

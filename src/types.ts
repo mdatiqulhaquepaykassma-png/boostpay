@@ -49,12 +49,15 @@ export interface Message {
   timestamp: number;
   reactions?: Record<string, string[]>; // emoji -> userIds
   /** 'call' renders as a centered call-history row (Telegram style). */
-  kind?: 'text' | 'call';
+  kind?: 'text' | 'call' | 'voice';
   callInfo?: {
     media: 'audio' | 'video';
     outcome: 'completed' | 'missed' | 'declined';
     durationMs: number;
   };
+  /** 'voice' renders as an in-chat voice note bubble. */
+  voiceData?: string;
+  voiceDurationMs?: number;
 }
 
 export interface Conversation {

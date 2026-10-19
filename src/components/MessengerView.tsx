@@ -14,10 +14,60 @@ import {
   Smile,
   Phone,
   Video
+, Mic, Play, Pause, X
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { startCallTo } from './CallOverlay';
 import { User, Conversation, Message } from '../types';
+
+/** In-chat voice note player */
+const VoiceNotePlayer: FC<{ data: string; durationMs?: number; isMe: boolean }> = ({ data, durationMs, isMe }) => {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [cur, setCur] = useState(0);
+  const total = Math.max(1, Math.round((durationMs || 0) / 1000));
+  const toggle = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (el.paused) {
+      el.play().then(() => setPlaying(true)).catch(() => {});
+    } else {
+      el.pause();
+      setPlaying(false);
+    }
+  };
+  return (
+    <div className="flex items-center gap-2 min-w-[160px]">
+      <button
+        type="button"
+        onClick={toggle}
+        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition cursor-pointer ${isMe ? 'bg-zinc-950/20 text-zinc-950' : 'bg-amber-500/20 text-amber-400'}`}
+        title={playing ? 'Pause' : 'Play voice message'}
+      >
+        {playing ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+      </button>
+      <div className="flex-1">
+        <div className={`h-1 rounded-full overflow-hidden ${isMe ? 'bg-zinc-950/20' : 'bg-zinc-700'}`}>
+          <div
+            className={`h-full ${isMe ? 'bg-zinc-950/60' : 'bg-amber-400'}`}
+            style={{ width: `${Math.min(100, (cur / total) * 100)}%`, transition: 'width 0.2s linear' }}
+          />
+        </div>
+        <div className={`text-[9px] font-mono mt-0.5 ${isMe ? 'text-zinc-950/70' : 'text-zinc-400'}`}>
+          {Math.floor(cur / 60)}:{String(Math.floor(cur % 60)).padStart(2, '0')} / {Math.floor(total / 60)}:{String(Math.floor(total % 60)).padStart(2, '0')}
+        </div>
+      </div>
+      <audio
+        ref={audioRef}
+        src={data}
+        preload="metadata"
+        onTimeUpdate={() => setCur(audioRef.current?.currentTime || 0)}
+        onEnded={() => { setPlaying(false); setCur(0); }}
+        className="hidden"
+      />
+    </div>
+  );
+};
 
 interface Props {
   currentUser: User;
@@ -124,7 +174,11 @@ const MessageItem = memo(({
             : 'bg-zinc-900/90 border border-zinc-800/80 text-zinc-100 rounded-2xl rounded-bl-xs shadow-sm'
         }`}
       >
-        <p className="break-words select-text font-normal">{m.text}</p>
+        {m.kind === 'voice' && m.voiceData ? (
+          <VoiceNotePlayer data={m.voiceData} durationMs={m.voiceDurationMs} isMe={isMe} />
+        ) : (
+          <p className="break-words select-text font-normal">{m.text}</p>
+        )}
 
         {/* Timestamp Footer */}
         <div className="flex items-center justify-end gap-1 mt-1 text-[9px] opacity-75 font-mono">
@@ -203,6 +257,11 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [inputMsg, setInputMsg] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recSeconds, setRecSeconds] = useState(0);
+  const recMediaRef = useRef<MediaRecorder | null>(null);
+  const recChunksRef = useRef<Blob[]>([]);
+  const recTimerRef = useRef<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isNewChatOpen, setIsNewChatOpen] = useState(false);
   const [newPeerId, setNewPeerId] = useState('');
@@ -398,6 +457,66 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     }
   };
 
+  // ------------------------- VOICE NOTES -------------------------
+  const stopRecordingCleanup = () => {
+    if (recTimerRef.current) { clearInterval(recTimerRef.current); recTimerRef.current = null; }
+    try { recMediaRef.current?.stream.getTracks().forEach(t => t.stop()); } catch { /* already stopped */ }
+    recMediaRef.current = null;
+    setIsRecording(false);
+    setRecSeconds(0);
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus']
+        .find((t) => (window as any).MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      recChunksRef.current = [];
+      rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) recChunksRef.current.push(e.data); };
+      rec.start();
+      recMediaRef.current = rec;
+      setIsRecording(true);
+      setRecSeconds(0);
+      recTimerRef.current = window.setInterval(() => setRecSeconds(s => s + 1), 1000);
+    } catch {
+      BoostPayStore.triggerToast({ type: 'ERROR', title: 'Microphone blocked', message: 'Allow microphone access to record voice messages.' } as any);
+    }
+  };
+
+  const cancelRecording = () => {
+    try { recMediaRef.current?.stop(); } catch { /* noop */ }
+    recChunksRef.current = [];
+    stopRecordingCleanup();
+  };
+
+  const sendRecording = async () => {
+    const rec = recMediaRef.current;
+    const conv = activeConv;
+    if (!rec || !conv) return;
+    const chunks = recChunksRef.current;
+    const ms = recSeconds * 1000;
+    rec.onstop = async () => {
+      stopRecordingCleanup();
+      if (!chunks.length) return;
+      const blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
+      if (blob.size > 2 * 1024 * 1024) {
+        BoostPayStore.triggerToast({ type: 'ERROR', title: 'Voice message too long', message: 'Keep voice notes under 2 minutes.' } as any);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const dataUrl = String(reader.result || '');
+        if (!dataUrl.startsWith('data:audio/')) return;
+        const recipient = conv.type === 'group' ? conv.id : getOtherParticipant(conv);
+        await BoostPayStore.sendChatMessage(recipient, '🎤 Voice message', 'USER', undefined, { data: dataUrl, durationMs: ms });
+        setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+      };
+      reader.readAsDataURL(blob);
+    };
+    try { rec.stop(); } catch { stopRecordingCleanup(); }
+  };
+
   const handleToggleReaction = async (messageId: string, emoji: string) => {
     await BoostPayStore.toggleMessageReaction(messageId, emoji, currentUser.id);
   };
@@ -569,23 +688,60 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               <Smile className="w-5 h-5" />
             </button>
 
-            <input
-              ref={inputRef}
-              type="text"
-              placeholder={`Message ${getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? 'Official Support' : `User #${getOtherParticipant(activeConv)}`}...`}
-              value={inputMsg}
-              onChange={(e) => setInputMsg(e.target.value)}
-              className="flex-1 rounded-full border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-xs text-white placeholder-zinc-500 focus:border-amber-500/60 focus:outline-none transition-colors"
-            />
+            {isRecording ? (
+              <>
+                <div className="flex-1 flex items-center gap-2.5 rounded-full border border-red-500/40 bg-red-950/30 px-4 py-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse" />
+                  <span className="text-xs font-mono text-red-300">Recording {Math.floor(recSeconds / 60)}:{String(recSeconds % 60).padStart(2, '0')}</span>
+                  <span className="text-[9px] text-zinc-500 ml-auto">max 2 min</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={cancelRecording}
+                  className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-zinc-300 hover:text-white transition cursor-pointer min-h-[44px] shrink-0"
+                  title="Cancel recording"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={sendRecording}
+                  className="rounded-2xl bg-red-500 px-4 py-2.5 text-white hover:bg-red-400 transition font-bold cursor-pointer active:scale-95 shadow-md shadow-red-500/20 min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
+                  title="Send voice message"
+                >
+                  <Send className="w-4 h-4 stroke-[2.2]" />
+                </button>
+              </>
+            ) : (
+              <>
+                <input
+                  ref={inputRef}
+                  type="text"
+                  placeholder={`Message ${getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? 'Official Support' : `User #${getOtherParticipant(activeConv)}`}...`}
+                  value={inputMsg}
+                  onChange={(e) => setInputMsg(e.target.value)}
+                  className="flex-1 rounded-full border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-xs text-white placeholder-zinc-500 focus:border-amber-500/60 focus:outline-none transition-colors"
+                />
 
-            <button
-              type="submit"
-              disabled={!inputMsg.trim() || isSending}
-              className="rounded-2xl bg-amber-500 px-4 py-2.5 text-zinc-950 hover:bg-amber-400 transition font-bold disabled:opacity-40 disabled:hover:bg-amber-500 cursor-pointer active:scale-95 shadow-md shadow-amber-500/20 min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
-              title="Send message"
-            >
-              <Send className="w-4 h-4 stroke-[2.2]" />
-            </button>
+                <button
+                  type="button"
+                  onClick={startRecording}
+                  className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
+                  title="Record voice message"
+                >
+                  <Mic className="w-4 h-4" />
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={!inputMsg.trim() || isSending}
+                  className="rounded-2xl bg-amber-500 px-4 py-2.5 text-zinc-950 hover:bg-amber-400 transition font-bold disabled:opacity-40 disabled:hover:bg-amber-500 cursor-pointer active:scale-95 shadow-md shadow-amber-500/20 min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
+                  title="Send message"
+                >
+                  <Send className="w-4 h-4 stroke-[2.2]" />
+                </button>
+              </>
+            )}
           </form>
         </div>
       ) : (

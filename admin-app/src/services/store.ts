@@ -520,7 +520,8 @@ export class BoostPayStore {
     recipientId: string,
     text: string,
     senderRole?: 'USER' | 'ADMIN',
-    callInfo?: { media?: 'audio' | 'video'; outcome?: 'completed' | 'missed' | 'declined'; durationMs?: number }
+    callInfo?: { media?: 'audio' | 'video'; outcome?: 'completed' | 'missed' | 'declined'; durationMs?: number },
+    voice?: { data: string; durationMs: number }
   ): Promise<{ success: boolean; message?: Message; conversation?: Conversation; error?: string }> {
     const cur = this.getCurrentUser();
     const senderId = senderRole === 'ADMIN' ? 'ADMIN_SUPPORT' : (cur?.id || '1');
@@ -540,7 +541,8 @@ export class BoostPayStore {
       senderRole: role,
       text: cleanText,
       timestamp: now,
-      ...(callInfo ? { kind: 'call' as const, callInfo } : {})
+      ...(callInfo ? { kind: 'call' as const, callInfo } : {}),
+      ...(voice ? { kind: 'voice' as const, voiceData: voice.data, voiceDurationMs: voice.durationMs, text: '🎤 Voice message' } : {})
     };
 
     // Save optimistically locally
@@ -578,17 +580,24 @@ export class BoostPayStore {
           senderRole: role,
           recipientId,
           text: cleanText,
-          ...(callInfo ? { kind: 'call', callInfo } : {})
+          ...(callInfo ? { kind: 'call', callInfo } : {}),
+          ...(voice ? { kind: 'voice', voiceData: voice.data, voiceDurationMs: voice.durationMs } : {})
         })
       });
 
       if (res.ok) {
         const data = await res.json();
         if (data.message) {
-          // Replace optimistic message with confirmed server message
+          // Replace optimistic message with confirmed server message, and drop
+          // any SSE-delivered copy so the same message never renders twice.
+          const seenIds = new Set<string>();
           const refreshedMsgs = this.getMessages().map(m =>
             m.id === optimisticMsg.id ? data.message : m
-          );
+          ).filter((m: any) => {
+            if (!m || seenIds.has(m.id)) return false;
+            seenIds.add(m.id);
+            return true;
+          });
           localStorage.setItem(STORAGE_MESSAGES, JSON.stringify(refreshedMsgs));
           const refreshedConvs = this.getConversations().map(c =>
             c.id === convId ? { ...c, ...data.conversation } : c
@@ -611,7 +620,7 @@ export class BoostPayStore {
   static async syncChatState(userId?: string): Promise<{ conversations: Conversation[], messages: Message[] }> {
     try {
       const query = userId ? `?userId=${encodeURIComponent(userId)}` : '';
-      const res = await fetch(`/api/chat/messages${query}`);
+      const res = await fetch(`/api/chat/messages${query}`, { headers: this.authHeaders() });
       if (res.ok) {
         const data = await res.json();
         const incomingConvs: Conversation[] = data.conversations || [];

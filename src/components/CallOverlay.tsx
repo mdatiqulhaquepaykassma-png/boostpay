@@ -6,6 +6,9 @@ import {
   VideoOff,
   Mic,
   MicOff,
+  Volume2,
+  VolumeX,
+  WifiOff,
   X,
   PhoneIncoming,
   PhoneOutgoing
@@ -107,6 +110,8 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
   const [startedAt, setStartedAt] = useState(0);
   const [nowTick, setNowTick] = useState(0);
   const [error, setError] = useState('');
+  const [speakerOn, setSpeakerOn] = useState(true);
+  const [netStatus, setNetStatus] = useState<'ok' | 'reconnecting'>('ok');
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -122,6 +127,8 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
   const peerRef = useRef<PeerInfo>({ id: '', name: '' });
   const timeoutRef = useRef<number | null>(null);
   const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const srcNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const ring = useRingtone();
 
   // Keep refs in sync with state for handlers created once
@@ -196,6 +203,45 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
     }
   }, [phase, media, cameraOff]);
 
+  // Route remote audio to earpiece or loudspeaker.
+  // setSinkId works on Chrome/Edge/Firefox + newer iOS; older iOS cannot switch
+  // (WebKit forces the loudspeaker while the mic is live) — we surface that.
+  const applyAudioRoute = useCallback(async (wantSpeaker: boolean): Promise<boolean> => {
+    const el = remoteAudioRef.current as (HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> }) | null;
+    if (!el) return false;
+    try {
+      const devs = (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices)
+        ? await navigator.mediaDevices.enumerateDevices()
+        : [];
+      const outs = devs.filter((d) => d.kind === 'audiooutput');
+      const earpiece = outs.find((d) => /earpiece|receiver/i.test(d.label));
+      const loudspeaker = outs.find((d) => /speaker|loudspeaker/i.test(d.label) && !/earpiece|receiver/i.test(d.label));
+      if (typeof el.setSinkId === 'function') {
+        if (wantSpeaker) {
+          await el.setSinkId(loudspeaker?.deviceId || '');
+        } else if (earpiece) {
+          await el.setSinkId(earpiece.deviceId);
+        } else {
+          return false; // no earpiece exposed on this device
+        }
+        setSpeakerOn(wantSpeaker);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const toggleSpeaker = useCallback(async () => {
+    const want = !speakerOn;
+    const ok = await applyAudioRoute(want);
+    if (!ok) {
+      setError(want ? 'Cannot switch to loudspeaker on this device.' : 'Earpiece mode is not available on this device — use volume keys or a headset.');
+      window.setTimeout(() => setError(''), 3200);
+    }
+  }, [speakerOn, applyAudioRoute]);
+
   const setupPeerConnection = useCallback((stream: MediaStream) => {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pcRef.current = pc;
@@ -215,6 +261,33 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
       if (remoteAudioRef.current) remoteAudioRef.current.srcObject = remoteStream;
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
     };
+    // Slow/broken internet: surface "Reconnecting" and auto-restart ICE
+    const onNet = () => {
+      const s = pc.iceConnectionState;
+      if (s === 'connected' || s === 'completed') {
+        setNetStatus('ok');
+      } else if (s === 'disconnected' || s === 'failed' || s === 'checking') {
+        setNetStatus('reconnecting');
+        if (s === 'failed' || s === 'disconnected') {
+          try { pc.restartIce(); } catch { /* older browser */ }
+          // Full renegotiation as a fallback (caller side only)
+          if (iAmCallerRef.current && pc.signalingState === 'stable') {
+            pc.createOffer({ iceRestart: true }).then((o) =>
+              pc.setLocalDescription(o).then(() =>
+                BoostPayStore.sendCallSignal(peerRef.current.id, {
+                  kind: 'offer',
+                  callId: callIdRef.current,
+                  media: callMediaRef.current,
+                  sdp: o.sdp
+                })
+              )
+            ).catch(() => { /* renegotiation will retry on next drop */ });
+          }
+        }
+      }
+    };
+    pc.oniceconnectionstatechange = onNet;
+    pc.onconnectionstatechange = onNet;
     return pc;
   }, []);
 
@@ -233,6 +306,8 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
     if (phase !== 'idle') return;
     setPeer({ id: peerId, name: peerName });
     setMedia(wantMedia);
+    setSpeakerOn(wantMedia === 'video'); // audio calls default to earpiece, video to loudspeaker
+    setNetStatus('ok');
     setPhase('outgoing');
     setError('');
     iAmCallerRef.current = true;
@@ -292,6 +367,9 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
       answeredRef.current = true;
       setStartedAt(Date.now());
       setPhase('active');
+      setNetStatus('ok');
+      setSpeakerOn(offer.media === 'video');
+      void applyAudioRoute(offer.media === 'video');
     } catch (e: any) {
       cleanupMedia();
       setPhase('idle');
@@ -300,7 +378,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
         ? 'Camera/microphone permission denied. Allow access to answer calls.'
         : 'Could not answer the call.');
     }
-  }, [getLocalStream, setupPeerConnection, ring, cleanupMedia]);
+  }, [getLocalStream, setupPeerConnection, ring, cleanupMedia, applyAudioRoute]);
 
   const rejectCall = useCallback(() => {
     const offer = pendingOfferRef.current;
@@ -321,6 +399,26 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
       const callId = String(signal?.callId || '');
 
       if (kind === 'offer') {
+        // ICE-restart re-offer on the same active call -> renegotiate, don't ring
+        if (phase === 'active' && callId && callId === callIdRef.current) {
+          void (async () => {
+            try {
+              const pc = pcRef.current;
+              if (!pc || !signal.sdp) return;
+              await pc.setRemoteDescription({ type: 'offer', sdp: String(signal.sdp) });
+              const answer = await pc.createAnswer();
+              await pc.setLocalDescription(answer);
+              await BoostPayStore.sendCallSignal(from, {
+                kind: 'answer',
+                callId,
+                media: callMediaRef.current,
+                sdp: answer.sdp || ''
+              });
+              setNetStatus('ok');
+            } catch { /* ignore malformed renegotiation */ }
+          })();
+          return;
+        }
         // Busy? reject politely
         if (phase !== 'idle') {
           void BoostPayStore.sendCallSignal(from, { kind: 'reject', callId });
@@ -368,6 +466,8 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
             answeredRef.current = true;
             setStartedAt(Date.now());
             setPhase('active');
+            setNetStatus('ok');
+            void applyAudioRoute(callMediaRef.current === 'video');
           } catch { /* malformed answer */ }
         })();
         return;
@@ -410,7 +510,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
       }
     });
     return unsub;
-  }, [phase, ring, finishCall]);
+  }, [phase, ring, finishCall, applyAudioRoute]);
 
   // Start-call request from anywhere in the app
   useEffect(() => {
@@ -459,6 +559,12 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
   return (
     <div className="fixed inset-0 z-[200] flex flex-col items-center justify-between bg-zinc-950/98 backdrop-blur-xl">
       <audio ref={remoteAudioRef} autoPlay playsInline />
+      {netStatus === 'reconnecting' && phase === 'active' && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[210] flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/15 px-4 py-2 backdrop-blur-md">
+          <WifiOff className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+          <span className="text-xs font-bold text-amber-300">Reconnecting…</span>
+        </div>
+      )}
       {isVideo && (
         <video
           ref={remoteVideoRef}
@@ -533,6 +639,13 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
                 {cameraOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
               </button>
             )}
+            <button
+              onClick={toggleSpeaker}
+              className={`flex h-12 w-12 items-center justify-center rounded-full border transition cursor-pointer ${speakerOn ? 'border-amber-500/50 bg-amber-500/20 text-amber-300' : 'border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'}`}
+              title={speakerOn ? 'Loudspeaker on — switch to earpiece' : 'Earpiece — switch to loudspeaker'}
+            >
+              {speakerOn ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
+            </button>
             <button
               onClick={() => finishCall(phase === 'outgoing' ? 'missed' : 'completed', true)}
               className="flex h-16 w-16 items-center justify-center rounded-full bg-red-500 text-white shadow-2xl shadow-red-500/30 hover:bg-red-400 active:scale-95 transition cursor-pointer"

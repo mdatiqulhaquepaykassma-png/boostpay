@@ -48,12 +48,14 @@ export interface Message {
   text: string;
   timestamp: number;
   reactions?: Record<string, string[]>; // emoji -> userIds
-  kind?: 'text' | 'call'; // call-history log entries
+  kind?: 'text' | 'call' | 'voice'; // call-history / voice-note entries
   callInfo?: {
     media?: 'audio' | 'video';
     outcome?: 'completed' | 'missed' | 'declined';
     durationMs?: number;
   };
+  voiceData?: string;
+  voiceDurationMs?: number;
 }
 
 export interface Conversation {

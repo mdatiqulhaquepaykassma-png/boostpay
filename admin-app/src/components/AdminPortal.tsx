@@ -36,7 +36,11 @@ import {
   Radio,
   Users2,
   Phone,
-  Video
+  Video,
+  Mic,
+  Play,
+  Pause,
+  X
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { CallManager, startCallTo } from './CallOverlay';
@@ -47,6 +51,32 @@ import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } f
 interface Props {
   onBack?: () => void;
 }
+
+const VoiceNotePlayer: FC<{ data: string; durationMs?: number }> = ({ data, durationMs }) => {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const total = Math.max(1, Math.round((durationMs || 0) / 1000));
+  const toggle = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (el.paused) { el.play().then(() => setPlaying(true)).catch(() => {}); }
+    else { el.pause(); setPlaying(false); }
+  };
+  return (
+    <div className="flex items-center gap-2 min-w-[150px]">
+      <button type="button" onClick={toggle} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-amber-400 cursor-pointer">
+        {playing ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+      </button>
+      <div className="flex-1">
+        <div className="h-1 rounded-full bg-zinc-700 overflow-hidden">
+          <div className="h-full bg-amber-400 transition-all" style={{ width: playing ? '100%' : '0%', transition: 'width 3s linear' }} />
+        </div>
+        <div className="text-[9px] font-mono text-zinc-400 mt-0.5">{Math.floor(total / 60)}:{String(Math.floor(total % 60)).padStart(2, '0')}</div>
+      </div>
+      <audio ref={audioRef} src={data} preload="metadata" onEnded={() => setPlaying(false)} className="hidden" />
+    </div>
+  );
+};
 
 export const AdminPortal: FC<Props> = ({ onBack }) => {
   // 1. Persistent Admin Auth State (Role-Bounded Non-Superuser)
@@ -150,6 +180,11 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   // Support chat responder
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [supportMessage, setSupportMessage] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [recSeconds, setRecSeconds] = useState(0);
+  const recMediaRef = useRef<MediaRecorder | null>(null);
+  const recChunksRef = useRef<Blob[]>([]);
+  const recTimerRef = useRef<number | null>(null);
   const adminChatEndRef = useRef<HTMLDivElement>(null);
 
   const refreshData = async (isManual = false) => {
@@ -559,6 +594,63 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
       setSupportMessage('');
       await refreshData();
     }
+  };
+
+  // ---- Voice notes (admin side) ----
+  const stopRecordingCleanup = () => {
+    if (recTimerRef.current) { clearInterval(recTimerRef.current); recTimerRef.current = null; }
+    try { recMediaRef.current?.stream.getTracks().forEach(t => t.stop()); } catch { /* noop */ }
+    recMediaRef.current = null;
+    setIsRecording(false);
+    setRecSeconds(0);
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+        .find((t) => (window as any).MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      recChunksRef.current = [];
+      rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) recChunksRef.current.push(e.data); };
+      rec.start();
+      recMediaRef.current = rec;
+      setIsRecording(true);
+      setRecSeconds(0);
+      recTimerRef.current = window.setInterval(() => setRecSeconds(s => s + 1), 1000);
+    } catch {
+      window.alert('Allow microphone access to record voice messages.');
+    }
+  };
+
+  const cancelRecording = () => {
+    try { recMediaRef.current?.stop(); } catch { /* noop */ }
+    recChunksRef.current = [];
+    stopRecordingCleanup();
+  };
+
+  const sendRecording = async () => {
+    const rec = recMediaRef.current;
+    if (!rec || !activeConv) return;
+    const chunks = recChunksRef.current;
+    const ms = recSeconds * 1000;
+    const peerId = activeConv.participants.find(p => p !== 'ADMIN_SUPPORT');
+    if (!peerId) return;
+    rec.onstop = async () => {
+      stopRecordingCleanup();
+      if (!chunks.length) return;
+      const blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
+      if (blob.size > 2 * 1024 * 1024) { window.alert('Voice message too long (max 2 minutes).'); return; }
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const dataUrl = String(reader.result || '');
+        if (!dataUrl.startsWith('data:audio/')) return;
+        await BoostPayStore.sendChatMessage(peerId, '🎤 Voice message', 'ADMIN', undefined, { data: dataUrl, durationMs: ms });
+        await refreshData();
+      };
+      reader.readAsDataURL(blob);
+    };
+    try { rec.stop(); } catch { stopRecordingCleanup(); }
   };
 
   // Real database connection ping (SELECT 1)
@@ -2113,6 +2205,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             </div>
                           );
                         }
+                        if (m.kind === 'voice' && m.voiceData) {
+                          return (
+                            <div key={m.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>
+                              <div className={`rounded-2xl px-3 py-2 ${isAdmin ? 'bg-gradient-to-br from-amber-500 to-amber-600 rounded-br-xs' : 'bg-zinc-800/90 border border-zinc-700/60 rounded-bl-xs'}`}>
+                                <VoiceNotePlayer data={m.voiceData} durationMs={m.voiceDurationMs} />
+                              </div>
+                            </div>
+                          );
+                        }
                         return (
                           <div
                             key={m.id}
@@ -2148,20 +2249,45 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   </div>
 
                   <form onSubmit={handleSendSupportMessage} className="pt-3 border-t border-zinc-800 flex gap-2">
-                    <input
-                      type="text"
-                      value={supportMessage}
-                      onChange={(e) => setSupportMessage(e.target.value)}
-                      placeholder="Type admin response..."
-                      className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 focus:border-amber-500 focus:outline-none"
-                    />
-                    <button
-                      type="submit"
-                      disabled={!supportMessage.trim()}
-                      className="rounded-xl bg-amber-500 px-4 text-xs font-bold text-zinc-950 hover:bg-amber-400 transition cursor-pointer disabled:opacity-50"
-                    >
-                      <Send className="w-4 h-4" />
-                    </button>
+                    {isRecording ? (
+                      <>
+                        <div className="flex-1 flex items-center gap-2.5 rounded-xl border border-red-500/40 bg-red-950/30 px-3.5 py-2.5">
+                          <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+                          <span className="text-xs font-mono text-red-300">Recording {Math.floor(recSeconds / 60)}:{String(recSeconds % 60).padStart(2, '0')}</span>
+                        </div>
+                        <button type="button" onClick={cancelRecording} className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-zinc-300 hover:text-white transition cursor-pointer">
+                          <X className="w-4 h-4" />
+                        </button>
+                        <button type="button" onClick={sendRecording} className="rounded-xl bg-red-500 px-4 text-xs font-bold text-white hover:bg-red-400 transition cursor-pointer">
+                          <Send className="w-4 h-4" />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <input
+                          type="text"
+                          value={supportMessage}
+                          onChange={(e) => setSupportMessage(e.target.value)}
+                          placeholder="Type admin response..."
+                          className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 focus:border-amber-500 focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={startRecording}
+                          title="Record voice message"
+                          className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-zinc-400 hover:text-amber-400 transition cursor-pointer"
+                        >
+                          <Mic className="w-4 h-4" />
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={!supportMessage.trim()}
+                          className="rounded-xl bg-amber-500 px-4 text-xs font-bold text-zinc-950 hover:bg-amber-400 transition cursor-pointer disabled:opacity-50"
+                        >
+                          <Send className="w-4 h-4" />
+                        </button>
+                      </>
+                    )}
                   </form>
                 </>
               ) : (
