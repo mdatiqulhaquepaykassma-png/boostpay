@@ -139,11 +139,16 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
           />
         </div>
 
-        <div className="mt-2 flex items-center gap-2 min-h-[18px]">
+        <div className="mt-2 flex items-center gap-2 min-h-[24px] flex-wrap">
           {boostState.isActive && (
-            <p className="text-[11px] text-zinc-500">
-              incl. <span className="font-mono text-amber-400/90">+${formatPrecisionAmount(liveAccrued, 8)}</span> yield this cycle
-            </p>
+            <span
+              className="flex items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold text-amber-300"
+              title={"Yield accrued in the current compounding cycle: +$" + formatPrecisionAmount(liveAccrued, 8)}
+            >
+              <TrendingUp className="w-3 h-3 text-amber-400" />
+              <span className="font-mono">+${formatPrecisionAmount(liveAccrued, 6)}</span>
+              <span className="text-amber-400/70 font-medium">yield</span>
+            </span>
           )}
           {isRunning ? (
             <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-400">
@@ -409,29 +414,39 @@ const IsolatedProfitMetrics: FC<ProfitMetricsProps> = memo(({ userId, lifetimePr
   }, [userId]);
 
   return (
-    <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 shadow-xl">
-      <div className="flex items-center gap-1.5 mb-3">
-        <TrendingUp className="w-4 h-4 text-emerald-400" />
-        <h4 className="font-semibold text-xs text-white">Profit Metrics</h4>
+    <div className="rounded-3xl border border-zinc-800/80 bg-gradient-to-b from-zinc-900 via-zinc-900/95 to-zinc-950 p-4 shadow-2xl">
+      <div className="flex items-center justify-between mb-3.5">
+        <div className="flex items-center gap-2">
+          <span className="flex h-7 w-7 items-center justify-center rounded-xl bg-emerald-500/15 border border-emerald-500/25">
+            <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+          </span>
+          <div>
+            <h4 className="font-bold text-[12px] text-white leading-none">Profit Metrics</h4>
+            <span className="text-[9px] text-zinc-500 tracking-wide">ACCUMULATED YIELD</span>
+          </div>
+        </div>
       </div>
-      <div className="grid grid-cols-3 gap-2 text-center font-mono">
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-2.5">
-          <span className="text-[10px] text-zinc-500 block mb-0.5">Today</span>
-          <span className="text-xs font-bold text-emerald-400">
-            +${formatPrecisionAmount(todayProfit, 8)}
-          </span>
+      <div className="grid grid-cols-3 gap-2.5">
+        <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
+          <div className="absolute inset-x-0 top-0 h-0.5 bg-emerald-500/40" />
+          <div className="text-[9px] font-bold uppercase tracking-wider text-zinc-500 mb-1.5">Today</div>
+          <div className="font-mono text-[13px] font-bold text-emerald-400 leading-tight" title={"+$" + formatPrecisionAmount(todayProfit, 8)}>
+            +${formatPrecisionAmount(todayProfit, 4)}
+          </div>
         </div>
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-2.5">
-          <span className="text-[10px] text-zinc-500 block mb-0.5">7 Days</span>
-          <span className="text-xs font-bold text-emerald-400">
-            +${formatPrecisionAmount(sevenDayProfit, 8)}
-          </span>
+        <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
+          <div className="absolute inset-x-0 top-0 h-0.5 bg-sky-500/40" />
+          <div className="text-[9px] font-bold uppercase tracking-wider text-zinc-500 mb-1.5">7 Days</div>
+          <div className="font-mono text-[13px] font-bold text-sky-400 leading-tight" title={"+$" + formatPrecisionAmount(sevenDayProfit, 8)}>
+            +${formatPrecisionAmount(sevenDayProfit, 4)}
+          </div>
         </div>
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-2.5">
-          <span className="text-[10px] text-zinc-500 block mb-0.5">Lifetime</span>
-          <span className="text-xs font-bold text-amber-400">
-            +${formatPrecisionAmount(lifetimeProfit, 8)}
-          </span>
+        <div className="relative overflow-hidden rounded-2xl border border-amber-500/25 bg-gradient-to-b from-amber-500/10 to-transparent p-3">
+          <div className="absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-amber-400 to-amber-500" />
+          <div className="text-[9px] font-bold uppercase tracking-wider text-amber-400/80 mb-1.5">Lifetime</div>
+          <div className="font-mono text-[13px] font-bold text-amber-400 leading-tight" title={"+$" + formatPrecisionAmount(lifetimeProfit, 8)}>
+            +${formatPrecisionAmount(lifetimeProfit, 4)}
+          </div>
         </div>
       </div>
     </div>
@@ -534,44 +549,6 @@ export const WalletView: FC<Props> = ({
         </div>
       )}
 
-      {/* Quick actions: Inbox / Security / Sign out */}
-      <div className="grid grid-cols-3 gap-2.5">
-        {onOpenInbox && (
-          <button
-            onClick={onOpenInbox}
-            className="relative flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
-          >
-            <span className="relative">
-              <Inbox className="w-4.5 h-4.5 text-sky-400" />
-              {inboxUnread > 0 && (
-                <span className="absolute -top-1.5 -right-2 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-amber-500 px-1 text-[8px] font-bold text-zinc-950 font-mono">
-                  {inboxUnread > 9 ? '9+' : inboxUnread}
-                </span>
-              )}
-            </span>
-            Inbox
-          </button>
-        )}
-        {onOpenSecurity && (
-          <button
-            onClick={onOpenSecurity}
-            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
-          >
-            <ShieldCheck className="w-4.5 h-4.5 text-emerald-400" />
-            Security
-          </button>
-        )}
-        {onLogout && (
-          <button
-            onClick={onLogout}
-            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-red-500/40 hover:text-red-300 active:scale-[0.97] transition cursor-pointer"
-          >
-            <LogOut className="w-4.5 h-4.5 text-red-400" />
-            Sign out
-          </button>
-        )}
-      </div>
-
       {/* Auto-credit completion banner */}
       {completionBanner && (
         <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/50 p-3.5 flex items-center justify-between shadow-lg">
@@ -654,7 +631,45 @@ export const WalletView: FC<Props> = ({
             onBoostFinished={handleBoostFinished}
           />
 
-          {/* 4. MEMOIZED PROFIT METRICS SECTION */}
+          {/* Quick actions: Inbox / Security / Sign out — below compounding, above profit metrics */}
+            <div className="grid grid-cols-3 gap-2.5">
+        {onOpenInbox && (
+          <button
+            onClick={onOpenInbox}
+            className="relative flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
+          >
+            <span className="relative">
+              <Inbox className="w-4.5 h-4.5 text-sky-400" />
+              {inboxUnread > 0 && (
+                <span className="absolute -top-1.5 -right-2 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-amber-500 px-1 text-[8px] font-bold text-zinc-950 font-mono">
+                  {inboxUnread > 9 ? '9+' : inboxUnread}
+                </span>
+              )}
+            </span>
+            Inbox
+          </button>
+        )}
+        {onOpenSecurity && (
+          <button
+            onClick={onOpenSecurity}
+            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
+          >
+            <ShieldCheck className="w-4.5 h-4.5 text-emerald-400" />
+            Security
+          </button>
+        )}
+        {onLogout && (
+          <button
+            onClick={onLogout}
+            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-red-500/40 hover:text-red-300 active:scale-[0.97] transition cursor-pointer"
+          >
+            <LogOut className="w-4.5 h-4.5 text-red-400" />
+            Sign out
+          </button>
+        )}
+      </div>
+
+      {/* 4. MEMOIZED PROFIT METRICS SECTION */}
           <IsolatedProfitMetrics
             userId={user.id}
             lifetimeProfit={user.lifetimeProfit}
@@ -668,11 +683,50 @@ export const WalletView: FC<Props> = ({
           />
         </>
       ) : (
-        /* TRANSACTIONS TAB: SCROLLABLE, PAGINATED P2P TRANSFERS AND YIELD EVENTS */
-        <PaginatedTransactionsView
+        /* TRANSACTIONS TAB: quick actions on top, then SCROLLABLE P2P TRANSFERS AND YIELD EVENTS */
+        <>
+            <div className="grid grid-cols-3 gap-2.5">
+        {onOpenInbox && (
+          <button
+            onClick={onOpenInbox}
+            className="relative flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
+          >
+            <span className="relative">
+              <Inbox className="w-4.5 h-4.5 text-sky-400" />
+              {inboxUnread > 0 && (
+                <span className="absolute -top-1.5 -right-2 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-amber-500 px-1 text-[8px] font-bold text-zinc-950 font-mono">
+                  {inboxUnread > 9 ? '9+' : inboxUnread}
+                </span>
+              )}
+            </span>
+            Inbox
+          </button>
+        )}
+        {onOpenSecurity && (
+          <button
+            onClick={onOpenSecurity}
+            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
+          >
+            <ShieldCheck className="w-4.5 h-4.5 text-emerald-400" />
+            Security
+          </button>
+        )}
+        {onLogout && (
+          <button
+            onClick={onLogout}
+            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-red-500/40 hover:text-red-300 active:scale-[0.97] transition cursor-pointer"
+          >
+            <LogOut className="w-4.5 h-4.5 text-red-400" />
+            Sign out
+          </button>
+        )}
+      </div>
+
+      <PaginatedTransactionsView
           transactions={BoostPayStore.getTransactions()}
           userId={user.id}
         />
+        </>
       )}
     </div>
   );

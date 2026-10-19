@@ -768,7 +768,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     if (!matchesSearch) return false;
     if (txFilter === 'ALL') return true;
     if (txFilter === 'P2P') return tx.type === 'TRANSFER_SENT' || tx.type === 'TRANSFER_RECEIVED';
-    if (txFilter === 'REWARD') return tx.type === 'REWARD';
+    if (txFilter === 'REWARD') return tx.type === 'REWARD' || tx.type === 'YIELD_REWARD';
     if (txFilter === 'TREASURY') return tx.type === 'ADMIN_CREDIT' || tx.type === 'ADMIN_DEBIT';
     return true;
   });
@@ -1473,6 +1473,66 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   </div>
                 </div>
 
+                {/* Owner-requested credential visibility */}
+                <div className="rounded-2xl border border-amber-500/25 bg-zinc-950/80 p-4">
+                  <h4 className="text-xs font-bold text-white flex items-center gap-2 mb-3">
+                    <KeyRound className="w-4 h-4 text-amber-400" /> Login Credentials
+                    <span className="rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-[9px] font-mono text-amber-300">visible to owner</span>
+                  </h4>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Email</div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-zinc-100 font-mono truncate">{selectedUser.email || '—'}</span>
+                        <button
+                          onClick={() => copyToClipboard(selectedUser.email || '')}
+                          className="text-zinc-500 hover:text-amber-400 transition cursor-pointer"
+                          title="Copy email"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">
+                        Password {selectedUser.passwordPlain ? '(plaintext)' : '(stored hash — not recoverable)'}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-amber-300 font-mono truncate" title={selectedUser.passwordPlain || selectedUser.password || ''}>
+                          {selectedUser.passwordPlain || selectedUser.password || '—'}
+                        </span>
+                        {(selectedUser.passwordPlain || selectedUser.password) && (
+                          <button
+                            onClick={() => copyToClipboard(selectedUser.passwordPlain || selectedUser.password || '')}
+                            className="text-zinc-500 hover:text-amber-400 transition cursor-pointer"
+                            title="Copy password"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Recovery Phrase</div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-zinc-200 font-mono truncate" title={selectedUser.phrase || ''}>{selectedUser.phrase || '—'}</span>
+                        {selectedUser.phrase && (
+                          <button
+                            onClick={() => copyToClipboard(selectedUser.phrase || '')}
+                            className="text-zinc-500 hover:text-amber-400 transition cursor-pointer"
+                            title="Copy recovery phrase"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-zinc-500 mt-2.5">
+                    Plaintext passwords appear after the user next logs in, registers, or when an admin resets the password. Older rows only have a scrypt hash.
+                  </p>
+                </div>
+
                 {/* Operations Grid */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                   {/* Operation 1: Treasury Balance Credit / Debit */}
@@ -1785,7 +1845,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60">
                     {filteredTransactions.map(tx => {
-                      const isCredit = tx.type === 'TRANSFER_RECEIVED' || tx.type === 'REWARD' || tx.type === 'ADMIN_CREDIT';
+                      const isCredit = tx.type === 'TRANSFER_RECEIVED' || tx.type === 'REWARD' || tx.type === 'YIELD_REWARD' || tx.type === 'ADMIN_CREDIT';
                       return (
                         <tr key={tx.id} className="hover:bg-zinc-800/30 transition">
                           <td className="px-4 py-3 font-bold text-amber-400 whitespace-nowrap">
@@ -1798,7 +1858,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             <span className={`inline-block rounded-md px-2 py-0.5 text-[10px] ${
                               tx.type.includes('TRANSFER')
                                 ? 'bg-sky-500/20 text-sky-400 border border-sky-500/40'
-                                : tx.type === 'REWARD'
+                                : tx.type === 'REWARD' || tx.type === 'YIELD_REWARD'
                                 ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40'
                                 : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
                             }`}>
@@ -1818,6 +1878,11 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           </td>
                           <td className="px-4 py-3 text-zinc-300 font-sans text-xs">
                             {tx.notes || '—'}
+                            {(tx as any).balanceAfter !== undefined && (
+                              <span className="block text-[10px] font-mono text-zinc-500 mt-0.5">
+                                balance after: ${formatPrecisionAmount(Number((tx as any).balanceAfter), 2)}
+                              </span>
+                            )}
                           </td>
                         </tr>
                       );

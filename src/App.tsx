@@ -423,7 +423,7 @@ export default function App() {
 
           {/* FIXED BOTTOM NAVIGATION BAR */}
           <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-3 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))]">
-            <div className={`max-w-md mx-auto grid items-center gap-1 ${isInstalled ? 'grid-cols-4' : 'grid-cols-5'}`}>
+            <div className={`max-w-md mx-auto grid items-center gap-1 ${isInstalled ? 'grid-cols-3' : 'grid-cols-4'}`}>
               {/* 1. Wallet Tab */}
               <button
                 onClick={() => setActiveTab('WALLET')}

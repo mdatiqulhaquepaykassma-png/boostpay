@@ -12,7 +12,9 @@ import {
   ArrowDown,
   Minus,
   Search,
-  X
+  X,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { User } from '../types';
@@ -138,6 +140,7 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [listPage, setListPage] = useState(0); // sliding window of 10 rows
 
   const prevRanksRef = useRef<Map<string, number>>(new Map());
   const [rankChanges, setRankChanges] = useState<Map<string, number>>(new Map());
@@ -250,6 +253,19 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
     });
   }, [users, searchQuery]);
 
+  // Telegram-style paging: a moving window of 10 rows (previous 10 hide when loading next)
+  const PAGE_SIZE = 10;
+  const pagedUsers = useMemo(
+    () => filteredUsers.slice(listPage * PAGE_SIZE, listPage * PAGE_SIZE + PAGE_SIZE),
+    [filteredUsers, listPage]
+  );
+  const hasNextPage = (listPage + 1) * PAGE_SIZE < filteredUsers.length;
+
+  // Reset to first page whenever the search filter changes
+  useEffect(() => {
+    setListPage(0);
+  }, [searchQuery]);
+
   const getRankBadge = useMemo(() => (rank: number) => {
     if (rank === 1) {
       return (
@@ -305,9 +321,7 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
 
         {searchQuery && (
           <div className="flex items-center justify-between mt-2 px-1 text-[11px] font-mono text-zinc-400">
-            <span>
-              Showing <strong className="text-amber-400">{filteredUsers.length}</strong> of {users.length} participants
-            </span>
+            <span>Search results</span>
             <button
               onClick={() => setSearchQuery('')}
               className="text-amber-400 hover:underline cursor-pointer font-sans"
@@ -327,9 +341,6 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
           <p className="text-xs text-zinc-400 mt-0.5">
             Real-time balance ranking & peer discovery
           </p>
-        </div>
-        <div className="text-xs text-zinc-500 font-mono">
-          Total Participants: <span className="text-white font-bold">{users.length}</span>
         </div>
       </div>
 
@@ -384,8 +395,8 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
         </div>
 
         <div className="space-y-2.5">
-          {filteredUsers.length > 0 ? (
-            filteredUsers.map((u, idx) => (
+          {pagedUsers.length > 0 ? (
+            pagedUsers.map((u, idx) => (
               <UserRow
                 key={u.id}
                 u={u}
@@ -416,6 +427,36 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
             </div>
           )}
         </div>
+
+        {/* Sliding-window paging: Load More shows the NEXT 10 (current 10 hide) */}
+        {filteredUsers.length > PAGE_SIZE && (
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <button
+              onClick={() => setListPage((p) => Math.max(0, p - 1))}
+              disabled={listPage === 0}
+              className={`flex-1 min-h-[44px] rounded-2xl border text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                listPage === 0
+                  ? 'border-zinc-800 bg-zinc-950 text-zinc-600 cursor-not-allowed'
+                  : 'border-zinc-700 bg-zinc-800/80 text-zinc-100 hover:bg-zinc-700 active:scale-[0.98]'
+              }`}
+            >
+              <ChevronLeft className="w-4 h-4" />
+              Load Previous
+            </button>
+            <button
+              onClick={() => setListPage((p) => p + 1)}
+              disabled={!hasNextPage}
+              className={`flex-1 min-h-[44px] rounded-2xl border text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                !hasNextPage
+                  ? 'border-zinc-800 bg-zinc-950 text-zinc-600 cursor-not-allowed'
+                  : 'border-amber-500/40 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 active:scale-[0.98]'
+              }`}
+            >
+              Load More
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

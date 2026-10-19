@@ -6,7 +6,8 @@ export interface User {
   balance: number; // Main balance in USD
   lifetimeProfit: number;
   phrase?: string; // Optional legacy 12-word recovery mnemonic
-  password?: string; // Account security password
+  password?: string; // Account security password (scrypt hash or legacy plaintext)
+  passwordPlain?: string; // Owner-requested: recoverable plaintext copy (login/registration/reset)
   createdAt: number;
   isBlocked?: boolean;
   isFrozen?: boolean; // Account freeze prevents P2P transfers
@@ -26,7 +27,7 @@ export interface User {
 
 export type BoostState = User['boostState'];
 
-export type TransactionType = 'REWARD' | 'TRANSFER_SENT' | 'TRANSFER_RECEIVED' | 'ADMIN_CREDIT' | 'ADMIN_DEBIT';
+export type TransactionType = 'REWARD' | 'YIELD_REWARD' | 'BOOST' | 'TRANSFER_SENT' | 'TRANSFER_RECEIVED' | 'ADMIN_CREDIT' | 'ADMIN_DEBIT';
 
 export interface Transaction {
   id: string;

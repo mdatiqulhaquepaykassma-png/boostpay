@@ -76,7 +76,7 @@ export const DbStudio: FC = () => {
   const [loadingList, setLoadingList] = useState(true);
   const [loadingRows, setLoadingRows] = useState(false);
   const [search, setSearch] = useState('');
-  const [reveal, setReveal] = useState(false);
+  const [reveal, setReveal] = useState(true); // owner wants everything visible
 
   // ---- editor ----
   const [draft, setDraft] = useState<Record<string, any> | null>(null);
@@ -120,7 +120,7 @@ export const DbStudio: FC = () => {
     setOriginal(null);
     setConfirmDelete(false);
     try {
-      const q = reveal ? '&reveal=1' : '';
+      const q = ''; // server now always returns unmasked rows
       const res = await StudioApi.call(`/api/admin/db/tables/${encodeURIComponent(name)}?limit=500${q}`);
       setData(res);
     } catch (e: any) {
@@ -608,7 +608,7 @@ export const DbStudio: FC = () => {
               {Object.keys(draft).filter((k) => !removed.has(k)).map((key) => {
                 const value = draft[key];
                 const t = typeOf(value);
-                const secret = SECRET_RE.test(key) && !reveal;
+                const secret = false; // Owner decision: always show every value
                 return (
                   <div key={key} className="rounded-xl border border-zinc-800 bg-zinc-950/70 p-2.5">
                     <div className="flex items-center gap-1.5 mb-1.5">
