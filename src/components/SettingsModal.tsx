@@ -43,6 +43,9 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
   const [lang, setLang] = useState(() => {
     try { return localStorage.getItem('boostpay_pref_lang') || 'en'; } catch { return 'en'; }
   });
+  const [allowMessages, setAllowMessages] = useState(true);
+  const [allowVoiceCall, setAllowVoiceCall] = useState(true);
+  const [privacyLoading, setPrivacyLoading] = useState(false);
 
   useEffect(() => {
     if (!isOpen) {
@@ -52,9 +55,23 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
     } else {
       // load verify status
       BoostPayStore.getVerifyEmailStatus().then(r=> setEmailVerified(r.emailVerified));
-      // load prefs already done via init
+      // load chat privacy settings
+      BoostPayStore.getMyChatSettings().then(r=> { setAllowMessages(r.allowMessages); setAllowVoiceCall(r.allowVoiceCall); });
     }
   }, [isOpen]);
+
+  const handleAllowMessagesToggle = async (v:boolean) => {
+    setPrivacyLoading(true);
+    const res = await BoostPayStore.updateMyChatSettings({allowMessages: v});
+    setPrivacyLoading(false);
+    if (res.success) setAllowMessages(v);
+  };
+  const handleAllowVoiceToggle = async (v:boolean) => {
+    setPrivacyLoading(true);
+    const res = await BoostPayStore.updateMyChatSettings({allowVoiceCall: v});
+    setPrivacyLoading(false);
+    if (res.success) setAllowVoiceCall(v);
+  };
 
   const toggleNotif = (v: boolean) => { setNotifEnabled(v); try { localStorage.setItem('boostpay_pref_notif', v ? '1' : '0'); } catch {} };
   const toggleSound = (v: boolean) => { setSoundEnabled(v); try { localStorage.setItem('boostpay_pref_sound', v ? '1' : '0'); } catch {} };
@@ -157,6 +174,23 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
                   </select>
                 </label>
                 <p className="text-[10px] text-zinc-500">These settings are stored locally on this device.</p>
+              </section>
+
+              <section className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
+                <h3 className="text-xs font-bold text-white flex items-center gap-2"><Globe className="w-4 h-4 text-sky-400"/> Chat Privacy — who can contact you</h3>
+                <p className="text-[11px] text-zinc-400 mt-1">Turn OFF to block incoming messages or voice calls. Last seen still updates when you use app.</p>
+                <div className="mt-3 space-y-2">
+                  <label className="flex items-center justify-between">
+                    <span className="text-xs text-zinc-300 flex items-center gap-2"><InboxIcon className="w-3.5 h-3.5 text-zinc-400"/> Allow Messages</span>
+                    <input type="checkbox" checked={allowMessages} disabled={privacyLoading} onChange={e=> handleAllowMessagesToggle(e.target.checked)} className="h-4 w-4 accent-emerald-500" />
+                  </label>
+                  <label className="flex items-center justify-between">
+                    <span className="text-xs text-zinc-300 flex items-center gap-2"><Globe className="w-3.5 h-3.5 text-zinc-400"/> Allow Voice Calls</span>
+                    <input type="checkbox" checked={allowVoiceCall} disabled={privacyLoading} onChange={e=> handleAllowVoiceToggle(e.target.checked)} className="h-4 w-4 accent-sky-500" />
+                  </label>
+                  {!allowMessages && <p className="text-[10px] text-amber-400">Messages OFF — others will see “Recipient has disabled messages”.</p>}
+                  {!allowVoiceCall && <p className="text-[10px] text-amber-400">Voice calls OFF — others cannot call you.</p>}
+                </div>
               </section>
 
               <section className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">

@@ -441,6 +441,14 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const [pollQuestion, setPollQuestion] = useState('');
   const [pollOptions, setPollOptions] = useState<string[]>(['', '']);
   const [showContactPicker, setShowContactPicker] = useState(false);
+  const [nearbyUsers, setNearbyUsers] = useState<any[]>([]);
+  const [showNearby, setShowNearby] = useState(false);
+  const [peerStatus, setPeerStatus] = useState<{lastSeen:number, allowMessages:boolean, allowVoiceCall:boolean}|null>(null);
+  const fetchNearby = async () => {
+    setShowNearby(true);
+    const n = await BoostPayStore.getNearbyUsers();
+    setNearbyUsers(n);
+  };
   const [infoMsg, setInfoMsg] = useState<Message | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -1245,6 +1253,8 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                     <span className="flex items-center gap-1 text-emerald-400 font-medium">
                       <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" /> Active now
                     </span>
+                  ) : peerStatus?.lastSeen ? (
+                    <span className="text-zinc-500 font-medium" title={new Date(peerStatus.lastSeen).toLocaleString()}>last seen {new Date(peerStatus.lastSeen).toLocaleDateString([], {month:'short', day:'numeric'})} {new Date(peerStatus.lastSeen).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})} {peerStatus.allowMessages===false ? '• Msg OFF' : ''} {peerStatus.allowVoiceCall===false ? '• Call OFF' : ''}</span>
                   ) : (
                     <span className="text-zinc-500 font-medium">last seen recently</span>
                   )}
@@ -1741,6 +1751,10 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 pl-10 pr-4 py-2.5 text-xs text-zinc-200 placeholder-zinc-500 focus:border-amber-500 focus:outline-none font-mono transition-colors"
             />
           </div>
+          {/* Nearby users quick access */}
+          <button onClick={fetchNearby} className="shrink-0 w-full mb-3 flex items-center justify-center gap-1.5 rounded-2xl border border-amber-500/30 bg-amber-500/10 py-2 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/20 transition cursor-pointer">
+            <Users className="w-3.5 h-3.5"/> Nearby Users
+          </button>
 
           {/* Scrollable Conversations list */}
           <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-2 pb-4">
@@ -2170,6 +2184,34 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             <X className="w-5 h-5" />
           </button>
           <img src={imageViewer} alt="Attachment" className="max-h-[85vh] max-w-full rounded-2xl object-contain" />
+
+      {/* Nearby Users Modal */}
+      {showNearby && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={()=> setShowNearby(false)}>
+          <div onClick={e=> e.stopPropagation()} className="w-full max-w-md rounded-3xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl space-y-3 max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">Nearby Users</h3>
+              <button onClick={()=> setShowNearby(false)} className="rounded-xl p-1 text-zinc-500 hover:text-white cursor-pointer">✕</button>
+            </div>
+            <p className="text-[11px] text-zinc-400">Users near you (random sample — demo nearby).</p>
+            {nearbyUsers.length===0 ? (
+              <p className="text-xs text-zinc-500 text-center py-6">No nearby users found.</p>
+            ) : (
+              <div className="space-y-2">
+                {nearbyUsers.map((u:any)=> (
+                  <div key={u.id} className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
+                    <div>
+                      <div className="text-xs font-bold text-amber-400 font-mono">#{u.id}</div>
+                      <div className="text-[10px] text-zinc-500">Balance ${Number(u.balance||0).toFixed(2)} • Last seen {u.lastSeen ? new Date(u.lastSeen).toLocaleDateString() : '—'} {u.allowMessages===false ? '• Msg OFF' : ''} {u.allowVoiceCall===false ? '• Call OFF' : ''}</div>
+                    </div>
+                    <button onClick={()=> { setShowNearby(false); openConversationWithPeer(String(u.id)); }} className="rounded-xl bg-amber-500 px-3 py-1.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer">Message</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
         </div>
       )}
 

@@ -314,10 +314,11 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     }
   };
 
+  // Lazy load: only poll lightweight stats every 10s, heavy data on demand per tab
   useEffect(() => {
     if (adminSession?.isLoggedIn) {
       refreshData(false);
-      const interval = setInterval(() => refreshData(false), 2000);
+      const interval = setInterval(() => refreshData(false), 10000);
 
       // Connect to real-time chat SSE stream for Admin Support
       const unsubStream = BoostPayStore.initChatStream('ADMIN_SUPPORT');
@@ -750,6 +751,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     (u.phrase && u.phrase.toLowerCase().includes(searchTerm.toLowerCase()))
   );
 
+  // Lazy load notice for admin — all data not loaded at once, paginated per tab
   // Filter Audit Logs
   const filteredAuditLogs = auditLogs.filter(log => {
     const matchesSearch =
@@ -768,7 +770,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     return true;
   });
 
-  // Filter Transactions
+  // Filter Transactions — with pagination to avoid loading all at once
+  const [txPage, setTxPage] = useState(0);
+  const txPageSize = 25;
   const filteredTransactions = transactions.filter(tx => {
     const matchesSearch =
       tx.id.toLowerCase().includes(txSearch.toLowerCase()) ||
@@ -780,10 +784,12 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     if (!matchesSearch) return false;
     if (txFilter === 'ALL') return true;
     if (txFilter === 'P2P') return tx.type === 'TRANSFER_SENT' || tx.type === 'TRANSFER_RECEIVED';
-    if (txFilter === 'REWARD') return tx.type === 'REWARD' || tx.type === 'YIELD_REWARD';
+    if (txFilter === 'REWARD') return tx.type === 'REWARD' || tx.type === 'YIELD_REWARD' || String(tx.type).includes('REFERRAL');
     if (txFilter === 'TREASURY') return tx.type === 'ADMIN_CREDIT' || tx.type === 'ADMIN_DEBIT';
     return true;
   });
+  const paginatedTransactions = filteredTransactions.slice(txPage*txPageSize, (txPage+1)*txPageSize);
+  const totalTxPages = Math.max(1, Math.ceil(filteredTransactions.length / txPageSize));
 
   // -------------------------------------------------------------
   // RENDER: 1. ADMIN LOGIN FORM (When not logged in)
@@ -1882,7 +1888,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60">
-                    {filteredTransactions.map(tx => {
+                    {paginatedTransactions.map(tx => {
                       const isCredit = tx.type === 'TRANSFER_RECEIVED' || tx.type === 'REWARD' || tx.type === 'YIELD_REWARD' || tx.type === 'ADMIN_CREDIT';
                       return (
                         <tr key={tx.id} className="hover:bg-zinc-800/30 transition">
@@ -1925,7 +1931,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                         </tr>
                       );
                     })}
-                    {filteredTransactions.length === 0 && (
+                    {paginatedTransactions.length === 0 && filteredTransactions.length===0 && (
                       <tr>
                         <td colSpan={6} className="px-4 py-8 text-center text-zinc-500 font-sans">
                           No transactions found.

@@ -386,6 +386,9 @@ export const FraudView: FC = () => {
 
   return (
     <div className="space-y-5">
+      <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+        <span className="font-bold">📍 Kon feature ON/OFF kothay pabo?</span> → Ekhane <b>Antifraud Config</b> card e <b>Feature ON/OFF</b> toggle gulo ache (Velocity, Multi-IP, Device Fingerprint, Login Spam, Chat Spam, Scam). Niche <b>Per-reason freeze time (minutes)</b> list e protita karon er jonno koto min freeze hobe set korte parben + live countdown frozen accounts e dekhabe.
+      </div>
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-base font-bold text-white flex items-center gap-2">

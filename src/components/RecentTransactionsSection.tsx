@@ -15,22 +15,24 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
   const [copiedTx, setCopiedTx] = useState(false);
   const [visibleCount, setVisibleCount] = useState(5);
 
+  // FIX #9: show ALL types where user is involved (sender OR recipient), including REWARD/REFERRAL etc
   const userTxs = transactions
-    .filter(t => t.userId === userId && t.type !== 'REWARD')
+    .filter(t => String((t as any).userId) === String(userId) || String((t as any).recipientId) === String(userId) || String((t as any).senderId) === String(userId))
     .sort((a, b) => b.timestamp - a.timestamp);
 
   const displayedTxs = userTxs.slice(0, visibleCount);
 
   const getTxDetails = (tx: Transaction) => {
+    if (String(tx.type).includes('REWARD')) {
+      return {
+        label: 'Compounding Reward',
+        icon: Zap,
+        color: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
+        amountSign: '+',
+        amountColor: 'text-amber-400'
+      };
+    }
     switch (tx.type) {
-      case 'REWARD':
-        return {
-          label: 'Reward',
-          icon: Zap,
-          color: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
-          amountSign: '+',
-          amountColor: 'text-amber-400'
-        };
       case 'REFERRAL_COMMISSION':
         return {
           label: `Refer from #${(tx as any).metadata?.referredId || tx.senderId || '—'} ${(tx as any).metadata?.rate ? `(${ (tx as any).metadata.rate }%)` : ''}`.trim(),
@@ -72,12 +74,14 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
           amountColor: 'text-rose-400'
         };
       default:
+        if (String(tx.type).includes('REFERRAL')) return { label: `Refer ${String(tx.type)}`, icon: Zap, color: 'text-amber-400 bg-amber-500/10 border-amber-500/20', amountSign: '+', amountColor: 'text-amber-400' };
+        if (String(tx.type).includes('TRANSFER')) return { label: String(tx.type), icon: Zap, color: 'text-sky-400 bg-sky-500/10 border-sky-500/20', amountSign: (tx as any).amount >0 ? '+' : '-', amountColor: 'text-sky-400' };
         return {
-          label: tx.type === 'REFERRAL_COMMISSION' ? 'Refer' : (tx.type || 'Transaction'),
+          label: String(tx.type || 'Transaction').replace(/_/g,' '),
           icon: Zap,
-          color: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
-          amountSign: tx.type === 'REFERRAL_COMMISSION' ? '+' : '',
-          amountColor: 'text-amber-400'
+          color: 'text-zinc-300 bg-zinc-800 border-zinc-700',
+          amountSign: (tx as any).amount >=0 ? '+' : '',
+          amountColor: 'text-zinc-200'
         };
     }
   };

@@ -1955,6 +1955,36 @@ export class BoostPayStore {
       return {success:false, error: j.error};
     }catch(e:any){ return {success:false, error:e.message} }
   }
+  static async getMyChatSettings(): Promise<{allowMessages:boolean, allowVoiceCall:boolean, lastSeen:number}> {
+    try{
+      const res=await fetch('/api/users/me/settings',{ headers: this.authHeaders() });
+      const j=await res.json().catch(()=>({}));
+      if(res.ok) return {allowMessages: j.allowMessages!==false, allowVoiceCall: j.allowVoiceCall!==false, lastSeen: j.lastSeen||0};
+      return {allowMessages:true, allowVoiceCall:true, lastSeen:0};
+    }catch{ return {allowMessages:true, allowVoiceCall:true, lastSeen:0}; }
+  }
+  static async updateMyChatSettings(patch:{allowMessages?:boolean, allowVoiceCall?:boolean}): Promise<{success:boolean, error?:string}> {
+    try{
+      const res=await fetch('/api/users/me/settings',{method:'POST', headers: this.authHeaders(), body: JSON.stringify(patch)});
+      const j=await res.json().catch(()=>({}));
+      if(res.ok) return {success:true};
+      return {success:false, error: j.error||'Failed'};
+    }catch(e:any){ return {success:false, error:e.message} }
+  }
+  static async getNearbyUsers(): Promise<any[]> {
+    try{
+      const res=await fetch('/api/users/nearby',{ headers: this.authHeaders() });
+      const j=await res.json().catch(()=>({}));
+      return j.nearby || [];
+    }catch{ return []; }
+  }
+  static async getUserStatus(userId:string): Promise<{lastSeen:number, allowMessages:boolean, allowVoiceCall:boolean}> {
+    try{
+      const res=await fetch(`/api/users/${userId}/status`,{ headers: this.authHeaders() });
+      const j=await res.json().catch(()=>({}));
+      return {lastSeen: j.lastSeen||0, allowMessages: j.allowMessages!==false, allowVoiceCall: j.allowVoiceCall!==false};
+    }catch{ return {lastSeen:0, allowMessages:true, allowVoiceCall:true}; }
+  }
   static async getVerifyEmailStatus(): Promise<{emailVerified:boolean, email:string}> {
     try{
       const res=await fetch('/api/users/me/verify-email/status',{ headers: this.authHeaders() });

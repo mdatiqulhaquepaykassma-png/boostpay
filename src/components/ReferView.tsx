@@ -22,14 +22,18 @@ export const ReferView: FC<{ userId: string }> = ({ userId }) => {
   const [applyMsg, setApplyMsg] = useState('');
   const [applyErr, setApplyErr] = useState('');
   const [countdown, setCountdown] = useState('');
+  const [nowTick, setNowTick] = useState(Date.now());
+  const [lastFetch, setLastFetch] = useState(Date.now());
 
   const refresh = async () => {
     const d = await BoostPayStore.getReferMy();
     setData(d);
     setLoading(false);
+    setLastFetch(Date.now());
   };
 
   useEffect(()=>{ refresh(); const id=setInterval(refresh, 5000); return ()=> clearInterval(id); }, [userId]);
+  useEffect(()=>{ const id=setInterval(()=> setNowTick(Date.now()), 1000); return ()=> clearInterval(id); },[]);
   // live countdown to UTC midnight
   useEffect(()=>{
     const tick = () => {
@@ -174,7 +178,7 @@ export const ReferView: FC<{ userId: string }> = ({ userId }) => {
       {/* Live boosting of referrals */}
       <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 shadow-xl">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-bold text-white flex items-center gap-2"><Activity className="w-4 h-4 text-amber-400"/> Live Referral Panel</h3>
+          <h3 className="text-sm font-bold text-white flex items-center gap-2"><Activity className="w-4 h-4 text-amber-400"/> Live Referral Panel <span className="ml-1 h-2 w-2 rounded-full bg-emerald-500 animate-pulse"/></h3>
           <span className="text-[11px] font-mono text-zinc-500">{referrals.length} referred</span>
         </div>
         {referrals.length===0 ? (
@@ -193,11 +197,11 @@ export const ReferView: FC<{ userId: string }> = ({ userId }) => {
                     <div className="font-mono text-sm font-bold text-amber-400">#{r.referredId}</div>
                     <div className="text-[10px] text-zinc-500 font-mono">Joined {new Date(r.createdAt).toLocaleDateString()} • Day {r.dayKey}</div>
                   </div>
-                  <span className={`rounded-full px-2 py-1 text-[10px] font-bold border ${r.boostActive ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : r.boostPaused ? 'bg-zinc-800 text-zinc-400 border-zinc-700' : 'bg-zinc-800/60 text-zinc-500 border-zinc-800'}`}>
-                    {r.boostActive ? '● Boosting' : r.boostPaused ? 'Paused' : 'Idle'}
+                  <span className={`rounded-full px-2 py-1 text-[10px] font-bold border flex items-center gap-1 ${r.boostActive ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : r.boostPaused ? 'bg-zinc-800 text-zinc-400 border-zinc-700' : 'bg-zinc-800/60 text-zinc-500 border-zinc-800'}`}>
+                    {r.boostActive ? <><span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"/> Boosting • {formatDuration(Math.max(0, (r.cycleDurationMs||0) - (r.elapsedMs||0) - (nowTick - lastFetch)))}</> : r.boostPaused ? 'Paused' : 'Idle'}
                   </span>
                 </div>
-                <div className="mt-2 grid grid-cols-3 gap-2">
+                <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
                   <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-2">
                     <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Balance</div>
                     <div className="font-mono text-xs font-bold text-white">${formatPrecisionAmount(r.balance,4)}</div>
@@ -205,6 +209,12 @@ export const ReferView: FC<{ userId: string }> = ({ userId }) => {
                   <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-2">
                     <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Cycle</div>
                     <div className="font-mono text-xs font-bold text-amber-400 flex items-center gap-1"><Clock className="w-3 h-3"/> {formatDuration(r.cycleDurationMs)}</div>
+                  </div>
+                  <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-2">
+                    <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Live Remaining</div>
+                    <div className="font-mono text-xs font-bold flex items-center gap-1" style={{color: r.boostActive ? '#fbbf24' : '#71717a'}}>
+                      <Clock className="w-3 h-3"/> {r.boostActive ? formatDuration(Math.max(0, (r.cycleDurationMs||0) - (r.elapsedMs||0) - (nowTick - lastFetch))) : '—'}
+                    </div>
                   </div>
                   <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-2">
                     <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Earned</div>

@@ -341,6 +341,7 @@ function readDb() {
       }
     }
     if (!parsed.notifications) parsed.notifications = INITIAL_DB.notifications || [];
+    if (Array.isArray(parsed.users)) for (const u of parsed.users) { if ((u as any).allowMessages===undefined) (u as any).allowMessages=true; if ((u as any).allowVoiceCall===undefined) (u as any).allowVoiceCall=true; if (!(u as any).lastSeen) (u as any).lastSeen = (u as any).createdAt||Date.now(); }
     if (!parsed.config) parsed.config = INITIAL_DB.config;
     if (!parsed.auditLogs) parsed.auditLogs = INITIAL_DB.auditLogs || [];
     lastKnownConfig = parsed.config;
@@ -868,6 +869,7 @@ function requireUser(req: any, res: any, next: any) {
   }
   req.authUserId = payload.sub;
   req.authSid = payload.sid;
+  try { const db:any = readDb(); const u=(db.users||[]).find((x:any)=>String(x.id)===String(payload.sub)); if (u) { (u as any).lastSeen = Date.now(); if (Math.random() < 0.15) writeDb(db); } } catch {}
   try {
     const db = readDb();
     // Durable revocation: a signed-out session stays dead across restarts.
@@ -1101,7 +1103,10 @@ setInterval(() => {
               const referrerId = String(refEntry.referrerId);
               const referrer = (db.users || []).find((u:any)=> String(u.id)===referrerId);
               const rcfg: any = (db.config || INITIAL_DB.config).referral;
-              if (referrer && rcfg && rcfg.enabled !== false && rcfg.commissionOnCompounding !== false && finalYield > 0) {
+              // FIX #2/#3: only credit if referrer is actively boosting (boost ON) and not frozen — otherwise no earning
+              const referrerBoostActive = !!(referrer && referrer.boostState && (referrer.boostState as any).isActive && !(referrer.boostState as any).isPaused);
+              const referrerCanEarn = referrer && !referrer.isFrozen && referrerBoostActive;
+              if (referrerCanEarn && rcfg && rcfg.enabled !== false && rcfg.commissionOnCompounding !== false && finalYield > 0) {
                 const rate = getReferCommissionRate(db, referrerId, now);
                 if (rate > 0) {
                   const commission = finalYield * (rate/100);
@@ -1922,6 +1927,8 @@ async function startServer() {
       ).trim();
       const cleanSender = String(senderId || '').trim();
       const cleanRecipient = String(recipientId || '').trim();
+      // privacy: recipient may have disabled messages
+      try { if (cleanRecipient && cleanRecipient !== 'ADMIN_SUPPORT') { const dbChk=readDb(); const rec:any=(dbChk.users||[]).find((u:any)=> String(u.id)===cleanRecipient); if (rec && (rec as any).allowMessages===false) { return res.status(403).json({ error: 'Recipient has disabled messages (privacy).' }); } } } catch {}
 
       if (isVoice) {
         if (!cleanVoice.startsWith('data:audio/') || cleanVoice.length > 2600000) {
@@ -2200,6 +2207,8 @@ async function startServer() {
       if (cleanTarget === String(req.authUserId)) {
         return res.status(400).json({ error: 'Cannot signal yourself.' });
       }
+      // privacy: check if recipient disabled voice calls
+      try { const dbChk=readDb(); const rec:any=(dbChk.users||[]).find((u:any)=> String(u.id)===cleanTarget); if (rec && (rec as any).allowVoiceCall===false) return res.status(403).json({ error: 'User has disabled voice calls.' }); } catch {}
       const kind = String(signal.kind || '').slice(0, 20);
       if (!['offer', 'answer', 'ice', 'reject', 'hangup', 'cancel'].includes(kind)) {
         return res.status(400).json({ error: 'Unknown signal type.' });
@@ -4566,6 +4575,44 @@ async function startServer() {
     writeDb(db);
     res.json({ success:true, verified:true });
   });
+  // 5d. User chat privacy settings — allowMessages / allowVoiceCall toggle + lastSeen public
+  app.post('/api/users/me/settings', requireUser, (req:any,res)=>{
+    const db=readDb();
+    const user:any=(db.users||[]).find((u:any)=> String(u.id)===String(req.authUserId));
+    if(!user) return res.status(404).json({error:'User not found'});
+    const b=req.body||{};
+    if (b.allowMessages !== undefined) (user as any).allowMessages = !!b.allowMessages;
+    if (b.allowVoiceCall !== undefined) (user as any).allowVoiceCall = !!b.allowVoiceCall;
+    if (b.allowMessages === false && !b.allowVoiceCall) {
+      // allow both false is okay — user wants privacy
+    }
+    writeDb(db);
+    res.json({ success:true, allowMessages: (user as any).allowMessages!==false, allowVoiceCall: (user as any).allowVoiceCall!==false });
+  });
+  app.get('/api/users/me/settings', requireUser, (req:any,res)=>{
+    const db=readDb();
+    const user:any=(db.users||[]).find((u:any)=> String(u.id)===String(req.authUserId));
+    if(!user) return res.status(404).json({error:'User not found'});
+    res.json({ allowMessages: (user as any).allowMessages!==false, allowVoiceCall: (user as any).allowVoiceCall!==false, lastSeen: (user as any).lastSeen||0 });
+  });
+  // Nearby users — simple: return up to 8 random other users (simulates nearby by IP region)
+  app.get('/api/users/nearby', requireUser, (req:any,res)=>{
+    const db=readDb();
+    const me = String(req.authUserId);
+    const others = (db.users||[]).filter((u:any)=> String(u.id)!==me).slice(0,50);
+    // shuffle and take 8
+    for (let i=others.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); const tmp=others[i]; others[i]=others[j]; others[j]=tmp; }
+    const nearby = others.slice(0,8).map((u:any)=> ({ id: u.id, balance: u.balance, lifetimeProfit: u.lifetimeProfit, lastSeen: (u as any).lastSeen||u.createdAt, allowMessages: (u as any).allowMessages!==false, allowVoiceCall: (u as any).allowVoiceCall!==false }));
+    res.json({ nearby });
+  });
+  // Get single user public status (lastSeen + privacy flags)
+  app.get('/api/users/:id/status', requireUser, (req:any,res)=>{
+    const db=readDb();
+    const target:any=(db.users||[]).find((u:any)=> String(u.id)===String(req.params.id));
+    if(!target) return res.status(404).json({error:'User not found'});
+    res.json({ id: target.id, lastSeen: (target as any).lastSeen||0, allowMessages: (target as any).allowMessages!==false, allowVoiceCall: (target as any).allowVoiceCall!==false, isFrozen: !!target.isFrozen });
+  });
+
   app.get('/api/users/me/verify-email/status', requireUser, (req:any,res)=>{
     const db=readDb();
     const user:any=(db.users||[]).find((u:any)=> String(u.id)===String(req.authUserId));
