@@ -305,6 +305,19 @@ function rotateBackups() {
 
 function writeDb(data: any) {
   try {
+    // SAFETY NET: no write may ever silently drop admin accounts, sessions or
+    // audit history. Merge endpoints rebuild the doc from partial payloads and
+    // have wiped these collections in the past (users reported losing the admin
+    // account after client syncs / restores). The preserved arrays are shared
+    // references into the live doc, so normal in-place mutations still work.
+    if (pgDoc && data !== pgDoc) {
+      if (!Array.isArray(data.admins) || data.admins.length === 0) {
+        if (Array.isArray(pgDoc.admins) && pgDoc.admins.length > 0) data.admins = pgDoc.admins;
+      }
+      if (!Array.isArray(data.sessions)) data.sessions = Array.isArray(pgDoc.sessions) ? pgDoc.sessions : [];
+      if (!Array.isArray(data.auditLogs)) data.auditLogs = Array.isArray(pgDoc.auditLogs) ? pgDoc.auditLogs : [];
+    }
+
     const tempFile = `${DB_FILE}.tmp`;
     const payload = JSON.stringify(data, null, 2);
     fs.writeFileSync(tempFile, payload, 'utf-8');
@@ -1448,6 +1461,9 @@ async function startServer() {
       const configToSave = current.config;
 
       const updatedDb = {
+        // Preserve every other collection (admins, sessions, auditLogs, ...) —
+        // a client state push must never wipe server-only data.
+        ...current,
         users: mergedUsers,
         transactions: transactionsToSave,
         conversations: conversationsToSave,
