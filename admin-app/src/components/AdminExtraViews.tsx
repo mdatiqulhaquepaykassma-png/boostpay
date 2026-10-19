@@ -1,5 +1,6 @@
 import { FC, useState, useEffect, useCallback, Fragment } from 'react';
 import {
+  Sliders,
   BarChart3,
   TrendingUp,
   Radio,
@@ -521,6 +522,122 @@ const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = 
           ))}
         </div>
       )}
+    </div>
+  );
+};
+
+export const AdminSystemSettingsView: FC = () => {
+  const [cfg, setCfg] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const load = async () => {
+    setLoading(true);
+    try {
+      const d:any = await BoostPayStore.adminApi('/api/admin/stats');
+      if (d?.config) setCfg(d.config);
+      // also fetch full referral + antifraud to show
+      try {
+        const r = await BoostPayStore.adminApi('/api/admin/refer/overview');
+        if (r?.config) setCfg((prev:any)=> ({...prev, referral: r.config}));
+      } catch {}
+      try {
+        const af = await BoostPayStore.adminApi('/api/admin/antifraud/logs');
+        if (af?.config) setCfg((prev:any)=> ({...prev, antifraud: af.config}));
+      } catch {}
+      setErr('');
+    } catch(e:any){ setErr(e.message); }
+    setLoading(false);
+  };
+  useEffect(()=>{ load(); },[]);
+  const save = async () => {
+    if (!cfg) return;
+    setSaving(true); setMsg(''); setErr('');
+    try {
+      await BoostPayStore.adminApi('/api/admin/config', { method:'POST', body: {
+        minuteRatePercent: cfg.minuteRatePercent,
+        hourlyRatePercent: cfg.hourlyRatePercent,
+        minBoostMs: cfg.minBoostMs,
+        maxBoostMs: cfg.maxBoostMs,
+        targetDurationMs: cfg.targetDurationMs,
+        compoundingEnabled: cfg.compoundingEnabled,
+        maintenanceMode: cfg.maintenanceMode,
+        referral: cfg.referral,
+        antifraud: cfg.antifraud
+      }});
+      // also save refer via dedicated endpoint to ensure sync
+      if (cfg.referral) {
+        try { await BoostPayStore.adminApi('/api/admin/refer/config', { method:'POST', body: cfg.referral }); } catch {}
+      }
+      if (cfg.antifraud) {
+        try { await BoostPayStore.adminApi('/api/admin/antifraud/config', { method:'POST', body: { ...cfg.antifraud, freezeDurations: cfg.antifraud.freezeDurations }}); } catch {}
+      }
+      setMsg('All settings saved ✅');
+      await load();
+    } catch(e:any){ setErr(e.message); }
+    setSaving(false);
+  };
+  if (loading) return <div className="flex justify-center py-10"><Loader2 className="w-6 h-6 animate-spin text-zinc-500"/></div>;
+  if (!cfg) return <div className="text-xs text-red-400">{err || 'Failed to load config'}</div>;
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-bold text-white flex items-center gap-2"><Sliders className="w-5 h-5 text-amber-400"/> System Settings — Full Control</h2>
+        <button onClick={load} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-amber-500/40 cursor-pointer flex items-center gap-1"><RefreshCw className="w-3.5 h-3.5"/> Refresh</button>
+      </div>
+      {err && <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4"/>{err}</div>}
+      {msg && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300 flex items-center gap-2"><Check className="w-4 h-4"/>{msg}</div>}
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+        <h3 className="text-xs font-bold text-white">Compounding Engine</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div><label className="text-[10px] font-mono text-zinc-500">Minute Rate %</label><input type="number" step="0.0001" value={cfg.minuteRatePercent ?? ''} onChange={e=> setCfg({...cfg, minuteRatePercent: parseFloat(e.target.value)||0})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          <div><label className="text-[10px] font-mono text-zinc-500">Min Boost (ms)</label><input type="number" value={cfg.minBoostMs ?? ''} onChange={e=> setCfg({...cfg, minBoostMs: parseInt(e.target.value)||0})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          <div><label className="text-[10px] font-mono text-zinc-500">Max Boost (ms)</label><input type="number" value={cfg.maxBoostMs ?? ''} onChange={e=> setCfg({...cfg, maxBoostMs: parseInt(e.target.value)||0})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          <div><label className="text-[10px] font-mono text-zinc-500">Target Duration (ms, optional)</label><input type="number" value={cfg.targetDurationMs ?? ''} onChange={e=> setCfg({...cfg, targetDurationMs: parseInt(e.target.value)||0})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.compoundingEnabled} onChange={e=> setCfg({...cfg, compoundingEnabled: e.target.checked})} /> Compounding enabled</label>
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.maintenanceMode} onChange={e=> setCfg({...cfg, maintenanceMode: e.target.checked})} /> Maintenance mode</label>
+        </div>
+      </div>
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+        <h3 className="text-xs font-bold text-white">Referral Control</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.referral?.enabled} onChange={e=> setCfg({...cfg, referral:{...cfg.referral, enabled:e.target.checked}})} /> Referral enabled</label>
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.referral?.dailyTierEnabled} onChange={e=> setCfg({...cfg, referral:{...cfg.referral, dailyTierEnabled:e.target.checked}})} /> Daily tier 1-10% UTC</label>
+          <div><label className="text-[10px] font-mono text-zinc-500">Base Rate %</label><input type="number" step="0.5" value={cfg.referral?.baseRatePercent ?? ''} onChange={e=> setCfg({...cfg, referral:{...cfg.referral, baseRatePercent: parseFloat(e.target.value)||0}})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          <div><label className="text-[10px] font-mono text-zinc-500">Max Rate %</label><input type="number" step="1" value={cfg.referral?.maxRatePercent ?? ''} onChange={e=> setCfg({...cfg, referral:{...cfg.referral, maxRatePercent: parseFloat(e.target.value)||10}})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.referral?.commissionOnCompounding} onChange={e=> setCfg({...cfg, referral:{...cfg.referral, commissionOnCompounding:e.target.checked}})} /> Commission on compounding</label>
+        </div>
+      </div>
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+        <h3 className="text-xs font-bold text-white">Antifraud</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.antifraud?.enabled} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, enabled:e.target.checked}})} /> Antifraud enabled</label>
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.antifraud?.velocityEnabled} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, velocityEnabled:e.target.checked}})} /> Velocity check</label>
+          <div><label className="text-[10px] font-mono text-zinc-500">Max transfers /10m</label><input type="number" value={cfg.antifraud?.maxTransfersPer10Min ?? ''} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, maxTransfersPer10Min: parseInt(e.target.value)||0}})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          <div><label className="text-[10px] font-mono text-zinc-500">New acct threshold $</label><input type="number" value={cfg.antifraud?.newAccountLargeTransferThreshold ?? ''} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, newAccountLargeTransferThreshold: parseFloat(e.target.value)||0}})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          <div><label className="text-[10px] font-mono text-zinc-500">Max logins /10m</label><input type="number" value={cfg.antifraud?.maxLoginsPer10Min ?? ''} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, maxLoginsPer10Min: parseInt(e.target.value)||0}})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          <div><label className="text-[10px] font-mono text-zinc-500">Max messages /min</label><input type="number" value={cfg.antifraud?.maxMessagesPerMin ?? ''} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, maxMessagesPerMin: parseInt(e.target.value)||0}})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+        </div>
+        {cfg.antifraud?.freezeDurations && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {Object.keys(cfg.antifraud.freezeDurations).map(k=>(
+              <div key={k} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2">
+                <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">{k}</div>
+                <div className="flex items-center gap-1 mt-1">
+                  <input type="number" value={Math.round((cfg.antifraud.freezeDurations[k]||0)/60000)} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, freezeDurations:{...cfg.antifraud.freezeDurations, [k]: parseInt(e.target.value)||0}}})} className="w-16 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs font-mono text-white"/>
+                  <span className="text-[10px] text-zinc-500">min</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="flex gap-2">
+        <button onClick={save} disabled={saving} className="rounded-xl bg-amber-500 px-6 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 disabled:opacity-50 flex items-center gap-2 cursor-pointer">{saving? <Loader2 className="w-4 h-4 animate-spin"/>: <Check className="w-4 h-4"/>} {saving?'Saving...':'Save All Settings'}</button>
+        <button onClick={load} className="rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-xs text-zinc-300 hover:border-zinc-700 cursor-pointer">Reset</button>
+      </div>
+      <p className="text-[11px] text-zinc-500 leading-relaxed">This panel exposes every live system setting: compounding engine, referral 1-10% global ranking, antifraud per-reason freezes. Changes apply instantly and are audit-logged.</p>
     </div>
   );
 };

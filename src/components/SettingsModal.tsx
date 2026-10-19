@@ -1,5 +1,5 @@
 import { FC, useState, useEffect } from 'react';
-import { X, ShieldCheck, KeyRound, Lock, Eye, EyeOff, Inbox as InboxIcon, LogOut, Check, AlertTriangle, Loader2 } from 'lucide-react';
+import { X, ShieldCheck, KeyRound, Lock, Eye, EyeOff, Inbox as InboxIcon, LogOut, Check, AlertTriangle, Loader2, Mail, Bell, Volume2, Globe, User as UserIcon, Trash2 } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User } from '../types';
 import { InboxView } from './InboxView';
@@ -15,7 +15,7 @@ interface Props {
 }
 
 export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserUpdated, onLogout, inboxUnread }) => {
-  const [tab, setTab] = useState<'SECURITY' | 'INBOX' | 'PASSWORD'>('SECURITY');
+  const [tab, setTab] = useState<'GENERAL' | 'SECURITY' | 'INBOX' | 'VERIFY' | 'PASSWORD'>('GENERAL');
   const [showSecurity, setShowSecurity] = useState(false);
 
   // password change state
@@ -27,12 +27,38 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
+  // verify email state
+  const [emailVerified, setEmailVerified] = useState(false);
+  const [verifyCode, setVerifyCode] = useState('');
+  const [verifyMsg, setVerifyMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [verifyLoading, setVerifyLoading] = useState(false);
+
+  // general prefs (local)
+  const [notifEnabled, setNotifEnabled] = useState(() => {
+    try { return localStorage.getItem('boostpay_pref_notif') !== '0'; } catch { return true; }
+  });
+  const [soundEnabled, setSoundEnabled] = useState(() => {
+    try { return localStorage.getItem('boostpay_pref_sound') !== '0'; } catch { return true; }
+  });
+  const [lang, setLang] = useState(() => {
+    try { return localStorage.getItem('boostpay_pref_lang') || 'en'; } catch { return 'en'; }
+  });
+
   useEffect(() => {
     if (!isOpen) {
       setMsg(null);
       setCurPass(''); setNewPass(''); setConfirm('');
+      setVerifyMsg(null); setVerifyCode('');
+    } else {
+      // load verify status
+      BoostPayStore.getVerifyEmailStatus().then(r=> setEmailVerified(r.emailVerified));
+      // load prefs already done via init
     }
   }, [isOpen]);
+
+  const toggleNotif = (v: boolean) => { setNotifEnabled(v); try { localStorage.setItem('boostpay_pref_notif', v ? '1' : '0'); } catch {} };
+  const toggleSound = (v: boolean) => { setSoundEnabled(v); try { localStorage.setItem('boostpay_pref_sound', v ? '1' : '0'); } catch {} };
+  const changeLang = (v: string) => { setLang(v); try { localStorage.setItem('boostpay_pref_lang', v); } catch {} };
 
   if (!isOpen) return null;
 
@@ -47,11 +73,30 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
     if (res.success) {
       setMsg({ type: 'ok', text: 'Password updated successfully ✅' });
       setCurPass(''); setNewPass(''); setConfirm('');
-      // update local user password for offline
       onUserUpdated({ ...currentUser, password: newPass } as any);
     } else {
       setMsg({ type: 'err', text: res.error || 'Failed to change password.' });
     }
+  };
+
+  const handleRequestVerify = async () => {
+    setVerifyLoading(true); setVerifyMsg(null);
+    const res = await BoostPayStore.requestVerifyEmail();
+    setVerifyLoading(false);
+    if (res.success) {
+      setVerifyMsg({ type: 'ok', text: 'Code sent to inbox' + (res.debugCode ? ` (demo: ${res.debugCode})` : '') });
+    } else setVerifyMsg({ type: 'err', text: res.error || 'Failed' });
+  };
+  const handleConfirmVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!verifyCode.trim()) { setVerifyMsg({ type: 'err', text: 'Enter 6-digit code' }); return; }
+    setVerifyLoading(true); setVerifyMsg(null);
+    const res = await BoostPayStore.confirmVerifyEmail(verifyCode.trim());
+    setVerifyLoading(false);
+    if (res.success) {
+      setVerifyMsg({ type: 'ok', text: 'Email verified ✅' });
+      setEmailVerified(true);
+    } else setVerifyMsg({ type: 'err', text: res.error || 'Failed' });
   };
 
   return (
@@ -64,21 +109,70 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
             </div>
             <div>
               <h2 className="text-sm font-bold text-white">Settings</h2>
-              <p className="text-[10px] text-zinc-400">Security · Inbox · Password</p>
+              <p className="text-[10px] text-zinc-400">Manage your account & preferences</p>
             </div>
           </div>
           <button onClick={onClose} className="rounded-xl p-2 text-zinc-400 hover:bg-zinc-800 hover:text-white transition cursor-pointer"><X className="w-4 h-4" /></button>
         </div>
 
-        <div className="shrink-0 flex gap-1 p-2 bg-zinc-950/60 border-b border-zinc-800">
-          <button onClick={() => setTab('SECURITY')} className={`flex-1 rounded-xl py-2 text-xs font-semibold transition cursor-pointer ${tab === 'SECURITY' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}>Security</button>
-          <button onClick={() => setTab('INBOX')} className={`flex-1 rounded-xl py-2 text-xs font-semibold transition cursor-pointer relative ${tab === 'INBOX' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}>
+        <div className="shrink-0 flex gap-1 p-2 bg-zinc-950/60 border-b border-zinc-800 overflow-x-auto">
+          <button onClick={() => setTab('GENERAL')} className={`flex-1 min-w-[60px] rounded-xl py-2 text-xs font-semibold transition cursor-pointer ${tab === 'GENERAL' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}>General</button>
+          <button onClick={() => setTab('SECURITY')} className={`flex-1 min-w-[60px] rounded-xl py-2 text-xs font-semibold transition cursor-pointer ${tab === 'SECURITY' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}>Security</button>
+          <button onClick={() => setTab('VERIFY')} className={`flex-1 min-w-[60px] rounded-xl py-2 text-xs font-semibold transition cursor-pointer ${tab === 'VERIFY' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}>Verify</button>
+          <button onClick={() => setTab('INBOX')} className={`flex-1 min-w-[60px] rounded-xl py-2 text-xs font-semibold transition cursor-pointer relative ${tab === 'INBOX' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}>
             Inbox {inboxUnread ? <span className="ml-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-red-500 px-1 text-[9px] text-white">{inboxUnread}</span> : null}
           </button>
-          <button onClick={() => setTab('PASSWORD')} className={`flex-1 rounded-xl py-2 text-xs font-semibold transition cursor-pointer ${tab === 'PASSWORD' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}>Password</button>
+          <button onClick={() => setTab('PASSWORD')} className={`flex-1 min-w-[60px] rounded-xl py-2 text-xs font-semibold transition cursor-pointer ${tab === 'PASSWORD' ? 'bg-amber-500 text-zinc-950 font-bold' : 'text-zinc-400 hover:text-white hover:bg-zinc-800'}`}>Password</button>
         </div>
 
         <div className="flex-1 overflow-y-auto min-h-0">
+          {tab === 'GENERAL' && (
+            <div className="p-5 space-y-4">
+              <section className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
+                <h3 className="text-xs font-bold text-white flex items-center gap-2"><UserIcon className="w-4 h-4 text-amber-400"/> Account Info</h3>
+                <div className="mt-2 space-y-1.5 text-xs">
+                  <div className="flex justify-between"><span className="text-zinc-500">User ID</span><span className="font-mono font-bold text-amber-400">#{currentUser.id}</span></div>
+                  <div className="flex justify-between"><span className="text-zinc-500">Email</span><span className="text-white truncate max-w-[160px]">{currentUser.email || '—'}</span></div>
+                  <div className="flex justify-between"><span className="text-zinc-500">Balance</span><span className="font-mono text-emerald-400">${Number(currentUser.balance||0).toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-zinc-500">Verified</span><span className={`font-mono text-xs ${emailVerified ? 'text-emerald-400' : 'text-zinc-400'}`}>{emailVerified ? '✓ Verified' : 'Not verified (optional)'}</span></div>
+                </div>
+              </section>
+
+              <section className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4 space-y-3">
+                <h3 className="text-xs font-bold text-white flex items-center gap-2"><Bell className="w-4 h-4 text-sky-400"/> Preferences</h3>
+                <label className="flex items-center justify-between">
+                  <span className="text-xs text-zinc-300 flex items-center gap-2"><Bell className="w-3.5 h-3.5 text-zinc-400"/> Push notifications</span>
+                  <input type="checkbox" checked={notifEnabled} onChange={e=> toggleNotif(e.target.checked)} className="h-4 w-4 accent-amber-500" />
+                </label>
+                <label className="flex items-center justify-between">
+                  <span className="text-xs text-zinc-300 flex items-center gap-2"><Volume2 className="w-3.5 h-3.5 text-zinc-400"/> Sound effects</span>
+                  <input type="checkbox" checked={soundEnabled} onChange={e=> toggleSound(e.target.checked)} className="h-4 w-4 accent-amber-500" />
+                </label>
+                <label className="flex items-center justify-between">
+                  <span className="text-xs text-zinc-300 flex items-center gap-2"><Globe className="w-3.5 h-3.5 text-zinc-400"/> Language</span>
+                  <select value={lang} onChange={e=> changeLang(e.target.value)} className="rounded-xl border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs text-white">
+                    <option value="en">English</option>
+                    <option value="bn">বাংলা</option>
+                    <option value="es">Español</option>
+                  </select>
+                </label>
+                <p className="text-[10px] text-zinc-500">These settings are stored locally on this device.</p>
+              </section>
+
+              <section className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
+                <h3 className="text-xs font-bold text-white flex items-center gap-2"><Trash2 className="w-4 h-4 text-red-400"/> Danger Zone</h3>
+                <p className="text-[11px] text-zinc-400 mt-1">Clear local chat cache & offline data. Server data stays safe.</p>
+                <button onClick={()=> { try{ localStorage.removeItem('boostpay_messages'); localStorage.removeItem('boostpay_conversations'); location.reload(); }catch{} }} className="mt-2 w-full rounded-xl border border-zinc-800 bg-zinc-900 py-2 text-xs text-zinc-300 hover:text-white cursor-pointer">Clear local cache</button>
+              </section>
+
+              {onLogout && (
+                <button onClick={onLogout} className="w-full flex items-center justify-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 py-3 text-xs font-bold text-red-400 hover:bg-red-500/20 cursor-pointer">
+                  <LogOut className="w-4 h-4" /> Sign out of this device
+                </button>
+              )}
+            </div>
+          )}
+
           {tab === 'SECURITY' && (
             <div className="p-5 space-y-4">
               <section className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
@@ -92,17 +186,41 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
                 </div>
               </section>
 
-              <section className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
-                <h3 className="text-xs font-bold text-white flex items-center gap-2"><InboxIcon className="w-4 h-4 text-sky-400" /> Inbox quick access</h3>
-                <p className="text-[11px] text-zinc-400 mt-1">You have {inboxUnread || 0} unread alerts. Open Inbox tab above to read & clear.</p>
-                <button onClick={() => setTab('INBOX')} className="mt-2 w-full rounded-xl bg-zinc-800 py-2 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 cursor-pointer">Go to Inbox →</button>
-              </section>
-
               {onLogout && (
                 <button onClick={onLogout} className="w-full flex items-center justify-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 py-3 text-xs font-bold text-red-400 hover:bg-red-500/20 cursor-pointer">
                   <LogOut className="w-4 h-4" /> Sign out of this device
                 </button>
               )}
+            </div>
+          )}
+
+          {tab === 'VERIFY' && (
+            <div className="p-5 space-y-4">
+              <section className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
+                <h3 className="text-xs font-bold text-white flex items-center gap-2"><Mail className="w-4 h-4 text-sky-400"/> Verify Email (optional)</h3>
+                <p className="text-[11px] text-zinc-400 mt-1">Verification is optional. Verified badges increase trust. Code is sent to your inbox.</p>
+                <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs flex justify-between">
+                  <span className="text-zinc-400">Status</span><span className={`font-mono font-bold ${emailVerified ? 'text-emerald-400' : 'text-amber-400'}`}>{emailVerified ? '✓ Verified' : 'Not verified'}</span>
+                </div>
+                {verifyMsg && (
+                  <div className={`mt-2 rounded-xl border p-2 text-xs flex items-center gap-2 ${verifyMsg.type==='ok' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-red-500/30 bg-red-500/10 text-red-300'}`}>
+                    {verifyMsg.type==='ok' ? <Check className="w-3.5 h-3.5"/> : <AlertTriangle className="w-3.5 h-3.5"/>} {verifyMsg.text}
+                  </div>
+                )}
+                {!emailVerified ? (
+                  <div className="mt-3 space-y-2">
+                    <button onClick={handleRequestVerify} disabled={verifyLoading} className="w-full rounded-xl bg-sky-500 py-2.5 text-xs font-bold text-white hover:bg-sky-400 disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer">
+                      {verifyLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Mail className="w-4 h-4"/>} Send verification code
+                    </button>
+                    <form onSubmit={handleConfirmVerify} className="flex gap-2">
+                      <input value={verifyCode} onChange={e=> setVerifyCode(e.target.value)} placeholder="Enter 6-digit code" className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white placeholder-zinc-600 focus:border-amber-500 focus:outline-none" />
+                      <button type="submit" disabled={verifyLoading} className="rounded-xl bg-amber-500 px-4 text-xs font-bold text-zinc-950 hover:bg-amber-400 disabled:opacity-50 cursor-pointer">Verify</button>
+                    </form>
+                  </div>
+                ) : (
+                  <div className="mt-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2 text-xs text-emerald-300 flex items-center gap-2"><Check className="w-4 h-4"/> Your email is verified. You can now enjoy full security features.</div>
+                )}
+              </section>
             </div>
           )}
 

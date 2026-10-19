@@ -1923,6 +1923,45 @@ export class BoostPayStore {
       return { success:false, error: j.error || 'Failed' };
     } catch(e:any){ return { success:false, error: e.message } }
   }
+  static async forgotPassword(email:string): Promise<{success:boolean, error?:string, token?:string}> {
+    try{
+      const res=await fetch('/api/users/forgot-password',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email})});
+      const j=await res.json().catch(()=>({}));
+      if(res.ok) return {success:true, token: j.token || j.debugToken};
+      return {success:false, error: j.error||'Failed'};
+    }catch(e:any){ return {success:false, error:e.message} }
+  }
+  static async resetPassword(email:string, token:string, newPassword:string): Promise<{success:boolean, error?:string}> {
+    try{
+      const res=await fetch('/api/users/reset-password',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email, token, newPassword})});
+      const j=await res.json().catch(()=>({}));
+      if(res.ok) return {success:true};
+      return {success:false, error: j.error||'Failed'};
+    }catch(e:any){ return {success:false, error:e.message} }
+  }
+  static async requestVerifyEmail(): Promise<{success:boolean, error?:string, debugCode?:string}> {
+    try{
+      const res=await fetch('/api/users/me/verify-email',{method:'POST', headers: this.authHeaders()});
+      const j=await res.json().catch(()=>({}));
+      if(res.ok) return {success:true, debugCode: j.debugCode};
+      return {success:false, error: j.error};
+    }catch(e:any){ return {success:false, error:e.message} }
+  }
+  static async confirmVerifyEmail(code:string): Promise<{success:boolean, error?:string}> {
+    try{
+      const res=await fetch('/api/users/me/verify-email/confirm',{method:'POST', headers: this.authHeaders(), body: JSON.stringify({code})});
+      const j=await res.json().catch(()=>({}));
+      if(res.ok) return {success:true};
+      return {success:false, error: j.error};
+    }catch(e:any){ return {success:false, error:e.message} }
+  }
+  static async getVerifyEmailStatus(): Promise<{emailVerified:boolean, email:string}> {
+    try{
+      const res=await fetch('/api/users/me/verify-email/status',{ headers: this.authHeaders() });
+      const j=await res.json().catch(()=>({}));
+      return {emailVerified: !!j.emailVerified, email: j.email||''};
+    }catch{ return {emailVerified:false, email:''} }
+  }
   static async adminAntifraudUnfreeze(userId:string): Promise<boolean>{
     try{
       const res = await fetch('/api/admin/antifraud/unfreeze', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId }) });

@@ -161,6 +161,16 @@ export const ReferView: FC<{ userId: string }> = ({ userId }) => {
         <TrendingUp className="w-5 h-5 text-emerald-400"/>
       </div>
 
+      {/* Today Active Boosted Referrals */}
+      <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-3 flex items-center justify-between">
+        <div>
+          <div className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5"><Activity className="w-3.5 h-3.5"/> Today Active Boosted</div>
+          <div className="font-mono text-sm font-bold text-white mt-0.5">{referrals.filter((r:any)=> r.boostActive).length} active <span className="text-zinc-500 text-xs font-normal">of {referrals.length} referred</span></div>
+          <div className="text-[10px] text-zinc-500">Referred users currently compounding</div>
+        </div>
+        <span className="h-8 w-8 rounded-xl bg-emerald-500/20 flex items-center justify-center text-emerald-400 font-mono text-xs font-bold">{referrals.filter((r:any)=> r.boostActive).length}</span>
+      </div>
+
       {/* Live boosting of referrals */}
       <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 shadow-xl">
         <div className="flex items-center justify-between mb-3">

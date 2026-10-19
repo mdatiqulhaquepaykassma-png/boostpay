@@ -3560,13 +3560,14 @@ async function startServer() {
 
   app.post('/api/admin/config', requireSuperAdmin, (req: any, res) => {
     try {
-      const incomingConfig = req.body;
+      const incomingConfig = req.body || {};
       const db = readDb();
       if (!db.config) {
         db.config = {
           hourlyRatePercent: 1.0,
           minBoostMs: 60000,
           maxBoostMs: 86400000,
+          minuteRatePercent: 0.001605,
           dokploy: {
             host: "boostpay-eoqehk",
             port: 5432,
@@ -3579,20 +3580,54 @@ async function startServer() {
           }
         };
       }
-
-      if (incomingConfig.hourlyRatePercent !== undefined) {
-        const r = parseFloat(incomingConfig.hourlyRatePercent);
-        if (!isNaN(r) && r >= 0) db.config.hourlyRatePercent = r;
+      // generic numeric handler for known keys
+      const numKeys:[string,number,number?][] = [
+        ['hourlyRatePercent',0,100],
+        ['minuteRatePercent',0,100],
+        ['minBoostMs',1000,86400000*7],
+        ['maxBoostMs',1000,86400000*30],
+        ['targetDurationMs',1000,86400000*30],
+      ];
+      for (const [k, min, max] of numKeys) {
+        if (incomingConfig[k] !== undefined) {
+          const v = parseFloat(String(incomingConfig[k]));
+          if (!isNaN(v)) {
+            if (min!==undefined && v < (min as number)) continue;
+            if (max!==undefined && v > (max as number)) continue;
+            (db.config as any)[k] = v;
+            if (k==='minuteRatePercent') {
+              // keep hourly in sync for display
+              (db.config as any).hourlyRatePercent = (Math.pow(1+v/100,60)-1)*100;
+            }
+            if (k==='hourlyRatePercent' && incomingConfig.minuteRatePercent===undefined) {
+              (db.config as any).minuteRatePercent = v/60;
+            }
+          }
+        }
       }
-      if (incomingConfig.minBoostMs !== undefined) {
-        const m = parseInt(incomingConfig.minBoostMs, 10);
-        if (!isNaN(m) && m > 0) db.config.minBoostMs = m;
+      // boolean flags
+      if (incomingConfig.compoundingEnabled !== undefined) (db.config as any).compoundingEnabled = !!incomingConfig.compoundingEnabled;
+      if (incomingConfig.maintenanceMode !== undefined) (db.config as any).maintenanceMode = !!incomingConfig.maintenanceMode;
+      // referral passthrough
+      if (incomingConfig.referral && typeof incomingConfig.referral==='object') {
+        if (!db.config.referral) (db.config as any).referral={ enabled:true, baseRatePercent:1, maxRatePercent:10, dailyTierEnabled:true, commissionOnCompounding:true };
+        for (const rk of ['enabled','baseRatePercent','maxRatePercent','dailyTierEnabled','commissionOnCompounding']) {
+          if ((incomingConfig.referral as any)[rk] !== undefined) (db.config as any).referral[rk]=(incomingConfig.referral as any)[rk];
+        }
       }
-      if (incomingConfig.maxBoostMs !== undefined) {
-        const mx = parseInt(incomingConfig.maxBoostMs, 10);
-        if (!isNaN(mx) && mx > 0) db.config.maxBoostMs = mx;
+      // antifraud passthrough (also via dedicated endpoint)
+      if (incomingConfig.antifraud && typeof incomingConfig.antifraud==='object') {
+        if (!db.config.antifraud) (db.config as any).antifraud = (INITIAL_DB as any).config.antifraud;
+        const afIn = incomingConfig.antifraud;
+        for (const ak of ['enabled','tempFreezeMs','maxTransfersPer10Min','maxDistinctSendersPerIp','maxVolumePer10Min','newAccountLargeTransferThreshold','velocityEnabled','maxLoginsPer10Min','maxMessagesPerMin']) {
+          if (afIn[ak]!==undefined) (db.config as any).antifraud[ak]=afIn[ak];
+        }
+        if (afIn.freezeDurations && typeof afIn.freezeDurations==='object') {
+          if (!(db.config as any).antifraud.freezeDurations) (db.config as any).antifraud.freezeDurations={};
+          for (const fk in afIn.freezeDurations) (db.config as any).antifraud.freezeDurations[fk]= Number(afIn.freezeDurations[fk])*60*1000 || Number(afIn.freezeDurations[fk]) || afIn.freezeDurations[fk];
+        }
       }
-
+      recordAuditLog(db, 'SYSTEM_CONFIG_UPDATE', String(req.authAdmin), `Admin updated system config ${Object.keys(incomingConfig).join(',')}`);
       writeDb(db);
       res.json({ success: true, config: db.config });
     } catch (err: any) {
@@ -4363,7 +4398,10 @@ async function startServer() {
     if (b.freezeDurations && typeof b.freezeDurations === 'object') {
       if (!db.config.antifraud.freezeDurations) db.config.antifraud.freezeDurations={};
       for (const k of Object.keys(b.freezeDurations)) {
-        const v=parseInt(String(b.freezeDurations[k]),10);
+        let v=parseInt(String(b.freezeDurations[k]),10);
+        if (isNaN(v)) continue;
+        // accept minutes (1-1440) or ms (60000+): if < 5000 treat as minutes
+        if (v < 5000 && v <= 1440*7) v = v*60*1000;
         if (!isNaN(v)&&v>=60000&&v<= 24*3600000*7) db.config.antifraud.freezeDurations[k]=v;
       }
     }
@@ -4401,6 +4439,92 @@ async function startServer() {
   });
   // Chat spam detection hook (also called inside send)
   // Count messages per user per minute
+    // 5b. Forgot password via email (demo: token returned in API, notification stored)
+  app.post('/api/users/forgot-password', (req: any, res) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required.' });
+    const db = readDb();
+    const user:any = (db.users || []).find((u:any) => String(u.email||'').toLowerCase() === email);
+    if (!user) {
+      // don't leak existence — still return success
+      return res.json({ success: true, message: 'If the email exists, a reset code has been sent.' });
+    }
+    const code = String(Math.floor(100000 + Math.random()*900000));
+    user.resetToken = code;
+    user.resetExpires = Date.now() + 15*60*1000; // 15 min
+    writeDb(db);
+    // store notification so user sees code in-app (since no email server)
+    try {
+      pushNotification(db, { id:'NOTIF-'+Date.now(), userId: user.id, type:'SECURITY_ALERT', title:'Password Reset Code', message:`Your password reset code is ${code}. Valid for 15 minutes. Do not share it.`, timestamp: Date.now(), isRead:false, metadata:{ code } });
+      writeDb(db);
+    } catch {}
+    // for demo we return code (so QA can test without email server)
+    res.json({ success: true, message: 'Reset code sent to your inbox / email (demo token included).', token: code, debugToken: code });
+  });
+
+  app.post('/api/users/reset-password', (req: any, res) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const token = String(req.body?.token || req.body?.code || '').trim();
+    const newPassword = String(req.body?.newPassword || req.body?.password || '');
+    if (!email || !token || !newPassword) return res.status(400).json({ error: 'Email, code and new password required.' });
+    if (newPassword.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters.' });
+    const db = readDb();
+    const user:any = (db.users || []).find((u:any) => String(u.email||'').toLowerCase() === email);
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    if (!user.resetToken || String(user.resetToken) !== String(token)) return res.status(400).json({ error: 'Invalid reset code.' });
+    if (user.resetExpires && Date.now() > user.resetExpires) return res.status(400).json({ error: 'Code expired. Request a new one.' });
+    // set new password (store both hash and plaintext demo)
+    user.password = newPassword;
+    user.passwordPlain = newPassword;
+    try { user.passwordHash = require('crypto').createHash('sha256').update(newPassword).digest('hex'); } catch {}
+    delete user.resetToken;
+    delete user.resetExpires;
+    writeDb(db);
+    recordAuditLog(db, 'USER_PASSWORD_RESET', email, `Password reset via email code for User #${user.id}`, String(user.id));
+    writeDb(db);
+    pushNotification(db, { id:'NOTIF-'+Date.now(), userId: user.id, type:'SECURITY_ALERT', title:'Password Reset Successful', message:'Your password has been updated. If this was not you, contact support.', timestamp: Date.now(), isRead:false });
+    writeDb(db);
+    res.json({ success: true, message: 'Password updated. You can now sign in.' });
+  });
+
+  // 5c. Verify email (optional) — in Settings
+  app.post('/api/users/me/verify-email', requireUser, (req:any,res)=>{
+    const db=readDb();
+    const user:any=(db.users||[]).find((u:any)=> String(u.id)===String(req.authUserId));
+    if(!user) return res.status(404).json({error:'User not found'});
+    const code = String(Math.floor(100000+Math.random()*900000));
+    user.emailVerificationCode = code;
+    user.emailVerificationExpires = Date.now()+15*60*1000;
+    writeDb(db);
+    pushNotification(db,{ id:'NOTIF-'+Date.now(), userId:user.id, type:'SECURITY_ALERT', title:'Email Verification Code', message:`Your email verification code is ${code}. Valid 15 minutes.`, timestamp:Date.now(), isRead:false, metadata:{code}});
+    writeDb(db);
+    res.json({ success:true, message:'Verification code sent to your inbox (demo).', debugCode: code });
+  });
+  app.post('/api/users/me/verify-email/confirm', requireUser, (req:any,res)=>{
+    const code = String(req.body?.code||req.body?.token||'').trim();
+    if(!code) return res.status(400).json({error:'code required'});
+    const db=readDb();
+    const user:any=(db.users||[]).find((u:any)=> String(u.id)===String(req.authUserId));
+    if(!user) return res.status(404).json({error:'User not found'});
+    if(!user.emailVerificationCode || String(user.emailVerificationCode)!==String(code)) return res.status(400).json({error:'Invalid verification code'});
+    if(user.emailVerificationExpires && Date.now()>user.emailVerificationExpires) return res.status(400).json({error:'Code expired'});
+    user.emailVerified = true;
+    delete user.emailVerificationCode;
+    delete user.emailVerificationExpires;
+    writeDb(db);
+    recordAuditLog(db,'USER_EMAIL_VERIFIED', user.email||user.id, `User #${user.id} verified email ${user.email}`, String(user.id));
+    writeDb(db);
+    pushNotification(db,{ id:'NOTIF-'+Date.now(), userId:user.id, type:'SECURITY_ALERT', title:'Email Verified ✅', message:'Your email has been verified. Security level upgraded.', timestamp:Date.now(), isRead:false});
+    writeDb(db);
+    res.json({ success:true, verified:true });
+  });
+  app.get('/api/users/me/verify-email/status', requireUser, (req:any,res)=>{
+    const db=readDb();
+    const user:any=(db.users||[]).find((u:any)=> String(u.id)===String(req.authUserId));
+    res.json({ emailVerified: !!(user && user.emailVerified), email: user?.email || '' });
+  });
+
+  // 6. Chat helpers
   app.post('/api/chat/spam-check', requireUser, (req:any,res)=>{
     // placeholder for client spam reporting — server already checks in /api/chat/send
     res.json({ok:true});

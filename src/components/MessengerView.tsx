@@ -1552,18 +1552,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             onSubmit={handleSendMessage}
             className="relative shrink-0 p-2.5 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-xl flex items-center gap-2 z-10"
           >
-            <button
-              type="button"
-              onClick={() => setShowEmojiPicker(prev => !prev)}
-              className={`p-2.5 rounded-2xl border transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0 ${
-                showEmojiPicker
-                  ? 'border-amber-500/50 bg-amber-500/15 text-amber-400'
-                  : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
-              }`}
-              title="Insert Emoji"
-            >
-              <Smile className="w-5 h-5" />
-            </button>
+            {/* Emoji button moved inside attachment menu */}
 
             {(replyTo || editing) && (
               <div className="absolute -top-11 left-2.5 right-2.5 flex items-center gap-2.5 rounded-2xl border border-zinc-800 bg-zinc-900/95 px-3 py-2 shadow-xl">
@@ -1636,6 +1625,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                       </button>
                       <button type="button" onClick={() => { setShowContactPicker(true); setShowAttachmentMenu(false); }} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 transition text-left">
                         <UserPlus className="w-4 h-4 text-sky-400" /> Contact
+                      </button>
+                      <button type="button" onClick={() => { setShowAttachmentMenu(false); setShowEmojiPicker(v=> !v); }} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 transition text-left">
+                        <Smile className="w-4 h-4 text-amber-400" /> Insert Emoji
                       </button>
                     </div>
                   )}

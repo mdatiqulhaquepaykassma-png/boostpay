@@ -44,7 +44,7 @@ import {
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { CallManager, startCallTo } from './CallOverlay';
-import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, DatabaseBrowser, ReferAdminView } from './AdminExtraViews';
+import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, DatabaseBrowser, ReferAdminView, AdminSystemSettingsView } from './AdminExtraViews';
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
 
@@ -88,7 +88,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // 2. Admin Portal Views
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'SETTINGS' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS'>('OVERVIEW');
 
   // 3. Database Storage & Diagnostics State
   const [storageProbe, setStorageProbe] = useState<any>(null);
@@ -280,10 +280,22 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         setAuditLogs(logs);
       }
 
-      // Fetch Latest Transactions
-      const txs = BoostPayStore.getTransactions();
-      if (txs) {
-        setTransactions(txs);
+      // Fetch Latest Transactions — via admin DB snapshot (authoritative, includes all types incl. REFERRAL_COMMISSION)
+      try {
+        const dbRes = await fetch('/api/db', { headers: BoostPayStore.adminAuthHeaders() });
+        if (dbRes.ok) {
+          const dbData = await dbRes.json();
+          if (Array.isArray(dbData.transactions)) {
+            setTransactions(dbData.transactions);
+            try { localStorage.setItem('boostpay_transactions', JSON.stringify(dbData.transactions)); } catch {}
+          }
+        } else {
+          const txs = BoostPayStore.getTransactions();
+          if (txs) setTransactions(txs);
+        }
+      } catch {
+        const txs = BoostPayStore.getTransactions();
+        if (txs) setTransactions(txs);
       }
 
       // Pull server-side support-chat history so user messages always arrive
@@ -1025,6 +1037,18 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           </button>
 
           <button
+            onClick={() => setActiveTab('SETTINGS')}
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+              activeTab === 'SETTINGS'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <Sliders className="w-4 h-4" />
+            <span>All Settings</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('BROADCAST')}
             className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
               activeTab === 'BROADCAST'
@@ -1095,6 +1119,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {activeTab === 'BROADCAST' && <BroadcastView />}
         {activeTab === 'FRAUD' && <FraudView />}
         {activeTab === 'REFER' && <ReferAdminView />}
+        {activeTab === 'SETTINGS' && <AdminSystemSettingsView />}
         {activeTab === 'ADMINS' && (
           <AdminAccountsView
             myEmail={(adminSession && adminSession.email) || ''}
