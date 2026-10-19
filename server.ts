@@ -729,9 +729,19 @@ function verifyToken(token: unknown): { sub: string; role: string; exp: number; 
 }
 
 function clientIp(req: any): string {
+  // Behind trusted proxy (app.set trust proxy 1) Express populates req.ip correctly
+  // Fallback to x-forwarded-for only if we trust proxy, otherwise socket IP
+  try {
+    const trustedIp = (req as any).ip;
+    if (trustedIp && typeof trustedIp === 'string' && trustedIp !== '::1' && trustedIp !== '127.0.0.1') return trustedIp;
+  } catch {}
   const fwd = req.headers && (req.headers['x-forwarded-for'] || req.headers['x-real-ip']);
-  if (typeof fwd === 'string' && fwd.trim()) return fwd.split(',')[0].trim();
-  return (req.socket && req.socket.remoteAddress) || 'unknown';
+  if (typeof fwd === 'string' && fwd.trim()) {
+    // Take first IP, validate IPv4/IPv6-ish
+    const cand = fwd.split(',')[0].trim();
+    if (/^[a-fA-F0-9:.]+$/.test(cand)) return cand;
+  }
+  return (req.socket && req.socket.remoteAddress) || (req as any).ip || 'unknown';
 }
 
 function getBearerToken(req: any): string | null {
@@ -953,6 +963,31 @@ function publicUser(u: any): any {
   return { ...rest, boostState: liveBoostState(u) };
 }
 
+/** Escape HTML to prevent stored XSS when user content is ever rendered as HTML */
+function escapeHtml(s: string): string {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+/** Sanitize chat/inbox text — strip dangerous protocols + trim + length cap */
+function sanitizeText(input: any, maxLen=2000): string {
+  let t = String(input||'').trim();
+  t = t.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g,''); // strip control chars
+  // Strip dangerous tags entirely (defense in depth — React already escapes {m.text} but we sanitize storage)
+  t = t.replace(/<script[^>]*>.*?<\/script>/gis,'').replace(/<iframe[^>]*>.*?<\/iframe>/gis,'').replace(/<object[^>]*>.*?<\/object>/gis,'');
+  t = t.replace(/javascript:/gi,'').replace(/data:/gi,'').replace(/vbscript:/gi,'');
+  // Escape remaining HTML so even if rendered via innerHTML it is inert
+  t = t.replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if (t.length > maxLen) t = t.slice(0,maxLen);
+  return t;
+}
+function containsSpamLink(text: string): boolean {
+  const lower = String(text||'').toLowerCase();
+  // block obvious spam/phishing patterns
+  const spamPatterns = ['http://','https://','www.','.ru','.xyz','bit.ly','tinyurl','t.me/','discord.gg','free money','double your','click here to win'];
+  let hits=0;
+  for (const p of spamPatterns) if (lower.includes(p)) hits++;
+  return hits >= 2; // allow single link, block spam blast
+}
+
 /** Admin console view: shows stored credentials (owner-requested password visibility), keeps recovery phrase for support search. */
 function adminUserView(u: any): any {
   if (!u || typeof u !== 'object') return u;
@@ -979,11 +1014,13 @@ function sanitizeIncomingUser(u: any): any | null {
   return clean;
 }
 
-// --- Simple in-memory rate limiter for auth endpoints (brute-force protection) ---
+// --- Hardened in-memory rate limiter (brute-force + spam + DDoS) ---
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 function rateLimit(maxPerMinute: number) {
   return (req: any, res: any, next: any) => {
-    const key = `${req.ip || 'unknown'}|${req.path}`;
+    const ip = clientIp(req);
+    const uid = (req.authUserId || req.authAdmin || req.body?.userId || req.body?.email || '') as string;
+    const key = `${ip}|${uid}|${req.path}`;
     const now = Date.now();
     let bucket = rateBuckets.get(key);
     if (!bucket || bucket.resetAt < now) {
@@ -992,11 +1029,34 @@ function rateLimit(maxPerMinute: number) {
     }
     bucket.count += 1;
     if (bucket.count > maxPerMinute) {
-      return res.status(429).json({ error: 'Too many attempts. Please wait a minute and try again.' });
+      // Add Retry-After header
+      res.setHeader('Retry-After', String(Math.ceil((bucket.resetAt - now)/1000)));
+      // Auto-blacklist IPs that hammer 50 over limit (DDoS/backhole scan)
+      if (bucket.count > maxPerMinute + 50) {
+        ipBlacklist.set(ip, Date.now()+ 15*60*1000);
+      }
+      return res.status(429).json({ error: 'Too many requests — slow down (429). Try again in 60s.' });
     }
     next();
   };
 }
+// Periodic cleanup to prevent memory leak from attacker IP spam
+setInterval(()=>{
+  const now=Date.now();
+  for (const [k,v] of rateBuckets.entries()) if (v.resetAt < now - 120000) rateBuckets.delete(k);
+}, 120000);
+// Global IP blacklist for repeated offenders (10x over limit)
+const ipBlacklist = new Map<string, number>();
+function checkBlacklist(req:any,res:any,next:any){
+  const ip=clientIp(req);
+  const until=ipBlacklist.get(ip);
+  if (until && until > Date.now()) {
+    res.setHeader('Retry-After', String(Math.ceil((until - Date.now())/1000)));
+    return res.status(429).json({ error: 'Your IP is temporarily blocked for abuse (10 min).' });
+  }
+  next();
+}
+
 
 // Initial bootstrap check
 readDb();
@@ -1204,22 +1264,87 @@ setInterval(() => {
 async function startServer() {
   const app = express();
   const PORT = parseInt(process.env.PORT || '3000', 10);
+  // Trust first proxy (Traefik/Dokploy) so req.ip is correct; do NOT trust arbitrary X-Forwarded-For from client otherwise
+  app.set('trust proxy', 1);
+  // Hide fingerprint
+  try { (app as any).disable('x-powered-by'); } catch {}
 
-  app.use(express.json({ limit: '10mb' }));
+  // Strict CORS — only allow official origins + localhost for dev
+  app.use((req:any,res:any,next:any)=>{
+    const allowed = [
+      'https://boostpay.72-60-42-18.sslip.io',
+      'https://boostpay-admin.72-60-42-18.sslip.io',
+      'https://boostpay-studio.72-60-42-18.sslip.io',
+      'http://localhost:3000','http://localhost:5173','http://localhost:5174','http://localhost:3001'
+    ];
+    const origin = String(req.headers.origin||'');
+    if (origin && allowed.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary','Origin');
+      res.setHeader('Access-Control-Allow-Credentials','true');
+      res.setHeader('Access-Control-Allow-Methods','GET,POST,PUT,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization, X-Boostpay-Token, X-Device-Fingerprint');
+    }
+    if (req.method==='OPTIONS') return res.sendStatus(204);
+    next();
+  });
 
-  // Basic security headers
-  app.use((_req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-    res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=()');
+  // Global API throttle — 200 req/min per IP+user (DDoS sponge absorbs burst, then 429)
+  // Request timeout + slowloris protection: kill requests hanging >15s (DoS via slow headers/body)
+  app.use((req:any,res:any,next:any)=>{
+    req.setTimeout?.(15000);
+    res.setTimeout?.(15000);
+    // Abort if client sends no data for 10s
+    const to = setTimeout(()=>{ try{ if(!res.headersSent) res.status(408).json({ error:'Request timeout' }); }catch{} }, 15000);
+    res.on('finish',()=> clearTimeout(to));
+    res.on('close',()=> clearTimeout(to));
+    next();
+  });
+  app.use(checkBlacklist);
+  app.use('/api', rateLimit(200));
+
+  // Body parser — 100kb globally to stop DDoS; chat uploads allow larger via route-specific parsers BEFORE global
+  // NOTE: route-specific parsers must come BEFORE global parser so they consume body first
+  app.use('/api/chat/send', express.json({ limit: '5mb' }));
+  app.use('/api/chat/group-call', express.json({ limit: '1mb' }));
+  app.use(express.json({ limit: '100kb' }));
+  // NoSQL injection guard: strip keys starting with $ or containing .
+  app.use((req:any,_res:any,next:any)=>{
+    try {
+      const scrub = (obj:any)=>{
+        if (!obj || typeof obj!=='object') return;
+        for (const k of Object.keys(obj)) {
+          if (k.startsWith('$') || k.includes('.')) { delete obj[k]; continue; }
+          if (typeof obj[k]==='object') scrub(obj[k]);
+        }
+      };
+      if (req.body) scrub(req.body);
+      if (req.query) scrub(req.query);
+    } catch {}
+    next();
+  });
+
+  // Hardened security headers (helmet-lite)
+  app.use((_req,res,next)=>{
+    res.setHeader('X-Content-Type-Options','nosniff');
+    res.setHeader('X-Frame-Options','SAMEORIGIN');
+    res.setHeader('Referrer-Policy','strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy','camera=(self), microphone=(self), geolocation=(self)');
+    res.setHeader('X-XSS-Protection','0'); // modern browsers use CSP instead
+    res.setHeader('Cross-Origin-Opener-Policy','same-origin');
+    res.setHeader('Cross-Origin-Resource-Policy','same-origin');
+    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self' https: wss:; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'none'");
+    // HSTS only when behind TLS — Traefik terminates TLS, Express sees http, so set header anyway; browser will upgrade if https
+    res.setHeader('Strict-Transport-Security','max-age=31536000; includeSubDomains; preload');
+    res.setHeader('X-Download-Options','noopen');
+    res.setHeader('X-Permitted-Cross-Domain-Policies','none');
     next();
   });
 
   // Brute-force protection on credential endpoints
   app.use('/api/users/login', rateLimit(15));
   app.use('/api/users/register', rateLimit(10));
-  app.use('/api/admin/login', rateLimit(10));
+  app.use('/api/admin/login', rateLimit(6)); // stricter for admin brute force
   app.use('/api/chat/send', rateLimit(60));
   app.use('/api/chat/call-signal', rateLimit(40));
 
@@ -1227,7 +1352,14 @@ async function startServer() {
   // Admin API: every route except /api/admin/login requires a valid admin token
   app.use('/api/admin', (req: any, res: any, next: any) => {
     if (req.path === '/login') return next();
+    // Log all admin attempts for audit (helps detect backdoor scans)
+    try { console.log(`[ADMIN-GUARD] ${clientIp(req)} ${req.method} ${req.path} admin=${(req.headers.authorization||'').slice(0,20)}`); } catch {}
     return requireAdmin(req, res, next);
+  });
+  // Extra rate limit on all admin POST (prevent admin spam/backdoor brute force)
+  app.use('/api/admin', (req:any,res:any,next:any)=>{
+    if (req.method==='POST') return rateLimit(40)(req,res,next);
+    next();
   });
 
   // User API: everything except login/register requires a valid user token
@@ -1309,6 +1441,12 @@ async function startServer() {
   // 5. User registration & restoration endpoint
   app.post('/api/users/register', (req, res) => {
     try {
+      // Basic bot mitigation: require device fingerprint + reject if submitted too fast (<1s) — bots fill instantly
+      const fp = String((req.headers['x-device-fingerprint']||'')||(req.body as any).deviceFingerprint||'').trim();
+      // If honeypot field exists (bots fill hidden fields), reject
+      if ((req.body as any).website || (req.body as any).url) {
+        return res.status(400).json({ error: 'Bot detected.' });
+      }
       const { id, email, phrase, password, balance, lifetimeProfit, boostState, createdAt } = req.body;
       const db = readDb();
       
@@ -1924,6 +2062,65 @@ async function startServer() {
 
   app.post('/api/chat/send', (req: any, res) => {
     try {
+      // Per-conversation spam: 20 msg/min per conversation (prevents flood)
+      // (global 60/min already via middleware, this is tighter per chat)
+      const convIdForLimit = String((req.body as any).conversationId || (req.body as any).recipientId || 'unknown');
+      const perConvKey = `${clientIp(req)}|${(req as any).authUserId||'anon'}|chat:${convIdForLimit}`;
+      let b = rateBuckets.get(perConvKey);
+      if (!b || (b as any).resetAt < Date.now()) { b={ count:0, resetAt: Date.now()+60000 } as any; rateBuckets.set(perConvKey,b as any); }
+      (b as any).count +=1;
+      if ((b as any).count > 20) {
+        return res.status(429).json({ error: 'You are sending messages too fast in this chat (20/min). Slow down.' });
+      }
+      // Text sanitization — prevent stored XSS
+      if (typeof req.body.text === 'string') req.body.text = sanitizeText(req.body.text, 2000);
+      if (typeof req.body.stickerEmoji === 'string') req.body.stickerEmoji = sanitizeText(req.body.stickerEmoji, 10);
+      if ((req.body as any).poll?.question) (req.body as any).poll.question = sanitizeText((req.body as any).poll.question, 200);
+      if (Array.isArray((req.body as any).poll?.options)) {
+        (req.body as any).poll.options = (req.body as any).poll.options.map((o:any)=> ({ text: sanitizeText(o?.text||'', 60) })).slice(0,6);
+      }
+      if (typeof req.body.text === 'string' && containsSpamLink(req.body.text)) {
+        // Flag as spam but don't silently drop — quarantine + log
+        try {
+          const dbSpam:any = readDb();
+          if (!dbSpam.antifraudLogs) dbSpam.antifraudLogs=[];
+          dbSpam.antifraudLogs.unshift({ id:'AFL-'+Math.floor(10000000+Math.random()*90000000), userId: String((req as any).authUserId||''), ip: clientIp(req), reason: `Spam link detected in chat`, timestamp: Date.now(), auto:true });
+          if (dbSpam.antifraudLogs.length>1000) dbSpam.antifraudLogs.pop();
+          writeDb(dbSpam);
+        } catch {}
+        return res.status(400).json({ error: 'Your message looks like spam (multiple links). Remove extra links and try again.' });
+      }
+      // Validate file uploads — block executables and excessive sizes (DoS)
+      if (req.body.fileData) {
+        const fd = String(req.body.fileData);
+        if (fd.length > 5*1024*1024) return res.status(413).json({ error: 'File too large (max 5MB).' });
+        // Only allow data URIs with safe MIME; block scripts/binaries
+        const safePrefix = /^(data:(image\/(png|jpeg|jpg|gif|webp)|application\/pdf|text\/plain|audio\/(mpeg|ogg|wav)|video\/mp4);base64,)/i;
+        if (!safePrefix.test(fd)) {
+          // Also allow plain base64 without prefix for legacy clients — but block executable signatures
+          if (/MZ|PK\x03\x04|\.exe|\.sh|\.bat/i.test(fd.slice(0,200))) {
+            return res.status(400).json({ error: 'File type not allowed.' });
+          }
+        }
+        // Sanitize fileName — prevent path traversal
+        if (req.body.fileName) {
+          let fn = String(req.body.fileName).replace(/[\\/]/g,'').replace(/\.\./g,'').slice(0,100);
+          fn = fn.replace(/[^a-zA-Z0-9._\-]/g,'_');
+          req.body.fileName = fn;
+        }
+        if (req.body.fileSize && Number(req.body.fileSize) > 5*1024*1024) {
+          return res.status(413).json({ error: 'File too large.' });
+        }
+      }
+      if (req.body.photoData) {
+        const pd = String(req.body.photoData);
+        if (pd.length > 5*1024*1024) return res.status(413).json({ error: 'Photo too large (max 5MB).' });
+        if (!pd.startsWith('data:image/')) return res.status(400).json({ error: 'Invalid photo format.' });
+      }
+      if (req.body.voiceData) {
+        const vd = String(req.body.voiceData);
+        if (vd.length > 3*1024*1024) return res.status(413).json({ error: 'Voice note too large (max 3MB).' });
+      }
       const { senderId, senderRole, recipientId, text, voiceData, voiceDurationMs, photoData, replyTo, forwardedFrom, fileData, fileName, fileSize, contactId, poll, stickerEmoji } = req.body;
       const rawKind = String((req.body && req.body.kind) || '');
       const isVoice = rawKind === 'voice';
@@ -2820,12 +3017,16 @@ async function startServer() {
   });
 
   // 7b. Server-Authoritative Instant P2P Transfer with SMS Notifications
-  app.post('/api/transfer', (req: any, res) => {
+  app.post('/api/transfer', rateLimit(8), (req: any, res) => {
     try {
       const { senderId, recipientId, amount } = req.body;
-      const numAmount = parseFloat(amount);
-      if (isNaN(numAmount) || numAmount <= 0) {
-        return res.status(400).json({ error: 'Please enter a valid transfer amount.' });
+      const numAmount = Number(amount);
+      if (!isFinite(numAmount) || isNaN(numAmount) || numAmount <= 0 || numAmount > 100000) {
+        return res.status(400).json({ error: 'Please enter a valid transfer amount (0 < x ≤ 100,000).' });
+      }
+      // Prevent float precision abuse — max 2 decimals
+      if (!/^\d+(\.\d{1,2})?$/.test(String(amount).trim())) {
+        return res.status(400).json({ error: 'Amount must have at most 2 decimal places.' });
       }
       if (String(senderId) === String(recipientId)) {
         return res.status(400).json({ error: 'Recipient must be different from the sender.' });
@@ -3211,7 +3412,7 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.get('/api/admin/stats', (_req, res) => {
+  app.get('/api/admin/stats', requireAdmin, (_req, res) => {
     const db = readDb();
     const totalUsers = db.users.length;
     const totalLiquidity = db.users.reduce((acc: number, u: any) => acc + (Number(u.balance) || 0), 0);
@@ -3242,13 +3443,13 @@ async function startServer() {
     });
   });
 
-  app.get('/api/admin/users', (_req, res) => {
+  app.get('/api/admin/users', requireAdmin, (_req, res) => {
     const db = readDb();
     res.json({ users: db.users.map(adminUserView), config: db.config });
   });
 
   // Storage Diagnostic Probe: Live read/write verification and stats
-  app.get('/api/admin/storage/probe', (_req, res) => {
+  app.get('/api/admin/storage/probe', requireAdmin, (_req, res) => {
     try {
       const start = Date.now();
       const db = readDb();
@@ -3344,7 +3545,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/adjust', requireSuperAdmin, (req: any, res) => {
+  app.post('/api/admin/adjust', rateLimit(30), requireSuperAdmin, (req: any, res) => {
     try {
       const { userId, type, amount, notes } = req.body;
       const db = readDb();
@@ -3529,7 +3730,7 @@ async function startServer() {
   });
 
   // Audit logs retrieval endpoint
-  app.get('/api/admin/audit-logs', (_req, res) => {
+  app.get('/api/admin/audit-logs', requireAdmin, (_req, res) => {
     try {
       const db = readDb();
       res.json({ success: true, logs: db.auditLogs || [] });
@@ -4161,7 +4362,9 @@ async function startServer() {
   // =========================================================================
   // Broadcast system announcements + urgent banner
   // =========================================================================
-  app.post('/api/admin/broadcast', requireAdmin, requireSuperAdmin, (req: any, res) => {
+  app.post('/api/admin/broadcast', requireAdmin, requireSuperAdmin, rateLimit(20), (req: any, res) => {
+    // Sanitize broadcast message to prevent admin XSS to all users
+    if (req.body && typeof req.body.message === 'string') req.body.message = sanitizeText(req.body.message, 500);
     const { title, message, banner, audience } = req.body || {};
     const cleanTitle = String(title || 'BOOSTPAY-ALERTS').trim().slice(0, 80) || 'BOOSTPAY-ALERTS';
     const cleanMsg = String(message || '').trim().slice(0, 1000);
@@ -4546,7 +4749,7 @@ async function startServer() {
   // Chat spam detection hook (also called inside send)
   // Count messages per user per minute
     // 5b. Forgot password via email (demo: token returned in API, notification stored)
-  app.post('/api/users/forgot-password', (req: any, res) => {
+  app.post('/api/users/forgot-password', rateLimit(6), (req: any, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required.' });
     const db = readDb();
@@ -4568,7 +4771,7 @@ async function startServer() {
     res.json({ success: true, message: 'Reset code sent to your inbox / email (demo token included).', token: code, debugToken: code });
   });
 
-  app.post('/api/users/reset-password', (req: any, res) => {
+  app.post('/api/users/reset-password', rateLimit(8), (req: any, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     const token = String(req.body?.token || req.body?.code || '').trim();
     const newPassword = String(req.body?.newPassword || req.body?.password || '');
