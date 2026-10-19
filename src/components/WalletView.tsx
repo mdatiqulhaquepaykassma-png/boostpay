@@ -1,5 +1,5 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
-import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut
+import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut, Settings
 } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User, BoostState, SystemConfig } from '../types';
@@ -404,6 +404,7 @@ interface Props {
   onOpenQR?: () => void;
   onOpenSecurity?: () => void;
   onOpenInbox?: () => void;
+  onOpenSettings?: () => void;
   onLogout?: () => void;
   inboxUnread?: number;
   config: SystemConfig;
@@ -416,11 +417,12 @@ export const WalletView: FC<Props> = ({
   onOpenQR,
   onOpenSecurity,
   onOpenInbox,
+  onOpenSettings,
   onLogout,
   inboxUnread = 0,
   config
 }) => {
-  const [walletTab, setWalletTab] = useState<'OVERVIEW' | 'TRANSACTIONS'>('OVERVIEW');
+  // walletTab removed per user request — single view only
   const [zeroBalanceWarning, setZeroBalanceWarning] = useState(false);
   const [completionBanner, setCompletionBanner] = useState<{ amount: number } | null>(null);
 
@@ -528,35 +530,7 @@ export const WalletView: FC<Props> = ({
         onOpenQR={onOpenQR}
       />
 
-      {/* 2. SUB-TAB SWITCHER: OVERVIEW (COMPOUNDING) vs TRANSACTIONS */}
-      <div className="flex rounded-2xl bg-zinc-900 border border-zinc-800 p-1">
-        <button
-          onClick={() => setWalletTab('OVERVIEW')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-semibold transition cursor-pointer min-h-[44px] ${
-            walletTab === 'OVERVIEW'
-              ? 'bg-zinc-800 text-amber-400 font-bold shadow-sm'
-              : 'text-zinc-400 hover:text-zinc-200'
-          }`}
-        >
-          <Zap className="w-4 h-4" />
-          <span>Compounding</span>
-        </button>
-        <button
-          onClick={() => setWalletTab('TRANSACTIONS')}
-          className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-xs font-semibold transition cursor-pointer min-h-[44px] ${
-            walletTab === 'TRANSACTIONS'
-              ? 'bg-zinc-800 text-amber-400 font-bold shadow-sm'
-              : 'text-zinc-400 hover:text-zinc-200'
-          }`}
-        >
-          <History className="w-4 h-4" />
-          <span>Transactions</span>
-        </button>
-      </div>
-
-      {walletTab === 'OVERVIEW' ? (
-        <>
-          {/* 3. MEMOIZED ISOLATED DYNAMIC COMPOUNDING CARD (Holds progress bar and accruing reward ticker) */}
+      {/* 3. ISOLATED DYNAMIC COMPOUNDING CARD */}
           <IsolatedCompoundingCard
             userId={user.id}
             baseBalance={user.balance}
@@ -570,99 +544,25 @@ export const WalletView: FC<Props> = ({
             onBoostFinished={handleBoostFinished}
           />
 
-          {/* Quick actions: Inbox / Security / Sign out — below compounding, above profit metrics */}
-            <div className="grid grid-cols-3 gap-2.5">
-        {onOpenInbox && (
-          <button
-            onClick={onOpenInbox}
-            className="relative flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
-          >
-            <span className="relative">
-              <Inbox className="w-4.5 h-4.5 text-sky-400" />
+          {/* Settings quick entry — replaces old Inbox/Security/Sign out grid */}
+          {onOpenSettings && (
+            <button
+              onClick={onOpenSettings}
+              className="w-full flex items-center justify-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/80 py-3 text-xs font-bold text-zinc-200 hover:border-zinc-700 hover:text-white active:scale-[0.98] transition cursor-pointer shadow-sm"
+            >
+              <Settings className="w-4 h-4 text-amber-400" />
+              <span>Settings & Security</span>
               {inboxUnread > 0 && (
-                <span className="absolute -top-1.5 -right-2 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-amber-500 px-1 text-[8px] font-bold text-zinc-950 font-mono">
-                  {inboxUnread > 9 ? '9+' : inboxUnread}
-                </span>
+                <span className="ml-1 flex h-5 min-w-[18px] items-center justify-center rounded-full bg-amber-500 px-1.5 text-[10px] font-bold text-zinc-950 font-mono">{inboxUnread > 9 ? '9+' : inboxUnread}</span>
               )}
-            </span>
-            Inbox
-          </button>
-        )}
-        {onOpenSecurity && (
-          <button
-            onClick={onOpenSecurity}
-            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
-          >
-            <ShieldCheck className="w-4.5 h-4.5 text-emerald-400" />
-            Security
-          </button>
-        )}
-        {onLogout && (
-          <button
-            onClick={onLogout}
-            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-red-500/40 hover:text-red-300 active:scale-[0.97] transition cursor-pointer"
-          >
-            <LogOut className="w-4.5 h-4.5 text-red-400" />
-            Sign out
-          </button>
-        )}
-      </div>
+            </button>
+          )}
 
-      {/* Profit Metrics removed per user request */}
-
-          {/* 5. MEMOIZED RECENT TRANSACTIONS SECTION */}
+          {/* Recent Transactions — Refer commissions now labeled as Refer */}
           <RecentTransactionsSection
             transactions={BoostPayStore.getTransactions()}
             userId={user.id}
-            onViewAllTransactions={() => setWalletTab('TRANSACTIONS')}
           />
-        </>
-      ) : (
-        /* TRANSACTIONS TAB: quick actions on top, then SCROLLABLE P2P TRANSFERS AND YIELD EVENTS */
-        <>
-            <div className="grid grid-cols-3 gap-2.5">
-        {onOpenInbox && (
-          <button
-            onClick={onOpenInbox}
-            className="relative flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
-          >
-            <span className="relative">
-              <Inbox className="w-4.5 h-4.5 text-sky-400" />
-              {inboxUnread > 0 && (
-                <span className="absolute -top-1.5 -right-2 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-amber-500 px-1 text-[8px] font-bold text-zinc-950 font-mono">
-                  {inboxUnread > 9 ? '9+' : inboxUnread}
-                </span>
-              )}
-            </span>
-            Inbox
-          </button>
-        )}
-        {onOpenSecurity && (
-          <button
-            onClick={onOpenSecurity}
-            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
-          >
-            <ShieldCheck className="w-4.5 h-4.5 text-emerald-400" />
-            Security
-          </button>
-        )}
-        {onLogout && (
-          <button
-            onClick={onLogout}
-            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-red-500/40 hover:text-red-300 active:scale-[0.97] transition cursor-pointer"
-          >
-            <LogOut className="w-4.5 h-4.5 text-red-400" />
-            Sign out
-          </button>
-        )}
-      </div>
-
-      <PaginatedTransactionsView
-          transactions={BoostPayStore.getTransactions()}
-          userId={user.id}
-        />
-        </>
-      )}
     </div>
   );
 };

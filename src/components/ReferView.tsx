@@ -21,15 +21,28 @@ export const ReferView: FC<{ userId: string }> = ({ userId }) => {
   const [applyCode, setApplyCode] = useState('');
   const [applyMsg, setApplyMsg] = useState('');
   const [applyErr, setApplyErr] = useState('');
+  const [countdown, setCountdown] = useState('');
 
   const refresh = async () => {
-    setLoading(true);
     const d = await BoostPayStore.getReferMy();
     setData(d);
     setLoading(false);
   };
 
   useEffect(()=>{ refresh(); const id=setInterval(refresh, 5000); return ()=> clearInterval(id); }, [userId]);
+  // live countdown to UTC midnight
+  useEffect(()=>{
+    const tick = () => {
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()+1, 0,0,0));
+      const diff = next.getTime() - now.getTime();
+      const h = Math.floor(diff/3600000);
+      const m = Math.floor((diff%3600000)/60000);
+      const s2 = Math.floor((diff%60000)/1000);
+      setCountdown(`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s2).padStart(2,'0')} UTC`);
+    };
+    tick(); const id=setInterval(tick,1000); return ()=> clearInterval(id);
+  },[]);
 
   const doCopy = async (text: string, which: 'code'|'link') => {
     const ok = await copyToClipboard(text);
@@ -91,6 +104,34 @@ export const ReferView: FC<{ userId: string }> = ({ userId }) => {
           </div>
           <p className="text-[11px] text-zinc-500 mt-2 leading-relaxed">Share your link: <span className="font-mono text-zinc-300">{data.referLink}</span> — new users signup with your code, you get <span className="text-amber-400 font-bold">1-10% daily tier</span> of their compounding profits.</p>
         </div>
+      </div>
+
+      {/* Upline — who referred you */}
+      {data.upline && (
+        <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-4">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">Your Upline</span>
+            <span className="text-[10px] font-mono text-zinc-500">{new Date(data.upline.createdAt).toLocaleDateString()}</span>
+          </div>
+          <div className="mt-2 flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-500 text-white font-mono font-bold text-sm">#{data.upline.referrerId}</div>
+            <div className="flex-1">
+              <div className="text-xs font-bold text-white font-mono">User #{data.upline.referrerId}</div>
+              <div className="text-[11px] text-zinc-400">Referrals: {data.upline.referralsCount} · Rate {data.upline.referRate}% · Lifetime ${formatPrecisionAmount(data.upline.referLifetime||0,6)}</div>
+            </div>
+          </div>
+          <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 flex items-center justify-between">
+            <span className="text-[11px] text-zinc-400">Upline earned from you</span>
+            <span className="font-mono text-xs font-bold text-emerald-400">+${formatPrecisionAmount(data.upline.earnedFromMe||0,8)}</span>
+          </div>
+          <p className="text-[10px] text-zinc-500 mt-1">Your compounding rewards give your upline {data.upline.referRate}% commission (global tier).</p>
+        </div>
+      )}
+
+      {/* Countdown */}
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 flex items-center justify-between">
+        <span className="text-[11px] font-semibold text-zinc-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5 text-amber-400" /> Next tier reset</span>
+        <span className="font-mono text-xs font-bold text-amber-400">{countdown}</span>
       </div>
 
       {/* Stats grid */}
@@ -204,7 +245,7 @@ export const ReferView: FC<{ userId: string }> = ({ userId }) => {
 
       {/* Tier explainer */}
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3 text-[11px] leading-relaxed text-zinc-400">
-        <span className="font-bold text-zinc-200">How rate works (24h UTC):</span> 1 referral today = 1%, 2 = 2% ... 10+ = 10%. Resets each UTC midnight. You earn that % of each referred user’s compounding REWARD until next cycle. Admin can adjust base/max from panel.
+        <span className="font-bold text-zinc-200">How rate works — Global Ranking (24h UTC):</span> Each day your referral count is ranked vs everyone. Highest referrals get 10%, lowest 1% (linear). Single user = 10%. You earn that % of each referred user’s compounding reward. Resets at UTC midnight.
       </div>
     </div>
   );

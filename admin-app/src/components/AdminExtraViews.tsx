@@ -438,27 +438,9 @@ export const FraudView: FC = () => {
         )}
       </div>
 
-      {/* Antifraud config */}
+      {/* Antifraud config — editable per-reason durations */}
       {data?._afConfig && (
-        <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
-          <h3 className="text-xs font-bold text-white">Antifraud 1h Temp Freeze — Config</h3>
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2"><div className="text-[10px] text-zinc-500">Temp Freeze</div><div className="font-mono text-white">{Math.round((data._afConfig.tempFreezeMs||3600000)/60000)} min</div></div>
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2"><div className="text-[10px] text-zinc-500">Max /10min</div><div className="font-mono text-white">{data._afConfig.maxTransfersPer10Min} transfers</div></div>
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2"><div className="text-[10px] text-zinc-500">New acct threshold</div><div className="font-mono text-white">${data._afConfig.newAccountLargeTransferThreshold}</div></div>
-          </div>
-          <p className="text-[11px] text-zinc-500">Auto-freeze locks for 1h (temp), then auto-unfreezes. Multi-IP velocity + new-account large transfer + rapid same-amount detected.</p>
-          {data._afLogs && data._afLogs.length>0 && (
-            <div className="space-y-1 max-h-40 overflow-y-auto">
-              {data._afLogs.slice(0,10).map((l:any)=>(
-                <div key={l.id} className="flex justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono">
-                  <span className="text-rose-300">#{l.userId} — {l.reason}</span>
-                  <span className="text-zinc-500">{new Date(l.timestamp).toLocaleTimeString()}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <AntifraudConfigEditor config={data._afConfig} onSaved={load} logs={data._afLogs} />
       )}
 
       {/* Fraud audit trail */}
@@ -480,6 +462,65 @@ export const FraudView: FC = () => {
           </div>
         )}
       </div>
+    </div>
+  );
+};
+
+const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = ({ config, onSaved, logs }) => {
+  const [saving, setSaving]=useState(false);
+  const [msg, setMsg]=useState('');
+  const [err, setErr]=useState('');
+  const [form, setForm]=useState<any>(() => ({
+    maxTransfersPer10Min: config.maxTransfersPer10Min ?? 5,
+    maxLoginsPer10Min: config.maxLoginsPer10Min ?? 5,
+    maxMessagesPerMin: config.maxMessagesPerMin ?? 10,
+    newAccountLargeTransferThreshold: config.newAccountLargeTransferThreshold ?? 100,
+    freezeDurations: config.freezeDurations || { velocity:60, multiIp:120, newAccountLarge:45, deviceFingerprint:90, loginSpam:30, chatSpam:15, scam:1440 }
+  }));
+  useEffect(()=>{ setForm({ maxTransfersPer10Min: config.maxTransfersPer10Min, maxLoginsPer10Min: config.maxLoginsPer10Min, maxMessagesPerMin: config.maxMessagesPerMin, newAccountLargeTransferThreshold: config.newAccountLargeTransferThreshold, freezeDurations: config.freezeDurations }); },[config]);
+  const save = async () => {
+    setSaving(true); setMsg(''); setErr('');
+    try{
+      const payload:any = { maxTransfersPer10Min: Number(form.maxTransfersPer10Min), maxLoginsPer10Min: Number(form.maxLoginsPer10Min), maxMessagesPerMin: Number(form.maxMessagesPerMin), newAccountLargeTransferThreshold: Number(form.newAccountLargeTransferThreshold), freezeDurations: {} };
+      for(const k in form.freezeDurations) payload.freezeDurations[k]=Number(form.freezeDurations[k]);
+      await BoostPayStore.adminApi('/api/admin/antifraud/config', { method:'POST', body: payload });
+      setMsg('Antifraud config saved ✅'); onSaved();
+    }catch(e:any){ setErr(e.message||'Save failed'); }
+    setSaving(false);
+  };
+  const labels:any = { velocity:'Velocity (same IP rapid)', multiIp:'Multi-IP cluster', newAccountLarge:'New account large', deviceFingerprint:'Device multi-account', loginSpam:'Login spam', chatSpam:'Chat spam', scam:'Scam' };
+  return (
+    <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
+      <h3 className="text-xs font-bold text-white flex items-center justify-between">Antifraud Config — per-reason freeze (min) {msg && <span className="text-emerald-400 text-[11px]">{msg}</span>} {err && <span className="text-red-400 text-[11px]">{err}</span>}</h3>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <div><label className="text-[10px] text-zinc-500 font-mono">Max transfers /10m</label><input type="number" value={form.maxTransfersPer10Min} onChange={e=> setForm((f:any)=>({...f, maxTransfersPer10Min: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
+        <div><label className="text-[10px] text-zinc-500 font-mono">Max logins /10m</label><input type="number" value={form.maxLoginsPer10Min} onChange={e=> setForm((f:any)=>({...f, maxLoginsPer10Min: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
+        <div><label className="text-[10px] text-zinc-500 font-mono">Max messages /min</label><input type="number" value={form.maxMessagesPerMin} onChange={e=> setForm((f:any)=>({...f, maxMessagesPerMin: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
+        <div><label className="text-[10px] text-zinc-500 font-mono">New acct threshold $</label><input type="number" value={form.newAccountLargeTransferThreshold} onChange={e=> setForm((f:any)=>({...f, newAccountLargeTransferThreshold: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {Object.keys(form.freezeDurations).map(k=>(
+          <div key={k} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2">
+            <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">{labels[k]||k}</div>
+            <div className="flex items-center gap-1 mt-1">
+              <input type="number" value={form.freezeDurations[k]} onChange={e=> setForm((f:any)=>({...f, freezeDurations:{...f.freezeDurations, [k]: e.target.value}}))} className="w-16 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs font-mono text-white"/>
+              <span className="text-[10px] text-zinc-500">min</span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <button onClick={save} disabled={saving} className="rounded-xl bg-amber-500 px-5 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 disabled:opacity-50 cursor-pointer">{saving?'Saving...':'Save Antifraud Config'}</button>
+      <p className="text-[11px] text-zinc-500">Each reason locks for its configured minutes (temp freeze, auto-unfreeze). Velocity/multiIp/newAccountLarge are transfer-related; deviceFingerprint covers shared-device logins; loginSpam/chatSpam are rate-limits.</p>
+      {logs && logs.length>0 && (
+        <div className="space-y-1 max-h-40 overflow-y-auto">
+          {logs.slice(0,10).map((l:any)=>(
+            <div key={l.id} className="flex justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono">
+              <span className="text-rose-300">#{l.userId} — {l.reason}</span>
+              <span className="text-zinc-500">{new Date(l.timestamp).toLocaleTimeString()}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 };

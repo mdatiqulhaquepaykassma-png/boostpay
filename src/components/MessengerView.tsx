@@ -1272,16 +1272,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               </div>
             )}
 
-            {/* Call actions (1:1 threads) */}
+            {/* Call actions (1:1 threads) — clean: only calls + info menu */}
             {activeConv.type !== 'group' && (
               <div className="flex items-center gap-1.5 shrink-0">
-                <button
-                  onClick={() => void handleBlockToggle()}
-                  title={isPeerBlocked ? 'Unblock user' : 'Block user'}
-                  className={`flex h-9 w-9 items-center justify-center rounded-2xl border active:scale-95 transition cursor-pointer ${isPeerBlocked ? 'border-red-500/40 bg-red-500/15 text-red-400' : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-red-400 hover:border-red-500/30'}`}
-                >
-                  <span className="text-[10px] font-bold">{isPeerBlocked ? '✓' : '⊘'}</span>
-                </button>
                 <button
                   onClick={() => startCallTo(getOtherParticipant(activeConv), getConvTitle(activeConv), 'audio')}
                   title="Voice call"
@@ -1297,15 +1290,8 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                   <Video className="w-4 h-4" />
                 </button>
                 <button
-                  onClick={() => { setShowSearch(s => !s); setSearchQuery(''); }}
-                  title="Search in chat"
-                  className="flex h-9 w-9 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white hover:border-zinc-600 active:scale-95 transition cursor-pointer"
-                >
-                  <Search className="w-4 h-4" />
-                </button>
-                <button
                   onClick={() => setShowChatMenu(s => !s)}
-                  title="Chat menu"
+                  title="Chat info & actions"
                   className="flex h-9 w-9 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white hover:border-zinc-600 active:scale-95 transition cursor-pointer"
                 >
                   <Info className="w-4 h-4" />
@@ -1357,6 +1343,20 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                   ? <BellOff className="w-4 h-4 text-zinc-400" />
                   : <Bell className="w-4 h-4 text-amber-400" />}
                 {(activeConv.mutedBy || []).includes(currentUser.id) ? 'Unmute notifications' : 'Mute notifications'}
+              </button>
+              <button
+                onClick={() => { setShowSearch(s => !s); setSearchQuery(''); setShowChatMenu(false); }}
+                className="w-full flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-xs text-zinc-200 hover:bg-zinc-800 transition cursor-pointer"
+              >
+                <Search className="w-4 h-4 text-zinc-400" />
+                {showSearch ? 'Hide search' : 'Search in chat'}
+              </button>
+              <button
+                onClick={() => { void handleBlockToggle(); setShowChatMenu(false); }}
+                className={`w-full flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-xs transition cursor-pointer ${isPeerBlocked ? 'text-red-400 hover:bg-red-500/10' : 'text-zinc-200 hover:bg-zinc-800'}`}
+              >
+                <span className="text-[11px] font-bold w-4 text-center">{isPeerBlocked ? '✓' : '⊘'}</span>
+                {isPeerBlocked ? 'Unblock user' : 'Block user'}
               </button>
               <button
                 onClick={() => { setShowSettings(true); setShowChatMenu(false); }}
@@ -1630,9 +1630,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                         <Paperclip className="w-4 h-4 text-sky-400" /> File / Document
                         <input type="file" className="hidden" onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) { handleSendFile(f); setShowAttachmentMenu(false); } e.target.value = ''; }} />
                       </label>
-                      <button type="button" onClick={() => { setShowStickerPicker(v => !v); setShowAttachmentMenu(false); setShowEmojiPicker(false); }} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 transition text-left">
-                        <span className="text-base leading-none">🙂</span> Sticker
-                      </button>
+                      {/* Sticker quick button hidden per user request (was causing send bug) */}
                       <button type="button" onClick={() => { setShowPollCreator(true); setShowAttachmentMenu(false); }} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 transition text-left">
                         <BarChart3 className="w-4 h-4 text-emerald-400" /> Poll
                       </button>

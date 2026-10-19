@@ -383,8 +383,6 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-amber-400">Your Standing</span>
-                  <span className="h-1 w-1 rounded-full bg-zinc-600" />
-                  <span className="text-[10px] font-mono text-zinc-500">Rank #{currentUserRank || '-'}</span>
                 </div>
                 <div className="mt-1 flex items-center gap-2">
                   <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-mono font-bold text-amber-300">#{myUser.id}</span>
@@ -392,7 +390,6 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
                 </div>
               </div>
             </div>
-            <span className="rounded-full border border-zinc-800 bg-zinc-950 px-3 py-1 text-[10px] font-mono font-semibold text-zinc-400">LIVE RANKING</span>
           </div>
           <div className="mt-4 grid grid-cols-2 gap-3">
             <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-3">

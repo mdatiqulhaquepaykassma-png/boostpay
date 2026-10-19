@@ -1008,6 +1008,8 @@ export class BoostPayStore {
       const alt = localStorage.getItem('bp_admin_token') || localStorage.getItem('admin_token');
       if (alt) { headers['Authorization'] = `Bearer ${alt}`; return headers; }
     } catch {}
+    const fp = this.getDeviceFingerprint();
+    if (fp) headers['X-Device-Fingerprint'] = fp;
     const tok = this.getAuthToken();
     if (tok) headers['Authorization'] = `Bearer ${tok}`;
     return headers;
@@ -1071,8 +1073,23 @@ export class BoostPayStore {
     } catch(e:any){ return { success:false, error:e.message } }
   }
   /** Headers for endpoints that require a signed user token. */
+  static getDeviceFingerprint(): string {
+    try {
+      const ua = (typeof navigator !== 'undefined' ? navigator.userAgent : '') || '';
+      const lang = (typeof navigator !== 'undefined' ? navigator.language : '') || '';
+      const plat = (typeof navigator !== 'undefined' ? (navigator as any).platform || '' : '') || '';
+      const tz = (typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : '') || '';
+      const scr = (typeof window !== 'undefined' && window.screen) ? `${window.screen.width}x${window.screen.height}x${window.screen.colorDepth}` : '';
+      const raw = `${ua}|${lang}|${plat}|${tz}|${scr}`;
+      // simple hash — base64 trimmed
+      let h = 0; for (let i=0;i<raw.length;i++) h = ((h<<5)-h)+raw.charCodeAt(i) |0;
+      return `fp_${Math.abs(h).toString(36)}_${raw.length}`;
+    } catch { return ''; }
+  }
   static authHeaders(): Record<string, string> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const fp = this.getDeviceFingerprint();
+    if (fp) headers['X-Device-Fingerprint'] = fp;
     const tok = this.getAuthToken();
     if (tok) headers['Authorization'] = `Bearer ${tok}`;
     return headers;
@@ -1462,13 +1479,15 @@ export class BoostPayStore {
 
     try {
       const cleanRefer = (referralCode||'').trim().replace(/^#/,'').replace(/^REF-?/i,'');
+      const dfp2 = this.getDeviceFingerprint();
       const res = await fetch('/api/users/register', {
         method: 'POST',
-        headers: this.authHeaders(),
+        headers: { ...this.authHeaders(), ...(dfp2 ? { 'X-Device-Fingerprint': dfp2 } : {}) },
         body: JSON.stringify({
           email: cleanEmail,
           password: cleanPass,
-          referralCode: cleanRefer || undefined
+          referralCode: cleanRefer || undefined,
+          deviceFingerprint: dfp2 || undefined
         })
       });
 
@@ -1540,10 +1559,11 @@ export class BoostPayStore {
 
     // 1. Authoritative Server-Side Login
     try {
+      const dfp = this.getDeviceFingerprint();
       const res = await fetch('/api/users/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: cleanEmail, password: cleanPass })
+        headers: { 'Content-Type': 'application/json', ...(dfp ? { 'X-Device-Fingerprint': dfp } : {}) },
+        body: JSON.stringify({ email: cleanEmail, password: cleanPass, deviceFingerprint: dfp || undefined })
       });
 
       const data = await res.json().catch(() => ({}));
@@ -1894,6 +1914,14 @@ export class BoostPayStore {
       const res = await fetch('/api/admin/antifraud/config', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify(cfg) });
       return res.ok;
     } catch { return false; }
+  }
+  static async changeMyPassword(currentPassword: string, newPassword: string): Promise<{ success:boolean, error?:string }> {
+    try {
+      const res = await fetch('/api/users/me/password', { method:'POST', headers: this.authHeaders(), body: JSON.stringify({ currentPassword, newPassword }) });
+      const j = await res.json().catch(()=>({}));
+      if (res.ok) return { success:true };
+      return { success:false, error: j.error || 'Failed' };
+    } catch(e:any){ return { success:false, error: e.message } }
   }
   static async adminAntifraudUnfreeze(userId:string): Promise<boolean>{
     try{

@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { Wallet, Trophy, MessageSquare, Inbox, Download, RefreshCw, Gift } from 'lucide-react';
+import { Wallet, Trophy, MessageSquare, Inbox, Download, RefreshCw, Gift, LogOut } from 'lucide-react';
 import { BoostPayStore, ToastData } from './services/store';
 import { User, SystemConfig } from './types';
 import { Navbar } from './components/Navbar';
@@ -21,6 +21,7 @@ import { usePWAInstall } from './hooks/usePWAInstall';
 import { P2PTransferModal } from './components/P2PTransferModal';
 import { WalletSkeleton } from './components/WalletSkeleton';
 import { SecurityModal } from './components/SecurityModal';
+import { SettingsModal } from './components/SettingsModal';
 import { QRPayModal } from './components/QRPayModal';
 import { CallManager } from './components/CallOverlay';
 import { AlertTriangle, X, QrCode } from 'lucide-react';
@@ -29,6 +30,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(() => BoostPayStore.getCurrentUser());
   const [isInitialSyncing, setIsInitialSyncing] = useState<boolean>(true);
   const [isSecurityOpen, setIsSecurityOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isQROpen, setIsQROpen] = useState(false);
   const [qrPrefill, setQrPrefill] = useState<{ userId: string; name?: string } | null>(null);
   const [systemBanner, setSystemBanner] = useState<{ message: string; title?: string } | null>(null);
@@ -317,6 +319,18 @@ export default function App() {
         />
       )}
 
+      {/* Settings modal (Password + Security + Inbox) */}
+      {currentUser && (
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          currentUser={currentUser}
+          onUserUpdated={(u) => setCurrentUser({ ...u })}
+          onLogout={handleLogout}
+          inboxUnread={unreadNotifCount}
+        />
+      )}
+
       {/* 1:1 voice/video calling (WebRTC) */}
       {currentUser && <CallManager currentUser={currentUser} />}
 
@@ -434,6 +448,7 @@ export default function App() {
                   onOpenSendMoney={() => setIsSendMoneyOpen(true)}
                   onOpenQR={() => setIsQROpen(true)}
                   onOpenSecurity={() => setIsSecurityOpen(true)}
+                  onOpenSettings={() => setIsSettingsOpen(true)}
                   onOpenInbox={() => {
                     setActiveTab('INBOX');
                     BoostPayStore.markNotificationAsRead(currentUser.id, 'ALL');
@@ -472,7 +487,7 @@ export default function App() {
 
           {/* FIXED BOTTOM NAVIGATION BAR */}
           <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-3 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))]">
-            <div className={`max-w-md mx-auto grid items-center gap-1 ${isInstalled ? 'grid-cols-4' : 'grid-cols-5'}`}>
+            <div className={`max-w-md mx-auto grid items-center gap-1 ${isInstalled ? 'grid-cols-5' : 'grid-cols-6'}`}>
               {/* 1. Wallet Tab */}
               <button
                 onClick={() => setActiveTab('WALLET')}
@@ -536,6 +551,16 @@ export default function App() {
                   <span>Install</span>
                 </button>
               )}
+
+              {/* 6. Logout — always last */}
+              <button
+                onClick={handleLogout}
+                className="flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition cursor-pointer min-h-[44px] text-zinc-500 hover:text-red-400"
+                title="Sign out"
+              >
+                <LogOut className="w-5 h-5 stroke-[2.2]" />
+                <span>Logout</span>
+              </button>
 
             </div>
           </nav>

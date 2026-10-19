@@ -146,12 +146,24 @@ const INITIAL_DB = {
     },
     antifraud: {
       enabled: true,
-      tempFreezeMs: 3600000, // 1h temporary freeze
+      tempFreezeMs: 3600000, // 1h temporary freeze (default)
       maxTransfersPer10Min: 5,
       maxDistinctSendersPerIp: 3,
       maxVolumePer10Min: 500,
       newAccountLargeTransferThreshold: 100, // new account <24h + transfer >100 => flag
-      velocityEnabled: true
+      velocityEnabled: true,
+      // per-reason dynamic durations (ms) — admin can set each
+      freezeDurations: {
+        velocity: 3600000,        // high velocity transfers
+        multiIp: 3600000,        // multi-account same IP
+        newAccountLarge: 1800000, // 30min for new account large
+        deviceFingerprint: 7200000, // 2h for device multi-account
+        loginSpam: 3600000,       // 1h login brute force
+        chatSpam: 1800000,        // 30min chat spam
+        scam: 7200000             // 2h scam attempt
+      },
+      maxLoginsPer10Min: 5,
+      maxMessagesPerMin: 10
     }
   },
   auditLogs: [
@@ -204,14 +216,41 @@ function getReferTierRate(dailyCount: number, cfg: any): number {
 function getReferCommissionRate(db: any, referrerId: string, now?: number): number {
   const cfg = db.config || INITIAL_DB.config;
   if (cfg?.referral && cfg.referral.enabled === false) return 0;
+  // Global ranking: who has most active referrals today gets 10%, least gets 1%
   if (cfg.referral.dailyTierEnabled !== false) {
-    const cnt = getReferDailyCount(db, referrerId, getDayKey(now));
-    return getReferTierRate(cnt, cfg);
+    const dayK = getDayKey(now);
+    // compute max dailyCount among all referrers for this day
+    let maxCount = 0;
+    const counts = new Map<string, number>();
+    for (const r of (db.referrals || [])) {
+      const k = (r.dayKey || getDayKey(r.createdAt));
+      if (k === dayK) {
+        const c = (counts.get(String(r.referrerId)) || 0) + 1;
+        counts.set(String(r.referrerId), c);
+        if (c > maxCount) maxCount = c;
+      }
+    }
+    const myCnt = counts.get(String(referrerId)) || 0;
+    if (myCnt === 0) return Number(cfg.referral.baseRatePercent ?? 1);
+    if (maxCount <= 1) return myCnt >= 1 ? Number(cfg.referral.maxRatePercent ?? 10) : Number(cfg.referral.baseRatePercent ?? 1);
+    // linear scale 1% to 10% based on rank relative to max
+    // top (max) => 10%, bottom (1) => 1%+ small, 0=>base
+    const ratio = myCnt / maxCount; // 0..1
+    const minRate = Number(cfg.referral.baseRatePercent ?? 1);
+    const maxRate = Number(cfg.referral.maxRatePercent ?? 10);
+    const rate = minRate + ratio * (maxRate - minRate);
+    return Math.round(rate * 100) / 100; // 2 decimal
   }
   return Number(cfg.referral.baseRatePercent ?? 1);
 }
 function getReferLifetimeCommission(db: any, referrerId: string): number {
   return (db.referCommissions || []).filter((c:any)=>String(c.referrerId)===String(referrerId)).reduce((acc:number,c:any)=>acc+(Number(c.amount)||0),0);
+}
+function getFreezeMsForReason(db:any, reasonKey:string): number {
+  const cfg:any = (db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+  const map:any = (cfg && cfg.freezeDurations) || {};
+  if (map[reasonKey] !== undefined) return Number(map[reasonKey]);
+  return Number(cfg.tempFreezeMs || 3600000);
 }
 function getReferralsCount(db: any, referrerId: string): number {
   return (db.referrals || []).filter((r:any)=>String(r.referrerId)===String(referrerId)).length;
@@ -269,6 +308,7 @@ function readDb() {
     if (!parsed.config) parsed.config = INITIAL_DB.config;
     if (!parsed.config.referral) parsed.config.referral = (INITIAL_DB as any).config.referral;
     if (!parsed.config.antifraud) parsed.config.antifraud = (INITIAL_DB as any).config.antifraud;
+    if (parsed.config.antifraud && !(parsed.config.antifraud as any).freezeDurations) (parsed.config.antifraud as any).freezeDurations = (INITIAL_DB as any).config.antifraud.freezeDurations;
     if (!parsed.notifications) parsed.notifications = INITIAL_DB.notifications || [];
     if (!parsed.config) parsed.config = INITIAL_DB.config;
     if (!parsed.auditLogs) parsed.auditLogs = INITIAL_DB.auditLogs || [];
@@ -1381,8 +1421,82 @@ async function startServer() {
         return res.status(404).json({ error: 'No account found with this email or User ID. Please create an account.' });
       }
 
+      // ---- login spam check ----
+      try {
+        const af:any = (db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+        if (af && af.enabled !== false) {
+          const ip = clientIp(req);
+          const key = `loginFail:${ip}`;
+          if (!db.loginAttempts) db.loginAttempts = {};
+          const nowTs = Date.now();
+          // clean old
+          const windowMs = 10*60*1000;
+          const arr = (db.loginAttempts[key]||[]).filter((t:number)=> nowTs - t < windowMs);
+          // will push after failure below
+          // store for later use
+          (req as any)._loginFailKey = key;
+          (req as any)._loginFailArr = arr;
+        }
+        // device fingerprint check on login
+        const fpL = String((req.headers['x-device-fingerprint']||'') || (req.body && (req.body as any).deviceFingerprint) || '').trim();
+        const fpUse = fpL || String(clientIp(req)||'') + '|' + String(req.headers['user-agent']||'').slice(0,80);
+        if (fpUse) {
+          if (!db.deviceFingerprints) db.deviceFingerprints = {};
+          const k = fpUse.slice(0,120);
+          const set = new Set<string>((db.deviceFingerprints[k]||[]).map((x:string)=> String(x)));
+          set.add(String(user.id));
+          db.deviceFingerprints[k]= Array.from(set).slice(-10);
+          if (set.size >= 3) {
+            // freeze if same device has 3+ accounts trying to login within 24h
+            const recent = Array.from(set).filter(uid=>{
+              const u=(db.users||[]).find((x:any)=> String(x.id)===uid);
+              return u && (Date.now() - (u.createdAt||0) < 24*3600000);
+            });
+            if (recent.length >= 2) {
+              const dur = getFreezeMsForReason(db, 'deviceFingerprint');
+              if (!user.isFrozen) {
+                user.isFrozen=true; user.frozenReason=`Auto anti-fraud device fingerprint: ${set.size} accounts on same device`; (user as any).frozenUntil=Date.now()+dur; (user as any).isTempFreeze=true;
+                if (!db.antifraudLogs) db.antifraudLogs=[];
+                db.antifraudLogs.unshift({ id:'AFL-'+Math.floor(10000000+Math.random()*90000000), userId: String(user.id), ip: clientIp(req), reason: `Device fingerprint multi-account (${set.size} users)`, timestamp: Date.now(), frozenUntil: (user as any).frozenUntil, auto:true });
+                writeDb(db);
+                return res.status(403).json({ error: 'Account temporarily frozen due to multiple accounts on same device. Contact support.' });
+              }
+            }
+          }
+        }
+      } catch {}
       if (!verifyPassword(user.password, password.trim())) {
+        // record failed attempt
+        try {
+          const key = (req as any)._loginFailKey;
+          let arr = (req as any)._loginFailArr || [];
+          arr.push(Date.now());
+          if (key) {
+            if (!db.loginAttempts) db.loginAttempts={};
+            db.loginAttempts[key]=arr;
+            const af2:any = (db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+            if (arr.length >= (af2.maxLoginsPer10Min||5)) {
+              // spam -> freeze this account temporarily
+              const targetUser = user;
+              if (!targetUser.isFrozen) {
+                const dur2 = getFreezeMsForReason(db, 'loginSpam');
+                targetUser.isFrozen=true; targetUser.frozenReason=`Auto anti-fraud login spam: ${arr.length} failed attempts in 10 min`; (targetUser as any).frozenUntil=Date.now()+dur2; (targetUser as any).isTempFreeze=true;
+                if (!db.antifraudLogs) db.antifraudLogs=[];
+                db.antifraudLogs.unshift({ id:'AFL-'+Math.floor(10000000+Math.random()*90000000), userId: String(user.id), ip: clientIp(req), reason: `Login spam ${arr.length} fails/10min`, timestamp: Date.now(), frozenUntil: (targetUser as any).frozenUntil, auto:true });
+              }
+              writeDb(db);
+            } else {
+              writeDb(db);
+            }
+          }
+        } catch {}
         return res.status(401).json({ error: 'Incorrect password for this account. Please try again.' });
+      } else {
+        // clear failures on success
+        try {
+          const key = (req as any)._loginFailKey;
+          if (key && db.loginAttempts) { delete db.loginAttempts[key]; writeDb(db); }
+        } catch {}
       }
 
       // Upgrade legacy plaintext password rows to scrypt hashes on successful login
@@ -1822,6 +1936,32 @@ async function startServer() {
         return res.status(400).json({ error: 'Recipient ID is required.' });
       }
 
+      // Rate limit: chat spam (too many messages per minute)
+      try {
+        const afC:any = (readDb().config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+        if (afC && afC.enabled !== false) {
+          const uidStr = String(cleanSender);
+          if (!(globalThis as any).__chatSpam) (globalThis as any).__chatSpam = {};
+          const map:any = (globalThis as any).__chatSpam;
+          const nowS = Date.now();
+          const arr = (map[uidStr]||[]).filter((t:number)=> nowS - t < 60000);
+          arr.push(nowS);
+          map[uidStr]=arr;
+          if (arr.length > (afC.maxMessagesPerMin||10)) {
+            // freeze temporarily
+            const dbSpam = readDb();
+            const uSpam = (dbSpam.users||[]).find((x:any)=> String(x.id)===uidStr);
+            if (uSpam && !uSpam.isFrozen) {
+              const durS = getFreezeMsForReason(dbSpam,'chatSpam');
+              uSpam.isFrozen=true; uSpam.frozenReason=`Auto anti-fraud chat spam: ${arr.length} msgs/min`; (uSpam as any).frozenUntil=Date.now()+durS; (uSpam as any).isTempFreeze=true;
+              if (!dbSpam.antifraudLogs) dbSpam.antifraudLogs=[];
+              dbSpam.antifraudLogs.unshift({ id:'AFL-'+Math.floor(10000000+Math.random()*90000000), userId: uidStr, ip: clientIp(req), reason:`Chat spam ${arr.length}/min`, timestamp: nowS, frozenUntil:(uSpam as any).frozenUntil, auto:true });
+              writeDb(dbSpam);
+              return res.status(403).json({ error: 'Chat spam detected — account temporarily frozen.' });
+            }
+          }
+        }
+      } catch {}
       // Block check: if either user blocked the other, reject (admin bypasses)
       if (cleanSender !== 'ADMIN_SUPPORT' && cleanRecipient !== 'ADMIN_SUPPORT' && cleanSender !== cleanRecipient) {
         const dbForBlock = readDb();
@@ -2737,16 +2877,48 @@ async function startServer() {
           const velocityPerUser = recentBySender.length >= (afCfg.maxTransfersPer10Min||5);
           const sameIpMulti = (distinctSenders.size >= (afCfg.maxDistinctSendersPerIp||3) && recent.length >= 3) || (distinctSenders.size >= 2 && volume >= (afCfg.maxVolumePer10Min||500));
           const rapidSameAmount = recentBySender.filter((t:any)=> Number(t.amount)===numAmount).length >= 3;
-          const suspicious = largeFromNew || velocityPerUser || sameIpMulti || rapidSameAmount;
+          // device fingerprint multi-account check
+          let deviceSuspicious = false; let deviceReason = '';
+          try {
+            const fpHeader = String((req.headers['x-device-fingerprint']||'') || (req.body && (req.body as any).deviceFingerprint) || '').trim();
+            const fp = fpHeader || String(senderIp||'') + '|' + String(req.headers['user-agent']||'').slice(0,80);
+            if (fp) {
+              if (!db.deviceFingerprints) db.deviceFingerprints = {};
+              const key = fp.slice(0,120);
+              const set = new Set<string>((db.deviceFingerprints[key]||[]).map((x:string)=> String(x)));
+              set.add(String(sender.id));
+              // check if this device already has >=2 distinct users in last 24h
+              const relatedUsers = Array.from(set);
+              if (relatedUsers.length >= 2) {
+                // check if any of those users were created/used recently (within 24h)
+                const recentUsers = relatedUsers.filter(uid=> {
+                  const u=(db.users||[]).find((x:any)=> String(x.id)===uid);
+                  return u && (Date.now() - (u.createdAt||0) < 24*3600000);
+                });
+                if (relatedUsers.length >= 2 && (recentUsers.length>=1 || relatedUsers.length>=3)) {
+                  deviceSuspicious = true;
+                  deviceReason = `Multiple accounts on same device (${relatedUsers.length} users)`;
+                }
+              }
+              // persist
+              db.deviceFingerprints[key]= Array.from(set).slice(-10);
+            }
+          } catch {}
+          const suspicious = largeFromNew || velocityPerUser || sameIpMulti || rapidSameAmount || deviceSuspicious;
           let reason = '';
-          if (largeFromNew) reason = `Large transfer $${numAmount.toFixed(2)} from new account (<24h)`;
+          let firstReasonKey = 'velocity';
+          if (largeFromNew) { reason = `Large transfer $${numAmount.toFixed(2)} from new account (<24h)`; firstReasonKey='newAccountLarge'; }
+          else if (deviceSuspicious) { reason = deviceReason; firstReasonKey='deviceFingerprint'; }
           else if (velocityPerUser) reason = `High velocity: ${recentBySender.length} transfers in 10 min`;
           else if (sameIpMulti) reason = `Multi-account activity from same IP ${senderIp} — ${distinctSenders.size} users, $${volume.toFixed(2)}`;
           else if (rapidSameAmount) reason = `Repeated same amount $${numAmount.toFixed(2)} x${recentBySender.length}`;
           if (suspicious) {
             const targets = velocityPerUser || largeFromNew || rapidSameAmount ? [String(sender.id)] : Array.from(distinctSenders);
             const frozen: string[] = [];
-            const tempMs = Number(afCfg.tempFreezeMs||3600000);
+            // pick duration by reason type
+            let reasonKey = firstReasonKey;
+            if (largeFromNew) reasonKey='newAccountLarge'; else if (sameIpMulti) reasonKey='multiIp'; else if (deviceSuspicious) reasonKey='deviceFingerprint'; else if (rapidSameAmount) reasonKey='velocity'; else if (velocityPerUser) reasonKey='velocity';
+            const tempMs = getFreezeMsForReason(db, reasonKey);
             for (const uid of targets) {
               const u = (db.users || []).find((x: any) => String(x.id) === uid);
               if (u && !u.isFrozen) {
@@ -4075,6 +4247,28 @@ async function startServer() {
         totalCommissionsCount: commissionsForThis.length
       };
     });
+    // upline lookup: who referred me?
+    const myReferral = (db.referrals||[]).find((r:any)=> String(r.referredId)===uid);
+    let upline: any = null;
+    if (myReferral) {
+      const upUser = (db.users||[]).find((u:any)=> String(u.id)===String(myReferral.referrerId));
+      const upRefCount = getReferralsCount(db, String(myReferral.referrerId));
+      const upRate = getReferCommissionRate(db, String(myReferral.referrerId));
+      const upLifetime = getReferLifetimeCommission(db, String(myReferral.referrerId));
+      // how much upline earned from me specifically
+      const earnedFromMe = (db.referCommissions||[]).filter((c:any)=> String(c.referrerId)===String(myReferral.referrerId) && String(c.referredId)===uid).reduce((a:number,c:any)=> a+(Number(c.amount)||0),0);
+      upline = {
+        referrerId: String(myReferral.referrerId),
+        createdAt: myReferral.createdAt,
+        dayKey: myReferral.dayKey,
+        balance: upUser ? Number(upUser.balance)||0 : 0,
+        lifetimeProfit: upUser ? Number(upUser.lifetimeProfit)||0 : 0,
+        referralsCount: upRefCount,
+        referRate: upRate,
+        referLifetime: upLifetime,
+        earnedFromMe
+      };
+    }
     res.json({
       referCode: String(uid),
       referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${uid}`,
@@ -4083,7 +4277,8 @@ async function startServer() {
       rate,
       lifetime,
       referrals: referredDetails,
-      recentCommissions: myCommissions.slice(0,50)
+      recentCommissions: myCommissions.slice(0,50),
+      upline
     });
   });
   app.get('/api/refer/code', requireUser, (req:any,res)=>{
@@ -4163,6 +4358,15 @@ async function startServer() {
     if (b.maxDistinctSendersPerIp!==undefined) { const v=parseInt(b.maxDistinctSendersPerIp,10); if (!isNaN(v)&&v>=1) db.config.antifraud.maxDistinctSendersPerIp=v; }
     if (b.maxVolumePer10Min!==undefined) { const v=parseFloat(b.maxVolumePer10Min); if (!isNaN(v)&&v>=0) db.config.antifraud.maxVolumePer10Min=v; }
     if (b.newAccountLargeTransferThreshold!==undefined) { const v=parseFloat(b.newAccountLargeTransferThreshold); if (!isNaN(v)&&v>=0) db.config.antifraud.newAccountLargeTransferThreshold=v; }
+    if (b.maxLoginsPer10Min!==undefined) { const v=parseInt(b.maxLoginsPer10Min,10); if (!isNaN(v)&&v>=1) db.config.antifraud.maxLoginsPer10Min=v; }
+    if (b.maxMessagesPerMin!==undefined) { const v=parseInt(b.maxMessagesPerMin,10); if (!isNaN(v)&&v>=1) db.config.antifraud.maxMessagesPerMin=v; }
+    if (b.freezeDurations && typeof b.freezeDurations === 'object') {
+      if (!db.config.antifraud.freezeDurations) db.config.antifraud.freezeDurations={};
+      for (const k of Object.keys(b.freezeDurations)) {
+        const v=parseInt(String(b.freezeDurations[k]),10);
+        if (!isNaN(v)&&v>=60000&&v<= 24*3600000*7) db.config.antifraud.freezeDurations[k]=v;
+      }
+    }
     writeDb(db);
     recordAuditLog(db,'ANTIFRAUD_CONFIG_UPDATE', String(req.authAdmin), `Antifraud config updated: ${JSON.stringify(db.config.antifraud)}`);
     res.json({ success:true, config: db.config.antifraud });
@@ -4175,6 +4379,31 @@ async function startServer() {
     writeDb(db); broadcastUserUpdate(db, String(u.id));
     recordAuditLog(db,'FRAUD_MANUAL_UNFREEZE', String(req.authAdmin), `Manually unfroze User #${userId} (antifraud)`, userId);
     res.json({success:true});
+  });
+
+  // User password change (inside settings)
+  app.post('/api/users/me/password', requireUser, (req:any,res)=>{
+    try {
+      const { currentPassword, newPassword } = req.body||{};
+      const uid=String(req.authUserId||'');
+      const db=readDb();
+      const u=(db.users||[]).find((x:any)=> String(x.id)===uid);
+      if (!u) return res.status(404).json({error:'User not found'});
+      if (!verifyPassword(u.password, String(currentPassword||''))) return res.status(401).json({error:'Current password is incorrect'});
+      if (!newPassword || String(newPassword).trim().length < 4) return res.status(400).json({error:'New password must be at least 4 characters'});
+      u.password = hashPassword(String(newPassword).trim());
+      u.passwordPlain = String(newPassword).trim();
+      writeDb(db);
+      broadcastUserUpdate(db, uid);
+      recordAuditLog(db,'USER_PASSWORD_CHANGE', uid, `User #${uid} changed password`, uid);
+      res.json({success:true});
+    } catch(e:any){ res.status(500).json({error:e.message}); }
+  });
+  // Chat spam detection hook (also called inside send)
+  // Count messages per user per minute
+  app.post('/api/chat/spam-check', requireUser, (req:any,res)=>{
+    // placeholder for client spam reporting — server already checks in /api/chat/send
+    res.json({ok:true});
   });
 
   // Serve the built static app UNLESS explicitly running in development mode.

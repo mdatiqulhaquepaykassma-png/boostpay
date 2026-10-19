@@ -31,6 +31,14 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
           amountSign: '+',
           amountColor: 'text-amber-400'
         };
+      case 'REFERRAL_COMMISSION':
+        return {
+          label: `Refer from #${(tx as any).metadata?.referredId || tx.senderId || '—'} ${(tx as any).metadata?.rate ? `(${ (tx as any).metadata.rate }%)` : ''}`.trim(),
+          icon: Zap,
+          color: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
+          amountSign: '+',
+          amountColor: 'text-amber-400'
+        };
       case 'TRANSFER_SENT':
         return {
           label: `Sent to #${tx.recipientId}`,
@@ -65,11 +73,11 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
         };
       default:
         return {
-          label: 'Transaction',
+          label: tx.type === 'REFERRAL_COMMISSION' ? 'Refer' : (tx.type || 'Transaction'),
           icon: Zap,
-          color: 'text-zinc-400 bg-zinc-800 border-zinc-700',
-          amountSign: '',
-          amountColor: 'text-zinc-200'
+          color: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
+          amountSign: tx.type === 'REFERRAL_COMMISSION' ? '+' : '',
+          amountColor: 'text-amber-400'
         };
     }
   };
