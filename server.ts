@@ -1576,17 +1576,31 @@ async function startServer() {
 
   app.post('/api/chat/send', (req: any, res) => {
     try {
-      const { senderId, senderRole, recipientId, text, voiceData, voiceDurationMs } = req.body;
+      const { senderId, senderRole, recipientId, text, voiceData, voiceDurationMs, photoData, replyTo, forwardedFrom } = req.body;
       const rawKind = String((req.body && req.body.kind) || '');
       const isVoice = rawKind === 'voice';
+      const isPhoto = rawKind === 'photo';
       const cleanVoice = isVoice && typeof voiceData === 'string' ? voiceData : '';
-      const cleanText = (text || (isVoice ? '🎤 Voice message' : '')).trim();
+      const cleanPhoto = isPhoto && typeof photoData === 'string' ? photoData : '';
+      const cleanReplyTo = replyTo && typeof replyTo === 'object'
+        ? {
+            id: String(replyTo.id || '').slice(0, 64),
+            text: String(replyTo.text || '').slice(0, 160),
+            senderId: String(replyTo.senderId || '').slice(0, 32)
+          }
+        : null;
+      const cleanForwarded = forwardedFrom ? String(forwardedFrom).slice(0, 32) : '';
+      const cleanText = (text || (isVoice ? '🎤 Voice message' : '') || (isPhoto ? '📷 Photo' : '')).trim();
       const cleanSender = String(senderId || '').trim();
       const cleanRecipient = String(recipientId || '').trim();
 
       if (isVoice) {
         if (!cleanVoice.startsWith('data:audio/') || cleanVoice.length > 2600000) {
           return res.status(400).json({ error: 'Invalid voice recording.' });
+        }
+      } else if (isPhoto) {
+        if (!cleanPhoto.startsWith('data:image/') || cleanPhoto.length > 5200000) {
+          return res.status(400).json({ error: 'Invalid photo.' });
         }
       } else if (!cleanText) {
         return res.status(400).json({ error: 'Message cannot be empty.' });
@@ -1671,17 +1685,22 @@ async function startServer() {
         );
       }
 
+      const previewText = isPhoto ? '📷 Photo' : isVoice ? '🎤 Voice message' : cleanText.slice(0, 120);
       if (!conv) {
         conv = {
           id: convId,
           participants,
-          lastMessage: cleanText,
-          lastMessageAt: now
+          lastMessage: previewText,
+          lastMessageAt: now,
+          lastRead: {},
+          mutedBy: []
         };
         db.conversations.unshift(conv);
       } else {
-        conv.lastMessage = cleanText;
+        conv.lastMessage = previewText;
         conv.lastMessageAt = now;
+        if (!conv.lastRead) conv.lastRead = {};
+        if (!conv.mutedBy) conv.mutedBy = [];
       }
 
       const newMsg: any = {
@@ -1706,7 +1725,15 @@ async function startServer() {
         newMsg.voiceData = cleanVoice;
         newMsg.voiceDurationMs = Math.max(0, Math.min(180000, Number(voiceDurationMs) || 0));
         newMsg.text = '🎤 Voice message';
+      } else if (isPhoto && cleanPhoto) {
+        newMsg.kind = 'photo';
+        newMsg.photoData = cleanPhoto;
+        newMsg.text = text && String(text).trim() ? String(text).trim().slice(0, 500) : '📷 Photo';
       }
+      if (cleanReplyTo) newMsg.replyTo = cleanReplyTo;
+      if (cleanForwarded) newMsg.forwardedFrom = cleanForwarded;
+      newMsg.pinned = false;
+      newMsg.deleted = false;
 
       db.messages.push(newMsg);
       writeDb(db);
@@ -1807,6 +1834,205 @@ async function startServer() {
         messageId: cleanMsgId,
         reactions: msg.reactions
       });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ---- Chat: edit / delete / pin / read receipts / typing / presence / groups ----
+  const findConvForMsg = (db: any, msg: any) =>
+    (db.conversations || []).find((c: any) => c.id === msg.conversationId);
+
+  const broadcastConvEvent = (conv: any, payload: any) => {
+    const parts: string[] = Array.isArray(conv?.participants) ? conv.participants : [];
+    for (const pid of parts) pushToUser(String(pid), payload);
+  };
+
+  app.post('/api/chat/message/edit', (req: any, res) => {
+    try {
+      const { messageId, text } = req.body;
+      const cleanId = String(messageId || '').trim();
+      const cleanText = String(text || '').trim().slice(0, 2000);
+      if (!cleanId || !cleanText) return res.status(400).json({ error: 'messageId and text are required.' });
+      const db = readDb();
+      const msg = (db.messages || []).find((m: any) => m.id === cleanId);
+      if (!msg) return res.status(404).json({ error: 'Message not found.' });
+      const isSelf = String(msg.senderId) === String(req.authUserId) || (req.authAdmin && msg.senderId === 'ADMIN_SUPPORT');
+      if (!isSelf) return res.status(403).json({ error: 'You can only edit your own messages.' });
+      if (msg.kind && msg.kind !== 'text') return res.status(400).json({ error: 'Only text messages can be edited.' });
+      msg.text = cleanText;
+      msg.editedAt = Date.now();
+      writeDb(db);
+      const conv = findConvForMsg(db, msg);
+      if (conv) broadcastConvEvent(conv, { type: 'chat_event', event: 'message_edited', messageId: msg.id, text: cleanText, editedAt: msg.editedAt, conversationId: msg.conversationId });
+      res.json({ success: true, message: msg });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/chat/message/delete', (req: any, res) => {
+    try {
+      const { messageId } = req.body;
+      const cleanId = String(messageId || '').trim();
+      if (!cleanId) return res.status(400).json({ error: 'messageId is required.' });
+      const db = readDb();
+      const msg = (db.messages || []).find((m: any) => m.id === cleanId);
+      if (!msg) return res.status(404).json({ error: 'Message not found.' });
+      const isSelf = String(msg.senderId) === String(req.authUserId) || (req.authAdmin && msg.senderId === 'ADMIN_SUPPORT');
+      if (!isSelf) return res.status(403).json({ error: 'You can only delete your own messages.' });
+      msg.deleted = true;
+      msg.text = '🚫 Message deleted';
+      delete msg.voiceData;
+      delete msg.photoData;
+      delete msg.callInfo;
+      msg.kind = 'text';
+      writeDb(db);
+      const conv = findConvForMsg(db, msg);
+      if (conv) broadcastConvEvent(conv, { type: 'chat_event', event: 'message_deleted', messageId: msg.id, conversationId: msg.conversationId });
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/chat/pin', (req: any, res) => {
+    try {
+      const { messageId, pinned } = req.body;
+      const cleanId = String(messageId || '').trim();
+      if (!cleanId) return res.status(400).json({ error: 'messageId is required.' });
+      const db = readDb();
+      const msg = (db.messages || []).find((m: any) => m.id === cleanId);
+      if (!msg) return res.status(404).json({ error: 'Message not found.' });
+      const conv = findConvForMsg(db, msg);
+      if (!conv) return res.status(404).json({ error: 'Conversation not found.' });
+      if (!Array.isArray(conv.participants) || !conv.participants.includes(String(req.authUserId || 'ADMIN_SUPPORT'))) {
+        return res.status(403).json({ error: 'Not a member of this conversation.' });
+      }
+      msg.pinned = Boolean(pinned);
+      writeDb(db);
+      broadcastConvEvent(conv, { type: 'chat_event', event: 'message_pinned', messageId: msg.id, pinned: msg.pinned, conversationId: msg.conversationId });
+      res.json({ success: true, pinned: msg.pinned });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/chat/read', (req: any, res) => {
+    try {
+      const { conversationId } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const who = String(req.authUserId || (req.authAdmin ? 'ADMIN_SUPPORT' : ''));
+      if (!cleanId || !who) return res.status(400).json({ error: 'conversationId is required.' });
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId);
+      if (!conv) return res.status(404).json({ error: 'Conversation not found.' });
+      if (!conv.lastRead) conv.lastRead = {};
+      conv.lastRead[who] = Date.now();
+      writeDb(db);
+      broadcastConvEvent(conv, { type: 'chat_event', event: 'read_update', conversationId: cleanId, userId: who, at: conv.lastRead[who] });
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/chat/typing', (req: any, res) => {
+    try {
+      const { conversationId } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const who = String(req.authUserId || (req.authAdmin ? 'ADMIN_SUPPORT' : ''));
+      if (!cleanId || !who) return res.status(400).json({ error: 'conversationId is required.' });
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId);
+      if (!conv) return res.status(404).json({ error: 'Conversation not found.' });
+      broadcastConvEvent(conv, { type: 'typing', conversationId: cleanId, userId: who, timestamp: Date.now() });
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Presence: who is currently connected to the chat stream
+  app.get('/api/chat/presence', (req: any, res) => {
+    const online = Array.from(chatSseClients.values()).map((c: any) => String(c.userId));
+    res.json({ success: true, online: Array.from(new Set(online)) });
+  });
+
+  // Mute a conversation for the caller
+  app.post('/api/chat/mute', (req: any, res) => {
+    try {
+      const { conversationId, muted } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const who = String(req.authUserId || (req.authAdmin ? 'ADMIN_SUPPORT' : ''));
+      if (!cleanId || !who) return res.status(400).json({ error: 'conversationId is required.' });
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId);
+      if (!conv) return res.status(404).json({ error: 'Conversation not found.' });
+      if (!Array.isArray(conv.mutedBy)) conv.mutedBy = [];
+      if (muted && !conv.mutedBy.includes(who)) conv.mutedBy.push(who);
+      if (!muted) conv.mutedBy = conv.mutedBy.filter((u: string) => u !== who);
+      writeDb(db);
+      res.json({ success: true, mutedBy: conv.mutedBy });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Group management: rename / add / remove members
+  app.post('/api/chat/conversation/update', (req: any, res) => {
+    try {
+      const { conversationId, name, addMembers, removeMembers } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const who = String(req.authUserId || (req.authAdmin ? 'ADMIN_SUPPORT' : ''));
+      if (!cleanId || !who) return res.status(400).json({ error: 'conversationId is required.' });
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId);
+      if (!conv) return res.status(404).json({ error: 'Conversation not found.' });
+      if (!Array.isArray(conv.participants) || !conv.participants.includes(who)) {
+        return res.status(403).json({ error: 'Not a member of this conversation.' });
+      }
+      const isCreator = !conv.createdBy || String(conv.createdBy) === who;
+      if (typeof name === 'string' && name.trim()) {
+        if (conv.type !== 'group') return res.status(400).json({ error: 'Only groups can be renamed.' });
+        if (!isCreator) return res.status(403).json({ error: 'Only the group creator can rename the group.' });
+        conv.name = name.trim().slice(0, 60);
+      }
+      if (Array.isArray(addMembers) && addMembers.length) {
+        const ids = addMembers.map((x: any) => String(x).trim()).filter(Boolean).slice(0, 50);
+        for (const id of ids) if (!conv.participants.includes(id)) conv.participants.push(id);
+      }
+      if (Array.isArray(removeMembers) && removeMembers.length) {
+        if (!isCreator && conv.type === 'group') {
+          // non-creators may only remove themselves (leave)
+          const onlySelf = removeMembers.every((x: any) => String(x) === who);
+          if (!onlySelf) return res.status(403).json({ error: 'Only the group creator can remove members.' });
+        }
+        const ids = removeMembers.map((x: any) => String(x).trim());
+        conv.participants = conv.participants.filter((p: string) => !ids.includes(p));
+      }
+      writeDb(db);
+      broadcastConvEvent(conv, { type: 'chat_event', event: 'conversation_updated', conversation: conv, conversationId: conv.id });
+      res.json({ success: true, conversation: conv });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Leave a group (removes the caller from participants)
+  app.post('/api/chat/conversation/leave', (req: any, res) => {
+    try {
+      const { conversationId } = req.body;
+      const cleanId = String(conversationId || '').trim();
+      const who = String(req.authUserId || (req.authAdmin ? 'ADMIN_SUPPORT' : ''));
+      if (!cleanId || !who) return res.status(400).json({ error: 'conversationId is required.' });
+      const db = readDb();
+      const conv = (db.conversations || []).find((c: any) => c.id === cleanId);
+      if (!conv) return res.status(404).json({ error: 'Conversation not found.' });
+      conv.participants = (conv.participants || []).filter((p: string) => p !== who);
+      writeDb(db);
+      broadcastConvEvent(conv, { type: 'chat_event', event: 'conversation_updated', conversation: conv, conversationId: conv.id });
+      res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

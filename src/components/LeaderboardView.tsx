@@ -36,7 +36,6 @@ interface UserRowProps {
 }
 
 const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, copyId, copiedId, getRankBadge }: UserRowProps) => {
-  const emailHandle = u.email ? (u.email.includes('@') ? u.email.split('@')[0] : u.email) : '';
 
   return (
     <div
@@ -53,11 +52,7 @@ const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, c
             <span className={`font-bold ${isMe ? 'text-amber-400' : 'text-zinc-200'}`}>
               #{u.id}
             </span>
-            {emailHandle && (
-              <span className="text-[11px] text-zinc-400 font-sans truncate max-w-[100px] sm:max-w-[140px]" title={u.email}>
-                {emailHandle}
-              </span>
-            )}
+
             {isMe && (
               <span className="text-[10px] bg-amber-500/20 text-amber-400 px-1.5 py-0.2 rounded font-sans font-medium">
                 You
@@ -294,7 +289,7 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search participants by ID (#1, 2) or name / email..."
+            placeholder="Search participants by ID (#1, 2)..."
             className="w-full h-11 rounded-2xl border border-zinc-800 bg-zinc-900/90 pl-10 pr-10 text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500/80 focus:ring-1 focus:ring-amber-500/40 focus:outline-none font-mono transition"
           />
           {searchQuery && (
@@ -410,7 +405,7 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
               </div>
               <h4 className="text-xs font-bold text-zinc-300">No participants found</h4>
               <p className="text-[11px] text-zinc-500 mt-1 max-w-xs">
-                No users match &ldquo;{searchQuery}&rdquo;. Try searching by User ID (e.g. #1) or name/email.
+                No users match &ldquo;{searchQuery}&rdquo;. Try searching by User ID (e.g. #1).
               </p>
               <button
                 onClick={() => setSearchQuery('')}

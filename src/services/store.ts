@@ -320,6 +320,175 @@ export class BoostPayStore {
   /**
    * Initializes real-time Server-Sent Events (SSE) chat connection for a user or admin
    */
+  // ---- Typing indicator listeners ----
+  private static typingListeners: Array<(ev: { conversationId: string; userId: string; timestamp: number }) => void> = [];
+
+  static onTyping(cb: (ev: { conversationId: string; userId: string; timestamp: number }) => void): () => void {
+    this.typingListeners.push(cb);
+    return () => {
+      this.typingListeners = this.typingListeners.filter((fn) => fn !== cb);
+    };
+  }
+
+  /** Apply realtime chat mutations pushed from the server (edit/delete/pin/read/group). */
+  private static handleChatEvent(data: any): void {
+    const ev = String(data.event || '');
+    const msgs = this.getMessages();
+    const convs = this.getConversations();
+    let msgsChanged = false;
+    let convsChanged = false;
+
+    if (ev === 'message_edited') {
+      const idx = msgs.findIndex((m) => m.id === data.messageId);
+      if (idx >= 0) {
+        msgs[idx] = { ...msgs[idx], text: data.text, editedAt: data.editedAt };
+        msgsChanged = true;
+      }
+    } else if (ev === 'message_deleted') {
+      const idx = msgs.findIndex((m) => m.id === data.messageId);
+      if (idx >= 0) {
+        msgs[idx] = { ...msgs[idx], deleted: true, text: '🚫 Message deleted', kind: 'text' } as any;
+        delete (msgs[idx] as any).voiceData;
+        delete (msgs[idx] as any).photoData;
+        msgsChanged = true;
+      }
+    } else if (ev === 'message_pinned') {
+      const idx = msgs.findIndex((m) => m.id === data.messageId);
+      if (idx >= 0) {
+        msgs[idx] = { ...msgs[idx], pinned: data.pinned };
+        msgsChanged = true;
+      }
+    } else if (ev === 'read_update') {
+      const idx = convs.findIndex((c) => c.id === data.conversationId);
+      if (idx >= 0) {
+        convs[idx] = { ...convs[idx], lastRead: { ...(convs[idx].lastRead || {}), [data.userId]: data.at } } as any;
+        convsChanged = true;
+      }
+    } else if (ev === 'conversation_updated' && data.conversation) {
+      const idx = convs.findIndex((c) => c.id === data.conversation.id);
+      if (idx >= 0) {
+        convs[idx] = { ...convs[idx], ...data.conversation };
+        convsChanged = true;
+      } else {
+        convs.unshift(data.conversation);
+        convsChanged = true;
+      }
+    }
+
+    if (msgsChanged) localStorage.setItem(STORAGE_MESSAGES, JSON.stringify(msgs));
+    if (convsChanged) localStorage.setItem(STORAGE_CONVERSATIONS, JSON.stringify(convs));
+    if (msgsChanged || convsChanged) this.triggerChatUpdate(convs, msgs);
+  }
+
+  static async editMessage(messageId: string, text: string): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/message/edit', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ messageId, text })
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  static async deleteMessage(messageId: string): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/message/delete', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ messageId })
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  static async togglePin(messageId: string, pinned: boolean): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/pin', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ messageId, pinned })
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  static async markConversationRead(conversationId: string): Promise<void> {
+    try {
+      await fetch('/api/chat/read', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId })
+      });
+    } catch { /* offline */ }
+  }
+
+  static async sendTyping(conversationId: string): Promise<void> {
+    try {
+      await fetch('/api/chat/typing', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId })
+      });
+    } catch { /* offline */ }
+  }
+
+  static async setConversationMute(conversationId: string, muted: boolean): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/mute', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId, muted })
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  static async updateConversation(conversationId: string, changes: { name?: string; addMembers?: string[]; removeMembers?: string[] }): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/conversation/update', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId, ...changes })
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  static async leaveConversation(conversationId: string): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/conversation/leave', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId })
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  static async getPresence(): Promise<string[]> {
+    try {
+      const res = await fetch('/api/chat/presence', { headers: this.authHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        return Array.isArray(data.online) ? data.online : [];
+      }
+    } catch { /* offline */ }
+    return [];
+  }
+
   static initChatStream(userId: string): () => void {
     if (!userId) return () => {};
 
@@ -405,6 +574,12 @@ export class BoostPayStore {
                 title: 'Compounding Cycle Complete',
                 message: `Yield reward of $${Number(data.reward || 0).toFixed(8)} was credited to your wallet.`
               } as any);
+            } else if (data.type === 'typing' && data.conversationId) {
+              for (const cb of this.typingListeners) {
+                try { cb({ conversationId: data.conversationId, userId: data.userId, timestamp: data.timestamp }); } catch { /* ignore */ }
+              }
+            } else if (data.type === 'chat_event' && data.event) {
+              this.handleChatEvent(data);
             } else if (data.type === 'call_signal' && data.signal) {
               for (const cb of this.callSignalListeners) {
                 try { cb({ from: String(data.from || ''), signal: data.signal }); } catch { /* listener error */ }
@@ -494,7 +669,12 @@ export class BoostPayStore {
     text: string,
     senderRole?: 'USER' | 'ADMIN',
     callInfo?: Message['callInfo'],
-    voice?: { data: string; durationMs: number }
+    voice?: { data: string; durationMs: number },
+    extra?: {
+      replyTo?: { id: string; text: string; senderId: string } | null;
+      photoData?: string;
+      forwardedFrom?: string;
+    }
   ): Promise<{ success: boolean; message?: Message; conversation?: Conversation; error?: string }> {
     const cur = this.getCurrentUser();
     const senderId = senderRole === 'ADMIN' ? 'ADMIN_SUPPORT' : (cur?.id || '1');
@@ -515,7 +695,10 @@ export class BoostPayStore {
       text: cleanText,
       timestamp: now,
       ...(callInfo ? { kind: 'call' as const, callInfo } : {}),
-      ...(voice ? { kind: 'voice' as const, voiceData: voice.data, voiceDurationMs: voice.durationMs, text: '🎤 Voice message' } : {})
+      ...(voice ? { kind: 'voice' as const, voiceData: voice.data, voiceDurationMs: voice.durationMs, text: '🎤 Voice message' } : {}),
+      ...(extra?.photoData ? { kind: 'photo' as const, photoData: extra.photoData, text: text || '📷 Photo' } : {}),
+      ...(extra?.replyTo ? { replyTo: extra.replyTo } : {}),
+      ...(extra?.forwardedFrom ? { forwardedFrom: extra.forwardedFrom } : {})
     };
 
     // Save optimistically locally
@@ -554,7 +737,10 @@ export class BoostPayStore {
           recipientId,
           text: cleanText,
           ...(callInfo ? { kind: 'call', callInfo } : {}),
-          ...(voice ? { kind: 'voice', voiceData: voice.data, voiceDurationMs: voice.durationMs } : {})
+          ...(voice ? { kind: 'voice', voiceData: voice.data, voiceDurationMs: voice.durationMs } : {}),
+          ...(extra?.photoData ? { kind: 'photo', photoData: extra.photoData } : {}),
+          ...(extra?.replyTo ? { replyTo: extra.replyTo } : {}),
+          ...(extra?.forwardedFrom ? { forwardedFrom: extra.forwardedFrom } : {})
         })
       });
 

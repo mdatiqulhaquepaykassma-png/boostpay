@@ -2205,11 +2205,21 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             </div>
                           );
                         }
-                        if (m.kind === 'voice' && m.voiceData) {
+                        if (m.kind === 'voice' && m.voiceData && !m.deleted) {
                           return (
                             <div key={m.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>
                               <div className={`rounded-2xl px-3 py-2 ${isAdmin ? 'bg-gradient-to-br from-amber-500 to-amber-600 rounded-br-xs' : 'bg-zinc-800/90 border border-zinc-700/60 rounded-bl-xs'}`}>
                                 <VoiceNotePlayer data={m.voiceData} durationMs={m.voiceDurationMs} />
+                              </div>
+                            </div>
+                          );
+                        }
+                        if (m.kind === 'photo' && m.photoData && !m.deleted) {
+                          return (
+                            <div key={m.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>
+                              <div className={`rounded-2xl px-2 py-2 ${isAdmin ? 'bg-gradient-to-br from-amber-500 to-amber-600 rounded-br-xs' : 'bg-zinc-800/90 border border-zinc-700/60 rounded-bl-xs'}`}>
+                                <img src={m.photoData} alt="attachment" className="max-h-48 rounded-xl object-cover" />
+                                {m.text && m.text !== '📷 Photo' && <p className="text-xs mt-1 px-1">{m.text}</p>}
                               </div>
                             </div>
                           );
@@ -2226,7 +2236,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                                   : 'bg-zinc-800/90 border border-zinc-700/60 text-zinc-100 rounded-bl-xs shadow-sm'
                               }`}
                             >
-                              <p className="break-words">{m.text}</p>
+                              <p className={`break-words ${m.deleted ? 'italic opacity-60' : ''}`}>{m.deleted ? '🚫 Message deleted' : m.text}</p>
                               <div className={`text-[9px] font-mono mt-1 ${
                                 isAdmin ? 'text-zinc-950/70 text-right' : 'text-zinc-400 text-right'
                               }`}>

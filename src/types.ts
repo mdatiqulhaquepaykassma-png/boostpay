@@ -49,7 +49,7 @@ export interface Message {
   timestamp: number;
   reactions?: Record<string, string[]>; // emoji -> userIds
   /** 'call' renders as a centered call-history row (Telegram style). */
-  kind?: 'text' | 'call' | 'voice';
+  kind?: 'text' | 'call' | 'voice' | 'photo';
   callInfo?: {
     media: 'audio' | 'video';
     outcome: 'completed' | 'missed' | 'declined';
@@ -58,6 +58,13 @@ export interface Message {
   /** 'voice' renders as an in-chat voice note bubble. */
   voiceData?: string;
   voiceDurationMs?: number;
+  /** 'photo' renders as an image bubble. */
+  photoData?: string;
+  replyTo?: { id: string; text: string; senderId: string };
+  forwardedFrom?: string;
+  editedAt?: number;
+  pinned?: boolean;
+  deleted?: boolean;
 }
 
 export interface Conversation {
@@ -65,6 +72,9 @@ export interface Conversation {
   type?: 'dm' | 'group';
   name?: string; // Group display name
   createdBy?: string;
+  lastRead?: Record<string, number>;
+  mutedBy?: string[];
+  members?: string[];
   participants: string[]; // [userId1, userId2], [userId, 'ADMIN_SUPPORT'] or group members
   lastMessage: string;
   lastMessageAt?: number;

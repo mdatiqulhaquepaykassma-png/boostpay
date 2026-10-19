@@ -14,7 +14,7 @@ import {
   Smile,
   Phone,
   Video
-, Mic, Play, Pause, X
+, Mic, Play, Pause, X, Pin, Reply, Forward, Pencil, Trash2, ImagePlus, Bell, BellOff, Settings, Users2, Info, Volume2
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { startCallTo } from './CallOverlay';
@@ -102,6 +102,13 @@ interface MessageItemProps {
   onReact: (messageId: string, emoji: string) => void;
   onCopy: (text: string) => void;
   copiedMsgId: string | null;
+  onReply: (m: Message) => void;
+  onForward: (m: Message) => void;
+  onPin: (m: Message) => void;
+  onEdit: (m: Message) => void;
+  onDelete: (m: Message) => void;
+  showSeen?: boolean;
+  onOpenImage?: (dataUrl: string) => void;
 }
 
 const MessageItem = memo(({
@@ -111,13 +118,23 @@ const MessageItem = memo(({
   currentUserId,
   onReact,
   onCopy,
-  copiedMsgId
+  copiedMsgId,
+  onReply,
+  onForward,
+  onPin,
+  onEdit,
+  onDelete,
+  showSeen,
+  onOpenImage
 }: MessageItemProps) => {
   const [showActionBar, setShowActionBar] = useState(false);
   const isCopied = copiedMsgId === m.id;
 
   const reactions = m.reactions || {};
   const hasReactions = Object.keys(reactions).some(k => reactions[k]?.length > 0);
+  const isDeleted = !!m.deleted;
+  const isVoice = m.kind === 'voice' && !!m.voiceData && !isDeleted;
+  const isPhoto = m.kind === 'photo' && !!m.photoData && !isDeleted;
 
   return (
     m.kind === 'call' ? (
@@ -151,6 +168,7 @@ const MessageItem = memo(({
       }`}
       onMouseEnter={() => setShowActionBar(true)}
       onMouseLeave={() => setShowActionBar(false)}
+      onTouchStart={() => setShowActionBar(true)}
     >
       {/* Sender Header for Incoming Messages */}
       {!isMe && (
@@ -164,55 +182,95 @@ const MessageItem = memo(({
         </div>
       )}
 
+      {/* Pinned indicator */}
+      {m.pinned && (
+        <div className="flex items-center gap-1 mb-0.5 text-[9px] text-amber-400/90 font-mono">
+          <Pin className="w-2.5 h-2.5" /> Pinned
+        </div>
+      )}
+
+      {/* Forwarded header */}
+      {m.forwardedFrom && (
+        <div className="flex items-center gap-1 mb-0.5 text-[9px] text-zinc-400 font-mono">
+          <Forward className="w-2.5 h-2.5" /> Forwarded from #{m.forwardedFrom}
+        </div>
+      )}
+
       {/* Main Glassmorphic Bubble */}
       <div
         className={`relative px-3.5 py-2.5 text-xs leading-relaxed transition-all backdrop-blur-md ${
-          isMe
+          isDeleted
+            ? 'bg-zinc-900/50 border border-zinc-800/60 text-zinc-500 italic rounded-2xl'
+            : isMe
             ? 'bg-gradient-to-br from-amber-500 to-amber-600 text-zinc-950 font-medium rounded-2xl rounded-br-xs shadow-md shadow-amber-500/10'
             : isAdmin
             ? 'bg-gradient-to-br from-sky-950/80 via-sky-900/40 to-zinc-900/90 border border-sky-500/30 text-sky-100 rounded-2xl rounded-bl-xs shadow-md shadow-sky-500/5'
             : 'bg-zinc-900/90 border border-zinc-800/80 text-zinc-100 rounded-2xl rounded-bl-xs shadow-sm'
         }`}
       >
-        {m.kind === 'voice' && m.voiceData ? (
-          <VoiceNotePlayer data={m.voiceData} durationMs={m.voiceDurationMs} isMe={isMe} />
+        {/* Reply quote */}
+        {m.replyTo && !isDeleted && (
+          <div className={`mb-1.5 rounded-xl px-2.5 py-1.5 border-l-2 ${
+            isMe ? 'bg-zinc-950/15 border-zinc-950/40' : 'bg-zinc-800/60 border-amber-400/70'
+          }`}>
+            <div className={`text-[9px] font-bold font-mono ${isMe ? 'text-zinc-950/80' : 'text-amber-400'}`}>
+              #{m.replyTo.senderId}
+            </div>
+            <div className={`text-[10px] truncate max-w-[200px] ${isMe ? 'text-zinc-950/70' : 'text-zinc-400'}`}>
+              {m.replyTo.text || 'Attachment'}
+            </div>
+          </div>
+        )}
+
+        {isDeleted ? (
+          <p className="break-words select-text font-normal text-[11px]">🚫 Message deleted</p>
+        ) : isPhoto ? (
+          <div className="space-y-1">
+            <button type="button" onClick={() => onOpenImage?.(m.photoData!)} className="block cursor-zoom-in">
+              <img src={m.photoData} alt="Photo attachment" className="max-h-56 rounded-xl object-cover" />
+            </button>
+            {m.text && m.text !== '📷 Photo' && (
+              <p className="break-words select-text font-normal">{m.text}</p>
+            )}
+          </div>
+        ) : isVoice ? (
+          <VoiceNotePlayer data={m.voiceData!} durationMs={m.voiceDurationMs} isMe={isMe} />
         ) : (
           <p className="break-words select-text font-normal">{m.text}</p>
         )}
 
         {/* Timestamp Footer */}
         <div className="flex items-center justify-end gap-1 mt-1 text-[9px] opacity-75 font-mono">
+          {m.editedAt && !isDeleted && <span>edited</span>}
           <span>{new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+          {isMe && !isDeleted && (
+            <span className={showSeen ? 'text-sky-600' : ''}>{showSeen ? '✓✓' : '✓'}</span>
+          )}
         </div>
       </div>
 
-      {/* Emoji Reactions Bar */}
       {hasReactions && (
-        <div className={`flex flex-wrap gap-1 mt-1 ${isMe ? 'justify-end' : 'justify-start'}`}>
-          {Object.entries(reactions).map(([emoji, userIds]) => {
-            if (!userIds || userIds.length === 0) return null;
-            const userReacted = userIds.includes(currentUserId);
-            return (
-              <button
-                key={emoji}
-                type="button"
-                onClick={() => onReact(m.id, emoji)}
-                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] border transition cursor-pointer select-none ${
-                  userReacted
-                    ? 'bg-amber-500/20 border-amber-500/40 text-amber-300 font-bold'
-                    : 'bg-zinc-900/90 border-zinc-800 text-zinc-400 hover:border-zinc-700'
-                }`}
-              >
-                <span>{emoji}</span>
-                <span className="font-mono text-[9px]">{userIds.length}</span>
-              </button>
-            );
-          })}
+        <div className="flex gap-1 mt-1">
+          {Object.entries(reactions).map(([emoji, uids]) => (
+            <button
+              key={emoji}
+              type="button"
+              onClick={() => onReact(m.id, emoji)}
+              className={`text-[10px] rounded-full px-1.5 py-0.2 border cursor-pointer transition ${
+                (uids || []).includes(currentUserId)
+                  ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                  : 'bg-zinc-800/80 border-zinc-700 text-zinc-300 hover:border-zinc-500'
+              }`}
+              title="Tap to react"
+            >
+              {emoji} {uids.length}
+            </button>
+          ))}
         </div>
       )}
 
       {/* Floating Hover Action Bar */}
-      {showActionBar && (
+      {showActionBar && !isDeleted && (
         <div
           className={`absolute -top-7 ${
             isMe ? 'right-0' : 'left-0'
@@ -233,15 +291,35 @@ const MessageItem = memo(({
             ))}
           </div>
 
-          {/* Copy Message Text */}
-          <button
-            type="button"
-            onClick={() => onCopy(m.text)}
-            className="text-zinc-400 hover:text-zinc-200 p-1 rounded transition cursor-pointer"
-            title="Copy Text"
-          >
-            {isCopied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+          <button type="button" onClick={() => onReply(m)} className="text-zinc-400 hover:text-amber-300 p-1 rounded transition cursor-pointer" title="Reply">
+            <Reply className="w-3 h-3" />
           </button>
+          <button type="button" onClick={() => onForward(m)} className="text-zinc-400 hover:text-sky-300 p-1 rounded transition cursor-pointer" title="Forward">
+            <Forward className="w-3 h-3" />
+          </button>
+          <button type="button" onClick={() => onPin(m)} className={`p-1 rounded transition cursor-pointer ${m.pinned ? 'text-amber-400' : 'text-zinc-400 hover:text-amber-300'}`} title={m.pinned ? 'Unpin' : 'Pin'}>
+            <Pin className="w-3 h-3" />
+          </button>
+          {isMe && !isVoice && !isPhoto && (
+            <button type="button" onClick={() => onEdit(m)} className="text-zinc-400 hover:text-emerald-300 p-1 rounded transition cursor-pointer" title="Edit">
+              <Pencil className="w-3 h-3" />
+            </button>
+          )}
+          {isMe && (
+            <button type="button" onClick={() => onDelete(m)} className="text-zinc-400 hover:text-red-400 p-1 rounded transition cursor-pointer" title="Delete">
+              <Trash2 className="w-3 h-3" />
+            </button>
+          )}
+          {!isVoice && !isPhoto && (
+            <button
+              type="button"
+              onClick={() => onCopy(m.text)}
+              className="text-zinc-400 hover:text-zinc-200 p-1 rounded transition cursor-pointer"
+              title="Copy Text"
+            >
+              {isCopied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -262,6 +340,29 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const recMediaRef = useRef<MediaRecorder | null>(null);
   const recChunksRef = useRef<Blob[]>([]);
   const recTimerRef = useRef<number | null>(null);
+
+  // Telegram-style chat features
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [editing, setEditing] = useState<Message | null>(null);
+  const [forwardMsg, setForwardMsg] = useState<Message | null>(null);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [peerTyping, setPeerTyping] = useState(false);
+  const [onlineIds, setOnlineIds] = useState<string[]>([]);
+  const [showGroupInfo, setShowGroupInfo] = useState(false);
+  const [showChatMenu, setShowChatMenu] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [imageViewer, setImageViewer] = useState<string | null>(null);
+  const [editingGroupName, setEditingGroupName] = useState('');
+  const [addMemberId, setAddMemberId] = useState('');
+  const [notifEnabled, setNotifEnabled] = useState(() => {
+    try { return localStorage.getItem('boostpay_chat_notif') !== 'off'; } catch { return true; }
+  });
+  const [soundEnabled, setSoundEnabled] = useState(() => {
+    try { return localStorage.getItem('boostpay_chat_sound') !== 'off'; } catch { return true; }
+  });
+  const typingTimeoutRef = useRef<number | null>(null);
+  const peerTypingTimeoutRef = useRef<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isNewChatOpen, setIsNewChatOpen] = useState(false);
   const [newPeerId, setNewPeerId] = useState('');
@@ -435,26 +536,141 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     setNewPeerId('');
   };
 
+  // ------------------------- TELEGRAM-STYLE FEATURES -------------------------
+  useEffect(() => {
+    const unsub = BoostPayStore.onTyping((ev) => {
+      if (activeConv && ev.conversationId === activeConv.id && ev.userId !== currentUser.id) {
+        setPeerTyping(true);
+        if (peerTypingTimeoutRef.current) clearTimeout(peerTypingTimeoutRef.current);
+        peerTypingTimeoutRef.current = window.setTimeout(() => setPeerTyping(false), 3000);
+      }
+    });
+    return unsub;
+  }, [activeConv?.id, currentUser.id]);
+
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      const ids = await BoostPayStore.getPresence();
+      if (alive) setOnlineIds(ids);
+    };
+    void poll();
+    const iv = window.setInterval(poll, 20000);
+    return () => { alive = false; clearInterval(iv); };
+  }, []);
+
+  // Read receipts: mark the open conversation as read whenever new content lands
+  useEffect(() => {
+    if (!activeConv) return;
+    void BoostPayStore.markConversationRead(activeConv.id);
+  }, [activeConv?.id, messages.length]);
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeConv || !inputMsg.trim() || isSending) return;
 
     const textToSend = inputMsg.trim();
+
+    // Edit mode: update the message instead of sending a new one
+    if (editing) {
+      const ok = await BoostPayStore.editMessage(editing.id, textToSend);
+      if (ok) {
+        setMessages(prev => prev.map(m => m.id === editing.id ? { ...m, text: textToSend, editedAt: Date.now() } : m));
+      }
+      setEditing(null);
+      setInputMsg('');
+      return;
+    }
+
     setInputMsg('');
     setShowEmojiPicker(false);
     setIsSending(true);
+    setReplyTo(null);
 
     // Groups: send to the group conversation ID; DMs: send to the peer
     const recipient = activeConv.type === 'group' ? activeConv.id : getOtherParticipant(activeConv);
 
     try {
-      await BoostPayStore.sendChatMessage(recipient, textToSend, 'USER');
+      await BoostPayStore.sendChatMessage(recipient, textToSend, 'USER', undefined, undefined, {
+        replyTo: replyTo ? { id: replyTo.id, text: replyTo.text || '', senderId: replyTo.senderId } : null
+      });
     } finally {
       setIsSending(false);
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 50);
     }
+  };
+
+  const handleInputChange = (v: string) => {
+    setInputMsg(v);
+    if (activeConv && v.trim()) {
+      if (!typingTimeoutRef.current) {
+        void BoostPayStore.sendTyping(activeConv.id);
+        typingTimeoutRef.current = window.setTimeout(() => { typingTimeoutRef.current = null; }, 2500);
+      }
+    }
+  };
+
+  const handleReply = (m: Message) => { setReplyTo(m); setEditing(null); inputRef.current?.focus(); };
+  const handleForwardStart = (m: Message) => setForwardMsg(m);
+  const handlePin = async (m: Message) => {
+    const ok = await BoostPayStore.togglePin(m.id, !m.pinned);
+    if (ok) setMessages(prev => prev.map(x => x.id === m.id ? { ...x, pinned: !m.pinned } : x));
+  };
+  const handleEdit = (m: Message) => { setEditing(m); setReplyTo(null); setInputMsg(m.text); inputRef.current?.focus(); };
+  const handleDelete = async (m: Message) => {
+    if (!window.confirm('Delete this message for everyone?')) return;
+    const ok = await BoostPayStore.deleteMessage(m.id);
+    if (ok) setMessages(prev => prev.map(x => x.id === m.id ? { ...x, deleted: true, text: '🚫 Message deleted', kind: 'text' } : x));
+  };
+  const handleForwardSend = async (targetConv: Conversation) => {
+    if (!forwardMsg) return;
+    const recipient = targetConv.type === 'group' ? targetConv.id : getOtherParticipant(targetConv);
+    const text = forwardMsg.kind === 'photo' ? '📷 Photo' : forwardMsg.kind === 'voice' ? '🎤 Voice message' : forwardMsg.text;
+    await BoostPayStore.sendChatMessage(recipient, text, 'USER', undefined, undefined, {
+      forwardedFrom: String(forwardMsg.senderId),
+      ...(forwardMsg.kind === 'photo' && forwardMsg.photoData ? { photoData: forwardMsg.photoData } : {})
+    });
+    setForwardMsg(null);
+    if (targetConv.id === activeConv?.id) {
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
+    }
+  };
+  const handleSendPhoto = (file: File) => {
+    if (!activeConv || file.size > 4 * 1024 * 1024) {
+      window.alert('Please choose an image under 4 MB.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      const dataUrl = String(reader.result || '');
+      if (!dataUrl.startsWith('data:image/')) return;
+      const recipient = activeConv.type === 'group' ? activeConv.id : getOtherParticipant(activeConv);
+      await BoostPayStore.sendChatMessage(recipient, '📷 Photo', 'USER', undefined, undefined, {
+        photoData: dataUrl,
+        replyTo: replyTo ? { id: replyTo.id, text: replyTo.text || '', senderId: replyTo.senderId } : null
+      });
+      setReplyTo(null);
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
+    };
+    reader.readAsDataURL(file);
+  };
+  const handleToggleMute = async () => {
+    if (!activeConv) return;
+    const muted = !(activeConv.mutedBy || []).includes(currentUser.id);
+    await BoostPayStore.setConversationMute(activeConv.id, muted);
+    setActiveConv(prev => prev ? { ...prev, mutedBy: muted ? [...(prev.mutedBy || []), currentUser.id] : (prev.mutedBy || []).filter(u => u !== currentUser.id) } : prev);
+  };
+  const toggleNotif = () => {
+    const v = !notifEnabled;
+    setNotifEnabled(v);
+    try { localStorage.setItem('boostpay_chat_notif', v ? 'on' : 'off'); } catch { /* ignore */ }
+  };
+  const toggleSound = () => {
+    const v = !soundEnabled;
+    setSoundEnabled(v);
+    try { localStorage.setItem('boostpay_chat_sound', v ? 'on' : 'off'); } catch { /* ignore */ }
   };
 
   // ------------------------- VOICE NOTES -------------------------
@@ -561,7 +777,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                     `#${getOtherParticipant(activeConv)}`
                   )}
                 </div>
-                <span className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-500 ring-2 ring-zinc-950" />
+                <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full ring-2 ring-zinc-950 ${
+                  activeConv.type !== 'group' && onlineIds.includes(getOtherParticipant(activeConv)) ? 'bg-emerald-500' : 'bg-zinc-600'
+                }`} />
               </div>
 
               <div className="min-w-0">
@@ -581,11 +799,17 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                   )}
                 </div>
                 <div className="flex items-center gap-2 text-[10px] text-zinc-400 font-mono">
-                  <span className="flex items-center gap-1 text-emerald-400 font-medium">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" /> Active now
-                  </span>
-                  <span>·</span>
-                  <span className="text-zinc-500 truncate">{activeConv.id}</span>
+                  {peerTyping ? (
+                    <span className="flex items-center gap-1 text-amber-400 font-medium">
+                      typing<span className="animate-pulse">…</span>
+                    </span>
+                  ) : activeConv.type !== 'group' && onlineIds.includes(getOtherParticipant(activeConv)) ? (
+                    <span className="flex items-center gap-1 text-emerald-400 font-medium">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 inline-block" /> Active now
+                    </span>
+                  ) : (
+                    <span className="text-zinc-500 font-medium">last seen recently</span>
+                  )}
                 </div>
               </div>
             </div>
@@ -607,7 +831,30 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                 >
                   <Video className="w-4 h-4" />
                 </button>
+                <button
+                  onClick={() => { setShowSearch(s => !s); setSearchQuery(''); }}
+                  title="Search in chat"
+                  className="flex h-9 w-9 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white hover:border-zinc-600 active:scale-95 transition cursor-pointer"
+                >
+                  <Search className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setShowChatMenu(s => !s)}
+                  title="Chat menu"
+                  className="flex h-9 w-9 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white hover:border-zinc-600 active:scale-95 transition cursor-pointer"
+                >
+                  <Info className="w-4 h-4" />
+                </button>
               </div>
+            )}
+            {activeConv.type === 'group' && (
+              <button
+                onClick={() => { setShowGroupInfo(true); setEditingGroupName(activeConv.name || ''); }}
+                title="Group info"
+                className="flex h-9 w-9 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white hover:border-zinc-600 active:scale-95 transition cursor-pointer shrink-0"
+              >
+                <Users2 className="w-4 h-4" />
+              </button>
             )}
           </div>
 
@@ -617,28 +864,118 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             <span className="truncate">Staff will never ask for your password or recovery phrase.</span>
           </div>
 
+          {/* Search in conversation */}
+          {showSearch && (
+            <div className="shrink-0 mx-3 mb-1.5 flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+              <Search className="w-3.5 h-3.5 text-zinc-500" />
+              <input
+                autoFocus
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search messages..."
+                className="flex-1 bg-transparent text-xs text-white placeholder-zinc-500 focus:outline-none"
+              />
+              <button onClick={() => { setShowSearch(false); setSearchQuery(''); }} className="text-zinc-500 hover:text-white cursor-pointer">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
+          {/* Chat menu dropdown */}
+          {showChatMenu && (
+            <div className="shrink-0 mx-3 mb-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/95 p-2 shadow-xl">
+              <button
+                onClick={() => { void handleToggleMute(); setShowChatMenu(false); }}
+                className="w-full flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-xs text-zinc-200 hover:bg-zinc-800 transition cursor-pointer"
+              >
+                {(activeConv.mutedBy || []).includes(currentUser.id)
+                  ? <BellOff className="w-4 h-4 text-zinc-400" />
+                  : <Bell className="w-4 h-4 text-amber-400" />}
+                {(activeConv.mutedBy || []).includes(currentUser.id) ? 'Unmute notifications' : 'Mute notifications'}
+              </button>
+              <button
+                onClick={() => { setShowSettings(true); setShowChatMenu(false); }}
+                className="w-full flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-xs text-zinc-200 hover:bg-zinc-800 transition cursor-pointer"
+              >
+                <Settings className="w-4 h-4 text-zinc-400" />
+                Chat settings
+              </button>
+              {activeConv.type === 'group' && (
+                <button
+                  onClick={() => { setShowGroupInfo(true); setEditingGroupName(activeConv.name || ''); setShowChatMenu(false); }}
+                  className="w-full flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-xs text-zinc-200 hover:bg-zinc-800 transition cursor-pointer"
+                >
+                  <Users2 className="w-4 h-4 text-zinc-400" />
+                  Group info
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Pinned message banner */}
+          {(() => {
+            const pinned = messages.find(m => m.conversationId === activeConv.id && m.pinned && !m.deleted);
+            if (!pinned) return null;
+            return (
+              <div className="shrink-0 mx-3 mb-1.5 rounded-xl border border-amber-500/25 bg-amber-500/10 px-3 py-1.5 flex items-center gap-2 text-[10px] text-amber-200">
+                <Pin className="w-3 h-3 text-amber-400 shrink-0" />
+                <span className="truncate flex-1">{pinned.text || 'Attachment'}</span>
+                <button onClick={() => void handlePin(pinned)} className="text-amber-400/70 hover:text-amber-300 cursor-pointer">
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            );
+          })()}
+
           {/* Messages Stream Viewport (Strictly Scrollable Middle Section) */}
           <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-3 px-3.5 py-2">
-            <div className="flex items-center justify-center my-1.5">
-              <span className="rounded-full bg-zinc-900/90 border border-zinc-800 px-3 py-0.5 text-[10px] font-mono text-zinc-400 shadow-sm">
-                Secure Encrypted Stream
-              </span>
-            </div>
+            {!searchQuery && (
+              <div className="flex items-center justify-center my-1.5">
+                <span className="rounded-full bg-zinc-900/90 border border-zinc-800 px-3 py-0.5 text-[10px] font-mono text-zinc-400 shadow-sm">
+                  Secure Encrypted Stream
+                </span>
+              </div>
+            )}
 
-            {messages
-              .filter(m => m.conversationId === activeConv.id)
-              .map(m => (
-                <MessageItem
-                  key={m.id}
-                  m={m}
-                  isMe={m.senderId === currentUser.id}
-                  isAdmin={m.senderRole === 'ADMIN' || m.senderId === 'ADMIN_SUPPORT'}
-                  currentUserId={currentUser.id}
-                  onReact={handleToggleReaction}
-                  onCopy={handleCopyMessageText}
-                  copiedMsgId={copiedMsgId}
-                />
-              ))}
+            {(() => {
+              const convMsgs = messages.filter(m =>
+                m.conversationId === activeConv.id &&
+                (!searchQuery || (m.text || '').toLowerCase().includes(searchQuery.toLowerCase()))
+              );
+              const peerId = getOtherParticipant(activeConv);
+              const peerLastRead = (activeConv.lastRead && (activeConv.lastRead as any)[peerId]) || 0;
+              return convMsgs.map((m, i) => {
+                const prev = convMsgs[i - 1];
+                const showDate = !prev || new Date(prev.timestamp).toDateString() !== new Date(m.timestamp).toDateString();
+                return (
+                  <React.Fragment key={m.id}>
+                    {showDate && (
+                      <div className="flex items-center justify-center my-2">
+                        <span className="rounded-full bg-zinc-900/90 border border-zinc-800 px-3 py-0.5 text-[10px] font-mono text-zinc-400">
+                          {new Date(m.timestamp).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}
+                        </span>
+                      </div>
+                    )}
+                    <MessageItem
+                      m={m}
+                      isMe={m.senderId === currentUser.id}
+                      isAdmin={m.senderRole === 'ADMIN' || m.senderId === 'ADMIN_SUPPORT'}
+                      currentUserId={currentUser.id}
+                      onReact={handleToggleReaction}
+                      onCopy={handleCopyMessageText}
+                      copiedMsgId={copiedMsgId}
+                      onReply={handleReply}
+                      onForward={handleForwardStart}
+                      onPin={handlePin}
+                      onEdit={handleEdit}
+                      onDelete={handleDelete}
+                      showSeen={m.senderId === currentUser.id && peerLastRead > 0 && m.timestamp <= peerLastRead}
+                      onOpenImage={setImageViewer}
+                    />
+                  </React.Fragment>
+                );
+              });
+            })()}
 
             {messages.filter(m => m.conversationId === activeConv.id).length === 0 && (
               <div className="h-44 flex flex-col items-center justify-center text-center px-4">
@@ -673,7 +1010,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
           {/* LOCKED BOTTOM INPUT DOCK (Permanently pinned at bottom above nav bar) */}
           <form
             onSubmit={handleSendMessage}
-            className="shrink-0 p-2.5 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-xl flex items-center gap-2 z-10"
+            className="relative shrink-0 p-2.5 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-xl flex items-center gap-2 z-10"
           >
             <button
               type="button"
@@ -688,6 +1025,26 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               <Smile className="w-5 h-5" />
             </button>
 
+            {(replyTo || editing) && (
+              <div className="absolute -top-11 left-2.5 right-2.5 flex items-center gap-2.5 rounded-2xl border border-zinc-800 bg-zinc-900/95 px-3 py-2 shadow-xl">
+                <div className={`w-0.5 self-stretch rounded-full ${editing ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+                <div className="flex-1 min-w-0">
+                  <div className={`text-[9px] font-bold font-mono ${editing ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {editing ? 'Editing message' : `Reply to #${replyTo!.senderId}`}
+                  </div>
+                  <div className="text-[10px] text-zinc-400 truncate">
+                    {(editing ? editing.text : replyTo!.text) || 'Attachment'}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setReplyTo(null); setEditing(null); setInputMsg(''); }}
+                  className="text-zinc-500 hover:text-white p-1 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
             {isRecording ? (
               <>
                 <div className="flex-1 flex items-center gap-2.5 rounded-full border border-red-500/40 bg-red-950/30 px-4 py-2">
@@ -714,12 +1071,28 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               </>
             ) : (
               <>
+                <label
+                  className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
+                  title="Send photo"
+                >
+                  <ImagePlus className="w-4 h-4" />
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files && e.target.files[0];
+                      if (f) handleSendPhoto(f);
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
                 <input
                   ref={inputRef}
                   type="text"
                   placeholder={`Message ${getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? 'Official Support' : `User #${getOtherParticipant(activeConv)}`}...`}
                   value={inputMsg}
-                  onChange={(e) => setInputMsg(e.target.value)}
+                  onChange={(e) => handleInputChange(e.target.value)}
                   className="flex-1 rounded-full border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-xs text-white placeholder-zinc-500 focus:border-amber-500/60 focus:outline-none transition-colors"
                 />
 
@@ -751,12 +1124,21 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             <div>
               <h2 className="text-lg font-bold text-white tracking-tight">Messages</h2>
             </div>
-            <button
-              onClick={() => openNewChatModal()}
-              className="flex items-center gap-1.5 rounded-2xl bg-amber-500 px-3 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 transition shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 min-h-[44px]"
-            >
-              <Plus className="w-4 h-4" /> New Chat
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShowSettings(true)}
+                title="Chat settings"
+                className="flex items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 px-3 text-zinc-400 hover:text-white hover:border-zinc-600 transition cursor-pointer min-h-[44px]"
+              >
+                <Settings className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => openNewChatModal()}
+                className="flex items-center gap-1.5 rounded-2xl bg-amber-500 px-3 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 transition shadow-md shadow-amber-500/20 cursor-pointer active:scale-95 min-h-[44px]"
+              >
+                <Plus className="w-4 h-4" /> New Chat
+              </button>
+            </div>
           </div>
 
           {/* 1-Tap Official Verified Support Glass Banner */}
@@ -822,7 +1204,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                           `#${other}`
                         )}
                       </div>
-                      <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-zinc-950" />
+                      <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-zinc-950 ${
+                        conv.type !== 'group' && onlineIds.includes(other) ? 'bg-emerald-500' : 'bg-zinc-600'
+                      }`} />
                     </div>
 
                     <div className="min-w-0">
@@ -832,6 +1216,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                             ? conv.name || 'Group chat'
                             : isSupport ? 'Official Verified Support' : `User #${other}`}
                         </span>
+                        {(conv.mutedBy || []).includes(currentUser.id) && (
+                          <BellOff className="w-3 h-3 text-zinc-500 shrink-0" />
+                        )}
                       </div>
                       <p className="text-[11px] text-zinc-400 truncate max-w-[200px] sm:max-w-xs mt-0.5">
                         {conv.lastMessage || 'No messages yet'}
@@ -954,7 +1341,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                               </div>
                               <div className="min-w-0">
                                 <p className="text-[11px] font-semibold text-zinc-200">User #{u.id}</p>
-                                <p className="text-[10px] text-zinc-500 truncate">{u.email}</p>
+                                <p className="text-[10px] text-zinc-500 truncate">User #{u.id}</p>
                               </div>
                             </button>
                           );
@@ -987,6 +1374,162 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Forward message sheet */}
+      {forwardMsg && (
+        <div className="fixed inset-0 z-[120] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-0 sm:p-4" onClick={() => setForwardMsg(null)}>
+          <div className="w-full max-w-md rounded-t-3xl sm:rounded-3xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-white mb-3">Forward message to</h3>
+            <div className="max-h-72 overflow-y-auto overscroll-contain space-y-1.5">
+              {userConversations.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => void handleForwardSend(c)}
+                  className="w-full flex items-center gap-2.5 rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-left hover:border-amber-500/40 transition cursor-pointer"
+                >
+                  <div className={`h-8 w-8 rounded-xl bg-gradient-to-tr ${getAvatarGradient(getOtherParticipant(c))} flex items-center justify-center text-white font-mono text-[10px] font-bold`}>
+                    {c.type === 'group' ? <Users className="w-3.5 h-3.5" /> : `#${getOtherParticipant(c)}`}
+                  </div>
+                  <span className="text-xs font-semibold text-zinc-200 truncate">
+                    {getConvTitle(c)}
+                  </span>
+                </button>
+              ))}
+              {userConversations.length === 0 && (
+                <p className="text-xs text-zinc-500 text-center py-4">No conversations yet.</p>
+              )}
+            </div>
+            <button onClick={() => setForwardMsg(null)} className="mt-3 w-full rounded-2xl bg-zinc-800 py-2.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-700 cursor-pointer">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Group info sheet */}
+      {showGroupInfo && activeConv && activeConv.type === 'group' && (
+        <div className="fixed inset-0 z-[120] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-0 sm:p-4" onClick={() => setShowGroupInfo(false)}>
+          <div className="w-full max-w-md rounded-t-3xl sm:rounded-3xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-white mb-3">Group Info</h3>
+            <label className="text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">Group name</label>
+            <div className="mt-1 flex gap-2">
+              <input
+                value={editingGroupName}
+                onChange={(e) => setEditingGroupName(e.target.value)}
+                className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white focus:border-amber-500/60 focus:outline-none"
+              />
+              <button
+                onClick={async () => {
+                  if (!editingGroupName.trim()) return;
+                  await BoostPayStore.updateConversation(activeConv.id, { name: editingGroupName.trim() });
+                  setActiveConv(prev => prev ? { ...prev, name: editingGroupName.trim() } : prev);
+                  setShowGroupInfo(false);
+                }}
+                className="rounded-xl bg-amber-500 px-4 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer"
+              >
+                Save
+              </button>
+            </div>
+
+            <div className="mt-4 text-[10px] text-zinc-500 font-semibold uppercase tracking-wider">
+              Members ({(activeConv.participants || []).length})
+            </div>
+            <div className="mt-1.5 max-h-40 overflow-y-auto overscroll-contain space-y-1">
+              {(activeConv.participants || []).map((pid) => (
+                <div key={pid} className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2">
+                  <span className="text-xs font-mono text-zinc-200">
+                    {pid === currentUser.id ? `User #${pid} (You)` : `User #${pid}`}
+                  </span>
+                  {pid !== currentUser.id && (
+                    <button
+                      onClick={async () => {
+                        await BoostPayStore.updateConversation(activeConv.id, { removeMembers: [pid] });
+                        setActiveConv(prev => prev ? { ...prev, participants: (prev.participants || []).filter(x => x !== pid) } : prev);
+                      }}
+                      className="text-[10px] text-red-400 hover:text-red-300 cursor-pointer"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-3 flex gap-2">
+              <input
+                value={addMemberId}
+                onChange={(e) => setAddMemberId(e.target.value)}
+                placeholder="Add member by ID (#12)"
+                className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-600 focus:border-amber-500/60 focus:outline-none"
+              />
+              <button
+                onClick={async () => {
+                  const raw = addMemberId.replace(/\D/g, '');
+                  if (!raw) return;
+                  await BoostPayStore.updateConversation(activeConv.id, { addMembers: [raw] });
+                  setActiveConv(prev => prev ? { ...prev, participants: Array.from(new Set([...(prev.participants || []), raw])) } : prev);
+                  setAddMemberId('');
+                }}
+                className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 text-xs font-bold text-amber-400 hover:border-amber-500/40 cursor-pointer"
+              >
+                Add
+              </button>
+            </div>
+
+            <button
+              onClick={async () => {
+                if (!window.confirm('Leave this group?')) return;
+                await BoostPayStore.leaveConversation(activeConv.id);
+                setShowGroupInfo(false);
+                setActiveConv(null);
+              }}
+              className="mt-4 w-full rounded-2xl border border-red-500/30 bg-red-950/30 py-2.5 text-xs font-bold text-red-300 hover:bg-red-950/50 cursor-pointer"
+            >
+              Leave Group
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Chat settings sheet */}
+      {showSettings && (
+        <div className="fixed inset-0 z-[120] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-0 sm:p-4" onClick={() => setShowSettings(false)}>
+          <div className="w-full max-w-md rounded-t-3xl sm:rounded-3xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-bold text-white mb-3">Chat Settings</h3>
+            <button onClick={toggleNotif} className="w-full flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3 mb-2 cursor-pointer hover:border-zinc-700 transition">
+              <span className="flex items-center gap-2.5 text-xs text-zinc-200">
+                {notifEnabled ? <Bell className="w-4 h-4 text-amber-400" /> : <BellOff className="w-4 h-4 text-zinc-500" />}
+                Message notifications
+              </span>
+              <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${notifEnabled ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}>
+                {notifEnabled ? 'ON' : 'OFF'}
+              </span>
+            </button>
+            <button onClick={toggleSound} className="w-full flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3 mb-2 cursor-pointer hover:border-zinc-700 transition">
+              <span className="flex items-center gap-2.5 text-xs text-zinc-200">
+                <Volume2 className="w-4 h-4 text-sky-400" />
+                Chat sounds
+              </span>
+              <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${soundEnabled ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}>
+                {soundEnabled ? 'ON' : 'OFF'}
+              </span>
+            </button>
+            <button onClick={() => setShowSettings(false)} className="mt-2 w-full rounded-2xl bg-zinc-800 py-2.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-700 cursor-pointer">
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Fullscreen image viewer */}
+      {imageViewer && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/90 backdrop-blur-md p-4" onClick={() => setImageViewer(null)}>
+          <button onClick={() => setImageViewer(null)} className="absolute top-4 right-4 rounded-full bg-white/10 p-2.5 text-white hover:bg-white/20 cursor-pointer">
+            <X className="w-5 h-5" />
+          </button>
+          <img src={imageViewer} alt="Attachment" className="max-h-[85vh] max-w-full rounded-2xl object-contain" />
         </div>
       )}
     </div>

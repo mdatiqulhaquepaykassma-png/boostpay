@@ -3,9 +3,17 @@ import App from './App.tsx';
 import './index.css';
 import { registerSW } from 'virtual:pwa-register';
 
-// Register service worker immediately for PWA installability and offline support
+// Register service worker immediately for PWA installability and offline support.
+// When a new version deploys, gently notify the app so the user can refresh.
 try {
-  registerSW({ immediate: true });
+  const updateSW = registerSW({
+    immediate: true,
+    onNeedRefresh() {
+      (window as any).__boostpay_update_sw = updateSW;
+      window.dispatchEvent(new CustomEvent('boostpay:update-available'));
+    }
+  });
+  (window as any).__boostpay_update_sw = updateSW;
 } catch {
   // Ignore virtual SW error if any
 }

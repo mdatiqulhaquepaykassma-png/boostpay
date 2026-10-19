@@ -319,7 +319,7 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
               </div>
 
               <div className="mt-3 w-full rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3.5">
-                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-1">Your Payee ID</p>
+                <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-1">Payee ID</p>
                 <div className="flex items-center gap-2">
                   <span className="flex-1 font-mono text-sm text-amber-400 font-bold">#{currentUser.id}</span>
                   <button
@@ -333,13 +333,7 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
                     {copied ? 'Copied' : 'Copy'}
                   </button>
                 </div>
-                {payload && (
-                  <p className="mt-2 break-all text-[9px] leading-relaxed text-zinc-600 font-mono">{payload}</p>
-                )}
               </div>
-              <p className="mt-3 text-center text-[10px] leading-relaxed text-zinc-600 px-4">
-                Only your public payee ID is embedded — never your password or phrase.
-              </p>
             </div>
           ) : (
             <div className="space-y-4">

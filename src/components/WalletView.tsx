@@ -1,5 +1,5 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
-import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2
+import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut
 } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User, BoostState, SystemConfig } from '../types';
@@ -27,6 +27,7 @@ function formatDuration(ms: number): string {
 // 1. ISOLATED LIVE BALANCE CARD (MEMOIZED)
 // ==========================================
 interface BalanceCardProps {
+  userId: string | number;
   baseBalance: number;
   boostState: BoostState;
   dynamicTargetDurationMs: number;
@@ -36,6 +37,7 @@ interface BalanceCardProps {
 }
 
 const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
+  userId,
   baseBalance,
   boostState,
   dynamicTargetDurationMs,
@@ -45,6 +47,7 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
 }) => {
   const isRunning = boostState.isActive && !boostState.isPaused;
   const [liveAccrued, setLiveAccrued] = useState(0);
+  const [idCopied, setIdCopied] = useState(false);
 
   useEffect(() => {
     if (!isRunning) {
@@ -110,13 +113,18 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
       <div className="relative p-6">
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Available Balance</span>
-          {isRunning ? (
-            <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> Live
-            </span>
-          ) : boostState.isActive && boostState.isPaused ? (
-            <span className="rounded-full border border-zinc-700 bg-zinc-950 px-2.5 py-1 text-[10px] font-semibold text-zinc-400">Paused</span>
-          ) : null}
+          <button
+            onClick={() => {
+              navigator.clipboard?.writeText(String(userId)).catch(() => {});
+              setIdCopied(true);
+              setTimeout(() => setIdCopied(false), 1200);
+            }}
+            className="flex items-center gap-1 rounded-full border border-zinc-800 bg-zinc-950/80 px-2.5 py-1 font-mono text-[10px] text-zinc-300 hover:border-amber-500/40 hover:text-amber-400 active:scale-95 transition cursor-pointer"
+            title="Tap to copy your ID"
+          >
+            ID: {userId}
+            {idCopied ? <CheckCircle2 className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-zinc-500" />}
+          </button>
         </div>
 
         <div className="mt-2.5">
@@ -131,11 +139,20 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
           />
         </div>
 
-        {boostState.isActive && (
-          <p className="mt-2 text-[11px] text-zinc-500">
-            incl. <span className="font-mono text-amber-400/90">+${formatPrecisionAmount(liveAccrued, 8)}</span> yield this cycle
-          </p>
-        )}
+        <div className="mt-2 flex items-center gap-2 min-h-[18px]">
+          {boostState.isActive && (
+            <p className="text-[11px] text-zinc-500">
+              incl. <span className="font-mono text-amber-400/90">+${formatPrecisionAmount(liveAccrued, 8)}</span> yield this cycle
+            </p>
+          )}
+          {isRunning ? (
+            <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-400">
+              <span className="h-1 w-1 rounded-full bg-emerald-400 animate-pulse" /> Live
+            </span>
+          ) : boostState.isActive && boostState.isPaused ? (
+            <span className="rounded-full border border-zinc-700 bg-zinc-950 px-2 py-0.5 text-[9px] font-semibold text-zinc-400">Paused</span>
+          ) : null}
+        </div>
 
         <div className="mt-5 grid grid-cols-2 gap-2.5">
           <button
@@ -279,9 +296,6 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
           </div>
           <div>
             <h3 className="text-sm font-bold text-white tracking-tight">Compounding</h3>
-            <p className="text-[10px] font-mono text-zinc-500">
-              {formatRatePercent(minuteRatePercent)}%/min · ~{hourlyEquiv.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}%/hr
-            </p>
           </div>
         </div>
         <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold tracking-wide ${
@@ -435,6 +449,9 @@ interface Props {
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
   onOpenSecurity?: () => void;
+  onOpenInbox?: () => void;
+  onLogout?: () => void;
+  inboxUnread?: number;
   config: SystemConfig;
 }
 
@@ -444,9 +461,11 @@ export const WalletView: FC<Props> = ({
   onOpenSendMoney,
   onOpenQR,
   onOpenSecurity,
+  onOpenInbox,
+  onLogout,
+  inboxUnread = 0,
   config
 }) => {
-  const [idCopied, setIdCopied] = useState(false);
   const [walletTab, setWalletTab] = useState<'OVERVIEW' | 'TRANSACTIONS'>('OVERVIEW');
   const [zeroBalanceWarning, setZeroBalanceWarning] = useState(false);
   const [completionBanner, setCompletionBanner] = useState<{ amount: number } | null>(null);
@@ -515,45 +534,42 @@ export const WalletView: FC<Props> = ({
         </div>
       )}
 
-      {/* Account actions strip (header: logo + sign-out) */}
-      <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900/70 px-3 py-2">
-        <button
-          onClick={() => {
-            navigator.clipboard?.writeText(String(user.id)).catch(() => {});
-            setIdCopied(true);
-            setTimeout(() => setIdCopied(false), 1200);
-          }}
-          className="flex items-center gap-1.5 rounded-full bg-zinc-800/80 px-2.5 py-1.5 text-[10px] text-zinc-200 cursor-pointer active:scale-95 transition"
-          title="Tap to copy your User ID"
-        >
-          <span className="font-mono">ID: {user.id}</span>
-          {idCopied ? <CheckCircle2 className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-zinc-400" />}
-        </button>
-        <div className="flex items-center gap-1">
-          {onOpenQR && (
-            <button
-              onClick={onOpenQR}
-              className="w-8 h-8 rounded-full bg-zinc-800/80 flex items-center justify-center text-amber-400 cursor-pointer active:scale-95 transition"
-              title="My QR code"
-            >
-              <QrCode className="w-3.5 h-3.5" />
-            </button>
-          )}
-          {onOpenSecurity && (
-            <button
-              onClick={onOpenSecurity}
-              className="w-8 h-8 rounded-full bg-zinc-800/80 flex items-center justify-center text-emerald-400 cursor-pointer active:scale-95 transition"
-              title="Security"
-            >
-              <ShieldCheck className="w-3.5 h-3.5" />
-            </button>
-          )}
-          {user.isFrozen && (
-            <span className="ml-1 rounded-full bg-red-500/15 border border-red-500/40 px-2 py-1 text-[9px] font-bold text-red-400 font-mono">
-              FROZEN
+      {/* Quick actions: Inbox / Security / Sign out */}
+      <div className="grid grid-cols-3 gap-2.5">
+        {onOpenInbox && (
+          <button
+            onClick={onOpenInbox}
+            className="relative flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
+          >
+            <span className="relative">
+              <Inbox className="w-4.5 h-4.5 text-sky-400" />
+              {inboxUnread > 0 && (
+                <span className="absolute -top-1.5 -right-2 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-amber-500 px-1 text-[8px] font-bold text-zinc-950 font-mono">
+                  {inboxUnread > 9 ? '9+' : inboxUnread}
+                </span>
+              )}
             </span>
-          )}
-        </div>
+            Inbox
+          </button>
+        )}
+        {onOpenSecurity && (
+          <button
+            onClick={onOpenSecurity}
+            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-zinc-700 hover:text-white active:scale-[0.97] transition cursor-pointer"
+          >
+            <ShieldCheck className="w-4.5 h-4.5 text-emerald-400" />
+            Security
+          </button>
+        )}
+        {onLogout && (
+          <button
+            onClick={onLogout}
+            className="flex flex-col items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900/70 py-3 text-[10px] font-semibold text-zinc-300 hover:border-red-500/40 hover:text-red-300 active:scale-[0.97] transition cursor-pointer"
+          >
+            <LogOut className="w-4.5 h-4.5 text-red-400" />
+            Sign out
+          </button>
+        )}
       </div>
 
       {/* Auto-credit completion banner */}
@@ -587,6 +603,7 @@ export const WalletView: FC<Props> = ({
 
       {/* 1. MEMOIZED ISOLATED MAIN BALANCE CARD (Updates only its numbers, no app re-render, no pulse, no card scaling) */}
       <IsolatedLiveBalanceCard
+        userId={user.id}
         baseBalance={user.balance}
         boostState={user.boostState}
         dynamicTargetDurationMs={dynamicTargetDurationMs}

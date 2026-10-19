@@ -48,7 +48,7 @@ export interface Message {
   text: string;
   timestamp: number;
   reactions?: Record<string, string[]>; // emoji -> userIds
-  kind?: 'text' | 'call' | 'voice'; // call-history / voice-note entries
+  kind?: 'text' | 'call' | 'voice' | 'photo'; // call-history / voice-note / photo entries
   callInfo?: {
     media?: 'audio' | 'video';
     outcome?: 'completed' | 'missed' | 'declined';
@@ -56,6 +56,12 @@ export interface Message {
   };
   voiceData?: string;
   voiceDurationMs?: number;
+  photoData?: string;
+  replyTo?: { id: string; text: string; senderId: string };
+  forwardedFrom?: string;
+  editedAt?: number;
+  pinned?: boolean;
+  deleted?: boolean;
 }
 
 export interface Conversation {

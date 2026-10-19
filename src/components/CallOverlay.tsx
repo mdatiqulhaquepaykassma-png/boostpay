@@ -431,9 +431,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
           from
         };
         callIdRef.current = callId;
-        // Resolve caller display name from the local user list if known
-        const known = BoostPayStore.getUsers().find((u) => String(u.id) === String(from));
-        const name = known?.email || `User #${from}`;
+        const name = `User #${from}`;
         setPeer({ id: String(from), name });
         setMedia(signal.media === 'video' ? 'video' : 'audio');
         setPhase('incoming');

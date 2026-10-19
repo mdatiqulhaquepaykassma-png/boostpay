@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useMemo } from 'react';
-import { Wallet, Trophy, MessageSquare, Inbox, Download } from 'lucide-react';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { Wallet, Trophy, MessageSquare, Inbox, Download, RefreshCw } from 'lucide-react';
 import { BoostPayStore, ToastData } from './services/store';
 import { User, SystemConfig } from './types';
 import { Navbar } from './components/Navbar';
@@ -164,6 +164,65 @@ export default function App() {
   // inside the installed PWA there is no install UI at all.
   const { isInstalled, install: promptPwaInstall } = usePWAInstall();
 
+  // Gentle "new version available" prompt
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  useEffect(() => {
+    const onUpdate = () => setUpdateAvailable(true);
+    window.addEventListener('boostpay:update-available', onUpdate);
+    return () => window.removeEventListener('boostpay:update-available', onUpdate);
+  }, []);
+
+  // Pull-to-refresh (custom — browser PTR stays disabled)
+  const mainScrollRef = useRef<HTMLElement | null>(null);
+  const [pullDist, setPullDist] = useState(0);
+  const [isPullRefreshing, setIsPullRefreshing] = useState(false);
+  const pullState = useRef({ startY: 0, active: false, dist: 0 });
+  useEffect(() => {
+    const el = mainScrollRef.current;
+    const uid = currentUser?.id;
+    if (!el || !uid || activeTab === 'MESSENGER') return;
+    const onTouchStart = (e: TouchEvent) => {
+      if (el.scrollTop <= 0) {
+        pullState.current.startY = e.touches[0].clientY;
+        pullState.current.active = true;
+      }
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (!pullState.current.active) return;
+      const dist = e.touches[0].clientY - pullState.current.startY;
+      if (dist > 0 && el.scrollTop <= 0) {
+        pullState.current.dist = Math.min(90, dist * 0.5);
+        setPullDist(pullState.current.dist);
+      }
+    };
+    const onTouchEnd = () => {
+      const d = pullState.current.dist;
+      pullState.current = { startY: 0, active: false, dist: 0 };
+      if (d > 55) {
+        setIsPullRefreshing(true);
+        setPullDist(56);
+        void (async () => {
+          try {
+            const fresh = await BoostPayStore.syncUserFromServer(uid);
+            if (fresh) setCurrentUser({ ...fresh });
+            await BoostPayStore.syncChatState(uid);
+          } catch { /* offline */ }
+          setTimeout(() => { setIsPullRefreshing(false); setPullDist(0); }, 500);
+        })();
+      } else {
+        setPullDist(0);
+      }
+    };
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchmove', onTouchMove, { passive: true });
+    el.addEventListener('touchend', onTouchEnd);
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('touchend', onTouchEnd);
+    };
+  }, [activeTab, currentUser?.id]);
+
   // Session expiry: any API 401 while logged in bounces to the login screen
   useEffect(() => {
     const origFetch = window.fetch.bind(window);
@@ -259,7 +318,45 @@ export default function App() {
       ) : (
         /* 3. LOGGED-IN MAIN USER INTERFACE */
         <div className={`flex-1 min-h-0 flex flex-col max-w-md w-full mx-auto ${activeTab === 'MESSENGER' ? 'h-[100dvh] max-h-screen overflow-hidden pb-[calc(58px+env(safe-area-inset-bottom))]' : 'pb-[calc(5rem+env(safe-area-inset-bottom))]'}`}>
-          <Navbar onLogout={handleLogout} />
+          {/* Gentle new-version prompt */}
+          {updateAvailable && (
+            <div className="mx-4 mt-2 flex items-center justify-between gap-3 rounded-2xl border border-sky-500/30 bg-sky-950/50 px-4 py-2.5">
+              <div className="flex items-center gap-2 text-xs text-sky-200">
+                <RefreshCw className="w-3.5 h-3.5 text-sky-400" />
+                A new version of BoostPay is ready.
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => {
+                    const fn = (window as any).__boostpay_update_sw;
+                    if (typeof fn === 'function') { void fn(true); }
+                    else window.location.reload();
+                  }}
+                  className="rounded-xl bg-sky-500 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-sky-400 transition cursor-pointer active:scale-95"
+                >
+                  Refresh
+                </button>
+                <button
+                  onClick={() => setUpdateAvailable(false)}
+                  className="rounded-xl px-2.5 py-1.5 text-[11px] text-zinc-400 hover:text-white transition cursor-pointer"
+                >
+                  Later
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Pull-to-refresh indicator */}
+          {(pullDist > 0 || isPullRefreshing) && (
+            <div
+              className="pointer-events-none flex items-center justify-center overflow-hidden transition-[height] duration-150"
+              style={{ height: isPullRefreshing ? 56 : pullDist }}
+            >
+              <RefreshCw className={`w-5 h-5 text-amber-400 ${isPullRefreshing ? 'animate-spin' : ''}`} />
+            </div>
+          )}
+
+          <Navbar />
 
           {/* Urgent system banner (admin broadcasts) */}
           {systemBanner && (
@@ -281,7 +378,7 @@ export default function App() {
             </div>
           )}
 
-          <main className={`flex-1 min-h-0 ${activeTab === 'MESSENGER' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto overscroll-contain'}`}>
+          <main ref={mainScrollRef} className={`flex-1 min-h-0 ${activeTab === 'MESSENGER' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto overscroll-contain'}`}>
             {activeTab === 'WALLET' && (
               isInitialSyncing ? (
                 <WalletSkeleton />
@@ -292,6 +389,13 @@ export default function App() {
                   onOpenSendMoney={() => setIsSendMoneyOpen(true)}
                   onOpenQR={() => setIsQROpen(true)}
                   onOpenSecurity={() => setIsSecurityOpen(true)}
+                  onOpenInbox={() => {
+                    setActiveTab('INBOX');
+                    BoostPayStore.markNotificationAsRead(currentUser.id, 'ALL');
+                    setUnreadNotifCount(0);
+                  }}
+                  onLogout={handleLogout}
+                  inboxUnread={unreadNotifCount}
                   config={config}
                 />
               )
@@ -342,32 +446,7 @@ export default function App() {
                 <span>Leaders</span>
               </button>
 
-              {/* 3. SMS Inbox Tab */}
-              <button
-                onClick={() => {
-                  setActiveTab('INBOX');
-                  // Clear unread count optimistically
-                  if (currentUser) {
-                    BoostPayStore.markNotificationAsRead(currentUser.id, 'ALL');
-                    setUnreadNotifCount(0);
-                  }
-                }}
-                className={`relative flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition cursor-pointer min-h-[44px] ${
-                  activeTab === 'INBOX' ? 'text-amber-400 font-bold' : 'text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                <div className="relative">
-                  <Inbox className="w-5 h-5 stroke-[2.2]" />
-                  {unreadNotifCount > 0 && (
-                    <span className="absolute -top-1.5 -right-2 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-bold text-zinc-950 font-mono shadow-sm">
-                      {unreadNotifCount > 9 ? '9+' : unreadNotifCount}
-                    </span>
-                  )}
-                </div>
-                <span>Inbox</span>
-              </button>
-
-              {/* 4. Messenger Tab */}
+              {/* 3. Messenger Tab */}
               <button
                 onClick={() => {
                   setActiveTab('MESSENGER');
