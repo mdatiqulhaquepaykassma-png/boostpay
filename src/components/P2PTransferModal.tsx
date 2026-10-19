@@ -255,11 +255,11 @@ export const P2PTransferModal: FC<Props> = ({
             {/* Recipient User ID Input */}
             <div>
               <label className="block text-xs font-medium text-zinc-400 mb-1">
-                Recipient Numeric User ID
+                Recipient User ID
               </label>
               <input
                 type="text"
-                placeholder="Enter 6-digit numeric User ID (e.g., 541290)"
+                placeholder="Enter recipient User ID (e.g., 2)"
                 value={recipientId}
                 onChange={(e) => setRecipientId(e.target.value.replace(/\D/g, ''))}
                 maxLength={8}

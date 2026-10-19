@@ -102,6 +102,7 @@ const INITIAL_DB = {
   ],
   conversations: [],
   messages: [],
+  blocks: {},
   notifications: [
     {
       id: "NOTIF-99014120",
@@ -204,6 +205,7 @@ function readDb() {
     if (!parsed.transactions) parsed.transactions = INITIAL_DB.transactions;
     if (!parsed.conversations) parsed.conversations = [];
     if (!parsed.messages) parsed.messages = [];
+    if (!parsed.blocks) parsed.blocks = {};
     if (!parsed.notifications) parsed.notifications = INITIAL_DB.notifications || [];
     if (!parsed.config) parsed.config = INITIAL_DB.config;
     if (!parsed.auditLogs) parsed.auditLogs = INITIAL_DB.auditLogs || [];
@@ -1676,6 +1678,17 @@ async function startServer() {
         return res.status(400).json({ error: 'Recipient ID is required.' });
       }
 
+      // Block check: if either user blocked the other, reject (admin bypasses)
+      if (cleanSender !== 'ADMIN_SUPPORT' && cleanRecipient !== 'ADMIN_SUPPORT' && cleanSender !== cleanRecipient) {
+        const dbForBlock = readDb();
+        const blocks = (dbForBlock as any).blocks || {};
+        const senderBlocks: string[] = blocks[cleanSender] || [];
+        const recipientBlocks: string[] = blocks[cleanRecipient] || [];
+        if (senderBlocks.includes(cleanRecipient) || recipientBlocks.includes(cleanSender)) {
+          return res.status(403).json({ error: 'You cannot send messages to this user (blocked).' });
+        }
+      }
+
       const db = readDb();
       if (!db.conversations) db.conversations = [];
       if (!db.messages) db.messages = [];
@@ -1991,12 +2004,15 @@ async function startServer() {
       if (!msg) return res.status(404).json({ error: 'Message not found.' });
       const isSelf = String(msg.senderId) === String(req.authUserId) || (req.authAdmin && msg.senderId === 'ADMIN_SUPPORT');
       if (!isSelf) return res.status(403).json({ error: 'You can only delete your own messages.' });
+      // Preserve original content for admin visibility — user view shows placeholder
+      if (!msg.originalText) msg.originalText = msg.text;
+      if (msg.photoData && !msg.originalPhotoData) msg.originalPhotoData = msg.photoData;
+      if (msg.voiceData && !msg.originalVoiceData) msg.originalVoiceData = msg.voiceData;
+      if (msg.fileData && !msg.originalFileData) msg.originalFileData = msg.fileData;
       msg.deleted = true;
       msg.text = '🚫 Message deleted';
-      delete msg.voiceData;
-      delete msg.photoData;
-      delete msg.callInfo;
-      msg.kind = 'text';
+      // Keep original media for admin audit, but hide from user clients via flag
+      msg.deletedAt = Date.now();
       writeDb(db);
       const conv = findConvForMsg(db, msg);
       if (conv) broadcastConvEvent(conv, { type: 'chat_event', event: 'message_deleted', messageId: msg.id, conversationId: msg.conversationId });
@@ -2153,7 +2169,44 @@ async function startServer() {
   // public/private groups, polls and GROUP VOICE CALLS (mesh via call-signal).
   // ─────────────────────────────────────────────────────────────────────────
 
-  // In-memory group call rooms (ephemeral — not persisted to the DB)
+  
+  // ── BLOCK / UNBLOCK (P2P) ──
+  app.post('/api/chat/block', (req: any, res) => {
+    try {
+      const { targetId, blocked } = req.body;
+      const cleanTarget = String(targetId || '').trim();
+      const me = String(req.authUserId || '');
+      if (!cleanTarget || !me) return res.status(400).json({ error: 'targetId is required.' });
+      if (cleanTarget === me) return res.status(400).json({ error: 'Cannot block yourself.' });
+      const db = readDb();
+      if (!db.blocks) db.blocks = {};
+      if (!db.blocks[me]) db.blocks[me] = [];
+      const list: string[] = db.blocks[me];
+      const idx = list.indexOf(cleanTarget);
+      if (blocked) {
+        if (idx < 0) list.push(cleanTarget);
+      } else {
+        if (idx >= 0) list.splice(idx, 1);
+      }
+      writeDb(db);
+      res.json({ success: true, blocked: !!blocked, blockedIds: list });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/chat/blocks', (req: any, res) => {
+    try {
+      const me = String(req.authUserId || '');
+      const db = readDb();
+      if (!db.blocks) db.blocks = {};
+      res.json({ blockedIds: db.blocks[me] || [] });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+// In-memory group call rooms (ephemeral — not persisted to the DB)
   const groupCalls = new Map<string, { callId: string; conversationId: string; hostId: string; startedAt: number; participants: { userId: string; joinedAt: number; muted: boolean }[] }>();
 
   function gcSnapshot(gc: any) {

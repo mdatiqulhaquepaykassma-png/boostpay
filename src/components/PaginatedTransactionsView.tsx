@@ -48,7 +48,7 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
     return () => clearInterval(interval);
   }, []);
 
-  const [filterType, setFilterType] = useState<'ALL' | 'P2P' | 'YIELD' | 'ADMIN'>('ALL');
+  const [filterType, setFilterType] = useState<'ALL' | 'P2P' | 'ADMIN'>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
@@ -56,10 +56,10 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
 
   const pageSize = 8;
 
-  // Filter user's transactions
+  // Filter user's transactions — REWARD/compounding hidden per user request
   const userTransactions = useMemo(() => {
     return liveTransactions
-      .filter((t) => t.userId === userId)
+      .filter((t) => t.userId === userId && t.type !== 'REWARD')
       .sort((a, b) => b.timestamp - a.timestamp);
   }, [liveTransactions, userId]);
 
@@ -68,7 +68,6 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
     return {
       all: userTransactions.length,
       p2p: userTransactions.filter((t) => t.type === 'TRANSFER_SENT' || t.type === 'TRANSFER_RECEIVED').length,
-      yield: userTransactions.filter((t) => t.type === 'REWARD').length,
       admin: userTransactions.filter((t) => t.type === 'ADMIN_CREDIT' || t.type === 'ADMIN_DEBIT').length
     };
   }, [userTransactions]);
@@ -94,9 +93,7 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
       if (filterType === 'P2P' && !(t.type === 'TRANSFER_SENT' || t.type === 'TRANSFER_RECEIVED')) {
         return false;
       }
-      if (filterType === 'YIELD' && t.type !== 'REWARD') {
-        return false;
-      }
+
       if (filterType === 'ADMIN' && !(t.type === 'ADMIN_CREDIT' || t.type === 'ADMIN_DEBIT')) {
         return false;
       }
@@ -232,8 +229,8 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
           </span>
         </div>
 
-        {/* Filter Tabs */}
-        <div className="grid grid-cols-4 gap-1 p-1 bg-zinc-950 rounded-2xl border border-zinc-800/80">
+        {/* Filter Tabs — Yield hidden per request */}
+        <div className="grid grid-cols-3 gap-1 p-1 bg-zinc-950 rounded-2xl border border-zinc-800/80">
           <button
             onClick={() => { setFilterType('ALL'); setCurrentPage(1); }}
             className={`py-2 px-1 text-[11px] font-semibold rounded-xl transition cursor-pointer text-center truncate ${
@@ -253,16 +250,6 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
             }`}
           >
             P2P ({counts.p2p})
-          </button>
-          <button
-            onClick={() => { setFilterType('YIELD'); setCurrentPage(1); }}
-            className={`py-2 px-1 text-[11px] font-semibold rounded-xl transition cursor-pointer text-center truncate ${
-              filterType === 'YIELD'
-                ? 'bg-zinc-800 text-amber-400 font-bold shadow-sm'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            Yield ({counts.yield})
           </button>
           <button
             onClick={() => { setFilterType('ADMIN'); setCurrentPage(1); }}

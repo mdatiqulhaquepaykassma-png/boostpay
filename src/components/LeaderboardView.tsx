@@ -344,32 +344,44 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
         </div>
       </div>
 
-      {/* Current User's Rank Spotlight Card */}
-      <div className="rounded-3xl border border-amber-500/30 bg-gradient-to-r from-amber-500/10 via-zinc-900/90 to-zinc-900/90 p-4 sm:p-5 shadow-xl">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 sm:h-12 sm:w-12 items-center justify-center rounded-2xl bg-amber-500 text-zinc-950 font-black text-base sm:text-lg shadow-lg shadow-amber-500/20 shrink-0">
-              #{currentUserRank > 0 ? currentUserRank : '-'}
-            </div>
-            <div className="min-w-0">
-              <span className="text-[11px] text-amber-400 font-mono uppercase tracking-wider block font-semibold">
-                Your Current Standing
-              </span>
-              <div className="flex items-center gap-2 mt-0.5">
-                <span className="text-sm font-bold text-white font-mono">#{myUser.id}</span>
-                <span className="text-[11px] text-zinc-400">(You)</span>
+      {/* Current User's Rank Spotlight Card — redesigned premium */}
+      <div className="relative overflow-hidden rounded-[28px] border border-zinc-800 bg-zinc-900 shadow-2xl">
+        <div className="pointer-events-none absolute -top-20 left-1/2 h-40 w-[120%] -translate-x-1/2 rounded-full bg-amber-500/[0.06] blur-3xl" />
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-amber-500/40 to-transparent" />
+        <div className="relative p-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500 text-zinc-950 font-black text-lg shadow-lg shadow-amber-500/25 shrink-0">
+                #{currentUserRank > 0 ? currentUserRank : '-'}
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-amber-400">Your Standing</span>
+                  <span className="h-1 w-1 rounded-full bg-zinc-600" />
+                  <span className="text-[10px] font-mono text-zinc-500">Rank #{currentUserRank || '-'}</span>
+                </div>
+                <div className="mt-1 flex items-center gap-2">
+                  <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-xs font-mono font-bold text-amber-300">#{myUser.id}</span>
+                  <span className="text-[11px] font-medium text-zinc-400">You</span>
+                </div>
               </div>
             </div>
+            <span className="rounded-full border border-zinc-800 bg-zinc-950 px-3 py-1 text-[10px] font-mono font-semibold text-zinc-400">LIVE RANKING</span>
           </div>
-
-          <div className="flex items-center gap-6 self-start sm:self-center font-mono">
-            <div>
-              <span className="text-[10px] text-zinc-500 block font-sans">Balance</span>
-              <span className="text-xs sm:text-sm font-bold text-white">${formatPrecisionAmount(myUser.balance, 8)}</span>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-3">
+              <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> Balance
+              </div>
+              <div className="mt-1 font-mono text-sm font-bold text-white truncate">${formatPrecisionAmount(myUser.balance, 8)}</div>
+              <div className="text-[10px] font-mono text-zinc-500">USD</div>
             </div>
-            <div>
-              <span className="text-[10px] text-zinc-500 block font-sans">Lifetime Profit</span>
-              <span className="text-xs sm:text-sm font-bold text-emerald-400">+${formatPrecisionAmount(myUser.lifetimeProfit, 8)}</span>
+            <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-3">
+              <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-amber-400/80">
+                <Sparkles className="w-3 h-3 text-amber-400" /> Profit
+              </div>
+              <div className="mt-1 font-mono text-sm font-bold text-emerald-400 truncate">+${formatPrecisionAmount(myUser.lifetimeProfit, 8)}</div>
+              <div className="text-[10px] font-mono text-zinc-500">Lifetime</div>
             </div>
           </div>
         </div>

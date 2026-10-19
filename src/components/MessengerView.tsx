@@ -449,6 +449,8 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const [discoverGroups, setDiscoverGroups] = useState<{ id: string; name: string; memberCount: number; joinApprovalRequired: boolean }[]>([]);
   const [inviteLink, setInviteLink] = useState('');
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [blockedIds, setBlockedIds] = useState<string[]>([]);
+  const [showAttachmentMenu, setShowAttachmentMenu] = useState(false);
 
   // GROUP VOICE CALL (mesh WebRTC)
   const [gcCall, setGcCall] = useState<any>(null);
@@ -483,6 +485,11 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const inputRef = useRef<HTMLInputElement>(null);
 
   const peerIdToUse = initialPeerId || targetPeerId;
+
+  // Load blocked users
+  useEffect(() => {
+    void BoostPayStore.getBlockedIds().then(setBlockedIds);
+  }, [currentUser.id]);
 
   // Real-time Server-Sent Events (SSE) Stream + Initial Sync
   useEffect(() => {
@@ -823,6 +830,18 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     const poll = await BoostPayStore.pollVote(m.id, optionIndex);
     if (poll) setMessages(prev => prev.map(x => x.id === m.id ? { ...x, poll } : x));
   };
+
+  const handleBlockToggle = async () => {
+    if (!activeConv || activeConv.type === 'group') return;
+    const peerId = getOtherParticipant(activeConv);
+    const isBlocked = blockedIds.includes(peerId);
+    const ok = await BoostPayStore.blockUser(peerId, !isBlocked);
+    if (ok) {
+      setBlockedIds(prev => isBlocked ? prev.filter(id => id !== peerId) : [...prev, peerId]);
+      void BoostPayStore.triggerToast(isBlocked ? `Unblocked User #${peerId}` : `Blocked User #${peerId}`);
+    }
+  };
+  const isPeerBlocked = activeConv && activeConv.type !== 'group' ? blockedIds.includes(getOtherParticipant(activeConv)) : false;
 
   // ───────────────── GROUP CALL (MESH) ─────────────────
   const gcEnsurePeer = (peerId: string): RTCPeerConnection => {
@@ -1257,6 +1276,13 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             {activeConv.type !== 'group' && (
               <div className="flex items-center gap-1.5 shrink-0">
                 <button
+                  onClick={() => void handleBlockToggle()}
+                  title={isPeerBlocked ? 'Unblock user' : 'Block user'}
+                  className={`flex h-9 w-9 items-center justify-center rounded-2xl border active:scale-95 transition cursor-pointer ${isPeerBlocked ? 'border-red-500/40 bg-red-500/15 text-red-400' : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-red-400 hover:border-red-500/30'}`}
+                >
+                  <span className="text-[10px] font-bold">{isPeerBlocked ? '✓' : '⊘'}</span>
+                </button>
+                <button
                   onClick={() => startCallTo(getOtherParticipant(activeConv), getConvTitle(activeConv), 'audio')}
                   title="Voice call"
                   className="flex h-9 w-9 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-emerald-400 hover:border-emerald-500/50 hover:bg-emerald-500/10 active:scale-95 transition cursor-pointer"
@@ -1405,6 +1431,13 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               >
                 Leave
               </button>
+            </div>
+          )}
+
+          {isPeerBlocked && (
+            <div className="shrink-0 mx-3 my-1.5 rounded-xl border border-red-500/30 bg-red-950/30 px-3 py-2 flex items-center justify-between gap-2">
+              <span className="text-[11px] text-red-300 font-medium">You blocked this user. Unblock to send messages.</span>
+              <button onClick={() => void handleBlockToggle()} className="rounded-lg bg-zinc-800 px-3 py-1 text-[10px] font-bold text-zinc-200 hover:bg-zinc-700 transition cursor-pointer">Unblock</button>
             </div>
           )}
 
@@ -1578,74 +1611,47 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               </>
             ) : (
               <>
-                <label
-                  className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
-                  title="Send photo"
-                >
-                  <ImagePlus className="w-4 h-4" />
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files && e.target.files[0];
-                      if (f) handleSendPhoto(f);
-                      e.target.value = '';
-                    }}
-                  />
-                </label>
-                <label
-                  className="rounded-2xl border border-zinc-800 bg-zinc-900 px-2.5 py-2.5 text-zinc-400 hover:text-sky-400 hover:border-sky-500/40 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
-                  title="Send file / document"
-                >
-                  <Paperclip className="w-4 h-4" />
-                  <input
-                    type="file"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files && e.target.files[0];
-                      if (f) handleSendFile(f);
-                      e.target.value = '';
-                    }}
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => { setShowStickerPicker(prev => !prev); setShowEmojiPicker(false); }}
-                  className={`rounded-2xl border px-2.5 py-2.5 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0 ${
-                    showStickerPicker
-                      ? 'border-amber-500/50 bg-amber-500/15 text-amber-400'
-                      : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40'
-                  }`}
-                  title="Send sticker"
-                >
-                  <span className="text-base leading-none">🙂</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowPollCreator(true)}
-                  className="rounded-2xl border border-zinc-800 bg-zinc-900 px-2.5 py-2.5 text-zinc-400 hover:text-emerald-400 hover:border-emerald-500/40 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
-                  title="Create poll"
-                >
-                  <BarChart3 className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowContactPicker(true)}
-                  className="rounded-2xl border border-zinc-800 bg-zinc-900 px-2.5 py-2.5 text-zinc-400 hover:text-sky-400 hover:border-sky-500/40 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
-                  title="Share contact"
-                >
-                  <UserPlus className="w-4 h-4" />
-                </button>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowAttachmentMenu(v => !v)}
+                    className={`rounded-2xl border px-3 py-2.5 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0 ${showAttachmentMenu ? 'border-amber-500/50 bg-amber-500/15 text-amber-400' : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'}`}
+                    title="Attachments"
+                  >
+                    <Paperclip className="w-4 h-4" />
+                  </button>
+                  {showAttachmentMenu && (
+                    <div className="absolute bottom-full left-0 mb-2 flex flex-col gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900 p-2 shadow-2xl min-w-[180px] z-20">
+                      <label className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 cursor-pointer transition">
+                        <ImagePlus className="w-4 h-4 text-amber-400" /> Photo
+                        <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) { handleSendPhoto(f); setShowAttachmentMenu(false); } e.target.value = ''; }} />
+                      </label>
+                      <label className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 cursor-pointer transition">
+                        <Paperclip className="w-4 h-4 text-sky-400" /> File / Document
+                        <input type="file" className="hidden" onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) { handleSendFile(f); setShowAttachmentMenu(false); } e.target.value = ''; }} />
+                      </label>
+                      <button type="button" onClick={() => { setShowStickerPicker(v => !v); setShowAttachmentMenu(false); setShowEmojiPicker(false); }} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 transition text-left">
+                        <span className="text-base leading-none">🙂</span> Sticker
+                      </button>
+                      <button type="button" onClick={() => { setShowPollCreator(true); setShowAttachmentMenu(false); }} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 transition text-left">
+                        <BarChart3 className="w-4 h-4 text-emerald-400" /> Poll
+                      </button>
+                      <button type="button" onClick={() => { setShowContactPicker(true); setShowAttachmentMenu(false); }} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 transition text-left">
+                        <UserPlus className="w-4 h-4 text-sky-400" /> Contact
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <input
                   ref={inputRef}
                   type="text"
-                  placeholder={(activeConv.participants || []).every(p => p === currentUser.id)
+                  disabled={!!isPeerBlocked}
+                  placeholder={isPeerBlocked ? 'You blocked this user' : (activeConv.participants || []).every(p => p === currentUser.id)
                     ? 'Write a note to yourself…'
                     : `Message ${getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? 'Official Support' : `User #${getOtherParticipant(activeConv)}`}...`}
                   value={inputMsg}
                   onChange={(e) => handleInputChange(e.target.value)}
-                  className="flex-1 rounded-full border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-xs text-white placeholder-zinc-500 focus:border-amber-500/60 focus:outline-none transition-colors"
+                  className={`flex-1 rounded-full border px-4 py-2.5 text-xs placeholder-zinc-500 focus:outline-none transition-colors ${isPeerBlocked ? 'border-zinc-800 bg-zinc-900/60 text-zinc-500 cursor-not-allowed' : 'border-zinc-800 bg-zinc-900 text-white focus:border-amber-500/60'}`}
                 />
 
                 <button

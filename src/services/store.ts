@@ -1731,6 +1731,26 @@ export class BoostPayStore {
     } catch { return null; }
   }
 
+  // ── Block / Unblock ──
+  static async getBlockedIds(): Promise<string[]> {
+    try {
+      const res = await fetch('/api/chat/blocks', { headers: this.authHeaders() });
+      const data = await res.json().catch(() => ({}));
+      return res.ok && Array.isArray(data.blockedIds) ? data.blockedIds : [];
+    } catch { return []; }
+  }
+
+  static async blockUser(targetId: string, blocked: boolean): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/block', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ targetId, blocked })
+      });
+      return res.ok;
+    } catch { return false; }
+  }
+
   // ── Group voice calls (mesh) ──
   static async gcStart(conversationId: string): Promise<any | null> {
     try {
@@ -1844,10 +1864,30 @@ export class BoostPayStore {
       const res = await fetch('/api/banner', { headers: this.authHeaders() });
       if (res.ok) {
         const data = await res.json();
-        return data.banner || null;
+        const banner = data.banner || null;
+        // Hide if user already dismissed this exact banner version
+        if (banner) {
+          try {
+            const uid = this.getCurrentUser()?.id || 'anon';
+            const key = `boostpay_dismissed_banner_${uid}`;
+            const dismissed = localStorage.getItem(key);
+            const curId = String(banner.createdAt || '') + '|' + String(banner.message || '');
+            if (dismissed === curId) return null;
+          } catch { /* ignore */ }
+        }
+        return banner;
       }
     } catch { /* ignore */ }
     return null;
+  }
+
+  static dismissBanner(banner: any): void {
+    try {
+      const uid = this.getCurrentUser()?.id || 'anon';
+      const key = `boostpay_dismissed_banner_${uid}`;
+      const curId = String(banner.createdAt || '') + '|' + String(banner.message || '');
+      localStorage.setItem(key, curId);
+    } catch { /* ignore */ }
   }
 
 
@@ -1899,7 +1939,19 @@ export class BoostPayStore {
     const raw = localStorage.getItem(STORAGE_NOTIFICATIONS);
     if (!raw) return [];
     try {
-      const list: InboxNotification[] = JSON.parse(raw);
+      let list: InboxNotification[] = JSON.parse(raw);
+      // Filter out locally-dismissed notification ids that persist across reloads
+      try {
+        const uid = userId || this.getCurrentUser()?.id || '';
+        if (uid) {
+          const delKey = `boostpay_deleted_notifs_${uid}`;
+          const delRaw = localStorage.getItem(delKey);
+          if (delRaw) {
+            const delSet = new Set<string>(JSON.parse(delRaw));
+            if (delSet.size) list = list.filter(n => !delSet.has(n.id));
+          }
+        }
+      } catch { /* ignore */ }
       if (!Array.isArray(list)) return [];
       let changed = false;
       const targetUserId = userId ? (LEGACY_USER_MAP[userId] || userId) : undefined;
@@ -1980,13 +2032,27 @@ export class BoostPayStore {
   }
 
   static async deleteNotification(userId: string, notifId: string): Promise<void> {
+    // Persist deleted ids locally so reload never resurrects them even if server lags
+    try {
+      const delKey = `boostpay_deleted_notifs_${userId}`;
+      let delIds: string[] = [];
+      try { delIds = JSON.parse(localStorage.getItem(delKey) || '[]'); } catch { delIds = []; }
+      if (notifId === 'ALL') {
+        const toDel = this.getNotifications(userId).map(n => n.id);
+        delIds = Array.from(new Set([...delIds, ...toDel]));
+      } else {
+        if (!delIds.includes(notifId)) delIds.push(notifId);
+      }
+      localStorage.setItem(delKey, JSON.stringify(delIds.slice(-500)));
+    } catch { /* ignore */ }
     let all = this.getNotifications();
     if (notifId === 'ALL') {
       all = all.filter(n => n.userId !== userId);
     } else {
       all = all.filter(n => !(n.userId === userId && n.id === notifId));
     }
-    this.saveNotifications(all);
+    // Direct write to avoid pushToServer resurrecting via union-merge before delete propagates
+    localStorage.setItem(STORAGE_NOTIFICATIONS, JSON.stringify(all));
 
     try {
       await fetch('/api/notifications/delete', {

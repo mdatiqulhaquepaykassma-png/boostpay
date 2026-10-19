@@ -16,7 +16,7 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
   const [visibleCount, setVisibleCount] = useState(5);
 
   const userTxs = transactions
-    .filter(t => t.userId === userId)
+    .filter(t => t.userId === userId && t.type !== 'REWARD')
     .sort((a, b) => b.timestamp - a.timestamp);
 
   const displayedTxs = userTxs.slice(0, visibleCount);

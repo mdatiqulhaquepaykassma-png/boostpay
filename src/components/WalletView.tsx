@@ -314,8 +314,14 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
         </span>
       </div>
 
+      {/* Duration — visible to user (minutes/hours) */}
+      <div className="mt-3 flex items-center justify-between rounded-xl border border-zinc-800/60 bg-zinc-950/60 px-3 py-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Cycle Duration</span>
+        <span className="text-[11px] font-mono font-bold text-amber-400">{formatDuration(targetDuration)}</span>
+      </div>
+
       {/* Yield accrued */}
-      <div className="mt-4 rounded-2xl border border-zinc-800/80 bg-zinc-950/70 p-4">
+      <div className="mt-3 rounded-2xl border border-zinc-800/80 bg-zinc-950/70 p-4">
         <div className="flex items-baseline justify-between">
           <span className="text-[11px] font-semibold text-zinc-400">Yield accrued</span>
           <span className="text-[10px] font-mono text-zinc-600">credits at cycle end</span>
@@ -387,73 +393,6 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
 
 IsolatedCompoundingCard.displayName = 'IsolatedCompoundingCard';
 
-// ==========================================
-// 3. ISOLATED PROFIT METRICS CARD (MEMOIZED)
-// ==========================================
-interface ProfitMetricsProps {
-  userId: string;
-  lifetimeProfit: number;
-}
-
-const IsolatedProfitMetrics: FC<ProfitMetricsProps> = memo(({ userId, lifetimeProfit }) => {
-  const { todayProfit, sevenDayProfit } = useMemo(() => {
-    const allTxs = BoostPayStore.getTransactions().filter(
-      (t) => t.userId === userId && (t.type === 'REWARD' || t.type === 'ADMIN_CREDIT')
-    );
-    const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-
-    return {
-      todayProfit: allTxs
-        .filter((t) => t.timestamp >= oneDayAgo)
-        .reduce((sum, t) => sum + t.amount, 0),
-      sevenDayProfit: allTxs
-        .filter((t) => t.timestamp >= sevenDaysAgo)
-        .reduce((sum, t) => sum + t.amount, 0)
-    };
-  }, [userId]);
-
-  return (
-    <div className="rounded-3xl border border-zinc-800/80 bg-gradient-to-b from-zinc-900 via-zinc-900/95 to-zinc-950 p-4 shadow-2xl">
-      <div className="flex items-center justify-between mb-3.5">
-        <div className="flex items-center gap-2">
-          <span className="flex h-7 w-7 items-center justify-center rounded-xl bg-emerald-500/15 border border-emerald-500/25">
-            <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
-          </span>
-          <div>
-            <h4 className="font-bold text-[12px] text-white leading-none">Profit Metrics</h4>
-            <span className="text-[9px] text-zinc-500 tracking-wide">ACCUMULATED YIELD</span>
-          </div>
-        </div>
-      </div>
-      <div className="grid grid-cols-3 gap-2.5">
-        <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
-          <div className="absolute inset-x-0 top-0 h-0.5 bg-emerald-500/40" />
-          <div className="text-[9px] font-bold uppercase tracking-wider text-zinc-500 mb-1.5">Today</div>
-          <div className="font-mono text-[13px] font-bold text-emerald-400 leading-tight" title={"+$" + formatPrecisionAmount(todayProfit, 8)}>
-            +${formatPrecisionAmount(todayProfit, 4)}
-          </div>
-        </div>
-        <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3">
-          <div className="absolute inset-x-0 top-0 h-0.5 bg-sky-500/40" />
-          <div className="text-[9px] font-bold uppercase tracking-wider text-zinc-500 mb-1.5">7 Days</div>
-          <div className="font-mono text-[13px] font-bold text-sky-400 leading-tight" title={"+$" + formatPrecisionAmount(sevenDayProfit, 8)}>
-            +${formatPrecisionAmount(sevenDayProfit, 4)}
-          </div>
-        </div>
-        <div className="relative overflow-hidden rounded-2xl border border-amber-500/25 bg-gradient-to-b from-amber-500/10 to-transparent p-3">
-          <div className="absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-amber-400 to-amber-500" />
-          <div className="text-[9px] font-bold uppercase tracking-wider text-amber-400/80 mb-1.5">Lifetime</div>
-          <div className="font-mono text-[13px] font-bold text-amber-400 leading-tight" title={"+$" + formatPrecisionAmount(lifetimeProfit, 8)}>
-            +${formatPrecisionAmount(lifetimeProfit, 4)}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-});
-
-IsolatedProfitMetrics.displayName = 'IsolatedProfitMetrics';
 
 // ==========================================
 // 4. MAIN WALLET VIEW CONTAINER
@@ -669,11 +608,7 @@ export const WalletView: FC<Props> = ({
         )}
       </div>
 
-      {/* 4. MEMOIZED PROFIT METRICS SECTION */}
-          <IsolatedProfitMetrics
-            userId={user.id}
-            lifetimeProfit={user.lifetimeProfit}
-          />
+      {/* Profit Metrics removed per user request */}
 
           {/* 5. MEMOIZED RECENT TRANSACTIONS SECTION */}
           <RecentTransactionsSection

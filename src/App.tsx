@@ -389,7 +389,12 @@ export default function App() {
                 <p className="text-[11px] leading-relaxed text-amber-100 break-words">{systemBanner.message}</p>
               </div>
               <button
-                onClick={() => setSystemBanner(null)}
+                onClick={() => {
+                  if (systemBanner) {
+                    try { BoostPayStore.dismissBanner(systemBanner); } catch {}
+                  }
+                  setSystemBanner(null);
+                }}
                 className="rounded-lg p-1 text-amber-400/70 hover:text-amber-300 hover:bg-amber-500/10 transition cursor-pointer"
                 title="Dismiss"
               >

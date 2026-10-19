@@ -2270,6 +2270,27 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             </div>
                           );
                         }
+                        // Admin sees deleted messages with original content flagged
+                        if (m.deleted) {
+                          const orig = (m as any).originalText || m.text;
+                          const origPhoto = (m as any).originalPhotoData;
+                          const origVoice = (m as any).originalVoiceData;
+                          const origFile = (m as any).originalFileData;
+                          return (
+                            <div key={m.id} className={`flex flex-col ${isAdmin ? 'items-end' : 'items-start'}`}>
+                              <div className={`max-w-[78%] rounded-2xl px-4 py-2.5 text-xs border ${isAdmin ? 'bg-amber-500/20 border-amber-500/40 text-amber-100' : 'bg-red-950/40 border-red-500/30 text-red-200'}`}>
+                                <div className="flex items-center gap-1.5 mb-1 text-[9px] font-bold uppercase tracking-wider text-red-400">
+                                  <Trash2 className="w-3 h-3" /> Deleted {m.kind ? `(${m.kind})` : ''}
+                                </div>
+                                {origPhoto && <img src={origPhoto} alt="deleted photo" className="max-h-32 rounded-lg opacity-70 mb-1" />}
+                                {origVoice && <div className="opacity-70"><VoiceNotePlayer data={origVoice} durationMs={m.voiceDurationMs} /></div>}
+                                {origFile && <div className="text-amber-300 opacity-70">📎 {(m as any).fileName || 'File'} (deleted)</div>}
+                                <p className="break-words italic">“{orig}”</p>
+                                <div className="text-[9px] font-mono mt-1 opacity-60 text-right">{new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · deleted</div>
+                              </div>
+                            </div>
+                          );
+                        }
                         if (m.kind === 'voice' && m.voiceData && !m.deleted) {
                           return (
                             <div key={m.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>
