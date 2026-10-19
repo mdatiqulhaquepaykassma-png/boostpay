@@ -8,7 +8,9 @@ import {
   AlertTriangle,
   Check,
   Copy,
-  RefreshCw
+  RefreshCw,
+  Download,
+  Share2
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
@@ -81,6 +83,14 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
     return stopCamera;
   }, [isOpen, stopCamera]);
 
+  // Open the camera automatically when the Scan tab appears
+  useEffect(() => {
+    if (!isOpen || tab !== 'SCAN') return;
+    const t = window.setTimeout(() => { void startCamera(); }, 120);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, tab]);
+
   const handlePayeePayload = useCallback((raw: string) => {
     setScanError('');
     let uid = '';
@@ -122,10 +132,15 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
       });
       streamRef.current = stream;
       setScanning(true);
-      const video = videoRef.current;
+      // The <video> element mounts with this tab — wait for the ref just in case.
+      let video = videoRef.current;
+      for (let i = 0; i < 20 && !video; i++) {
+        await new Promise((r) => setTimeout(r, 50));
+        video = videoRef.current;
+      }
       if (!video) return;
       video.srcObject = stream;
-      await video.play();
+      try { await video.play(); } catch { /* autoplay quirk — the stream still feeds frames */ }
       const tick = () => {
         const canvas = canvasRef.current;
         if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
@@ -188,6 +203,36 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
     }
   };
 
+  const downloadQR = useCallback(() => {
+    if (!qrDataUrl) return;
+    const a = document.createElement('a');
+    a.href = qrDataUrl;
+    a.download = `boostpay-qr-${currentUser.id}.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }, [qrDataUrl, currentUser.id]);
+
+  const shareQR = useCallback(async () => {
+    if (!qrDataUrl) return;
+    try {
+      const blob = await (await fetch(qrDataUrl)).blob();
+      const file = new File([blob], `boostpay-qr-${currentUser.id}.png`, { type: 'image/png' });
+      const nav = navigator as any;
+      if (nav.canShare && nav.canShare({ files: [file] })) {
+        await nav.share({ files: [file], title: 'BoostPay payment QR' });
+        return;
+      }
+      if (nav.share) {
+        await nav.share({ title: 'BoostPay payment QR', text: `BoostPay payee ID: #${currentUser.id}` });
+        return;
+      }
+      downloadQR();
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') downloadQR();
+    }
+  }, [qrDataUrl, currentUser.id, downloadQR]);
+
   if (!isOpen) return null;
 
   return (
@@ -246,7 +291,22 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
                 )}
               </div>
 
-              <div className="mt-4 w-full rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3.5">
+              <div className="mt-3 grid w-full grid-cols-2 gap-2">
+                <button
+                  onClick={downloadQR}
+                  className="flex items-center justify-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-950 py-2.5 text-xs font-semibold text-zinc-200 hover:border-amber-500/40 hover:text-amber-400 active:scale-[0.98] transition cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" /> Save QR
+                </button>
+                <button
+                  onClick={shareQR}
+                  className="flex items-center justify-center gap-1.5 rounded-2xl bg-amber-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition cursor-pointer shadow-md shadow-amber-500/20"
+                >
+                  <Share2 className="w-3.5 h-3.5" /> Share
+                </button>
+              </div>
+
+              <div className="mt-3 w-full rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3.5">
                 <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold mb-1">Your Payee ID</p>
                 <div className="flex items-center gap-2">
                   <span className="flex-1 font-mono text-sm text-amber-400 font-bold">#{currentUser.id}</span>
@@ -265,9 +325,8 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
                   <p className="mt-2 break-all text-[9px] leading-relaxed text-zinc-600 font-mono">{payload}</p>
                 )}
               </div>
-              <p className="mt-3 text-center text-[10px] leading-relaxed text-zinc-500 px-4">
-                Let the sender scan this code with BoostPay. The code contains only your public payee ID — it never
-                exposes your password, phrase or balance.
+              <p className="mt-3 text-center text-[10px] leading-relaxed text-zinc-600 px-4">
+                Only your public payee ID is embedded — never your password or phrase.
               </p>
             </div>
           ) : (

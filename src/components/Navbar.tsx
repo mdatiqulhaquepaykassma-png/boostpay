@@ -1,5 +1,5 @@
 import React, { FC, useState, memo } from 'react';
-import { Copy, Check, LogOut, Sparkles, ShieldCheck, QrCode } from 'lucide-react';
+import { Copy, Check, LogOut, ShieldCheck, QrCode } from 'lucide-react';
 import { User } from '../types';
 import { copyToClipboard } from '../services/store';
 import { InstallButton } from './InstallButton';
@@ -28,18 +28,15 @@ export const Navbar: FC<Props> = memo(({ user, isAdmin = false, onLogout, onOpen
     <header className="sticky top-0 z-30 w-full border-b border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-4 py-3">
       <div className="flex items-center justify-between">
         {/* Brand */}
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500 text-zinc-950 font-black shadow-md shadow-amber-500/20">
-            <Sparkles className="w-4 h-4 fill-current" />
+        <div className="flex items-center gap-2.5">
+          <div className="relative flex h-9 w-9 items-center justify-center rounded-2xl bg-gradient-to-b from-zinc-800 to-zinc-950 border border-zinc-800 shadow-lg">
+            <svg viewBox="0 0 512 512" className="h-5 w-5">
+              <path d="M292 64L140 288h124l-44 160 152-224H248l44-160z" fill="#f59e0b" stroke="#d97706" strokeWidth="10" strokeLinejoin="round" />
+            </svg>
           </div>
-          <div>
-            <span className="font-bold text-sm tracking-tight text-white block leading-none">
-              BoostPay
-            </span>
-            <span className="text-[10px] text-zinc-400 font-mono">
-              Fintech Wallet
-            </span>
-          </div>
+          <span className="font-bold text-[15px] tracking-tight text-white leading-none">
+            BoostPay
+          </span>
         </div>
 
         {/* Right side controls */}

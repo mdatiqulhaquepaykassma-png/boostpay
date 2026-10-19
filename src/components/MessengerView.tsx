@@ -11,9 +11,12 @@ import {
   Headphones,
   Copy,
   Check,
-  Smile
+  Smile,
+  Phone,
+  Video
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
+import { startCallTo } from './CallOverlay';
 import { User, Conversation, Message } from '../types';
 
 interface Props {
@@ -67,6 +70,31 @@ const MessageItem = memo(({
   const hasReactions = Object.keys(reactions).some(k => reactions[k]?.length > 0);
 
   return (
+    m.kind === 'call' ? (
+      <div className="flex justify-center my-1.5">
+        <div className={`inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-[10px] ${
+          m.callInfo?.outcome === 'missed' || m.callInfo?.outcome === 'declined'
+            ? 'border-red-500/25 bg-red-500/10 text-red-300'
+            : 'border-zinc-800 bg-zinc-900/80 text-zinc-400'
+        }`}>
+          <span>{m.callInfo?.outcome === 'missed' ? '📵' : m.callInfo?.media === 'video' ? '🎥' : '📞'}</span>
+          <span className="font-semibold">
+            {m.callInfo?.outcome === 'missed'
+              ? 'Missed call'
+              : m.callInfo?.outcome === 'declined'
+              ? 'Call declined'
+              : `${m.callInfo?.media === 'video' ? 'Video' : 'Voice'} call`}
+          </span>
+          {m.callInfo?.outcome === 'completed' && (
+            <span className="font-mono text-zinc-500">
+              {Math.floor((m.callInfo.durationMs || 0) / 60000)}m {Math.floor(((m.callInfo.durationMs || 0) % 60000) / 1000)}s
+            </span>
+          )}
+          <span className="text-zinc-600">·</span>
+          <span className="font-mono text-zinc-500">{new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+        </div>
+      </div>
+    ) : (
     <div
       className={`group relative flex flex-col max-w-[85%] sm:max-w-[78%] transition-all ${
         isMe ? 'ml-auto items-end' : 'mr-auto items-start'
@@ -163,6 +191,7 @@ const MessageItem = memo(({
         </div>
       )}
     </div>
+    )
   );
 });
 
@@ -428,7 +457,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                     </span>
                   ) : (
                     <span className="text-xs font-bold font-mono text-zinc-100">
-                      Peer User #{getOtherParticipant(activeConv)}
+                      User #{getOtherParticipant(activeConv)}
                     </span>
                   )}
                 </div>
@@ -441,12 +470,32 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                 </div>
               </div>
             </div>
+
+            {/* Call actions (1:1 threads) */}
+            {activeConv.type !== 'group' && (
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  onClick={() => startCallTo(getOtherParticipant(activeConv), getConvTitle(activeConv), 'audio')}
+                  title="Voice call"
+                  className="flex h-9 w-9 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-emerald-400 hover:border-emerald-500/50 hover:bg-emerald-500/10 active:scale-95 transition cursor-pointer"
+                >
+                  <Phone className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => startCallTo(getOtherParticipant(activeConv), getConvTitle(activeConv), 'video')}
+                  title="Video call"
+                  className="flex h-9 w-9 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-sky-400 hover:border-sky-500/50 hover:bg-sky-500/10 active:scale-95 transition cursor-pointer"
+                >
+                  <Video className="w-4 h-4" />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Compact Security Header */}
           <div className="shrink-0 mx-3 my-1.5 rounded-xl border border-red-500/20 bg-red-950/20 px-3 py-1.5 flex items-center gap-2 text-[10px] text-red-300">
             <ShieldAlert className="w-3.5 h-3.5 text-red-400 shrink-0" />
-            <span className="truncate">Staff will never ask for your recovery phrase or transfer passwords.</span>
+            <span className="truncate">Staff will never ask for your password or recovery phrase.</span>
           </div>
 
           {/* Messages Stream Viewport (Strictly Scrollable Middle Section) */}
@@ -477,10 +526,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                 <div className="h-10 w-10 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-amber-400 mb-2">
                   <MessageSquare className="w-5 h-5 stroke-[1.8]" />
                 </div>
-                <h4 className="text-xs font-bold text-zinc-200">Start the conversation</h4>
-                <p className="text-[11px] text-zinc-500 mt-0.5 max-w-xs">
-                  Say hello to initiate real-time communication.
-                </p>
+                <h4 className="text-xs font-bold text-zinc-200">Say hello</h4>
               </div>
             )}
             <div ref={messagesEndRef} />
@@ -529,7 +575,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               placeholder={`Message ${getOtherParticipant(activeConv) === 'ADMIN_SUPPORT' ? 'Official Support' : `User #${getOtherParticipant(activeConv)}`}...`}
               value={inputMsg}
               onChange={(e) => setInputMsg(e.target.value)}
-              className="flex-1 rounded-2xl border border-zinc-800 bg-zinc-900 px-3.5 py-2.5 text-xs text-white placeholder-zinc-500 focus:border-amber-500 focus:outline-none transition-colors"
+              className="flex-1 rounded-full border border-zinc-800 bg-zinc-900 px-4 py-2.5 text-xs text-white placeholder-zinc-500 focus:border-amber-500/60 focus:outline-none transition-colors"
             />
 
             <button
@@ -547,10 +593,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden px-4 pt-3">
           <div className="shrink-0 flex items-center justify-between mb-3">
             <div>
-              <h2 className="text-base font-bold text-white flex items-center gap-2">
-                <MessageSquare className="w-5 h-5 text-amber-400" /> Messenger Inbox
-              </h2>
-              <p className="text-[11px] text-zinc-400">Direct peer communication & Verified Support</p>
+              <h2 className="text-lg font-bold text-white tracking-tight">Messages</h2>
             </div>
             <button
               onClick={() => openNewChatModal()}
@@ -577,7 +620,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                     </span>
                   </div>
                   <p className="text-[11px] text-zinc-300 mt-0.5">
-                    Need instant help with transfers or rates? Tap for 24/7 direct assistance.
+                    Help with transfers, rates & account issues.
                   </p>
                 </div>
               </div>
@@ -649,7 +692,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
 
             {filteredConversations.length === 0 && (
               <div className="py-10 text-center text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-2xl">
-                No conversations found. Tap &quot;New Chat&quot; above to message a peer by numeric ID.
+                No conversations yet.
               </div>
             )}
           </div>
@@ -659,7 +702,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-150">
               <div className="relative w-full max-w-sm rounded-3xl border border-zinc-800 bg-zinc-900/95 p-5 shadow-2xl text-zinc-100 backdrop-blur-2xl">
                 <h3 className="font-bold text-sm text-white mb-1">Start New Conversation</h3>
-                <p className="text-xs text-zinc-400 mb-3">Message a peer directly or create a group chat</p>
+                <p className="text-xs text-zinc-400 mb-3">By numeric user ID, or start a group</p>
 
                 {/* Mode switch */}
                 <div className="flex rounded-2xl bg-zinc-950 p-1 mb-4 border border-zinc-800/80">

@@ -8,9 +8,10 @@ import { usePWAInstall } from '../hooks/usePWAInstall';
  * a previously dismissed prompt). One modal serves every install button.
  */
 export const PWAInstallHelp: FC = () => {
-  const { installHelpMode, closeInstallHelp, isIOS } = usePWAInstall();
+  const { installHelpMode, closeInstallHelp, isIOS, isInstalled } = usePWAInstall();
 
-  if (!installHelpMode) return null;
+  // Never show install guidance inside the installed PWA itself
+  if (!installHelpMode || isInstalled) return null;
 
   return (
     <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/70 p-4 pb-8 backdrop-blur-sm sm:items-center">

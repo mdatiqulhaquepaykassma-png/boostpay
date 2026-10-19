@@ -48,7 +48,12 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
 
   useEffect(() => {
     if (!isRunning) {
-      setLiveAccrued(0);
+      // Frozen while paused (progress must never reset); zero once the cycle is over.
+      if (boostState.isActive && boostState.isPaused) {
+        setLiveAccrued(Number(boostState.accumulatedYield) || 0);
+      } else {
+        setLiveAccrued(0);
+      }
       return;
     }
 
@@ -98,51 +103,63 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   const currentTotal = baseBalance + liveAccrued;
 
   return (
-    <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-5 shadow-xl relative overflow-hidden">
-      <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
-        <span className="font-medium tracking-wide">Main Balance</span>
-        <span className="text-[11px] font-mono text-zinc-400 flex items-center gap-1.5">
-          <span className="h-2 w-2 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50"></span>
-          Realtime 24/7 Server Sync
-        </span>
-      </div>
+    <div className="relative overflow-hidden rounded-[26px] border border-zinc-800/80 bg-zinc-900 shadow-2xl">
+      <div className="pointer-events-none absolute -top-28 left-1/2 h-52 w-[140%] -translate-x-1/2 rounded-full bg-amber-500/[0.07] blur-3xl" />
+      <div className="pointer-events-none absolute inset-x-12 top-0 h-px bg-gradient-to-r from-transparent via-amber-500/50 to-transparent" />
 
-      {/* Smooth high-precision live balance ticker without pulses or card scaling */}
-      <div className="my-2.5">
-        <SmoothNumericTicker
-          value={currentTotal}
-          decimals={8}
-          prefix="$"
-          suffix="USD"
-          size="xl"
-          intColor="text-white"
-          decColor="text-amber-400"
-        />
-      </div>
+      <div className="relative p-6">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Available Balance</span>
+          {isRunning ? (
+            <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" /> Live
+            </span>
+          ) : boostState.isActive && boostState.isPaused ? (
+            <span className="rounded-full border border-zinc-700 bg-zinc-950 px-2.5 py-1 text-[10px] font-semibold text-zinc-400">Paused</span>
+          ) : null}
+        </div>
 
-      {/* Transfer + QR Buttons */}
-      <div className="mt-4 grid grid-cols-2 gap-2.5">
-        <button
-          onClick={onOpenSendMoney}
-          disabled={isRunning}
-          className={`h-11 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
-            isRunning
-              ? 'border border-zinc-800 bg-zinc-950 text-zinc-500 cursor-not-allowed opacity-80'
-              : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700/80 active:scale-[0.98]'
-          }`}
-        >
-          <Send className="w-3.5 h-3.5 text-amber-400" />
-          {isRunning ? 'Transfers Locked' : 'Send Money'}
-        </button>
-        {onOpenQR && (
-          <button
-            onClick={onOpenQR}
-            className="h-11 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700/80 active:scale-[0.98]"
-          >
-            <QrCode className="w-3.5 h-3.5 text-amber-400" />
-            QR Pay
-          </button>
+        <div className="mt-2.5">
+          <SmoothNumericTicker
+            value={currentTotal}
+            decimals={8}
+            prefix="$"
+            suffix="USD"
+            size="xl"
+            intColor="text-white"
+            decColor="text-amber-400"
+          />
+        </div>
+
+        {boostState.isActive && (
+          <p className="mt-2 text-[11px] text-zinc-500">
+            incl. <span className="font-mono text-amber-400/90">+${formatPrecisionAmount(liveAccrued, 8)}</span> yield this cycle
+          </p>
         )}
+
+        <div className="mt-5 grid grid-cols-2 gap-2.5">
+          <button
+            onClick={onOpenSendMoney}
+            disabled={isRunning}
+            className={`h-11 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
+              isRunning
+                ? 'border border-zinc-800 bg-zinc-950 text-zinc-600 cursor-not-allowed'
+                : 'bg-zinc-100 text-zinc-950 hover:bg-white active:scale-[0.98]'
+            }`}
+          >
+            <Send className="w-3.5 h-3.5" />
+            {isRunning ? 'Transfers Locked' : 'Send Money'}
+          </button>
+          {onOpenQR && (
+            <button
+              onClick={onOpenQR}
+              className="h-11 rounded-2xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer border border-zinc-700 bg-zinc-800/80 text-zinc-100 hover:bg-zinc-700 active:scale-[0.98]"
+            >
+              <QrCode className="w-3.5 h-3.5 text-amber-400" />
+              QR Pay
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -249,41 +266,40 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
 
   // Compute equivalent hourly rate for dual display
   const hourlyEquiv = ((Math.pow(1 + minuteRatePercent / 100, 60) - 1) * 100);
+  const remainingMs = Math.max(0, targetDuration - elapsedMs);
 
   return (
-    <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-5 shadow-xl relative">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <div className={`p-2 rounded-xl ${isRunning ? 'bg-amber-500/20 text-amber-400' : 'bg-zinc-800 text-zinc-400'}`}>
-            <Zap className="w-4 h-4 fill-current" />
+    <div className="rounded-[26px] border border-zinc-800/80 bg-zinc-900 p-6 shadow-2xl">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className={`flex h-10 w-10 items-center justify-center rounded-2xl ${isRunning ? 'bg-amber-500 text-zinc-950 shadow-lg shadow-amber-500/20' : 'bg-zinc-800 text-zinc-400'}`}>
+            <Zap className="w-5 h-5 fill-current" />
           </div>
           <div>
-            <h3 className="font-bold text-sm text-white">Dynamic Compounding</h3>
-            <p className="text-[11px] text-zinc-400">
-              Rate: <span className="font-mono text-amber-400 font-semibold">{formatRatePercent(minuteRatePercent)}%/min</span> <span className="text-zinc-500 font-mono text-[10px]">(~{hourlyEquiv.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}%/hr)</span> · Duration: <span className="font-mono text-zinc-300">{formatDuration(targetDuration)}</span>
+            <h3 className="text-sm font-bold text-white tracking-tight">Compounding</h3>
+            <p className="text-[10px] font-mono text-zinc-500">
+              {formatRatePercent(minuteRatePercent)}%/min · ~{hourlyEquiv.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}%/hr
             </p>
           </div>
         </div>
-        {isRunning && (
-          <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-mono text-amber-400 font-bold border border-amber-500/30">
-            ACTIVE (24/7)
-          </span>
-        )}
-        {isPaused && (
-          <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] font-mono text-zinc-400 font-bold border border-zinc-700">
-            PAUSED
-          </span>
-        )}
+        <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold tracking-wide ${
+          isRunning
+            ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+            : isPaused
+            ? 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+            : 'bg-zinc-800/60 text-zinc-500 border border-zinc-800'
+        }`}>
+          {isRunning ? 'RUNNING' : isPaused ? 'PAUSED' : 'IDLE'}
+        </span>
       </div>
 
-      {/* Accruing Reward Section with Smooth Monospace Digit Transitions */}
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-950/80 p-3.5 mb-3.5">
-        <div className="flex justify-between text-[11px] text-zinc-400 mb-1">
-          <span>Accruing Reward</span>
-          <span className="font-mono text-zinc-500">Auto-credits on finish</span>
+      {/* Yield accrued */}
+      <div className="mt-4 rounded-2xl border border-zinc-800/80 bg-zinc-950/70 p-4">
+        <div className="flex items-baseline justify-between">
+          <span className="text-[11px] font-semibold text-zinc-400">Yield accrued</span>
+          <span className="text-[10px] font-mono text-zinc-600">credits at cycle end</span>
         </div>
-
-        <div className="my-1">
+        <div className="mt-1">
           <SmoothNumericTicker
             value={liveYield}
             decimals={8}
@@ -296,45 +312,48 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
           />
         </div>
 
-        {/* Isolated Smooth Progress Bar */}
-        <div className="mt-2.5">
-          <div className="flex justify-between text-[10px] font-mono text-zinc-500 mb-1 select-none">
-            <span>{formatDuration(elapsedMs)}</span>
-            <span className="text-zinc-300 font-semibold">{progressPercent.toFixed(1)}%</span>
-            <span>{formatDuration(targetDuration)}</span>
-          </div>
-          <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden">
+        {/* Progress */}
+        <div className="mt-3">
+          <div className="h-1.5 w-full rounded-full bg-zinc-800/80 overflow-hidden">
             <div
-              className="h-full bg-amber-500 rounded-full transition-[width] duration-150 ease-linear"
+              className="h-full rounded-full bg-gradient-to-r from-amber-500 to-amber-300 transition-[width] duration-200 ease-linear"
               style={{ width: `${progressPercent}%` }}
             />
+          </div>
+          <div className="mt-2 flex items-center justify-between text-[10px] font-mono text-zinc-500">
+            <span>{formatDuration(elapsedMs)}</span>
+            <span className="font-bold text-zinc-300">{progressPercent.toFixed(1)}%</span>
+            <span>{formatDuration(remainingMs)} left</span>
           </div>
         </div>
       </div>
 
-      {/* Action Controls */}
-      <div>
+      {/* Actions */}
+      <div className="mt-4">
         {!boostState.isActive ? (
           <button
             onClick={onStartBoost}
-            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-amber-500/20"
+            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20"
           >
             <Zap className="w-4 h-4 fill-current" /> Start Compounding
           </button>
         ) : isPaused ? (
           <button
             onClick={onResumeBoost}
-            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-amber-500/20"
+            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20"
           >
             <Play className="w-4 h-4 fill-current" /> Resume Compounding
           </button>
         ) : (
-          <button
-            onClick={onPauseBoost}
-            className="w-full h-11 rounded-2xl border border-zinc-700 bg-zinc-800 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 active:scale-[0.98] transition flex items-center justify-center gap-1.5 cursor-pointer"
-          >
-            <Pause className="w-4 h-4" /> Pause (Unlocks Transfers)
-          </button>
+          <>
+            <button
+              onClick={onPauseBoost}
+              className="w-full h-11 rounded-2xl border border-zinc-700 bg-zinc-800/70 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Pause className="w-4 h-4" /> Pause Compounding
+            </button>
+            <p className="mt-2 text-center text-[10px] text-zinc-500">Pausing freezes progress and unlocks transfers.</p>
+          </>
         )}
       </div>
     </div>

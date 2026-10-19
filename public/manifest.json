@@ -2,7 +2,7 @@
   "id": "/",
   "name": "BoostPay",
   "short_name": "BoostPay",
-  "description": "BoostPay - Dynamic Compounding Yield Engine & P2P Financial Transfers",
+  "description": "Send money, earn compounding yield, chat with support.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

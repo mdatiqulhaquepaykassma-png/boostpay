@@ -687,6 +687,18 @@ function liveBoostState(u: any): any {
           ? startingBal * elapsed * ratePerMs
           : startingBal * Math.expm1(elapsed * Math.log1p(ratePerMs)))
       : 0;
+  } else if (bs.isActive && bs.isPaused) {
+    // Frozen view while paused: keep the checkpointed progress visible.
+    const frozenElapsed = Number(bs.elapsedMs) || 0;
+    const startingBal = Number(bs.startingBalance ?? u.balance) || 0;
+    out.elapsedMs = frozenElapsed;
+    out.accumulatedYield = bs.accumulatedYield !== undefined && bs.accumulatedYield !== null
+      ? bs.accumulatedYield
+      : (ratePerMs > 0
+          ? (frozenElapsed * ratePerMs < 1e-5
+              ? startingBal * frozenElapsed * ratePerMs
+              : startingBal * Math.expm1(frozenElapsed * Math.log1p(ratePerMs)))
+          : 0);
   }
   return out;
 }
@@ -703,6 +715,12 @@ function requireUser(req: any, res: any, next: any) {
   req.authSid = payload.sid;
   try {
     const db = readDb();
+    // Durable revocation: a signed-out session stays dead across restarts.
+    const rec = sessionSnapshot(db).find((x: SessionRecord) => x.id === payload.sid);
+    if (rec && rec.revoked && payload.sid) {
+      revokedSessions.add(payload.sid);
+      return res.status(401).json({ error: 'This session was signed out. Please sign in again.' });
+    }
     touchSession(db, payload.sid);
   } catch { /* non-fatal */ }
   next();
@@ -719,6 +737,14 @@ function requireAdmin(req: any, res: any, next: any) {
   req.authAdmin = payload.sub;
   req.authSid = payload.sid;
   req.authAdminRole = payload.adminRole || 'SUPERADMIN';
+  try {
+    const db = readDb();
+    const rec = sessionSnapshot(db).find((x: SessionRecord) => x.id === payload.sid);
+    if (rec && rec.revoked && payload.sid) {
+      revokedSessions.add(payload.sid);
+      return res.status(401).json({ error: 'This admin session was signed out.' });
+    }
+  } catch { /* non-fatal */ }
   next();
 }
 
@@ -953,7 +979,7 @@ async function startServer() {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('Referrer-Policy', 'no-referrer');
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Permissions-Policy', 'camera=(self), microphone=(self), geolocation=()');
     next();
   });
 
@@ -1244,6 +1270,23 @@ async function startServer() {
         return res.status(404).json({ error: 'User not found' });
       }
 
+      // Freeze progress at the pause instant so pause never resets compounding.
+      const pbs = user.boostState;
+      if (pbs.startedAt > 0 && !pbs.isPaused) {
+        const cfg = db.config || INITIAL_DB.config;
+        const mRate = cfg.minuteRatePercent !== undefined
+          ? cfg.minuteRatePercent
+          : (cfg.hourlyRatePercent ? cfg.hourlyRatePercent / 60 : 0.001605);
+        const rPerMs = (mRate / 100) / 60000;
+        const pElapsed = Math.min(Date.now() - pbs.startedAt, pbs.targetDurationMs || Number.MAX_SAFE_INTEGER);
+        pbs.elapsedMs = pElapsed;
+        const pStart = Number(pbs.startingBalance ?? user.balance) || 0;
+        pbs.accumulatedYield = rPerMs > 0
+          ? (pElapsed * rPerMs < 1e-5
+              ? pStart * pElapsed * rPerMs
+              : pStart * Math.expm1(pElapsed * Math.log1p(rPerMs)))
+          : 0;
+      }
       user.boostState.isPaused = true;
       user.boostState.pausedAt = Date.now();
       writeDb(db);
@@ -1586,7 +1629,7 @@ async function startServer() {
         conv.lastMessageAt = now;
       }
 
-      const newMsg = {
+      const newMsg: any = {
         id: `MSG-${now}-${Math.random().toString(36).substring(2, 7)}`,
         conversationId: conv.id,
         senderId: cleanSender,
@@ -1594,6 +1637,17 @@ async function startServer() {
         text: cleanText,
         timestamp: now
       };
+      // Call-log rows (Telegram-style call history inside the chat thread)
+      const rawKind = (req.body && req.body.kind) || '';
+      const rawCi = (req.body && req.body.callInfo) || null;
+      if (rawKind === 'call' && rawCi && typeof rawCi === 'object') {
+        newMsg.kind = 'call';
+        newMsg.callInfo = {
+          media: rawCi.media === 'video' ? 'video' : 'audio',
+          outcome: ['completed', 'missed', 'declined'].includes(rawCi.outcome) ? rawCi.outcome : 'completed',
+          durationMs: Math.max(0, Math.min(24 * 3600 * 1000, Number(rawCi.durationMs) || 0))
+        };
+      }
 
       db.messages.push(newMsg);
       writeDb(db);
@@ -1606,6 +1660,46 @@ async function startServer() {
         message: newMsg,
         conversation: conv
       });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // WebRTC call signaling — ephemeral events forwarded over the SSE stream
+  app.post('/api/chat/call-signal', (req: any, res) => {
+    try {
+      const { targetId, signal } = req.body || {};
+      const cleanTarget = String(targetId || '').trim();
+      if (!cleanTarget || !signal || typeof signal !== 'object') {
+        return res.status(400).json({ error: 'targetId and signal are required.' });
+      }
+      if (cleanTarget === String(req.authUserId)) {
+        return res.status(400).json({ error: 'Cannot signal yourself.' });
+      }
+      const kind = String(signal.kind || '').slice(0, 20);
+      if (!['offer', 'answer', 'ice', 'reject', 'hangup', 'cancel'].includes(kind)) {
+        return res.status(400).json({ error: 'Unknown signal type.' });
+      }
+      pushToUser(cleanTarget, {
+        type: 'call_signal',
+        from: String(req.authUserId),
+        signal: {
+          kind,
+          callId: String(signal.callId || '').slice(0, 60),
+          media: signal.media === 'video' ? 'video' : 'audio',
+          sdp: typeof signal.sdp === 'string' ? signal.sdp.slice(0, 60000) : undefined,
+          candidate: signal.candidate && typeof signal.candidate === 'object'
+            ? {
+                candidate: String(signal.candidate.candidate || '').slice(0, 2000),
+                sdpMid: signal.candidate.sdpMid ?? null,
+                sdpMLineIndex: signal.candidate.sdpMLineIndex ?? null,
+                usernameFragment: signal.candidate.usernameFragment ?? null
+              }
+            : undefined
+        },
+        timestamp: Date.now()
+      });
+      res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -2778,6 +2872,20 @@ async function startServer() {
       }
     }
     recordAuditLog(db, 'USER_REVOKE_SESSIONS', String(req.authUserId), `Signed out ${count} other device(s)`);
+    writeDb(db);
+    res.json({ success: true, revoked: count });
+  });
+
+  app.post('/api/users/me/sessions/revoke-all', requireUser, (req: any, res) => {
+    const db = readDb();
+    let count = 0;
+    for (const sess of sessionSnapshot(db)) {
+      if (sess.userId === String(req.authUserId) && sess.role === 'USER' && !sess.revoked) {
+        revokeSession(db, sess.id);
+        count++;
+      }
+    }
+    recordAuditLog(db, 'USER_REVOKE_SESSIONS', String(req.authUserId), `Signed out of all ${count} device(s)`);
     writeDb(db);
     res.json({ success: true, revoked: count });
   });

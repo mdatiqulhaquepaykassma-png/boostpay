@@ -83,12 +83,13 @@ export const SecurityModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
     setMsg({ type: 'ok', text: 'Device signed out.' });
   };
 
-  const revokeOthers = async () => {
+  const revokeAll = async () => {
+    if (!confirm('Sign out of BoostPay on ALL devices (including this one)?')) return;
     setBusy('others');
-    const n = await BoostPayStore.revokeOtherSessions();
-    await loadSessions();
-    setBusy(null);
-    setMsg({ type: 'ok', text: n > 0 ? `${n} other device(s) signed out.` : 'No other active devices found.' });
+    await BoostPayStore.revokeAllSessions();
+    // Full sign-out everywhere: clear the local session and return to the login screen
+    BoostPayStore.setCurrentUser(null);
+    window.location.reload();
   };
 
   return (
@@ -170,12 +171,12 @@ export const SecurityModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
                 <h3 className="text-xs font-bold text-white">Signed-in Devices</h3>
               </div>
               <button
-                onClick={revokeOthers}
+                onClick={revokeAll}
                 disabled={busy === 'others'}
                 className="flex items-center gap-1 rounded-xl border border-red-500/30 bg-red-500/10 px-2.5 py-1.5 text-[10px] font-semibold text-red-400 hover:bg-red-500/20 active:scale-95 transition cursor-pointer disabled:opacity-50"
               >
                 {busy === 'others' ? <Loader2 className="w-3 h-3 animate-spin" /> : <LogOut className="w-3 h-3" />}
-                Sign out all others
+                Sign out all devices
               </button>
             </div>
 
@@ -224,7 +225,7 @@ export const SecurityModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
               </div>
             )}
             <p className="mt-3 text-[10px] text-zinc-500 leading-relaxed">
-              Signing out a device invalidates its session instantly. You will stay signed in on this device.
+              &quot;Sign out all devices&quot; ends every session at once. The single-device button keeps this device signed in.
             </p>
           </section>
         </div>

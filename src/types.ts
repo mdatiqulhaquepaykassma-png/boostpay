@@ -48,6 +48,13 @@ export interface Message {
   text: string;
   timestamp: number;
   reactions?: Record<string, string[]>; // emoji -> userIds
+  /** 'call' renders as a centered call-history row (Telegram style). */
+  kind?: 'text' | 'call';
+  callInfo?: {
+    media: 'audio' | 'video';
+    outcome: 'completed' | 'missed' | 'declined';
+    durationMs: number;
+  };
 }
 
 export interface Conversation {

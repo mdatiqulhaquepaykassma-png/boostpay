@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { Wallet, Trophy, MessageSquare, Download, ExternalLink, Inbox } from 'lucide-react';
+import { Wallet, Trophy, MessageSquare, Inbox } from 'lucide-react';
 import { BoostPayStore, ToastData } from './services/store';
 import { User, SystemConfig } from './types';
 import { Navbar } from './components/Navbar';
@@ -20,7 +20,7 @@ import { P2PTransferModal } from './components/P2PTransferModal';
 import { WalletSkeleton } from './components/WalletSkeleton';
 import { SecurityModal } from './components/SecurityModal';
 import { QRPayModal } from './components/QRPayModal';
-import { usePWAInstall } from './hooks/usePWAInstall';
+import { CallManager } from './components/CallOverlay';
 import { AlertTriangle, X, QrCode } from 'lucide-react';
 
 export default function App() {
@@ -43,13 +43,6 @@ export default function App() {
 
   // System config state
   const [config, setConfig] = useState<SystemConfig>(BoostPayStore.getConfig());
-
-  // PWA install hook & state
-  const { isInstallable, isInstalled, isInstallLoading, justInstalled, install, openApp } = usePWAInstall();
-
-  const handleBottomInstallClick = async () => {
-    await install();
-  };
 
   // Initialize backend sync without logging out the user
   useEffect(() => {
@@ -193,6 +186,9 @@ export default function App() {
         />
       )}
 
+      {/* 1:1 voice/video calling (WebRTC) */}
+      {currentUser && <CallManager currentUser={currentUser} />}
+
       {/* QR Pay modal (personal code + scanner) */}
       {currentUser && (
         <QRPayModal
@@ -296,7 +292,7 @@ export default function App() {
 
           {/* FIXED BOTTOM NAVIGATION BAR */}
           <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-3 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))]">
-            <div className="max-w-md mx-auto grid grid-cols-5 items-center gap-1">
+            <div className="max-w-md mx-auto grid grid-cols-4 items-center gap-1">
               {/* 1. Wallet Tab */}
               <button
                 onClick={() => setActiveTab('WALLET')}
@@ -363,33 +359,6 @@ export default function App() {
                 <span>Chat</span>
               </button>
 
-              {/* 5. Install / Open App Action */}
-              <div className="flex flex-col items-center justify-center min-h-[44px]">
-                {isInstalled || justInstalled ? (
-                  <button
-                    onClick={openApp}
-                    className="flex flex-col items-center justify-center gap-1 text-[11px] text-emerald-400 font-bold hover:text-emerald-300 transition cursor-pointer min-h-[44px]"
-                    title="Open installed BoostPay app"
-                  >
-                    <ExternalLink className="w-5 h-5" />
-                    <span>Open</span>
-                  </button>
-                ) : (
-                  <button
-                    onClick={handleBottomInstallClick}
-                    disabled={isInstallLoading}
-                    className="flex flex-col items-center justify-center gap-1 text-[11px] font-bold text-amber-400 hover:text-amber-300 active:scale-95 transition cursor-pointer min-h-[44px]"
-                    title="Install BoostPay"
-                  >
-                    {isInstallLoading ? (
-                      <div className="h-5 w-5 rounded-full border-2 border-amber-400 border-t-transparent animate-spin" />
-                    ) : (
-                      <Download className="w-5 h-5 stroke-[2.5]" />
-                    )}
-                    <span>Install</span>
-                  </button>
-                )}
-              </div>
             </div>
           </nav>
         </div>

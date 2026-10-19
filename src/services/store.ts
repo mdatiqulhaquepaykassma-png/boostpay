@@ -401,6 +401,10 @@ export class BoostPayStore {
                 title: 'Compounding Cycle Complete',
                 message: `Yield reward of $${Number(data.reward || 0).toFixed(8)} was credited to your wallet.`
               } as any);
+            } else if (data.type === 'call_signal' && data.signal) {
+              for (const cb of this.callSignalListeners) {
+                try { cb({ from: String(data.from || ''), signal: data.signal }); } catch { /* listener error */ }
+              }
             }
           } catch (e) {
             console.warn('Error parsing SSE event data:', e);
@@ -484,7 +488,8 @@ export class BoostPayStore {
   static async sendChatMessage(
     recipientId: string,
     text: string,
-    senderRole?: 'USER' | 'ADMIN'
+    senderRole?: 'USER' | 'ADMIN',
+    callInfo?: Message['callInfo']
   ): Promise<{ success: boolean; message?: Message; conversation?: Conversation; error?: string }> {
     const cur = this.getCurrentUser();
     const senderId = senderRole === 'ADMIN' ? 'ADMIN_SUPPORT' : (cur?.id || '1');
@@ -503,7 +508,8 @@ export class BoostPayStore {
       senderId,
       senderRole: role,
       text: cleanText,
-      timestamp: now
+      timestamp: now,
+      ...(callInfo ? { kind: 'call' as const, callInfo } : {})
     };
 
     // Save optimistically locally
@@ -540,7 +546,8 @@ export class BoostPayStore {
           senderId,
           senderRole: role,
           recipientId,
-          text: cleanText
+          text: cleanText,
+          ...(callInfo ? { kind: 'call', callInfo } : {})
         })
       });
 
@@ -1405,6 +1412,41 @@ export class BoostPayStore {
       }
     } catch { /* ignore */ }
     return 0;
+  }
+
+  static async revokeAllSessions(): Promise<number> {
+    try {
+      const res = await fetch('/api/users/me/sessions/revoke-all', {
+        method: 'POST',
+        headers: this.authHeaders()
+      });
+      if (res.ok) {
+        const data = await res.json();
+        return data.revoked || 0;
+      }
+    } catch { /* ignore */ }
+    return 0;
+  }
+
+  // --- WebRTC call signaling (ephemeral, rides the SSE stream) ---
+  private static callSignalListeners: ((ev: { from: string; signal: any }) => void)[] = [];
+
+  static onCallSignal(listener: (ev: { from: string; signal: any }) => void): () => void {
+    this.callSignalListeners.push(listener);
+    return () => {
+      this.callSignalListeners = this.callSignalListeners.filter((l) => l !== listener);
+    };
+  }
+
+  static async sendCallSignal(targetId: string, signal: any): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/call-signal', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ targetId, signal })
+      });
+      return res.ok;
+    } catch { return false; }
   }
 
   static async setAntiPhishingCode(code: string): Promise<string> {
