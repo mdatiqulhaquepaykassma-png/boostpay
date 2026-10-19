@@ -99,6 +99,22 @@ const BarChart: FC<{ points: SeriesPoint[]; color: string; title: string }> = ({
   );
 };
 
+const FreezeCountdown: FC<{ until?: number }> = ({ until }) => {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!until) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [until]);
+  if (!until) return <span className="text-[10px] text-zinc-500">Permanent freeze</span>;
+  const diff = until - now;
+  if (diff <= 0) return <span className="text-[10px] text-emerald-400 font-bold">Ready to unfreeze</span>;
+  const h = Math.floor(diff/3600000);
+  const m = Math.floor((diff%3600000)/60000);
+  const sSec = Math.floor((diff%60000)/1000);
+  return <span className="font-mono text-xs font-bold text-amber-400">{String(h).padStart(2,'0')}:{String(m).padStart(2,'0')}:{String(sSec).padStart(2,'0')}</span>;
+};
+
 /* ==========================================================================
    Analytics & Revenue Dashboard
    ========================================================================== */
@@ -412,18 +428,27 @@ export const FraudView: FC = () => {
         )}
       </div>
 
-      {/* Frozen users */}
+      {/* Frozen users — with live countdown for temp freeze */}
       <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
-        <h3 className="text-xs font-bold text-white mb-3">Frozen Accounts ({(data?.frozenUsers || []).length})</h3>
+        <h3 className="text-xs font-bold text-white mb-3 flex items-center justify-between">Frozen Accounts ({(data?.frozenUsers || []).length}) <span className="text-[10px] text-zinc-500 font-normal">Live countdown for temp freeze</span></h3>
         {(data?.frozenUsers || []).length === 0 ? (
           <p className="py-6 text-center text-[11px] text-zinc-500">No frozen accounts.</p>
         ) : (
           <div className="space-y-2">
             {(data.frozenUsers || []).map((u: any) => (
               <div key={u.id} className="flex items-center justify-between gap-3 rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3">
-                <div className="min-w-0">
-                  <p className="text-xs font-bold text-white font-mono">#{u.id} <span className="text-zinc-500 font-sans font-normal">{u.email}</span></p>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-bold text-white font-mono">#{u.id} <span className="text-zinc-500 font-sans font-normal">{u.email}</span> {u.isTempFreeze && <span className="ml-1 rounded-full bg-amber-500/20 border border-amber-500/30 px-1.5 py-0.5 text-[9px] text-amber-300">TEMP</span>}</p>
                   <p className="text-[10px] text-rose-300/80 truncate">{u.frozenReason || 'Frozen by administration'}</p>
+                  {u.isTempFreeze && u.frozenUntil ? (
+                    <div className="mt-1 flex items-center gap-2 text-[10px]">
+                      <span className="text-zinc-500">Unfreeze in:</span>
+                      <FreezeCountdown until={u.frozenUntil} />
+                      <span className="text-zinc-600 font-mono text-[9px]">{new Date(u.frozenUntil).toLocaleTimeString()}</span>
+                    </div>
+                  ) : u.frozenAt ? (
+                    <div className="mt-1 text-[10px] text-zinc-500">Frozen at {new Date(u.frozenAt).toLocaleString()}</div>
+                  ) : null}
                 </div>
                 <button
                   onClick={() => unfreeze(u.id)}
@@ -472,17 +497,20 @@ const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = 
   const [msg, setMsg]=useState('');
   const [err, setErr]=useState('');
   const [form, setForm]=useState<any>(() => ({
+    enabled: config.enabled !== false,
+    velocityEnabled: config.velocityEnabled !== false,
     maxTransfersPer10Min: config.maxTransfersPer10Min ?? 5,
     maxLoginsPer10Min: config.maxLoginsPer10Min ?? 5,
     maxMessagesPerMin: config.maxMessagesPerMin ?? 10,
     newAccountLargeTransferThreshold: config.newAccountLargeTransferThreshold ?? 100,
-    freezeDurations: config.freezeDurations || { velocity:60, multiIp:120, newAccountLarge:45, deviceFingerprint:90, loginSpam:30, chatSpam:15, scam:1440 }
+    freezeDurations: config.freezeDurations || { velocity:60, multiIp:60, newAccountLarge:30, deviceFingerprint:120, loginSpam:60, chatSpam:30, scam:120 },
+    features: config.features || { velocity:true, multiIp:true, newAccountLarge:true, deviceFingerprint:true, loginSpam:true, chatSpam:true, scam:true }
   }));
-  useEffect(()=>{ setForm({ maxTransfersPer10Min: config.maxTransfersPer10Min, maxLoginsPer10Min: config.maxLoginsPer10Min, maxMessagesPerMin: config.maxMessagesPerMin, newAccountLargeTransferThreshold: config.newAccountLargeTransferThreshold, freezeDurations: config.freezeDurations }); },[config]);
+  useEffect(()=>{ setForm({ enabled: config.enabled!==false, velocityEnabled: config.velocityEnabled!==false, maxTransfersPer10Min: config.maxTransfersPer10Min, maxLoginsPer10Min: config.maxLoginsPer10Min, maxMessagesPerMin: config.maxMessagesPerMin, newAccountLargeTransferThreshold: config.newAccountLargeTransferThreshold, freezeDurations: config.freezeDurations, features: config.features || { velocity:true, multiIp:true, newAccountLarge:true, deviceFingerprint:true, loginSpam:true, chatSpam:true, scam:true } }); },[config]);
   const save = async () => {
     setSaving(true); setMsg(''); setErr('');
     try{
-      const payload:any = { maxTransfersPer10Min: Number(form.maxTransfersPer10Min), maxLoginsPer10Min: Number(form.maxLoginsPer10Min), maxMessagesPerMin: Number(form.maxMessagesPerMin), newAccountLargeTransferThreshold: Number(form.newAccountLargeTransferThreshold), freezeDurations: {} };
+      const payload:any = { enabled: !!form.enabled, velocityEnabled: !!form.velocityEnabled, maxTransfersPer10Min: Number(form.maxTransfersPer10Min), maxLoginsPer10Min: Number(form.maxLoginsPer10Min), maxMessagesPerMin: Number(form.maxMessagesPerMin), newAccountLargeTransferThreshold: Number(form.newAccountLargeTransferThreshold), freezeDurations: {}, features: form.features };
       for(const k in form.freezeDurations) payload.freezeDurations[k]=Number(form.freezeDurations[k]);
       await BoostPayStore.adminApi('/api/admin/antifraud/config', { method:'POST', body: payload });
       setMsg('Antifraud config saved ✅'); onSaved();
@@ -490,25 +518,49 @@ const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = 
     setSaving(false);
   };
   const labels:any = { velocity:'Velocity (same IP rapid)', multiIp:'Multi-IP cluster', newAccountLarge:'New account large', deviceFingerprint:'Device multi-account', loginSpam:'Login spam', chatSpam:'Chat spam', scam:'Scam' };
+  const desc:any = { velocity:'High velocity transfers from same user (10m window)', multiIp:'Multiple users sharing same IP doing transfers', newAccountLarge:'New account <24h sending large amount', deviceFingerprint:'Same device/browser with multiple accounts', loginSpam:'Many login attempts in 10 min (brute force)', chatSpam:'Flooding chat with many messages per minute', scam:'General scam / suspicious pattern' };
   return (
     <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
-      <h3 className="text-xs font-bold text-white flex items-center justify-between">Antifraud Config — per-reason freeze (min) {msg && <span className="text-emerald-400 text-[11px]">{msg}</span>} {err && <span className="text-red-400 text-[11px]">{err}</span>}</h3>
+      <h3 className="text-xs font-bold text-white flex items-center justify-between">Antifraud Config — features & per-reason freeze {msg && <span className="text-emerald-400 text-[11px]">{msg}</span>} {err && <span className="text-red-400 text-[11px]">{err}</span>}</h3>
+      <div className="flex flex-wrap gap-2 p-2 rounded-xl bg-zinc-950 border border-zinc-800">
+        <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" checked={!!form.enabled} onChange={e=> setForm((f:any)=>({...f, enabled: e.target.checked}))} className="h-4 w-4 accent-amber-500"/> Antifraud Master ON</label>
+        <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" checked={!!form.velocityEnabled} onChange={e=> setForm((f:any)=>({...f, velocityEnabled: e.target.checked}))} className="h-4 w-4 accent-amber-500"/> Velocity legacy ON</label>
+      </div>
+      <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-2">Feature ON/OFF — kon feature active thakbe</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {Object.keys(form.features||{}).map((k:string)=>(
+            <label key={k} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 cursor-pointer">
+              <span className="text-xs text-zinc-300">{labels[k]||k}</span>
+              <input type="checkbox" checked={!!form.features[k]} onChange={e=> setForm((f:any)=>({...f, features:{...f.features, [k]: e.target.checked}}))} className="h-4 w-4 accent-emerald-500"/>
+            </label>
+          ))}
+        </div>
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <div><label className="text-[10px] text-zinc-500 font-mono">Max transfers /10m</label><input type="number" value={form.maxTransfersPer10Min} onChange={e=> setForm((f:any)=>({...f, maxTransfersPer10Min: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
         <div><label className="text-[10px] text-zinc-500 font-mono">Max logins /10m</label><input type="number" value={form.maxLoginsPer10Min} onChange={e=> setForm((f:any)=>({...f, maxLoginsPer10Min: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
         <div><label className="text-[10px] text-zinc-500 font-mono">Max messages /min</label><input type="number" value={form.maxMessagesPerMin} onChange={e=> setForm((f:any)=>({...f, maxMessagesPerMin: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
         <div><label className="text-[10px] text-zinc-500 font-mono">New acct threshold $</label><input type="number" value={form.newAccountLargeTransferThreshold} onChange={e=> setForm((f:any)=>({...f, newAccountLargeTransferThreshold: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        {Object.keys(form.freezeDurations).map(k=>(
-          <div key={k} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2">
-            <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">{labels[k]||k}</div>
-            <div className="flex items-center gap-1 mt-1">
-              <input type="number" value={form.freezeDurations[k]} onChange={e=> setForm((f:any)=>({...f, freezeDurations:{...f.freezeDurations, [k]: e.target.value}}))} className="w-16 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs font-mono text-white"/>
-              <span className="text-[10px] text-zinc-500">min</span>
+      <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-2">Per-reason freeze time (minutes) — dynamically kon karon e koto khon freeze</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {Object.keys(form.freezeDurations).map(k=>(
+            <div key={k} className={`rounded-xl border p-2 ${form.features[k]===false ? 'border-zinc-800 bg-zinc-900 opacity-60' : 'border-zinc-800 bg-zinc-950'}`}>
+              <div className="flex items-center justify-between">
+                <div className={`text-[9px] uppercase tracking-wider font-semibold ${form.features[k]===false ? 'text-zinc-600' : 'text-zinc-400'}`}>{labels[k]||k}</div>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded-full ${form.features[k]===false ? 'bg-zinc-800 text-zinc-500' : 'bg-emerald-500/20 text-emerald-400'}`}>{form.features[k]===false ? 'OFF' : 'ON'}</span>
+              </div>
+              <div className="text-[10px] text-zinc-500 leading-tight mt-0.5">{desc[k]||''}</div>
+              <div className="flex items-center gap-1 mt-1">
+                <input type="number" value={form.freezeDurations[k]} onChange={e=> setForm((f:any)=>({...f, freezeDurations:{...f.freezeDurations, [k]: e.target.value}}))} className="w-16 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs font-mono text-white"/>
+                <span className="text-[10px] text-zinc-500">min</span>
+                <span className="text-[9px] text-zinc-600 ml-1">{form.freezeDurations[k]}m = {Math.floor(Number(form.freezeDurations[k])/60)}h{(Number(form.freezeDurations[k])%60)? ' '+(Number(form.freezeDurations[k])%60)+'m':''}</span>
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
       <button onClick={save} disabled={saving} className="rounded-xl bg-amber-500 px-5 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 disabled:opacity-50 cursor-pointer">{saving?'Saving...':'Save Antifraud Config'}</button>
       <p className="text-[11px] text-zinc-500">Each reason locks for its configured minutes (temp freeze, auto-unfreeze). Velocity/multiIp/newAccountLarge are transfer-related; deviceFingerprint covers shared-device logins; loginSpam/chatSpam are rate-limits.</p>
@@ -612,13 +664,26 @@ export const AdminSystemSettingsView: FC = () => {
       <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
         <h3 className="text-xs font-bold text-white">Antifraud</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.antifraud?.enabled} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, enabled:e.target.checked}})} /> Antifraud enabled</label>
-          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.antifraud?.velocityEnabled} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, velocityEnabled:e.target.checked}})} /> Velocity check</label>
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.antifraud?.enabled} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, enabled:e.target.checked}})} /> Antifraud Master ON</label>
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.antifraud?.velocityEnabled} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, velocityEnabled:e.target.checked}})} /> Velocity check (legacy)</label>
           <div><label className="text-[10px] font-mono text-zinc-500">Max transfers /10m</label><input type="number" value={cfg.antifraud?.maxTransfersPer10Min ?? ''} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, maxTransfersPer10Min: parseInt(e.target.value)||0}})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
           <div><label className="text-[10px] font-mono text-zinc-500">New acct threshold $</label><input type="number" value={cfg.antifraud?.newAccountLargeTransferThreshold ?? ''} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, newAccountLargeTransferThreshold: parseFloat(e.target.value)||0}})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
           <div><label className="text-[10px] font-mono text-zinc-500">Max logins /10m</label><input type="number" value={cfg.antifraud?.maxLoginsPer10Min ?? ''} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, maxLoginsPer10Min: parseInt(e.target.value)||0}})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
           <div><label className="text-[10px] font-mono text-zinc-500">Max messages /min</label><input type="number" value={cfg.antifraud?.maxMessagesPerMin ?? ''} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, maxMessagesPerMin: parseInt(e.target.value)||0}})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
         </div>
+        {cfg.antifraud?.features && (
+          <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-2">Features ON/OFF — kon detection active</div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {Object.keys(cfg.antifraud.features).map(k=> (
+                <label key={k} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 cursor-pointer">
+                  <span className="text-xs text-zinc-300 capitalize">{k.replace(/([A-Z])/g,' $1')}</span>
+                  <input type="checkbox" checked={!!cfg.antifraud.features[k]} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, features:{...cfg.antifraud.features, [k]: e.target.checked}}})} className="h-4 w-4 accent-emerald-500"/>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
         {cfg.antifraud?.freezeDurations && (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             {Object.keys(cfg.antifraud.freezeDurations).map(k=>(

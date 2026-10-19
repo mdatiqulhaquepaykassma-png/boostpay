@@ -162,6 +162,16 @@ const INITIAL_DB = {
         chatSpam: 1800000,        // 30min chat spam
         scam: 7200000             // 2h scam attempt
       },
+      // per-feature on/off toggles — admin can enable/disable each detection type
+      features: {
+        velocity: true,
+        multiIp: true,
+        newAccountLarge: true,
+        deviceFingerprint: true,
+        loginSpam: true,
+        chatSpam: true,
+        scam: true
+      },
       maxLoginsPer10Min: 5,
       maxMessagesPerMin: 10
     }
@@ -252,6 +262,15 @@ function getFreezeMsForReason(db:any, reasonKey:string): number {
   if (map[reasonKey] !== undefined) return Number(map[reasonKey]);
   return Number(cfg.tempFreezeMs || 3600000);
 }
+function isAntifraudFeatureEnabled(db:any, reasonKey:string): boolean {
+  const cfg:any = (db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+  if (!cfg || cfg.enabled === false) return false;
+  const feats:any = (cfg && cfg.features) || {};
+  if (feats[reasonKey] === false) return false;
+  // legacy velocityEnabled maps to velocity feature
+  if (reasonKey==='velocity' && (cfg as any).velocityEnabled === false) return false;
+  return true;
+}
 function getReferralsCount(db: any, referrerId: string): number {
   return (db.referrals || []).filter((r:any)=>String(r.referrerId)===String(referrerId)).length;
 }
@@ -309,6 +328,18 @@ function readDb() {
     if (!parsed.config.referral) parsed.config.referral = (INITIAL_DB as any).config.referral;
     if (!parsed.config.antifraud) parsed.config.antifraud = (INITIAL_DB as any).config.antifraud;
     if (parsed.config.antifraud && !(parsed.config.antifraud as any).freezeDurations) (parsed.config.antifraud as any).freezeDurations = (INITIAL_DB as any).config.antifraud.freezeDurations;
+    if (parsed.config.antifraud && !(parsed.config.antifraud as any).features) (parsed.config.antifraud as any).features = (INITIAL_DB as any).config.antifraud.features;
+    // ensure all freezeDurations keys exist
+    if (parsed.config.antifraud && (parsed.config.antifraud as any).freezeDurations) {
+      for (const k of Object.keys((INITIAL_DB as any).config.antifraud.freezeDurations)) {
+        if ((parsed.config.antifraud as any).freezeDurations[k] === undefined) (parsed.config.antifraud as any).freezeDurations[k] = (INITIAL_DB as any).config.antifraud.freezeDurations[k];
+      }
+    }
+    if (parsed.config.antifraud && (parsed.config.antifraud as any).features) {
+      for (const k of Object.keys((INITIAL_DB as any).config.antifraud.features)) {
+        if ((parsed.config.antifraud as any).features[k] === undefined) (parsed.config.antifraud as any).features[k] = (INITIAL_DB as any).config.antifraud.features[k];
+      }
+    }
     if (!parsed.notifications) parsed.notifications = INITIAL_DB.notifications || [];
     if (!parsed.config) parsed.config = INITIAL_DB.config;
     if (!parsed.auditLogs) parsed.auditLogs = INITIAL_DB.auditLogs || [];
@@ -1446,7 +1477,7 @@ async function startServer() {
           const set = new Set<string>((db.deviceFingerprints[k]||[]).map((x:string)=> String(x)));
           set.add(String(user.id));
           db.deviceFingerprints[k]= Array.from(set).slice(-10);
-          if (set.size >= 3) {
+          if (isAntifraudFeatureEnabled(db, 'deviceFingerprint') && set.size >= 3) {
             // freeze if same device has 3+ accounts trying to login within 24h
             const recent = Array.from(set).filter(uid=>{
               const u=(db.users||[]).find((x:any)=> String(x.id)===uid);
@@ -2895,7 +2926,7 @@ async function startServer() {
                   const u=(db.users||[]).find((x:any)=> String(x.id)===uid);
                   return u && (Date.now() - (u.createdAt||0) < 24*3600000);
                 });
-                if (relatedUsers.length >= 2 && (recentUsers.length>=1 || relatedUsers.length>=3)) {
+                if (isAntifraudFeatureEnabled(db, 'deviceFingerprint') && relatedUsers.length >= 2 && (recentUsers.length>=1 || relatedUsers.length>=3)) {
                   deviceSuspicious = true;
                   deviceReason = `Multiple accounts on same device (${relatedUsers.length} users)`;
                 }
@@ -2912,7 +2943,7 @@ async function startServer() {
           else if (velocityPerUser) reason = `High velocity: ${recentBySender.length} transfers in 10 min`;
           else if (sameIpMulti) reason = `Multi-account activity from same IP ${senderIp} — ${distinctSenders.size} users, $${volume.toFixed(2)}`;
           else if (rapidSameAmount) reason = `Repeated same amount $${numAmount.toFixed(2)} x${recentBySender.length}`;
-          if (suspicious) {
+          if (suspicious && isAntifraudFeatureEnabled(db, firstReasonKey)) {
             const targets = velocityPerUser || largeFromNew || rapidSameAmount ? [String(sender.id)] : Array.from(distinctSenders);
             const frozen: string[] = [];
             // pick duration by reason type
@@ -3624,7 +3655,18 @@ async function startServer() {
         }
         if (afIn.freezeDurations && typeof afIn.freezeDurations==='object') {
           if (!(db.config as any).antifraud.freezeDurations) (db.config as any).antifraud.freezeDurations={};
-          for (const fk in afIn.freezeDurations) (db.config as any).antifraud.freezeDurations[fk]= Number(afIn.freezeDurations[fk])*60*1000 || Number(afIn.freezeDurations[fk]) || afIn.freezeDurations[fk];
+          for (const fk in afIn.freezeDurations) {
+            let vv:any = afIn.freezeDurations[fk];
+            let num = Number(vv);
+            if (!isNaN(num)) {
+              if (num < 5000) num = num*60*1000;
+              (db.config as any).antifraud.freezeDurations[fk]= num;
+            } else (db.config as any).antifraud.freezeDurations[fk]= vv;
+          }
+        }
+        if (afIn.features && typeof afIn.features==='object') {
+          if (!(db.config as any).antifraud.features) (db.config as any).antifraud.features={};
+          for (const fk in afIn.features) (db.config as any).antifraud.features[fk]= !!afIn.features[fk];
         }
       }
       recordAuditLog(db, 'SYSTEM_CONFIG_UPDATE', String(req.authAdmin), `Admin updated system config ${Object.keys(incomingConfig).join(',')}`);
@@ -4403,6 +4445,12 @@ async function startServer() {
         // accept minutes (1-1440) or ms (60000+): if < 5000 treat as minutes
         if (v < 5000 && v <= 1440*7) v = v*60*1000;
         if (!isNaN(v)&&v>=60000&&v<= 24*3600000*7) db.config.antifraud.freezeDurations[k]=v;
+      }
+    }
+    if (b.features && typeof b.features === 'object') {
+      if (!db.config.antifraud.features) db.config.antifraud.features={};
+      for (const k of Object.keys(b.features)) {
+        db.config.antifraud.features[k] = !!b.features[k];
       }
     }
     writeDb(db);
