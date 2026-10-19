@@ -4,13 +4,14 @@
  */
 
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { Wallet, Trophy, MessageSquare, Inbox, Download, RefreshCw } from 'lucide-react';
+import { Wallet, Trophy, MessageSquare, Inbox, Download, RefreshCw, Gift } from 'lucide-react';
 import { BoostPayStore, ToastData } from './services/store';
 import { User, SystemConfig } from './types';
 import { Navbar } from './components/Navbar';
 import { AuthGate } from './components/AuthGate';
 import { WalletView } from './components/WalletView';
 import { LeaderboardView } from './components/LeaderboardView';
+import { ReferView } from './components/ReferView';
 
 import { MessengerView } from './components/MessengerView';
 import { InboxView } from './components/InboxView';
@@ -31,7 +32,7 @@ export default function App() {
   const [isQROpen, setIsQROpen] = useState(false);
   const [qrPrefill, setQrPrefill] = useState<{ userId: string; name?: string } | null>(null);
   const [systemBanner, setSystemBanner] = useState<{ message: string; title?: string } | null>(null);
-  const [activeTab, setActiveTab] = useState<'WALLET' | 'LEADERBOARD' | 'INBOX' | 'MESSENGER'>('WALLET');
+  const [activeTab, setActiveTab] = useState<'WALLET' | 'LEADERBOARD' | 'REFERRAL' | 'INBOX' | 'MESSENGER'>('WALLET');
   const [chatTargetPeerId, setChatTargetPeerId] = useState<string | null>(null);
 
   // Real-time floating toasts state
@@ -223,8 +224,27 @@ export default function App() {
     };
   }, [activeTab, currentUser?.id]);
 
-  // Deep link: #/join/<token> — Telegram-style group invite links
+  // Deep link: #/join/<token> — Telegram-style group invite links + #/join-ref/<code>
   useEffect(() => {
+    const refM = window.location.hash.match(/^#\/join-ref\/([\w-]+)/);
+    if (refM) {
+      const code = refM[1];
+      try {
+        localStorage.setItem('boostpay_pending_ref', code);
+        // if already logged in, try auto-apply
+        if (currentUser) {
+          BoostPayStore.applyReferCode(code).then(r=>{
+            if (r.success) BoostPayStore.triggerToast('Refer code linked: #' + code);
+            else if (r.error) BoostPayStore.triggerToast(r.error);
+          });
+        } else {
+          BoostPayStore.triggerToast('Refer code saved: #' + code + ' — create account to activate');
+        }
+      } catch {}
+      try { window.history.replaceState(null,'',window.location.pathname+window.location.search); } catch {}
+      if (currentUser) setActiveTab('REFERRAL');
+      return;
+    }
     if (!currentUser) return;
     const m = window.location.hash.match(/^#\/join\/([\w-]+)/);
     if (!m) return;
@@ -433,6 +453,10 @@ export default function App() {
               />
             )}
 
+            {activeTab === 'REFERRAL' && (
+              <ReferView userId={currentUser.id} />
+            )}
+
             {activeTab === 'INBOX' && (
               <InboxView userId={currentUser.id} />
             )}
@@ -448,7 +472,7 @@ export default function App() {
 
           {/* FIXED BOTTOM NAVIGATION BAR */}
           <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-3 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))]">
-            <div className={`max-w-md mx-auto grid items-center gap-1 ${isInstalled ? 'grid-cols-3' : 'grid-cols-4'}`}>
+            <div className={`max-w-md mx-auto grid items-center gap-1 ${isInstalled ? 'grid-cols-4' : 'grid-cols-5'}`}>
               {/* 1. Wallet Tab */}
               <button
                 onClick={() => setActiveTab('WALLET')}
@@ -471,7 +495,18 @@ export default function App() {
                 <span>Leaders</span>
               </button>
 
-              {/* 3. Messenger Tab */}
+              {/* 3. Referral Tab */}
+              <button
+                onClick={() => setActiveTab('REFERRAL')}
+                className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition cursor-pointer min-h-[44px] ${
+                  activeTab === 'REFERRAL' ? 'text-amber-400 font-bold' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                <Gift className="w-5 h-5 stroke-[2.2]" />
+                <span>Refer</span>
+              </button>
+
+              {/* 4. Messenger Tab */}
               <button
                 onClick={() => {
                   setActiveTab('MESSENGER');

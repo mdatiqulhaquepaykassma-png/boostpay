@@ -996,6 +996,80 @@ export class BoostPayStore {
     }
   }
 
+  static adminAuthHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    try {
+      const adminRaw = localStorage.getItem('boostpay_admin_session_v1');
+      if (adminRaw) {
+        const sess = JSON.parse(adminRaw);
+        if (sess && sess.token) { headers['Authorization'] = `Bearer ${sess.token}`; return headers; }
+      }
+      // fallback: also try admin store key
+      const alt = localStorage.getItem('bp_admin_token') || localStorage.getItem('admin_token');
+      if (alt) { headers['Authorization'] = `Bearer ${alt}`; return headers; }
+    } catch {}
+    const tok = this.getAuthToken();
+    if (tok) headers['Authorization'] = `Bearer ${tok}`;
+    return headers;
+  }
+  static getAdminSession(): any {
+    try {
+      const raw = localStorage.getItem('boostpay_admin_session_v1');
+      if (raw) return JSON.parse(raw);
+    } catch {}
+    return null;
+  }
+  static setAdminSession(s: any): any {
+    const val = { ...s, isLoggedIn: true };
+    localStorage.setItem('boostpay_admin_session_v1', JSON.stringify(val));
+    return val;
+  }
+  static clearAdminSession(): void {
+    localStorage.removeItem('boostpay_admin_session_v1');
+  }
+  static async probeDatabaseStorage(): Promise<any> {
+    try { const res = await fetch('/api/admin/db/ping', { headers: this.adminAuthHeaders() }); if (res.ok) return await res.json(); } catch {}
+    return null;
+  }
+  static async exportDatabase(): Promise<Blob | null> {
+    try {
+      const res = await fetch('/api/admin/backup/save', { method: 'POST', headers: this.adminAuthHeaders() });
+      if (res.ok) { const data = await res.json(); return new Blob([JSON.stringify(data)], { type: 'application/json' }); }
+      // fallback to /api/db dump
+      const r2 = await fetch('/api/db', { headers: this.adminAuthHeaders() });
+      if (r2.ok) { const j = await r2.json(); return new Blob([JSON.stringify(j,null,2)], { type:'application/json' }); }
+    } catch {}
+    return null;
+  }
+  static async importDatabase(parsed:any): Promise<any> {
+    // not implemented local; admin does via file upload to server separately
+    return { success:false, error:'Use admin panel file import' };
+  }
+  static async getAuditLogs(): Promise<any[]> {
+    try { const res = await fetch('/api/admin/audit-logs', { headers: this.adminAuthHeaders() }); if(res.ok){ const j=await res.json(); return j.logs||[]; } } catch {}
+    return [];
+  }
+  static async adminAdjustBalance(userId:string, type:'CREDIT'|'DEBIT', amount:number, note:string): Promise<any> {
+    try {
+      const ep = type==='CREDIT' ? '/api/admin/adjust/credit' : '/api/admin/adjust/debit';
+      // try generic endpoint
+      let res = await fetch(ep, { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId, amount, note }) });
+      if (!res.ok) {
+        res = await fetch('/api/admin/users/adjust', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId, type, amount, note }) });
+      }
+      if (res.ok) return await res.json();
+      const j = await res.json().catch(()=>({}));
+      return { success:false, error: j.error||'Failed' };
+    } catch(e:any){ return { success:false, error: e.message } }
+  }
+  static async adminToggleFreezeUser(userId:string, isFrozen:boolean, reason:string, adminEmail?:string): Promise<any>{
+    try{
+      const res = await fetch('/api/admin/users/freeze', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId, isFrozen, reason, adminEmail }) });
+      if (res.ok) return await res.json();
+      const j=await res.json().catch(()=>({}));
+      return { success:false, error: j.error||'Failed' };
+    } catch(e:any){ return { success:false, error:e.message } }
+  }
   /** Headers for endpoints that require a signed user token. */
   static authHeaders(): Record<string, string> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -1375,7 +1449,7 @@ export class BoostPayStore {
    * Register a new user with Email and Password
    * Server assigns next sequential numeric ID starting from 1 (1, 2, 3...)
    */
-  static async registerUser(email: string, password?: string): Promise<User> {
+  static async registerUser(email: string, password?: string, referralCode?: string): Promise<User> {
     const cleanEmail = email.trim().toLowerCase();
     const cleanPass = password?.trim() || '';
 
@@ -1387,12 +1461,14 @@ export class BoostPayStore {
     }
 
     try {
+      const cleanRefer = (referralCode||'').trim().replace(/^#/,'').replace(/^REF-?/i,'');
       const res = await fetch('/api/users/register', {
         method: 'POST',
         headers: this.authHeaders(),
         body: JSON.stringify({
           email: cleanEmail,
-          password: cleanPass
+          password: cleanPass,
+          referralCode: cleanRefer || undefined
         })
       });
 
@@ -1747,6 +1823,81 @@ export class BoostPayStore {
         headers: this.authHeaders(),
         body: JSON.stringify({ targetId, blocked })
       });
+      return res.ok;
+    } catch { return false; }
+  }
+
+  // ── Referral system ──
+  static async getReferMy(): Promise<any | null> {
+    try {
+      const res = await fetch('/api/refer/my', { headers: this.authHeaders() });
+      if (res.ok) return await res.json();
+    } catch {}
+    return null;
+  }
+  static async getReferCode(): Promise<{ referCode:string, referLink:string } | null> {
+    try {
+      const res = await fetch('/api/refer/code', { headers: this.authHeaders() });
+      if (res.ok) return await res.json();
+    } catch {}
+    return null;
+  }
+  static async applyReferCode(code: string): Promise<{ success:boolean, error?:string }> {
+    try {
+      const res = await fetch('/api/refer/apply', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ code })
+      });
+      const data = await res.json().catch(()=>({}));
+      if (res.ok) return { success:true };
+      return { success:false, error: data.error||'Failed' };
+    } catch (e:any){ return { success:false, error: e?.message||'Network error' }; }
+  }
+  static async getLeaderboardUserDetail(userId: string): Promise<any | null> {
+    try {
+      const res = await fetch(`/api/leaderboard/user/${encodeURIComponent(userId)}`, { headers: this.authHeaders() });
+      if (res.ok) return await res.json();
+    } catch {}
+    return null;
+  }
+  static async getReferLeader(): Promise<any | null> {
+    try {
+      const res = await fetch('/api/refer/leader', { headers: this.authHeaders() });
+      if (res.ok) return await res.json();
+    } catch {}
+    return null;
+  }
+  // Admin refer/antifraud
+  static async adminGetReferOverview(): Promise<any | null> {
+    try {
+      const res = await fetch('/api/admin/refer/overview', { headers: this.adminAuthHeaders() });
+      if (res.ok) return await res.json();
+    } catch {}
+    return null;
+  }
+  static async adminSetReferConfig(cfg: any): Promise<boolean> {
+    try {
+      const res = await fetch('/api/admin/refer/config', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify(cfg) });
+      return res.ok;
+    } catch { return false; }
+  }
+  static async adminGetAntifraud(): Promise<any | null> {
+    try {
+      const res = await fetch('/api/admin/antifraud/logs', { headers: this.adminAuthHeaders() });
+      if (res.ok) return await res.json();
+    } catch {}
+    return null;
+  }
+  static async adminSetAntifraudConfig(cfg:any): Promise<boolean> {
+    try{
+      const res = await fetch('/api/admin/antifraud/config', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify(cfg) });
+      return res.ok;
+    } catch { return false; }
+  }
+  static async adminAntifraudUnfreeze(userId:string): Promise<boolean>{
+    try{
+      const res = await fetch('/api/admin/antifraud/unfreeze', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId }) });
       return res.ok;
     } catch { return false; }
   }

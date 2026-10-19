@@ -320,7 +320,23 @@ export const FraudView: FC = () => {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const d = await BoostPayStore.adminApi('/api/admin/fraud');
+      let d:any = null;
+      try { d = await BoostPayStore.adminApi('/api/admin/fraud'); } catch {}
+      // also fetch new antifraud logs for 1h temp freezes
+      let af:any = null;
+      try { af = await BoostPayStore.adminApi('/api/admin/antifraud/logs'); } catch {}
+      if (!d) d = { signals:[], frozenUsers:[], fraudLogs:[] };
+      if (af) {
+        // merge antifraudLogs into fraudLogs + expose signals from it
+        const extraLogs = (af.logs||[]).map((l:any)=> ({ id: l.id, action: 'FRAUD_AUTO_FREEZE', details: l.reason + ' — IP ' + (l.ip||'?') + ' — until ' + (l.frozenUntil? new Date(l.frozenUntil).toLocaleString(): '1h'), timestamp: l.timestamp }));
+        d.fraudLogs = [...(extraLogs||[]), ...(d.fraudLogs||[])].slice(0,200);
+        // if d.frozenUsers empty, derive from af logs (recent frozen)
+        if ((!d.frozenUsers||d.frozenUsers.length===0) && af.logs) {
+          d._afConfig = af.config;
+        }
+        d._afConfig = af.config || d._afConfig;
+        d._afLogs = af.logs;
+      }
       setData(d);
       setError('');
     } catch (e: any) {
@@ -422,6 +438,29 @@ export const FraudView: FC = () => {
         )}
       </div>
 
+      {/* Antifraud config */}
+      {data?._afConfig && (
+        <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
+          <h3 className="text-xs font-bold text-white">Antifraud 1h Temp Freeze — Config</h3>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2"><div className="text-[10px] text-zinc-500">Temp Freeze</div><div className="font-mono text-white">{Math.round((data._afConfig.tempFreezeMs||3600000)/60000)} min</div></div>
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2"><div className="text-[10px] text-zinc-500">Max /10min</div><div className="font-mono text-white">{data._afConfig.maxTransfersPer10Min} transfers</div></div>
+            <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2"><div className="text-[10px] text-zinc-500">New acct threshold</div><div className="font-mono text-white">${data._afConfig.newAccountLargeTransferThreshold}</div></div>
+          </div>
+          <p className="text-[11px] text-zinc-500">Auto-freeze locks for 1h (temp), then auto-unfreezes. Multi-IP velocity + new-account large transfer + rapid same-amount detected.</p>
+          {data._afLogs && data._afLogs.length>0 && (
+            <div className="space-y-1 max-h-40 overflow-y-auto">
+              {data._afLogs.slice(0,10).map((l:any)=>(
+                <div key={l.id} className="flex justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono">
+                  <span className="text-rose-300">#{l.userId} — {l.reason}</span>
+                  <span className="text-zinc-500">{new Date(l.timestamp).toLocaleTimeString()}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Fraud audit trail */}
       <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
         <h3 className="text-xs font-bold text-white mb-3">Fraud Audit Trail</h3>
@@ -440,6 +479,94 @@ export const FraudView: FC = () => {
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+};
+
+export const ReferAdminView: FC = () => {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const [form, setForm] = useState<any>({ enabled: true, baseRatePercent: 1, maxRatePercent: 10, dailyTierEnabled: true, commissionOnCompounding: true });
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const d = await BoostPayStore.adminApi('/api/admin/refer/overview');
+      setData(d);
+      if (d?.config) setForm({ enabled: d.config.enabled!==false, baseRatePercent: d.config.baseRatePercent??1, maxRatePercent: d.config.maxRatePercent??10, dailyTierEnabled: d.config.dailyTierEnabled!==false, commissionOnCompounding: d.config.commissionOnCompounding!==false });
+    } catch(e:any){ setErr(e.message); }
+    setLoading(false);
+  };
+  useEffect(()=>{ load(); },[]);
+
+  const save = async () => {
+    setSaving(true); setMsg(''); setErr('');
+    try{
+      await BoostPayStore.adminApi('/api/admin/refer/config', { method:'POST', body: form });
+      setMsg('Referral config saved ✅');
+      await load();
+    }catch(e:any){ setErr(e.message); }
+    setSaving(false);
+  };
+
+  if (loading) return <div className="flex justify-center py-10"><Loader2 className="w-6 h-6 animate-spin text-zinc-500"/></div>;
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-base font-bold text-white flex items-center gap-2"><Users2 className="w-5 h-5 text-amber-400"/> Referral Control Center</h2>
+        <button onClick={load} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-amber-500/40 cursor-pointer flex items-center gap-1"><RefreshCw className="w-3.5 h-3.5"/> Refresh</button>
+      </div>
+      {err && <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4"/>{err}</div>}
+      {msg && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300 flex items-center gap-2"><Check className="w-4 h-4"/>{msg}</div>}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4"><div className="text-[10px] uppercase text-zinc-500 font-semibold">Total Referrals</div><div className="text-xl font-black text-white font-mono">{data?.totalReferrals??0}</div></div>
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4"><div className="text-[10px] uppercase text-zinc-500 font-semibold">Total Commission Paid</div><div className="text-xl font-black text-emerald-400 font-mono">${Number(data?.totalCommissions??0).toFixed(2)}</div></div>
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4"><div className="text-[10px] uppercase text-zinc-500 font-semibold">Active Rate</div><div className="text-xl font-black text-amber-400 font-mono">{form.baseRatePercent}–{form.maxRatePercent}%</div></div>
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4"><div className="text-[10px] uppercase text-zinc-500 font-semibold">Mode</div><div className="text-sm font-bold text-white">{form.enabled? 'Enabled ✅':'Disabled'}</div></div>
+      </div>
+
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+        <h3 className="text-xs font-bold text-white">Referral Settings (1-10% dynamic)</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={form.enabled} onChange={e=> setForm({...form, enabled: e.target.checked})} /> Referral system enabled</label>
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={form.dailyTierEnabled} onChange={e=> setForm({...form, dailyTierEnabled: e.target.checked})} /> Daily tier 1-10% (UTC midnight reset)</label>
+          <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={form.commissionOnCompounding} onChange={e=> setForm({...form, commissionOnCompounding: e.target.checked})} /> Commission on compounding</label>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div><label className="text-[10px] font-mono text-zinc-500">Base Rate % (min)</label><input type="number" step="0.5" value={form.baseRatePercent} onChange={e=> setForm({...form, baseRatePercent: parseFloat(e.target.value)||0})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          <div><label className="text-[10px] font-mono text-zinc-500">Max Rate % (cap)</label><input type="number" step="1" value={form.maxRatePercent} onChange={e=> setForm({...form, maxRatePercent: parseFloat(e.target.value)||10})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+        </div>
+        <p className="text-[11px] text-zinc-500 leading-relaxed">How it works: Each UTC day, count referrals created today per referrer → 1 = 1%, 2 = 2% ... 10+ = 10% (capped by Max). That % is applied to each compounding REWARD of referred users that day.</p>
+        <button onClick={save} disabled={saving} className="rounded-xl bg-amber-500 px-5 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer disabled:opacity-50">{saving?'Saving...':'Save Refer Config'}</button>
+      </div>
+
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+        <h3 className="text-xs font-bold text-white mb-3">Recent Referrals ({(data?.referrals||[]).length})</h3>
+        <div className="space-y-1.5 max-h-64 overflow-y-auto">
+          {(data?.referrals||[]).slice(0,50).map((r:any)=> (
+            <div key={r.id} className="flex justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono">
+              <span className="text-amber-400">#{r.referrerId} → #{r.referredId}</span>
+              <span className="text-zinc-500">{new Date(r.createdAt).toLocaleDateString()} {r.dayKey}</span>
+            </div>
+          ))}
+          {(data?.referrals||[]).length===0 && <p className="text-center text-[11px] text-zinc-500 py-6">No referrals yet.</p>}
+        </div>
+      </div>
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+        <h3 className="text-xs font-bold text-white mb-3">Recent Commissions</h3>
+        <div className="space-y-1.5 max-h-64 overflow-y-auto">
+          {(data?.commissions||[]).slice(0,50).map((c:any)=>(
+            <div key={c.id} className="flex justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono">
+              <span className="text-emerald-400">+${Number(c.amount).toFixed(4)} ({c.rate}% from #{c.referredId}→#{c.referrerId})</span>
+              <span className="text-zinc-500">{new Date(c.timestamp).toLocaleDateString()}</span>
+            </div>
+          ))}
+          {(data?.commissions||[]).length===0 && <p className="text-center text-[11px] text-zinc-500 py-6">No commissions yet.</p>}
+        </div>
       </div>
     </div>
   );

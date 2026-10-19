@@ -44,7 +44,7 @@ import {
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { CallManager, startCallTo } from './CallOverlay';
-import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, DatabaseBrowser } from './AdminExtraViews';
+import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, DatabaseBrowser, ReferAdminView } from './AdminExtraViews';
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
 
@@ -88,7 +88,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // 2. Admin Portal Views
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS'>('OVERVIEW');
 
   // 3. Database Storage & Diagnostics State
   const [storageProbe, setStorageProbe] = useState<any>(null);
@@ -1013,6 +1013,18 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           </button>
 
           <button
+            onClick={() => setActiveTab('REFER')}
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+              activeTab === 'REFER'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            <span>Referral</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('BROADCAST')}
             className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
               activeTab === 'BROADCAST'
@@ -1082,6 +1094,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {activeTab === 'ANALYTICS' && <AnalyticsDashboard />}
         {activeTab === 'BROADCAST' && <BroadcastView />}
         {activeTab === 'FRAUD' && <FraudView />}
+        {activeTab === 'REFER' && <ReferAdminView />}
         {activeTab === 'ADMINS' && (
           <AdminAccountsView
             myEmail={(adminSession && adminSession.email) || ''}

@@ -20,6 +20,16 @@ import { BoostPayStore, copyToClipboard } from '../services/store';
 import { User } from '../types';
 import { formatPrecisionAmount } from '../utils/format';
 
+function formatDuration(ms:number): string {
+  const totalSecs = Math.max(0, Math.floor(ms/1000));
+  const h=Math.floor(totalSecs/3600);
+  const m=Math.floor((totalSecs%3600)/60);
+  const sec=totalSecs%60;
+  if(h>0) return `${h}h ${m}m ${sec}s`;
+  if(m>0) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
 interface Props {
   currentUser?: User;
   currentUserId?: string;
@@ -37,11 +47,12 @@ interface UserRowProps {
   getRankBadge: (rank: number) => React.ReactNode;
 }
 
-const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, copyId, copiedId, getRankBadge }: UserRowProps) => {
+const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, copyId, copiedId, getRankBadge, onOpenDetail }: UserRowProps & { onOpenDetail: (id:string)=>void }) => {
 
   return (
     <div
-      className={`flex items-center justify-between rounded-2xl border p-3.5 transition-all duration-300 ease-in-out ${
+      onClick={()=> onOpenDetail(u.id)}
+      className={`flex items-center justify-between rounded-2xl border p-3.5 transition-all duration-300 ease-in-out cursor-pointer ${
         isMe
           ? 'border-amber-500/40 bg-amber-500/5 shadow-lg shadow-amber-500/5'
           : 'border-zinc-800/80 bg-zinc-950/60 hover:border-zinc-700 hover:bg-zinc-950'
@@ -79,7 +90,7 @@ const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, c
               return null;
             })()}
             <button
-              onClick={() => copyId(u.id)}
+              onClick={(e)=> { e.stopPropagation(); copyId(u.id); }}
               className="text-zinc-500 hover:text-zinc-300 p-0.5 transition cursor-pointer"
               title="Copy User ID"
             >
@@ -89,6 +100,14 @@ const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, c
                 <Copy className="w-3 h-3" />
               )}
             </button>
+          </div>
+          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+            <span className="text-[10px] text-zinc-500 font-mono truncate">
+              Cycle: {formatDuration((u as any)._cycleDurationMs || 60000)}
+            </span>
+            <span className="text-[10px] bg-zinc-800 text-zinc-400 px-1.5 py-0.2 rounded-full font-mono">
+              Refer: {(u as any)._referralsCount||0} • {(u as any)._referRate||0}%
+            </span>
           </div>
           <span className="text-[10px] text-zinc-500 font-mono sm:hidden block truncate">
             Profit: +${formatPrecisionAmount(u.lifetimeProfit, 8)}
@@ -116,7 +135,7 @@ const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, c
             </span>
           ) : (
             <button
-              onClick={() => onSelectPeerForChat(u.id)}
+              onClick={(e)=> { e.stopPropagation(); onSelectPeerForChat(u.id); }}
               className="flex items-center gap-1 rounded-xl bg-zinc-800 hover:bg-amber-500 hover:text-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 transition font-medium active:scale-95 shadow-sm cursor-pointer"
               title={`Message User #${u.id}`}
             >
@@ -141,6 +160,8 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [listPage, setListPage] = useState(0); // sliding window of 10 rows
+  const [selectedDetail, setSelectedDetail] = useState<any | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   const prevRanksRef = useRef<Map<string, number>>(new Map());
   const [rankChanges, setRankChanges] = useState<Map<string, number>>(new Map());
@@ -161,11 +182,16 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
             startedAt: 0,
             pausedAt: 0,
             elapsedMs: 0,
-            targetDurationMs: 60000,
+            targetDurationMs: Number(u.cycleDurationMs || 60000),
             startingBalance: u.balance,
             accumulatedYield: 0
-          }
-        }));
+          },
+          // attach referral meta for UI
+          _cycleDurationMs: Number(u.cycleDurationMs || 60000),
+          _referralsCount: Number(u.referralsCount || 0),
+          _referRate: Number(u.referRate || 0),
+          _referLifetime: Number(u.referLifetime || 0)
+        } as any));
 
         const newChanges = new Map<string, number>();
         sorted.forEach((u, newIdx) => {
@@ -419,6 +445,13 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
                 copyId={copyId}
                 copiedId={copiedId}
                 getRankBadge={getRankBadge}
+                onOpenDetail={async (id:string)=>{
+                  setDetailLoading(true);
+                  setSelectedDetail({ id, ...(users.find(x=> x.id===id) as any) });
+                  const d = await BoostPayStore.getLeaderboardUserDetail(id);
+                  if (d) setSelectedDetail(d);
+                  setDetailLoading(false);
+                }}
               />
             ))
           ) : (
@@ -439,6 +472,59 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
             </div>
           )}
         </div>
+
+        {/* Detail modal for refer + cycle */}
+        {selectedDetail && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-md" onClick={()=> setSelectedDetail(null)}>
+            <div onClick={(e)=> e.stopPropagation()} className="w-full max-w-md rounded-3xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl space-y-3 max-h-[80vh] overflow-y-auto">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-white">User #{selectedDetail.user?.id || selectedDetail.id} — Full Details</h3>
+                <button onClick={()=> setSelectedDetail(null)} className="rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 text-zinc-400 hover:text-white cursor-pointer"><X className="w-4 h-4"/></button>
+              </div>
+              {detailLoading ? <p className="text-xs text-zinc-500">Loading...</p> : (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Cycle Duration</div>
+                      <div className="font-mono text-sm font-bold text-amber-400">{formatDuration(Number(selectedDetail.user?.cycleDurationMs || selectedDetail.cycleDurationMs || 0))}</div>
+                    </div>
+                    <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 p-3">
+                      <div className="text-[10px] uppercase tracking-wider text-amber-400 font-semibold">Refer Count</div>
+                      <div className="font-mono text-sm font-bold text-white">{selectedDetail.referralsCount ?? selectedDetail._referralsCount ?? 0} users</div>
+                    </div>
+                    <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-3">
+                      <div className="text-[10px] uppercase tracking-wider text-emerald-400 font-semibold">Current Rate</div>
+                      <div className="font-mono text-sm font-bold text-emerald-400">{selectedDetail.rate ?? selectedDetail._referRate ?? 0}% (1-10% daily)</div>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3">
+                      <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Lifetime Referral Earned</div>
+                      <div className="font-mono text-sm font-bold text-white">+${formatPrecisionAmount(Number(selectedDetail.lifetime ?? selectedDetail._referLifetime ?? 0),8)}</div>
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
+                    <div className="text-[11px] font-semibold text-zinc-400">Balance & Profit</div>
+                    <div className="font-mono text-xs text-white">Balance: ${formatPrecisionAmount(Number(selectedDetail.user?.balance ?? 0),8)} • Profit: +${formatPrecisionAmount(Number(selectedDetail.user?.lifetimeProfit ?? 0),8)}</div>
+                  </div>
+                  {selectedDetail.recentCommissions && selectedDetail.recentCommissions.length>0 && (
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] font-bold text-zinc-300">Recent refer earnings</div>
+                      {selectedDetail.recentCommissions.slice(0,5).map((c:any)=>(
+                        <div key={c.id} className="flex justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono">
+                          <span className="text-emerald-400">+${formatPrecisionAmount(c.amount,8)}</span>
+                          <span className="text-zinc-500">{c.rate}% from #{c.referredId}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {selectedDetail.referrals && (
+                    <div className="text-[10px] text-zinc-500">Daily joins this UTC cycle: {selectedDetail.dailyCount ?? '-'} — tier auto 1-10%.</div>
+                  )}
+                  <button onClick={()=> { setSelectedDetail(null); if (selectedDetail.user?.id) onSelectPeerForChat(String(selectedDetail.user.id)); }} className="w-full rounded-xl bg-amber-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer">Chat with #{selectedDetail.user?.id || selectedDetail.id}</button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Sliding-window paging: Load More shows the NEXT 10 (current 10 hide) */}
         {filteredUsers.length > PAGE_SIZE && (

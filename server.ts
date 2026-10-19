@@ -103,6 +103,9 @@ const INITIAL_DB = {
   conversations: [],
   messages: [],
   blocks: {},
+  referrals: [],
+  referCommissions: [],
+  antifraudLogs: [],
   notifications: [
     {
       id: "NOTIF-99014120",
@@ -133,6 +136,22 @@ const INITIAL_DB = {
       dockerHostname: "boostpay-eoqehk",
       isConnected: true,
       lastPingMs: 42
+    },
+    referral: {
+      enabled: true,
+      baseRatePercent: 1, // default 1%
+      maxRatePercent: 10,
+      dailyTierEnabled: true, // 1 refer=1% ... 10+=10% per 24h UTC cycle
+      commissionOnCompounding: true
+    },
+    antifraud: {
+      enabled: true,
+      tempFreezeMs: 3600000, // 1h temporary freeze
+      maxTransfersPer10Min: 5,
+      maxDistinctSendersPerIp: 3,
+      maxVolumePer10Min: 500,
+      newAccountLargeTransferThreshold: 100, // new account <24h + transfer >100 => flag
+      velocityEnabled: true
     }
   },
   auditLogs: [
@@ -159,6 +178,43 @@ function recordAuditLog(db: any, action: string, adminEmail: string, details: st
   db.auditLogs.unshift(log);
   if (db.auditLogs.length > 1000) db.auditLogs.pop();
   return log;
+}
+
+// ---------------------------------------------------------------------------
+// Referral helpers — dynamic 1-10% daily tier (UTC 00:00 cycle)
+// ---------------------------------------------------------------------------
+function getDayKey(ts?: number): string {
+  const d = ts ? new Date(ts) : new Date();
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth()+1).padStart(2,'0');
+  const dy = String(d.getUTCDate()).padStart(2,'0');
+  return `${y}-${m}-${dy}`;
+}
+function getReferDailyCount(db: any, referrerId: string, dayKey?: string): number {
+  const k = dayKey || getDayKey(Date.now());
+  return (db.referrals || []).filter((r: any) => String(r.referrerId)===String(referrerId) && (r.dayKey||getDayKey(r.createdAt))===k).length;
+}
+function getReferTierRate(dailyCount: number, cfg: any): number {
+  if (dailyCount <= 0) return Number(cfg?.referral?.baseRatePercent ?? 1);
+  const v = Math.min(10, Math.max(1, dailyCount));
+  // clamp to maxRate if configured lower
+  const cap = Number(cfg?.referral?.maxRatePercent ?? 10);
+  return Math.min(v, cap);
+}
+function getReferCommissionRate(db: any, referrerId: string, now?: number): number {
+  const cfg = db.config || INITIAL_DB.config;
+  if (!cfg?.referral?.enabled) return 0;
+  if (cfg.referral.dailyTierEnabled) {
+    const cnt = getReferDailyCount(db, referrerId, getDayKey(now));
+    return getReferTierRate(cnt, cfg);
+  }
+  return Number(cfg.referral.baseRatePercent ?? 1);
+}
+function getReferLifetimeCommission(db: any, referrerId: string): number {
+  return (db.referCommissions || []).filter((c:any)=>String(c.referrerId)===String(referrerId)).reduce((acc:number,c:any)=>acc+(Number(c.amount)||0),0);
+}
+function getReferralsCount(db: any, referrerId: string): number {
+  return (db.referrals || []).filter((r:any)=>String(r.referrerId)===String(referrerId)).length;
 }
 
 const LEGACY_USER_ID_MAP: Record<string, string> = {
@@ -206,6 +262,13 @@ function readDb() {
     if (!parsed.conversations) parsed.conversations = [];
     if (!parsed.messages) parsed.messages = [];
     if (!parsed.blocks) parsed.blocks = {};
+    if (!Array.isArray(parsed.referrals)) parsed.referrals = [];
+    if (!Array.isArray(parsed.referCommissions)) parsed.referCommissions = [];
+    if (!Array.isArray(parsed.antifraudLogs)) parsed.antifraudLogs = [];
+    // ensure config.referral + antifraud defaults
+    if (!parsed.config) parsed.config = INITIAL_DB.config;
+    if (!parsed.config.referral) parsed.config.referral = (INITIAL_DB as any).config.referral;
+    if (!parsed.config.antifraud) parsed.config.antifraud = (INITIAL_DB as any).config.antifraud;
     if (!parsed.notifications) parsed.notifications = INITIAL_DB.notifications || [];
     if (!parsed.config) parsed.config = INITIAL_DB.config;
     if (!parsed.auditLogs) parsed.auditLogs = INITIAL_DB.auditLogs || [];
@@ -223,6 +286,12 @@ function readDb() {
       }
     }
 
+    // backfill referCode for old users
+    if (Array.isArray(parsed.users)) {
+      for (const u of (parsed.users as any[])) {
+        if (!(u as any).referCode) (u as any).referCode = String(u.id);
+      }
+    }
     if (migrated) {
       if (Array.isArray(parsed.transactions)) {
         for (const t of parsed.transactions) {
@@ -891,6 +960,17 @@ setInterval(() => {
     const ratePerMs = (minuteRate / 100) / 60000;
 
     for (const user of db.users) {
+      // Auto-unfreeze 1h temp locks + freeze pause
+      if (user.isFrozen && (user as any).isTempFreeze && (user as any).frozenUntil && now >= (user as any).frozenUntil) {
+        user.isFrozen = false;
+        (user as any).isTempFreeze = false;
+        (user as any).frozenUntil = undefined;
+        user.frozenReason = undefined;
+        updated = true;
+        recordAuditLog(db, 'FRAUD_AUTO_UNFREEZE', 'SYSTEM', `Auto-unfroze User #${user.id} after 1h temp lock expired`, user.id);
+        pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: user.id, type: 'SECURITY_ALERT', title: 'BOOSTPAY-SECURITY', message: 'Your temporary 1-hour security freeze has been lifted. You may now transact and resume compounding.', timestamp: now, isRead: false });
+        broadcastUserUpdate(db, user.id);
+      }
       // Frozen accounts: compounding is paused (can never progress while frozen)
       if (user.isFrozen && user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
         user.boostState.isPaused = true;
@@ -943,6 +1023,34 @@ setInterval(() => {
               balanceAfter: user.balance
             }
           });
+          // ---- Referral commission on compounding (1-10% dynamic) ------------
+          try {
+            const refEntry = (db.referrals || []).find((r:any)=> String(r.referredId)===String(user.id));
+            if (refEntry) {
+              const referrerId = String(refEntry.referrerId);
+              const referrer = (db.users || []).find((u:any)=> String(u.id)===referrerId);
+              const rcfg: any = (db.config || INITIAL_DB.config).referral;
+              if (referrer && rcfg && rcfg.enabled !== false && rcfg.commissionOnCompounding !== false && finalYield > 0) {
+                const rate = getReferCommissionRate(db, referrerId, now);
+                if (rate > 0) {
+                  const commission = finalYield * (rate/100);
+                  if (commission > 0 && isFinite(commission)) {
+                    referrer.balance = (Number(referrer.balance)||0) + commission;
+                    referrer.lifetimeProfit = (Number(referrer.lifetimeProfit)||0) + commission;
+                    // update referrer boost duration based on new balance
+                    if (referrer.boostState) referrer.boostState.targetDurationMs = calculateDynamicDuration(referrer.balance, db.users, db.config);
+                    const commTx = { id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000), userId: referrerId, type: 'REFERRAL_COMMISSION', amount: commission, timestamp: now, notes: `Referral commission ${rate}% on User #${user.id} compounding $${formatAmount8(finalYield)}`, metadata: { referredId: user.id, sourceTxId: rewardTx.id, rate } } as any;
+                    db.transactions.unshift(commTx);
+                    if (!db.referCommissions) db.referCommissions = [];
+                    db.referCommissions.unshift({ id: 'RC-'+Math.floor(10000000+Math.random()*90000000), referrerId, referredId: String(user.id), amount: commission, rate, sourceTxId: rewardTx.id, timestamp: now, dayKey: getDayKey(now) });
+                    if (db.referCommissions.length>5000) db.referCommissions.pop();
+                    pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: referrerId, type: 'REFERRAL_COMMISSION', title: 'BOOSTPAY-REFERRAL', message: `REFERRAL EARNED: +$${formatAmount8(commission)} (${rate}% of User #${user.id} yield $${formatAmount8(finalYield)}). Balance: $${formatAmount8(referrer.balance)}.`, amount: commission, referenceId: commTx.id, timestamp: now, isRead: false, metadata: { referredId: user.id, rate, sourceYield: finalYield, balanceAfter: referrer.balance } } as any);
+                    broadcastUserUpdate(db, referrerId);
+                  }
+                }
+              }
+            }
+          } catch (refErr) { console.error('Refer commission error:', refErr); }
 
           // Calculate new duration based on latest balance (for the NEXT manual cycle)
           const nextDuration = calculateDynamicDuration(user.balance, db.users, config);
@@ -1180,6 +1288,25 @@ async function startServer() {
         return res.status(400).json({ error: 'Password must be at least 4 characters long.' });
       }
 
+      // Referral code handling (optional)
+      let referralCodeRaw = (req.body && (req.body as any).referralCode) ? String((req.body as any).referralCode).trim() : '';
+      if (!referralCodeRaw && (req.body as any).referrerId) referralCodeRaw = String((req.body as any).referrerId).trim();
+      // strip leading # or REF- prefix
+      let referrerIdClean = referralCodeRaw.replace(/^#/,'').replace(/^REF-?/i,'').trim();
+      let referrerForNew: any = null;
+      if (referralCodeRaw) {
+        referrerForNew = db.users.find((u:any)=> String(u.id)===referrerIdClean);
+        // also allow code that equals id with case-insensitive email alias? just id match
+        if (!referrerForNew) {
+          // fail silently? But inform user
+          // We'll allow signup even if invalid code, just record no referral
+          referrerForNew = null;
+        }
+      }
+      if (referrerForNew && String(referrerForNew.id) === String(referrerForNew.id)) {
+        // self-refer check: will compare after id assigned
+      }
+
       const userId = getNextSequentialUserId(db.users);
 
       const initialDuration = calculateDynamicDuration(0, db.users, db.config);
@@ -1204,10 +1331,27 @@ async function startServer() {
         }
       };
 
+      // create referral link if valid and not self
+      if (referrerForNew && String(referrerForNew.id) !== String(userId)) {
+        const cfgRef: any = (db.config || INITIAL_DB.config).referral;
+        if (cfgRef && cfgRef.enabled !== false) {
+          if (!db.referrals) db.referrals = [];
+          const dayK = getDayKey(Date.now());
+          db.referrals.unshift({ id: 'REF-'+Math.floor(10000000+Math.random()*90000000), referrerId: String(referrerForNew.id), referredId: String(userId), createdAt: Date.now(), dayKey: dayK });
+          // attach referredBy to new user for quick lookup
+          (newUser as any).referredBy = String(referrerForNew.id);
+          (newUser as any).referCode = String(userId);
+          recordAuditLog(db, 'REFERRAL_CREATED', referrerForNew.id, `User #${userId} referred by #${referrerForNew.id}`, userId);
+          pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: String(referrerForNew.id), type: 'REFERRAL_JOINED', title: 'BOOSTPAY-REFERRAL', message: `New referral joined: User #${userId} used your code. You now have ${getReferralsCount(db, String(referrerForNew.id))} referrals — current rate ${getReferCommissionRate(db, String(referrerForNew.id))}% (1-10% daily).`, timestamp: Date.now(), isRead: false, metadata: { referredId: userId } } as any);
+        }
+      }
+      // ensure every user has a referCode field
+      if (!(newUser as any).referCode) (newUser as any).referCode = String(userId);
+
       db.users.push(newUser);
       const sess3 = createSession(db, userId, 'USER', clientIp(req), String(req.headers['user-agent'] || ''));
       writeDb(db);
-      res.json({ success: true, user: publicUser(newUser), token: issueToken(userId, 'USER', sess3.id), sessionId: sess3.id });
+      res.json({ success: true, user: { ...publicUser(newUser), referCode: String(userId), referredBy: (newUser as any).referredBy || undefined }, token: issueToken(userId, 'USER', sess3.id), sessionId: sess3.id });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -2574,47 +2718,63 @@ async function startServer() {
         recipient.boostState.targetDurationMs = calculateDynamicDuration(recipient.balance, db.users, db.config);
       }
 
-      // ---- Automated Anti-Fraud Trigger -------------------------------------
-      // Same IP driving unusual transfer activity across multiple accounts
-      // (or very high velocity) freezes the involved senders automatically.
+      // ---- Automated Anti-Fraud Trigger (stronger + 1h temp freeze) -----------------
       try {
-        const WINDOW_MS = 10 * 60 * 1000;
-        const nowTs = Date.now();
-        const recent = db.transactions.filter((t: any) =>
-          t.type === 'TRANSFER_SENT' && t.ip === senderIp && nowTs - t.timestamp < WINDOW_MS
-        );
-        const distinctSenders = new Set<string>(recent.map((t: any) => String(t.userId)));
-        const volume = recent.reduce((acc: number, t: any) => acc + (Number(t.amount) || 0), 0);
-        const suspicious = (distinctSenders.size >= 3 && recent.length >= 3) || (distinctSenders.size >= 2 && volume >= 500);
-        if (suspicious) {
-          const frozen: string[] = [];
-          for (const uid of distinctSenders) {
-            const u = (db.users || []).find((x: any) => String(x.id) === uid);
-            if (u && !u.isFrozen) {
-              u.isFrozen = true;
-              u.frozenReason = `Automated anti-fraud: unusual multi-account transfer velocity from one device/IP (${senderIp}).`;
-              frozen.push(uid);
-              pushNotification(db, {
-                id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
-                userId: uid,
-                type: 'SECURITY_ALERT',
-                title: 'BOOSTPAY-SECURITY',
-                message: `SECURITY FREEZE: Your account was automatically frozen due to unusual transfer activity from your device/IP. If this was you, contact support from the in-app messenger.`,
-                timestamp: nowTs,
-                isRead: false
-              });
+        const dbCfg: any = db.config || INITIAL_DB.config;
+        const afCfg = dbCfg.antifraud || (INITIAL_DB as any).config.antifraud;
+        if (afCfg && afCfg.enabled !== false) {
+          const WINDOW_MS = 10 * 60 * 1000;
+          const nowTs = Date.now();
+          const recent = db.transactions.filter((t: any) =>
+            t.type === 'TRANSFER_SENT' && t.ip === senderIp && nowTs - t.timestamp < WINDOW_MS
+          );
+          const recentBySender = recent.filter((t:any)=> String(t.userId)===String(sender.id));
+          const distinctSenders = new Set<string>(recent.map((t: any) => String(t.userId)));
+          const volume = recent.reduce((acc: number, t: any) => acc + (Number(t.amount) || 0), 0);
+          // Stronger rules:
+          const isNewAccount = (Date.now() - (sender.createdAt||0)) < 24*3600000;
+          const largeFromNew = isNewAccount && numAmount >= (afCfg.newAccountLargeTransferThreshold||100);
+          const velocityPerUser = recentBySender.length >= (afCfg.maxTransfersPer10Min||5);
+          const sameIpMulti = (distinctSenders.size >= (afCfg.maxDistinctSendersPerIp||3) && recent.length >= 3) || (distinctSenders.size >= 2 && volume >= (afCfg.maxVolumePer10Min||500));
+          const rapidSameAmount = recentBySender.filter((t:any)=> Number(t.amount)===numAmount).length >= 3;
+          const suspicious = largeFromNew || velocityPerUser || sameIpMulti || rapidSameAmount;
+          let reason = '';
+          if (largeFromNew) reason = `Large transfer $${numAmount.toFixed(2)} from new account (<24h)`;
+          else if (velocityPerUser) reason = `High velocity: ${recentBySender.length} transfers in 10 min`;
+          else if (sameIpMulti) reason = `Multi-account activity from same IP ${senderIp} — ${distinctSenders.size} users, $${volume.toFixed(2)}`;
+          else if (rapidSameAmount) reason = `Repeated same amount $${numAmount.toFixed(2)} x${recentBySender.length}`;
+          if (suspicious) {
+            const targets = velocityPerUser || largeFromNew || rapidSameAmount ? [String(sender.id)] : Array.from(distinctSenders);
+            const frozen: string[] = [];
+            const tempMs = Number(afCfg.tempFreezeMs||3600000);
+            for (const uid of targets) {
+              const u = (db.users || []).find((x: any) => String(x.id) === uid);
+              if (u && !u.isFrozen) {
+                u.isFrozen = true;
+                u.frozenAt = nowTs;
+                u.frozenUntil = nowTs + tempMs;
+                u.isTempFreeze = true;
+                u.frozenReason = `Auto anti-fraud 1h freeze: ${reason}`;
+                frozen.push(uid);
+                // antifraud log entry
+                if (!db.antifraudLogs) db.antifraudLogs = [];
+                db.antifraudLogs.unshift({ id:'AFL-'+Math.floor(10000000+Math.random()*90000000), userId: uid, ip: senderIp, reason, timestamp: nowTs, frozenUntil: u.frozenUntil, auto:true });
+                if (db.antifraudLogs.length>1000) db.antifraudLogs.pop();
+                pushNotification(db, {
+                  id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+                  userId: uid,
+                  type: 'SECURITY_ALERT',
+                  title: 'BOOSTPAY-SECURITY',
+                  message: `SECURITY TEMP FREEZE (1h): ${reason}. Your account is temporarily locked for 60 minutes for security review. If this was you, contact support.`,
+                  timestamp: nowTs,
+                  isRead: false
+                });
+              }
             }
-          }
-          if (frozen.length) {
-            recordAuditLog(db, 'FRAUD_AUTO_FREEZE', 'SYSTEM', `Anti-fraud auto-froze ${frozen.join(', ')} — IP ${senderIp}, ${recent.length} transfers, $${volume.toFixed(2)} in 10 min`);
-            pushToAdmins({
-              type: 'fraud_alert',
-              ip: senderIp,
-              frozen,
-              transfers: recent.length,
-              volume,
-              timestamp: nowTs
-            });
+            if (frozen.length) {
+              recordAuditLog(db, 'FRAUD_AUTO_FREEZE', 'SYSTEM', `Anti-fraud 1h auto-froze ${frozen.join(', ')} — IP ${senderIp}, ${recent.length} transfers, $${volume.toFixed(2)} in 10 min — ${reason}`);
+              pushToAdmins({ type: 'fraud_alert', ip: senderIp, frozen, transfers: recent.length, volume, reason, timestamp: nowTs });
+            }
           }
         }
       } catch (fraudErr) {
@@ -3848,7 +4008,11 @@ async function startServer() {
         lifetimeProfit: Number(u.lifetimeProfit) || 0,
         createdAt: u.createdAt || 0,
         boostActive: !!(u.boostState && u.boostState.isActive && !u.boostState.isPaused),
-        isFrozen: !!u.isFrozen
+        isFrozen: !!u.isFrozen,
+        cycleDurationMs: Number((u.boostState && u.boostState.targetDurationMs) || calculateDynamicDuration(u.balance, db.users, db.config) || 60000),
+        referralsCount: getReferralsCount(db, String(u.id)),
+        referRate: getReferCommissionRate(db, String(u.id)),
+        referLifetime: getReferLifetimeCommission(db, String(u.id))
       }))
       .sort((a: any, b: any) => b.balance - a.balance || b.lifetimeProfit - a.lifetimeProfit);
     const meIdx = rows.findIndex((r: any) => r.id === me);
@@ -3857,6 +4021,160 @@ async function startServer() {
       me: meIdx >= 0 ? { ...rows[meIdx], rank: meIdx + 1 } : null,
       total: rows.length
     });
+  });
+  // Detailed per-user referral + cycle info for leaderboard modal
+  app.get('/api/leaderboard/user/:id', requireUserOrAdmin, (req:any,res)=>{
+    const db = readDb();
+    const uid = String(req.params.id||'');
+    const u = (db.users||[]).find((x:any)=> String(x.id)===uid);
+    if (!u) return res.status(404).json({error:'User not found'});
+    const referrals = (db.referrals||[]).filter((r:any)=> String(r.referrerId)===uid);
+    const commissions = (db.referCommissions||[]).filter((c:any)=> String(c.referrerId)===uid);
+    const lifetime = commissions.reduce((a:number,c:any)=> a+(Number(c.amount)||0),0);
+    const dailyCount = getReferDailyCount(db, uid);
+    const rate = getReferCommissionRate(db, uid);
+    res.json({
+      user: { id: String(u.id), balance: Number(u.balance)||0, lifetimeProfit: Number(u.lifetimeProfit)||0, cycleDurationMs: Number((u.boostState&&u.boostState.targetDurationMs)||calculateDynamicDuration(u.balance, db.users, db.config)), boostActive: !!(u.boostState&&u.boostState.isActive&&!u.boostState.isPaused), isFrozen: !!u.isFrozen },
+      referralsCount: referrals.length,
+      dailyCount,
+      rate,
+      lifetime,
+      referrals: referrals.slice(0,100).map((r:any)=> ({ referredId: r.referredId, createdAt: r.createdAt, dayKey: r.dayKey })),
+      recentCommissions: commissions.slice(0,50)
+    });
+  });
+
+
+  // ================= Referral endpoints =================
+  app.get('/api/refer/my', requireUser, (req:any,res)=>{
+    const db=readDb(); const uid=String(req.authUserId||'');
+    const me=(db.users||[]).find((u:any)=> String(u.id)===uid);
+    if (!me) return res.status(404).json({error:'User not found'});
+    const myReferrals=(db.referrals||[]).filter((r:any)=> String(r.referrerId)===uid);
+    const myCommissions=(db.referCommissions||[]).filter((c:any)=> String(c.referrerId)===uid);
+    const rate=getReferCommissionRate(db, uid);
+    const dailyCount=getReferDailyCount(db, uid);
+    const lifetime=myCommissions.reduce((a:number,c:any)=> a+(Number(c.amount)||0),0);
+    // Build live snapshots for each referred user (balance + boost + cycle)
+    const referredDetails = myReferrals.map((r:any)=>{
+      const ru=(db.users||[]).find((u:any)=> String(u.id)===String(r.referredId));
+      if (!ru) return { referredId: String(r.referredId), createdAt: r.createdAt, missing:true };
+      const commissionsForThis = myCommissions.filter((c:any)=> String(c.referredId)===String(r.referredId));
+      const earned = commissionsForThis.reduce((a:number,c:any)=> a+(Number(c.amount)||0),0);
+      return {
+        referredId: String(ru.id),
+        balance: Number(ru.balance)||0,
+        lifetimeProfit: Number(ru.lifetimeProfit)||0,
+        boostActive: !!(ru.boostState && ru.boostState.isActive && !ru.boostState.isPaused),
+        boostPaused: !!(ru.boostState && ru.boostState.isActive && ru.boostState.isPaused),
+        cycleDurationMs: Number((ru.boostState && ru.boostState.targetDurationMs) || calculateDynamicDuration(ru.balance, db.users, db.config)),
+        elapsedMs: Number((ru.boostState && (ru.boostState.elapsedMs||0)) || 0),
+        createdAt: r.createdAt,
+        dayKey: r.dayKey,
+        earnedFromThis: earned,
+        totalCommissionsCount: commissionsForThis.length
+      };
+    });
+    res.json({
+      referCode: String(uid),
+      referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${uid}`,
+      referralsCount: myReferrals.length,
+      dailyCount,
+      rate,
+      lifetime,
+      referrals: referredDetails,
+      recentCommissions: myCommissions.slice(0,50)
+    });
+  });
+  app.get('/api/refer/code', requireUser, (req:any,res)=>{
+    const uid=String(req.authUserId||'');
+    res.json({ referCode: uid, referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${uid}` });
+  });
+  app.post('/api/refer/apply', requireUser, (req:any,res)=>{
+    const db=readDb(); const uid=String(req.authUserId||'');
+    const codeRaw=String((req.body&&req.body.code)||'').trim().replace(/^#/,'').replace(/^REF-?/i,'');
+    if (!codeRaw) return res.status(400).json({error:'Refer code required'});
+    if (codeRaw===uid) return res.status(400).json({error:'You cannot refer yourself'});
+    const me=(db.users||[]).find((u:any)=> String(u.id)===uid);
+    if (!me) return res.status(404).json({error:'User not found'});
+    if ((me as any).referredBy) return res.status(400).json({error:'You already have a referrer'});
+    const referrer=(db.users||[]).find((u:any)=> String(u.id)===codeRaw);
+    if (!referrer) return res.status(404).json({error:'Invalid refer code — user not found'});
+    const cfgRef:any=(db.config||INITIAL_DB.config).referral;
+    if (!cfgRef|| cfgRef.enabled===false) return res.status(403).json({error:'Referral system is disabled by admin'});
+    if ((db.referrals||[]).some((r:any)=> String(r.referredId)===uid)) return res.status(400).json({error:'Already referred'});
+    if (!db.referrals) db.referrals=[];
+    const dayK=getDayKey(Date.now());
+    db.referrals.unshift({ id:'REF-'+Math.floor(10000000+Math.random()*90000000), referrerId: String(referrer.id), referredId: uid, createdAt: Date.now(), dayKey: dayK });
+    (me as any).referredBy = String(referrer.id);
+    if (!(me as any).referCode) (me as any).referCode = uid;
+    recordAuditLog(db,'REFERRAL_APPLIED', uid, `User #${uid} applied refer code #${referrer.id}`, uid);
+    pushNotification(db, { id:'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: String(referrer.id), type:'REFERRAL_JOINED', title:'BOOSTPAY-REFERRAL', message:`New referral: User #${uid} joined via your code. Total referrals: ${getReferralsCount(db, String(referrer.id))} — rate ${getReferCommissionRate(db, String(referrer.id))}%`, timestamp: Date.now(), isRead:false } as any);
+    writeDb(db);
+    broadcastUserUpdate(db, uid);
+    res.json({success:true, referredBy: String(referrer.id) });
+  });
+  app.get('/api/refer/leader', requireUserOrAdmin, (req:any,res)=>{
+    const db=readDb();
+    // rank referrers by daily count today
+    const dayK=getDayKey(Date.now());
+    const map = new Map<string, number>();
+    for (const r of (db.referrals||[])) {
+      const k=(r.dayKey||getDayKey(r.createdAt));
+      if (k===dayK) {
+        map.set(String(r.referrerId), (map.get(String(r.referrerId))||0)+1);
+      }
+    }
+    const rows = Array.from(map.entries()).map(([id,cnt])=> ({ referrerId:id, dailyCount:cnt, rate: getReferTierRate(cnt, db.config), lifetime: getReferLifetimeCommission(db,id) })).sort((a,b)=> b.dailyCount-a.dailyCount).slice(0,50);
+    res.json({ dayKey: dayK, rows });
+  });
+
+  // ============== Admin refer + antifraud controls ==============
+  app.get('/api/admin/refer/overview', requireAdmin, (req:any,res)=>{
+    const db=readDb();
+    const totalReferrals=(db.referrals||[]).length;
+    const totalCommissions=(db.referCommissions||[]).reduce((a:number,c:any)=> a+(Number(c.amount)||0),0);
+    res.json({ totalReferrals, totalCommissions, referrals: (db.referrals||[]).slice(0,500), commissions: (db.referCommissions||[]).slice(0,500), config: (db.config||INITIAL_DB.config).referral });
+  });
+  app.post('/api/admin/refer/config', requireSuperAdmin, (req:any,res)=>{
+    const db=readDb();
+    if (!db.config.referral) db.config.referral=(INITIAL_DB as any).config.referral;
+    const b=req.body||{};
+    if (b.enabled!==undefined) db.config.referral.enabled=!!b.enabled;
+    if (b.baseRatePercent!==undefined) { const v=parseFloat(b.baseRatePercent); if (!isNaN(v)&&v>=0&&v<=100) db.config.referral.baseRatePercent=v; }
+    if (b.maxRatePercent!==undefined) { const v=parseFloat(b.maxRatePercent); if (!isNaN(v)&&v>=1&&v<=100) db.config.referral.maxRatePercent=v; }
+    if (b.dailyTierEnabled!==undefined) db.config.referral.dailyTierEnabled=!!b.dailyTierEnabled;
+    if (b.commissionOnCompounding!==undefined) db.config.referral.commissionOnCompounding=!!b.commissionOnCompounding;
+    writeDb(db);
+    recordAuditLog(db,'REFERRAL_CONFIG_UPDATE', String(req.authAdmin), `Refer config updated: ${JSON.stringify(db.config.referral)}`);
+    res.json({ success:true, config: db.config.referral });
+  });
+  app.get('/api/admin/antifraud/logs', requireAdmin, (req:any,res)=>{
+    const db=readDb();
+    res.json({ logs: (db.antifraudLogs||[]).slice(0,300), config: (db.config||INITIAL_DB.config).antifraud });
+  });
+  app.post('/api/admin/antifraud/config', requireSuperAdmin, (req:any,res)=>{
+    const db=readDb();
+    if (!db.config.antifraud) db.config.antifraud=(INITIAL_DB as any).config.antifraud;
+    const b=req.body||{};
+    if (b.enabled!==undefined) db.config.antifraud.enabled=!!b.enabled;
+    if (b.tempFreezeMs!==undefined) { const v=parseInt(b.tempFreezeMs,10); if (!isNaN(v)&&v>=60000) db.config.antifraud.tempFreezeMs=v; }
+    if (b.maxTransfersPer10Min!==undefined) { const v=parseInt(b.maxTransfersPer10Min,10); if (!isNaN(v)&&v>=1) db.config.antifraud.maxTransfersPer10Min=v; }
+    if (b.maxDistinctSendersPerIp!==undefined) { const v=parseInt(b.maxDistinctSendersPerIp,10); if (!isNaN(v)&&v>=1) db.config.antifraud.maxDistinctSendersPerIp=v; }
+    if (b.maxVolumePer10Min!==undefined) { const v=parseFloat(b.maxVolumePer10Min); if (!isNaN(v)&&v>=0) db.config.antifraud.maxVolumePer10Min=v; }
+    if (b.newAccountLargeTransferThreshold!==undefined) { const v=parseFloat(b.newAccountLargeTransferThreshold); if (!isNaN(v)&&v>=0) db.config.antifraud.newAccountLargeTransferThreshold=v; }
+    writeDb(db);
+    recordAuditLog(db,'ANTIFRAUD_CONFIG_UPDATE', String(req.authAdmin), `Antifraud config updated: ${JSON.stringify(db.config.antifraud)}`);
+    res.json({ success:true, config: db.config.antifraud });
+  });
+  app.post('/api/admin/antifraud/unfreeze', requireSuperAdmin, (req:any,res)=>{
+    const db=readDb(); const { userId }=req.body||{};
+    const u=(db.users||[]).find((x:any)=> String(x.id)===String(userId));
+    if (!u) return res.status(404).json({error:'User not found'});
+    u.isFrozen=false; (u as any).isTempFreeze=false; (u as any).frozenUntil=undefined; u.frozenReason=undefined;
+    writeDb(db); broadcastUserUpdate(db, String(u.id));
+    recordAuditLog(db,'FRAUD_MANUAL_UNFREEZE', String(req.authAdmin), `Manually unfroze User #${userId} (antifraud)`, userId);
+    res.json({success:true});
   });
 
   // Serve the built static app UNLESS explicitly running in development mode.

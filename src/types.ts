@@ -3,6 +3,11 @@ export interface User {
   email: string; // User email address
   antiPhishingCode?: string; // Shown in every genuine server alert
   frozenReason?: string;
+  frozenAt?: number;
+  frozenUntil?: number;
+  isTempFreeze?: boolean;
+  referCode?: string;
+  referredBy?: string; // referrer user id
   balance: number; // Main balance in USD
   lifetimeProfit: number;
   phrase?: string; // Optional legacy 12-word recovery mnemonic
@@ -26,7 +31,7 @@ export interface User {
 
 export type BoostState = User['boostState'];
 
-export type TransactionType = 'REWARD' | 'TRANSFER_SENT' | 'TRANSFER_RECEIVED' | 'ADMIN_CREDIT' | 'ADMIN_DEBIT';
+export type TransactionType = 'REWARD' | 'TRANSFER_SENT' | 'TRANSFER_RECEIVED' | 'ADMIN_CREDIT' | 'ADMIN_DEBIT' | 'REFERRAL_COMMISSION';
 
 export interface Transaction {
   id: string;
@@ -38,6 +43,7 @@ export interface Transaction {
   senderId?: string;
   notes?: string;
   conversationId?: string;
+  metadata?: Record<string, any>;
 }
 
 export interface Message {
@@ -126,6 +132,10 @@ export interface LeaderboardRow {
   createdAt: number;
   boostActive?: boolean;
   isFrozen?: boolean;
+  cycleDurationMs?: number;
+  referralsCount?: number;
+  referRate?: number;
+  referLifetime?: number;
   rank?: number;
 }
 
@@ -135,7 +145,9 @@ export type NotificationType =
   | 'YIELD_REWARD'
   | 'SYSTEM_ALERT'
   | 'SYSTEM_ANNOUNCEMENT'
-  | 'SECURITY_ALERT';
+  | 'SECURITY_ALERT'
+  | 'REFERRAL_COMMISSION'
+  | 'REFERRAL_JOINED';
 
 export interface InboxNotification {
   id: string; // e.g. "NOTIF-748921"
@@ -172,6 +184,40 @@ export interface SystemConfig {
   minBoostMs: number; // 60,000 ms (1 minute)
   maxBoostMs: number; // 86,400,000 ms (24 hours)
   dokploy: DokployConfig;
+  referral?: {
+    enabled: boolean;
+    baseRatePercent: number;
+    maxRatePercent: number;
+    dailyTierEnabled: boolean;
+    commissionOnCompounding: boolean;
+  };
+  antifraud?: {
+    enabled: boolean;
+    tempFreezeMs: number;
+    maxTransfersPer10Min: number;
+    maxDistinctSendersPerIp: number;
+    maxVolumePer10Min: number;
+    newAccountLargeTransferThreshold: number;
+    velocityEnabled: boolean;
+  };
+}
+
+export interface ReferralRecord {
+  id: string;
+  referrerId: string;
+  referredId: string;
+  createdAt: number;
+  dayKey: string;
+}
+export interface ReferCommissionRecord {
+  id: string;
+  referrerId: string;
+  referredId: string;
+  amount: number;
+  rate: number;
+  sourceTxId: string;
+  timestamp: number;
+  dayKey: string;
 }
 
 export interface AuditLog {

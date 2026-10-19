@@ -1,5 +1,5 @@
-import { FC, useState } from 'react';
-import { ArrowRight, Eye, EyeOff, Mail, Lock, Loader2 } from 'lucide-react';
+import { FC, useState, useEffect } from 'react';
+import { ArrowRight, Eye, EyeOff, Mail, Lock, Loader2, Gift, Users } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User } from '../types';
 
@@ -24,6 +24,25 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
   const [showSignupPassword, setShowSignupPassword] = useState(false);
   const [signupError, setSignupError] = useState('');
   const [isSigningUp, setIsSigningUp] = useState(false);
+  const [referralCode, setReferralCode] = useState(() => {
+    try {
+      const h = window.location.hash || '';
+      const m = h.match(/#\/join-ref\/([\w-]+)/) || h.match(/#\/join\/([\w-]+)/);
+      if (m) return m[1];
+      const q = new URLSearchParams(window.location.search);
+      return q.get('ref') || q.get('referral') || localStorage.getItem('boostpay_pending_ref') || '';
+    } catch { return ''; }
+  });
+
+  useEffect(()=>{
+    if (referralCode) {
+      try { localStorage.setItem('boostpay_pending_ref', referralCode); } catch {}
+    }
+  },[referralCode]);
+  // auto-switch to signup if ref present
+  useEffect(()=>{
+    if (referralCode) setTab('SIGNUP');
+  },[]);
 
   const handleUserLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -83,7 +102,11 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
 
     setIsSigningUp(true);
     try {
-      const newUser = await BoostPayStore.registerUser(cleanEmail, signupPassword);
+      const cleanRefer = referralCode.trim().replace(/^#/,'').replace(/^REF-?/i,'');
+      const newUser = await BoostPayStore.registerUser(cleanEmail, signupPassword, cleanRefer || undefined);
+      try { localStorage.removeItem('boostpay_pending_ref'); } catch {}
+      // clear hash
+      try { if (window.location.hash.includes('join-ref')||window.location.hash.includes('join')) history.replaceState(null,'',window.location.pathname+window.location.search); } catch {}
       onLoginUser(newUser);
     } catch (err: any) {
       setSignupError(err.message || 'Registration failed.');
@@ -248,6 +271,23 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
               />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-zinc-300 mb-1.5 flex items-center gap-1.5">
+                <Gift className="w-3.5 h-3.5 text-amber-400" /> Referral Code <span className="text-[10px] text-zinc-500 font-normal">(optional)</span>
+              </label>
+              <div className="relative">
+                <Users className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
+                <input
+                  type="text"
+                  placeholder="Enter referrer User ID (e.g. 1 or #1)"
+                  value={referralCode}
+                  onChange={(e)=> setReferralCode(e.target.value)}
+                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 pl-9 pr-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none font-mono"
+                />
+              </div>
+              {referralCode && <p className="text-[10px] text-emerald-400/80 mt-1 font-mono">✓ You will be linked to User #{referralCode.replace(/^#/,'').replace(/^REF-?/i,'')} — they earn {1}–10% on your compounding rewards.</p>}
             </div>
 
             {signupError && (
