@@ -34,9 +34,12 @@ import {
   Clock,
   BarChart3,
   Radio,
-  Users2
+  Users2,
+  Phone,
+  Video
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
+import { CallManager, startCallTo } from './CallOverlay';
 import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, DatabaseBrowser } from './AdminExtraViews';
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
@@ -247,6 +250,10 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
       if (txs) {
         setTransactions(txs);
       }
+
+      // Pull server-side support-chat history so user messages always arrive
+      // in the panel even if the SSE stream dropped briefly.
+      await BoostPayStore.syncChatState('ADMIN_SUPPORT');
 
       const newConvs = BoostPayStore.getConversations();
       setConversations(newConvs);
@@ -767,6 +774,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   // -------------------------------------------------------------
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans">
+      {/* Real-time audio/video call manager for the Admin Support mailbox */}
+      <CallManager currentUser={{ id: 'ADMIN_SUPPORT' }} senderRole="ADMIN" />
       {/* Top Admin Header */}
       <header className="sticky top-0 z-40 w-full border-b border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-4 sm:px-8 py-3.5">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
@@ -2056,11 +2065,35 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             <div className="md:col-span-2 rounded-3xl border border-zinc-800 bg-zinc-900/90 p-5 flex flex-col h-[520px]">
               {activeConv ? (
                 <>
-                  <div className="border-b border-zinc-800 pb-3 mb-3">
-                    <span className="text-[10px] font-mono text-zinc-400 uppercase">Chatting with</span>
-                    <h4 className="text-sm font-bold text-white font-mono">
-                      User #{activeConv.participants.find(p => p !== 'ADMIN_SUPPORT')}
-                    </h4>
+                  <div className="border-b border-zinc-800 pb-3 mb-3 flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] font-mono text-zinc-400 uppercase">Chatting with</span>
+                      <h4 className="text-sm font-bold text-white font-mono">
+                        User #{activeConv.participants.find(p => p !== 'ADMIN_SUPPORT')}
+                      </h4>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          const peer = activeConv.participants.find(p => p !== 'ADMIN_SUPPORT');
+                          if (peer) startCallTo(peer, `User #${peer}`, 'audio');
+                        }}
+                        title="Voice call"
+                        className="w-8 h-8 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 flex items-center justify-center hover:bg-emerald-500/25 transition cursor-pointer"
+                      >
+                        <Phone className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          const peer = activeConv.participants.find(p => p !== 'ADMIN_SUPPORT');
+                          if (peer) startCallTo(peer, `User #${peer}`, 'video');
+                        }}
+                        title="Video call"
+                        className="w-8 h-8 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-400 flex items-center justify-center hover:bg-amber-500/25 transition cursor-pointer"
+                      >
+                        <Video className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
 
                   <div className="flex-1 overflow-y-auto space-y-2.5 p-2">
@@ -2070,6 +2103,16 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                         const isAdmin = m.senderId === 'ADMIN_SUPPORT';
                         const reactions = m.reactions || {};
                         const hasReactions = Object.keys(reactions).some(k => reactions[k]?.length > 0);
+                        if (m.kind === 'call') {
+                          return (
+                            <div key={m.id} className="flex justify-center">
+                              <div className="flex items-center gap-1.5 rounded-full bg-zinc-800/70 border border-zinc-700/60 px-3.5 py-1.5 text-[10px] text-zinc-300">
+                                <Phone className="w-3 h-3 text-emerald-400" />
+                                <span>{m.text}</span>
+                              </div>
+                            </div>
+                          );
+                        }
                         return (
                           <div
                             key={m.id}

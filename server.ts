@@ -1000,6 +1000,8 @@ async function startServer() {
   app.use('/api/users/login', rateLimit(15));
   app.use('/api/users/register', rateLimit(10));
   app.use('/api/admin/login', rateLimit(10));
+  app.use('/api/chat/send', rateLimit(60));
+  app.use('/api/chat/call-signal', rateLimit(40));
 
   // --- Authentication guards -------------------------------------------------
   // Admin API: every route except /api/admin/login requires a valid admin token
@@ -1383,7 +1385,8 @@ async function startServer() {
               lifetimeProfit: serverUser.lifetimeProfit !== undefined ? Number(serverUser.lifetimeProfit) : Number(incUser.lifetimeProfit || 0)
             };
           } else {
-            mergedUsers.push(incUser);
+            // SECURITY: never create users from a client push — accounts are only
+            // created through registration (prevents fake-user / leaderboard injection).
           }
         }
       }
@@ -1526,6 +1529,11 @@ async function startServer() {
     let userConvs = db.conversations || [];
     let userMsgs = db.messages || [];
 
+    // SECURITY: the ADMIN_SUPPORT mailbox contains every support thread —
+    // only authenticated admins may read it (IDOR fix).
+    if (userId === 'ADMIN_SUPPORT' && !req.authAdmin) {
+      return res.status(403).json({ error: 'Administrator authentication required.' });
+    }
     if (userId && userId !== 'ADMIN_SUPPORT') {
       // SECURITY: users can only read their own conversations (admins excepted)
       if (!req.authAdmin && String(userId) !== String(req.authUserId)) {
@@ -1698,7 +1706,7 @@ async function startServer() {
       }
       pushToUser(cleanTarget, {
         type: 'call_signal',
-        from: String(req.authUserId),
+        from: String(req.authUserId || (req.authAdmin ? 'ADMIN_SUPPORT' : '')),
         signal: {
           kind,
           callId: String(signal.callId || '').slice(0, 60),

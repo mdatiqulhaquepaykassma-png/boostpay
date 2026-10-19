@@ -4,10 +4,11 @@ import { usePWAInstall } from '../hooks/usePWAInstall';
 
 interface Props {
   variant?: 'compact' | 'full';
+  children?: React.ReactNode;
   className?: string;
 }
 
-export const InstallButton: FC<Props> = ({ variant = 'compact', className = '' }) => {
+export const InstallButton: FC<Props> = ({ variant = 'compact', className = '', children }) => {
   const { isInstallable, isInstalled, isInstallLoading, justInstalled, install } = usePWAInstall();
 
   // If already running as an installed PWA, suppress button
@@ -40,12 +41,16 @@ export const InstallButton: FC<Props> = ({ variant = 'compact', className = '' }
       title="Install BoostPay app to your device"
       className={`relative inline-flex items-center justify-center gap-1.5 rounded-xl bg-amber-500 px-3 py-1.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-95 transition cursor-pointer shadow-md shadow-amber-500/20 disabled:opacity-60 ${className}`}
     >
-      {isInstallLoading ? (
+      {children ? (
+        children
+      ) : isInstallLoading ? (
         <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-zinc-950 border-t-transparent" />
       ) : (
-        <Download className="w-3.5 h-3.5 stroke-[2.5]" />
+        <>
+          <Download className="w-3.5 h-3.5 stroke-[2.5]" />
+          <span>{variant === 'full' ? 'Install BoostPay App' : 'Install App'}</span>
+        </>
       )}
-      <span>{variant === 'full' ? 'Install BoostPay App' : 'Install App'}</span>
     </button>
   );
 };

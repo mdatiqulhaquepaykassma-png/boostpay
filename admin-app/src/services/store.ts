@@ -328,6 +328,29 @@ export class BoostPayStore {
   /**
    * Initializes real-time Server-Sent Events (SSE) chat connection for a user or admin
    */
+  // ---- WebRTC call signaling (1:1 audio/video) ----
+  private static callSignalListeners: Array<(signal: any) => void> = [];
+
+  static onCallSignal(cb: (signal: any) => void): () => void {
+    this.callSignalListeners.push(cb);
+    return () => {
+      this.callSignalListeners = this.callSignalListeners.filter((fn) => fn !== cb);
+    };
+  }
+
+  static async sendCallSignal(targetId: string, signal: any): Promise<boolean> {
+    try {
+      const res = await fetch('/api/chat/call-signal', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ targetId, signal })
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   static initChatStream(userId: string): () => void {
     if (!userId) return () => {};
 
@@ -409,6 +432,10 @@ export class BoostPayStore {
                 title: 'Compounding Cycle Complete',
                 message: `Yield reward of $${Number(data.reward || 0).toFixed(8)} was credited to your wallet.`
               } as any);
+            } else if (data.type === 'call_signal') {
+              for (const cb of this.callSignalListeners) {
+                try { cb(data.signal); } catch { /* ignore */ }
+              }
             }
           } catch (e) {
             console.warn('Error parsing SSE event data:', e);
@@ -492,7 +519,8 @@ export class BoostPayStore {
   static async sendChatMessage(
     recipientId: string,
     text: string,
-    senderRole?: 'USER' | 'ADMIN'
+    senderRole?: 'USER' | 'ADMIN',
+    callInfo?: { media?: 'audio' | 'video'; outcome?: 'completed' | 'missed' | 'declined'; durationMs?: number }
   ): Promise<{ success: boolean; message?: Message; conversation?: Conversation; error?: string }> {
     const cur = this.getCurrentUser();
     const senderId = senderRole === 'ADMIN' ? 'ADMIN_SUPPORT' : (cur?.id || '1');
@@ -511,7 +539,8 @@ export class BoostPayStore {
       senderId,
       senderRole: role,
       text: cleanText,
-      timestamp: now
+      timestamp: now,
+      ...(callInfo ? { kind: 'call' as const, callInfo } : {})
     };
 
     // Save optimistically locally
@@ -548,7 +577,8 @@ export class BoostPayStore {
           senderId,
           senderRole: role,
           recipientId,
-          text: cleanText
+          text: cleanText,
+          ...(callInfo ? { kind: 'call', callInfo } : {})
         })
       });
 
@@ -801,7 +831,12 @@ export class BoostPayStore {
   // --- Session tokens (sent as `Authorization: Bearer <token>` on API calls) ---
 
   static getAuthToken(): string | null {
-    return localStorage.getItem(STORAGE_AUTH_TOKEN);
+    const tok = localStorage.getItem(STORAGE_AUTH_TOKEN);
+    if (tok) return tok;
+    // Admin console has no user token — fall back to the admin session token so
+    // user-facing chat APIs (SSE stream, send, sync) work for ADMIN_SUPPORT.
+    const sess = this.getAdminSession();
+    return sess && sess.token ? sess.token : null;
   }
 
   static setAuthToken(token: string | null | undefined): void {

@@ -32,3 +32,12 @@
   animation: shimmer 1.8s infinite;
   content: '';
 }
+
+
+/* App shell scroll behavior */
+html {
+  overscroll-behavior-y: none; /* no pull-to-refresh inside the app */
+}
+body {
+  overflow-x: hidden; /* never allow horizontal scroll */
+}

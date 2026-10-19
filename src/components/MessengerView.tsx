@@ -499,7 +499,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
           </div>
 
           {/* Messages Stream Viewport (Strictly Scrollable Middle Section) */}
-          <div className="flex-1 min-h-0 overflow-y-auto space-y-3 px-3.5 py-2">
+          <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-3 px-3.5 py-2">
             <div className="flex items-center justify-center my-1.5">
               <span className="rounded-full bg-zinc-900/90 border border-zinc-800 px-3 py-0.5 text-[10px] font-mono text-zinc-400 shadow-sm">
                 Secure Encrypted Stream
@@ -643,7 +643,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
           </div>
 
           {/* Scrollable Conversations list */}
-          <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pb-4">
+          <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-2 pb-4">
             {filteredConversations.map((conv) => {
               const other = getOtherParticipant(conv);
               const isSupport = other === 'ADMIN_SUPPORT';

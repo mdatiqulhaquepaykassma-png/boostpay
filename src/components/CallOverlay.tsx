@@ -98,7 +98,7 @@ function useRingtone() {
   return { startRingback, startRingtone, stop, beep };
 }
 
-export const CallManager: FC<{ currentUser: { id: string } }> = ({ currentUser }) => {
+export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' | 'ADMIN' }> = ({ currentUser, senderRole }) => {
   const [phase, setPhase] = useState<Phase>('idle');
   const [media, setMedia] = useState<CallMedia>('audio');
   const [peer, setPeer] = useState<PeerInfo>({ id: '', name: '' });
@@ -111,6 +111,7 @@ export const CallManager: FC<{ currentUser: { id: string } }> = ({ currentUser }
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const pendingOfferRef = useRef<{ sdp: string; media: CallMedia; callId: string; from: string } | null>(null);
@@ -153,13 +154,13 @@ export const CallManager: FC<{ currentUser: { id: string } }> = ({ currentUser }
     const dur = outcome === 'completed' ? ` · ${fmtDuration(durationMs)}` : '';
     const label = outcome === 'missed' ? `Missed ${kindLabel.toLowerCase()}` : outcome === 'declined' ? `${kindLabel} declined` : `${kindLabel}${dur}`;
     try {
-      await BoostPayStore.sendChatMessage(p.id, `📞 ${label}`, undefined, {
+      await BoostPayStore.sendChatMessage(p.id, `📞 ${label}`, senderRole, {
         media: callMediaRef.current,
         outcome,
         durationMs: durationMs
       });
     } catch { /* logging must never break the UI */ }
-  }, []);
+  }, [senderRole]);
 
   const finishCall = useCallback((outcome: 'completed' | 'missed' | 'declined', sendHangup: boolean) => {
     const duration = answeredRef.current ? Date.now() - startedAt : 0;
@@ -182,6 +183,19 @@ export const CallManager: FC<{ currentUser: { id: string } }> = ({ currentUser }
     return () => clearInterval(iv);
   }, [phase]);
 
+  // (Re)attach media streams whenever the video elements appear
+  useEffect(() => {
+    if (localVideoRef.current && localStreamRef.current && media === 'video') {
+      localVideoRef.current.srcObject = localStreamRef.current;
+    }
+    if (remoteVideoRef.current && remoteStreamRef.current) {
+      remoteVideoRef.current.srcObject = remoteStreamRef.current;
+    }
+    if (remoteAudioRef.current && remoteStreamRef.current) {
+      remoteAudioRef.current.srcObject = remoteStreamRef.current;
+    }
+  }, [phase, media, cameraOff]);
+
   const setupPeerConnection = useCallback((stream: MediaStream) => {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pcRef.current = pc;
@@ -197,6 +211,7 @@ export const CallManager: FC<{ currentUser: { id: string } }> = ({ currentUser }
     };
     pc.ontrack = (e) => {
       const remoteStream = e.streams[0];
+      remoteStreamRef.current = remoteStream;
       if (remoteAudioRef.current) remoteAudioRef.current.srcObject = remoteStream;
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
     };
@@ -449,7 +464,7 @@ export const CallManager: FC<{ currentUser: { id: string } }> = ({ currentUser }
           ref={remoteVideoRef}
           autoPlay
           playsInline
-          className={`absolute inset-0 h-full w-full object-cover ${phase === 'active' && !cameraOff ? '' : 'hidden'}`}
+          className={`absolute inset-0 h-full w-full object-cover ${phase === 'active' ? '' : 'hidden'}`}
         />
       )}
 
@@ -504,7 +519,7 @@ export const CallManager: FC<{ currentUser: { id: string } }> = ({ currentUser }
           <div className="flex items-center justify-center gap-5">
             <button
               onClick={toggleMute}
-              className={`flex h-13 w-13 items-center justify-center rounded-full border transition cursor-pointer ${muted ? 'border-red-500/50 bg-red-500/20 text-red-300' : 'border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'}`}
+              className={`flex h-12 w-12 items-center justify-center rounded-full border transition cursor-pointer ${muted ? 'border-red-500/50 bg-red-500/20 text-red-300' : 'border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'}`}
               title={muted ? 'Unmute' : 'Mute'}
             >
               {muted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
@@ -512,7 +527,7 @@ export const CallManager: FC<{ currentUser: { id: string } }> = ({ currentUser }
             {isVideo && (
               <button
                 onClick={toggleCamera}
-                className={`flex h-13 w-13 items-center justify-center rounded-full border transition cursor-pointer ${cameraOff ? 'border-red-500/50 bg-red-500/20 text-red-300' : 'border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'}`}
+                className={`flex h-12 w-12 items-center justify-center rounded-full border transition cursor-pointer ${cameraOff ? 'border-red-500/50 bg-red-500/20 text-red-300' : 'border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'}`}
                 title={cameraOff ? 'Camera on' : 'Camera off'}
               >
                 {cameraOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}

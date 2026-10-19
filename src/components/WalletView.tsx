@@ -1,5 +1,5 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
-import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode
+import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, LogOut, CheckCircle2
 } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User, BoostState, SystemConfig } from '../types';
@@ -428,6 +428,8 @@ interface Props {
   onUpdateUser: (user: User) => void;
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
+  onOpenSecurity?: () => void;
+  onLogout?: () => void;
   config: SystemConfig;
 }
 
@@ -436,8 +438,11 @@ export const WalletView: FC<Props> = ({
   onUpdateUser,
   onOpenSendMoney,
   onOpenQR,
+  onOpenSecurity,
+  onLogout,
   config
 }) => {
+  const [idCopied, setIdCopied] = useState(false);
   const [walletTab, setWalletTab] = useState<'OVERVIEW' | 'TRANSACTIONS'>('OVERVIEW');
   const [zeroBalanceWarning, setZeroBalanceWarning] = useState(false);
   const [completionBanner, setCompletionBanner] = useState<{ amount: number } | null>(null);
@@ -492,6 +497,51 @@ export const WalletView: FC<Props> = ({
 
   return (
     <div className="w-full px-4 py-4 space-y-4">
+      {/* Account actions strip (header stays logo-only) */}
+      <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900/70 px-3 py-2">
+        <button
+          onClick={() => {
+            navigator.clipboard?.writeText(String(user.id)).catch(() => {});
+            setIdCopied(true);
+            setTimeout(() => setIdCopied(false), 1200);
+          }}
+          className="flex items-center gap-1.5 rounded-full bg-zinc-800/80 px-2.5 py-1.5 text-[10px] text-zinc-200 cursor-pointer active:scale-95 transition"
+          title="Tap to copy your User ID"
+        >
+          <span className="font-mono">ID: {user.id}</span>
+          {idCopied ? <CheckCircle2 className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-zinc-400" />}
+        </button>
+        <div className="flex items-center gap-1">
+          {onOpenQR && (
+            <button
+              onClick={onOpenQR}
+              className="w-8 h-8 rounded-full bg-zinc-800/80 flex items-center justify-center text-amber-400 cursor-pointer active:scale-95 transition"
+              title="My QR code"
+            >
+              <QrCode className="w-3.5 h-3.5" />
+            </button>
+          )}
+          {onOpenSecurity && (
+            <button
+              onClick={onOpenSecurity}
+              className="w-8 h-8 rounded-full bg-zinc-800/80 flex items-center justify-center text-emerald-400 cursor-pointer active:scale-95 transition"
+              title="Security"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+            </button>
+          )}
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              className="w-8 h-8 rounded-full bg-zinc-800/80 flex items-center justify-center text-red-400 cursor-pointer active:scale-95 transition"
+              title="Sign out"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Auto-credit completion banner */}
       {completionBanner && (
         <div className="rounded-2xl border border-emerald-500/30 bg-emerald-950/50 p-3.5 flex items-center justify-between shadow-lg">

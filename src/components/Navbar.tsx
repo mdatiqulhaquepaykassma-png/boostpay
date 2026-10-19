@@ -1,101 +1,19 @@
-import React, { FC, useState, memo } from 'react';
-import { Copy, Check, LogOut, ShieldCheck, QrCode } from 'lucide-react';
-import { User } from '../types';
-import { copyToClipboard } from '../services/store';
-import { InstallButton } from './InstallButton';
+import React from 'react';
 
-interface Props {
-  user: User | null;
-  isAdmin?: boolean;
-  onLogout: () => void;
-  onOpenSecurity?: () => void;
-  onOpenQR?: () => void;
-}
-
-export const Navbar: FC<Props> = memo(({ user, isAdmin = false, onLogout, onOpenSecurity, onOpenQR }) => {
-  const [copied, setCopied] = useState(false);
-
-  const copyId = async () => {
-    if (!user) return;
-    const ok = await copyToClipboard(user.id);
-    if (ok) {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
+/** Clean app header: the BoostPay logo only — all account actions live in
+ *  the Wallet page strip and the bottom navigation. */
+export const Navbar: React.FC = () => {
   return (
-    <header className="sticky top-0 z-30 w-full border-b border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-4 py-3">
-      <div className="flex items-center justify-between">
-        {/* Brand */}
-        <div className="flex items-center gap-2.5">
-          <div className="relative flex h-9 w-9 items-center justify-center rounded-2xl bg-gradient-to-b from-zinc-800 to-zinc-950 border border-zinc-800 shadow-lg">
-            <svg viewBox="0 0 512 512" className="h-5 w-5">
-              <path d="M292 64L140 288h124l-44 160 152-224H248l44-160z" fill="#f59e0b" stroke="#d97706" strokeWidth="10" strokeLinejoin="round" />
-            </svg>
-          </div>
-          <span className="font-bold text-[15px] tracking-tight text-white leading-none">
-            BoostPay
-          </span>
+    <header className="sticky top-0 z-30 flex items-center justify-center h-14 px-4 bg-[#09090b]/95 backdrop-blur-md border-b border-zinc-800/80">
+      <div className="flex items-center gap-2.5">
+        <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-500 flex items-center justify-center shadow-lg shadow-amber-500/20 overflow-hidden">
+          <img src="/icon.svg" alt="BoostPay" className="w-7 h-7 object-contain" />
         </div>
-
-        {/* Right side controls */}
-        <div className="flex items-center gap-2">
-          {/* In-app Install Button */}
-          <InstallButton variant="compact" />
-
-          {/* QR Pay */}
-          {user && onOpenQR && (
-            <button
-              onClick={onOpenQR}
-              className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 hover:border-amber-500/50 hover:text-amber-400 active:scale-95 transition cursor-pointer"
-              title="QR Pay — show or scan"
-            >
-              <QrCode className="w-3.5 h-3.5" />
-            </button>
-          )}
-
-          {/* Security Center */}
-          {user && onOpenSecurity && (
-            <button
-              onClick={onOpenSecurity}
-              className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 hover:border-amber-500/50 hover:text-amber-400 active:scale-95 transition cursor-pointer"
-              title="Security Center — anti-phishing code & devices"
-            >
-              <ShieldCheck className="w-3.5 h-3.5" />
-            </button>
-          )}
-
-          {/* User ID copy button */}
-          {user && (
-            <button
-              onClick={copyId}
-              className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11px] font-mono font-medium text-zinc-300 hover:border-zinc-700 active:scale-95 transition cursor-pointer"
-              title="Tap to copy User ID"
-            >
-              <span className="text-zinc-500">ID:</span>
-              <span className="text-amber-400 font-bold">{user.id}</span>
-              {copied ? (
-                <Check className="w-3 h-3 text-emerald-400" />
-              ) : (
-                <Copy className="w-3 h-3 text-zinc-500" />
-              )}
-            </button>
-          )}
-
-
-          {/* Logout */}
-          <button
-            onClick={onLogout}
-            className="flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[11px] text-zinc-400 hover:text-red-400 hover:border-zinc-700 active:scale-95 transition cursor-pointer"
-            title="Sign Out"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-          </button>
+        <div>
+          <div className="text-[15px] font-extrabold text-white tracking-tight leading-none">BoostPay</div>
+          <div className="text-[8px] text-amber-400 font-bold tracking-[0.14em]">SECURE WALLET</div>
         </div>
       </div>
     </header>
   );
-});
-
-Navbar.displayName = 'Navbar';
+};

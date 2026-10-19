@@ -54,9 +54,11 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
         if (!alive) return;
         setPayload(data.payload);
         const url = await QRCode.toDataURL(data.payload, {
-          width: 420,
-          margin: 1,
-          color: { dark: '#fafafa', light: '#09090b' },
+          width: 640,
+          margin: 2,
+          // Standard dark-on-light QR: inverted (light-on-dark) codes fail on
+          // most decoders including jsQR with dontInvert.
+          color: { dark: '#09090b', light: '#fafafa' },
           errorCorrectionLevel: 'M'
         });
         setQrDataUrl(url);
@@ -116,7 +118,7 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
   }, [onClose, onScannedPayee, stopCamera]);
 
   const scanImageData = useCallback((imageData: ImageData) => {
-    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+    const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
     return code && code.data ? code.data : null;
   }, []);
 
@@ -141,14 +143,23 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
       if (!video) return;
       video.srcObject = stream;
       try { await video.play(); } catch { /* autoplay quirk — the stream still feeds frames */ }
+      let lastScan = 0;
       const tick = () => {
         const canvas = canvasRef.current;
         if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
           rafRef.current = requestAnimationFrame(tick);
           return;
         }
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+        // Decode ~6x/second on a downscaled frame — full-res every frame starves the UI
+        const now = performance.now();
+        if (now - lastScan < 160) {
+          rafRef.current = requestAnimationFrame(tick);
+          return;
+        }
+        lastScan = now;
+        const scale = Math.min(1, 720 / (video.videoWidth || 720));
+        canvas.width = Math.round((video.videoWidth || 720) * scale);
+        canvas.height = Math.round((video.videoHeight || 480) * scale);
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (!ctx) return;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -186,11 +197,12 @@ export const QRPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onScannedP
         im.src = dataUrl;
       });
       const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
+      const imgScale = Math.min(1, 1280 / Math.max(img.naturalWidth, img.naturalHeight));
+      canvas.width = Math.max(1, Math.round(img.naturalWidth * imgScale));
+      canvas.height = Math.max(1, Math.round(img.naturalHeight * imgScale));
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) throw new Error('Canvas unavailable.');
-      ctx.drawImage(img, 0, 0);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = scanImageData(imageData);
       if (data) {

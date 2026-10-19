@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
-import { Wallet, Trophy, MessageSquare, Inbox } from 'lucide-react';
+import { useState, useEffect, useMemo } from 'react';
+import { Wallet, Trophy, MessageSquare, Inbox, Download } from 'lucide-react';
 import { BoostPayStore, ToastData } from './services/store';
 import { User, SystemConfig } from './types';
 import { Navbar } from './components/Navbar';
@@ -16,6 +16,8 @@ import { MessengerView } from './components/MessengerView';
 import { InboxView } from './components/InboxView';
 import { FloatingToastContainer } from './components/FloatingToast';
 import { PWAInstallHelp } from './components/PWAInstallHelp';
+import { InstallButton } from './components/InstallButton';
+import { usePWAInstall } from './hooks/usePWAInstall';
 import { P2PTransferModal } from './components/P2PTransferModal';
 import { WalletSkeleton } from './components/WalletSkeleton';
 import { SecurityModal } from './components/SecurityModal';
@@ -159,6 +161,12 @@ export default function App() {
     setChatTargetPeerId(null);
   };
 
+  // true when running installed as a PWA (no install UI inside the app)
+  const isStandalone = useMemo(
+    () => window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone === true,
+    []
+  );
+
   const handleUserLogin = (user: User) => {
     BoostPayStore.setCurrentUser(user);
     setCurrentUser(user);
@@ -171,7 +179,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans antialiased pt-[env(safe-area-inset-top)]">
+    <div className="h-[100dvh] overflow-hidden bg-zinc-950 text-zinc-100 flex flex-col font-sans antialiased pt-[env(safe-area-inset-top)]">
       {/* Real-Time Floating Toast Alerts Container */}
       {/* PWA manual install guidance (iOS / Android / iframe fallback) */}
       <PWAInstallHelp />
@@ -227,13 +235,7 @@ export default function App() {
       ) : (
         /* 3. LOGGED-IN MAIN USER INTERFACE */
         <div className={`flex-1 flex flex-col max-w-md w-full mx-auto ${activeTab === 'MESSENGER' ? 'h-[100dvh] max-h-screen overflow-hidden pb-[calc(58px+env(safe-area-inset-bottom))]' : 'pb-[calc(5rem+env(safe-area-inset-bottom))]'}`}>
-          <Navbar
-            user={currentUser}
-            isAdmin={false}
-            onLogout={handleLogout}
-            onOpenSecurity={() => setIsSecurityOpen(true)}
-            onOpenQR={() => setIsQROpen(true)}
-          />
+          <Navbar />
 
           {/* Urgent system banner (admin broadcasts) */}
           {systemBanner && (
@@ -255,7 +257,7 @@ export default function App() {
             </div>
           )}
 
-          <main className={`flex-1 ${activeTab === 'MESSENGER' ? 'flex flex-col min-h-0 overflow-hidden' : 'overflow-y-auto'}`}>
+          <main className={`flex-1 ${activeTab === 'MESSENGER' ? 'flex flex-col min-h-0 overflow-hidden' : 'overflow-y-auto overscroll-contain'}`}>
             {activeTab === 'WALLET' && (
               isInitialSyncing ? (
                 <WalletSkeleton />
@@ -265,6 +267,8 @@ export default function App() {
                   onUpdateUser={(updated: User) => setCurrentUser({ ...updated })}
                   onOpenSendMoney={() => setIsSendMoneyOpen(true)}
                   onOpenQR={() => setIsQROpen(true)}
+                  onOpenSecurity={() => setIsSecurityOpen(true)}
+                  onLogout={handleLogout}
                   config={config}
                 />
               )
@@ -292,7 +296,7 @@ export default function App() {
 
           {/* FIXED BOTTOM NAVIGATION BAR */}
           <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-3 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))]">
-            <div className="max-w-md mx-auto grid grid-cols-4 items-center gap-1">
+            <div className={`max-w-md mx-auto grid items-center gap-1 ${isStandalone ? 'grid-cols-4' : 'grid-cols-5'}`}>
               {/* 1. Wallet Tab */}
               <button
                 onClick={() => setActiveTab('WALLET')}
@@ -358,6 +362,16 @@ export default function App() {
                 </div>
                 <span>Chat</span>
               </button>
+
+              {/* 5. Install (browser only — hidden inside the installed PWA) */}
+              {!isStandalone && (
+                <InstallButton
+                  className="!inline-flex !flex-col items-center justify-center gap-1 text-[11px] font-medium transition cursor-pointer min-h-[44px] !bg-transparent !text-zinc-500 hover:!text-zinc-300 !shadow-none !px-0 !rounded-none !justify-self-center"
+                >
+                  <Download className="w-5 h-5 stroke-[2.2]" />
+                  <span>Install</span>
+                </InstallButton>
+              )}
 
             </div>
           </nav>
