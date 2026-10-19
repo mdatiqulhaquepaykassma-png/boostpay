@@ -37,7 +37,7 @@ import {
   Users2
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
-import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView } from './AdminExtraViews';
+import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, DatabaseBrowser } from './AdminExtraViews';
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
 
@@ -1748,10 +1748,10 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   <Database className="w-4 h-4 text-amber-400" />
                 </div>
                 <div className="text-sm font-bold font-mono text-emerald-400 flex items-center gap-1.5">
-                  <span>Container File Store</span>
+                  <span>{stats.dokployStatus.storageMode === 'postgres' ? 'PostgreSQL' : 'JSON File Store'}</span>
                 </div>
-                <div className="text-[10px] text-zinc-500 font-mono mt-1 truncate" title="data/boostpay_db.json">
-                  data/boostpay_db.json
+                <div className="text-[10px] text-zinc-500 font-mono mt-1 truncate" title="live database">
+                  {stats.dokployStatus.storageMode === 'postgres' ? 'app_state table (JSONB)' : 'data/boostpay_db.json'}
                 </div>
               </div>
 
@@ -1794,6 +1794,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                 </div>
               </div>
             </div>
+
+            {/* Visual Database Table Browser */}
+            <DatabaseBrowser />
 
             {/* Live Verification & Test Write Card */}
             <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-6 shadow-xl space-y-4">

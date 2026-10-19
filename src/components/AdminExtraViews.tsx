@@ -1,4 +1,4 @@
-import { FC, useState, useEffect, useCallback } from 'react';
+import { FC, useState, useEffect, useCallback, Fragment } from 'react';
 import {
   BarChart3,
   TrendingUp,
@@ -14,7 +14,13 @@ import {
   RefreshCw,
   KeyRound,
   Activity,
-  Wallet
+  Wallet,
+  Database,
+  Table2,
+  Search,
+  ChevronLeft,
+  ChevronRight,
+  Lock
 } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 
@@ -604,6 +610,250 @@ export const AdminAccountsView: FC<{ myEmail: string; myRole: string }> = ({ myE
           Update Password
         </button>
       </div>
+    </div>
+  );
+};
+
+/* ==========================================================================
+   Visual Database Table Browser
+   ========================================================================== */
+
+interface DbTableInfo { name: string; count: number; columns: string[]; }
+interface DbTableData { name: string; count: number; columns: string[]; rows: any[]; }
+
+const dbFmtCell = (v: any): string => {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (typeof v === 'object') {
+    const s = JSON.stringify(v);
+    return s.length > 100 ? s.slice(0, 100) + '…' : s;
+  }
+  const s = String(v);
+  return s.length > 100 ? s.slice(0, 100) + '…' : s;
+};
+
+export const DatabaseBrowser: FC = () => {
+  const [tables, setTables] = useState<DbTableInfo[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [data, setData] = useState<DbTableData | null>(null);
+  const [loadingList, setLoadingList] = useState(true);
+  const [loadingRows, setLoadingRows] = useState(false);
+  const [error, setError] = useState('');
+  const [query, setQuery] = useState('');
+  const [page, setPage] = useState(0);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const [sortCol, setSortCol] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<1 | -1>(1);
+  const pageSize = 25;
+
+  const loadTables = useCallback(async () => {
+    setLoadingList(true);
+    setError('');
+    try {
+      const res = await BoostPayStore.adminApi('/api/admin/db/tables');
+      const list: DbTableInfo[] = res.tables || [];
+      setTables(list);
+      setSelected((prev) => prev || (list[0] ? list[0].name : null));
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load tables');
+    }
+    setLoadingList(false);
+  }, []);
+
+  const loadRows = useCallback(async (name: string) => {
+    setLoadingRows(true);
+    setExpanded(null);
+    setPage(0);
+    setQuery('');
+    setSortCol(null);
+    try {
+      const res = await BoostPayStore.adminApi(`/api/admin/db/tables/${encodeURIComponent(name)}?limit=500`);
+      setData(res);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to load rows');
+    }
+    setLoadingRows(false);
+  }, []);
+
+  useEffect(() => { loadTables(); }, [loadTables]);
+  useEffect(() => { if (selected) loadRows(selected); }, [selected, loadRows]);
+
+  const filtered = (data?.rows || []).filter((r) =>
+    !query.trim() || JSON.stringify(r).toLowerCase().includes(query.trim().toLowerCase())
+  );
+  const sorted = sortCol
+    ? [...filtered].sort((a, b) => {
+        const av = a?.[sortCol]; const bv = b?.[sortCol];
+        return String(av ?? '').localeCompare(String(bv ?? ''), undefined, { numeric: true }) * sortDir;
+      })
+    : filtered;
+  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const pageRows = sorted.slice(page * pageSize, (page + 1) * pageSize);
+  const columns = data?.columns || [];
+
+  return (
+    <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-6 shadow-xl space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800 pb-4">
+        <div>
+          <h3 className="text-sm font-bold text-white flex items-center gap-2">
+            <Table2 className="w-4 h-4 text-amber-400" />
+            Database Tables — Visual Browser
+          </h3>
+          <p className="text-xs text-zinc-400 mt-0.5">
+            Live data straight from the server database. Click any table to browse its rows, click a row to see full details.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700/70 bg-zinc-950 px-2.5 py-1.5 text-[10px] font-mono text-zinc-400">
+            <Lock className="w-3 h-3 text-amber-400" /> secret fields masked
+          </span>
+          <button
+            onClick={() => { loadTables(); if (selected) loadRows(selected); }}
+            className="inline-flex items-center gap-2 rounded-xl bg-amber-500 px-3.5 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 transition cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingList || loadingRows ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-400">{error}</div>
+      )}
+
+      {/* Table selector chips */}
+      <div className="flex flex-wrap gap-2">
+        {loadingList && tables.length === 0 && (
+          <div className="flex items-center gap-2 text-xs text-zinc-500 py-2">
+            <Loader2 className="w-4 h-4 animate-spin" /> Loading tables...
+          </div>
+        )}
+        {tables.map((t) => (
+          <button
+            key={t.name}
+            onClick={() => setSelected(t.name)}
+            className={`inline-flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-bold border transition cursor-pointer ${
+              selected === t.name
+                ? 'bg-amber-500 text-zinc-950 border-amber-400'
+                : 'bg-zinc-950 text-zinc-300 border-zinc-700/70 hover:border-amber-500/50 hover:text-white'
+            }`}
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span>{t.name}</span>
+            <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-mono ${selected === t.name ? 'bg-zinc-950/30 text-zinc-950' : 'bg-zinc-800 text-zinc-400'}`}>
+              {t.count}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {/* Rows grid */}
+      {selected && (
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 overflow-hidden">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 p-3 border-b border-zinc-800">
+            <div className="flex items-center gap-2 text-xs font-bold text-white">
+              <Table2 className="w-4 h-4 text-amber-400" />
+              <span>{selected}</span>
+              <span className="text-zinc-500 font-normal">
+                {data ? `${data.count} rows · ${columns.length} columns` : ''}
+              </span>
+            </div>
+            <div className="flex-1" />
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                value={query}
+                onChange={(e) => { setQuery(e.target.value); setPage(0); setExpanded(null); }}
+                placeholder="Search rows..."
+                className="w-full sm:w-56 rounded-lg border border-zinc-800 bg-zinc-900 pl-8 pr-3 py-1.5 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-amber-500/60"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => { setPage((p) => Math.max(0, p - 1)); setExpanded(null); }}
+                disabled={page === 0}
+                className="rounded-lg border border-zinc-800 bg-zinc-900 p-1.5 text-zinc-400 hover:text-white disabled:opacity-40 cursor-pointer"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+              <span className="text-[10px] font-mono text-zinc-500 w-16 text-center">
+                {page + 1} / {pageCount}
+              </span>
+              <button
+                onClick={() => { setPage((p) => Math.min(pageCount - 1, p + 1)); setExpanded(null); }}
+                disabled={page >= pageCount - 1}
+                className="rounded-lg border border-zinc-800 bg-zinc-900 p-1.5 text-zinc-400 hover:text-white disabled:opacity-40 cursor-pointer"
+              >
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {loadingRows ? (
+            <div className="flex items-center gap-2 text-xs text-zinc-500 p-6">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading rows...
+            </div>
+          ) : pageRows.length === 0 ? (
+            <div className="text-xs text-zinc-600 p-6">No rows match your search.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-[11px]">
+                <thead>
+                  <tr className="border-b border-zinc-800">
+                    {columns.map((c) => (
+                      <th
+                        key={c}
+                        onClick={() => {
+                          if (sortCol === c) setSortDir((d) => (d === 1 ? -1 : 1));
+                          else { setSortCol(c); setSortDir(1); }
+                        }}
+                        className="px-3 py-2 font-bold text-zinc-400 uppercase tracking-wider whitespace-nowrap cursor-pointer hover:text-amber-400 select-none"
+                      >
+                        {c}
+                        {sortCol === c ? (sortDir === 1 ? ' ▲' : ' ▼') : ''}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {pageRows.map((row, i) => {
+                    const globalIndex = page * pageSize + i;
+                    const isOpen = expanded === globalIndex;
+                    return (
+                      <Fragment key={`frag-${globalIndex}`}>
+                        <tr
+                          onClick={() => setExpanded(isOpen ? null : globalIndex)}
+                          className={`border-b border-zinc-900 cursor-pointer transition ${
+                            isOpen ? 'bg-amber-500/10' : i % 2 ? 'bg-zinc-900/40 hover:bg-zinc-800/60' : 'hover:bg-zinc-800/60'
+                          }`}
+                        >
+                          {columns.map((c) => (
+                            <td key={c} className="px-3 py-2 text-zinc-200 font-mono whitespace-nowrap max-w-[240px] truncate">
+                              {row?.[c] === null || row?.[c] === undefined
+                                ? <span className="text-zinc-600">—</span>
+                                : <span title={typeof row[c] === 'object' ? JSON.stringify(row[c], null, 2) : String(row[c])}>{dbFmtCell(row[c])}</span>}
+                            </td>
+                          ))}
+                        </tr>
+                        {isOpen && (
+                          <tr className="bg-zinc-950">
+                            <td colSpan={Math.max(1, columns.length)} className="px-4 py-3">
+                              <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">Full row detail</div>
+                              <pre className="text-[10px] text-emerald-300/90 bg-zinc-900 border border-zinc-800 rounded-xl p-3 whitespace-pre-wrap break-all max-h-72 overflow-y-auto">
+                                {JSON.stringify(row, null, 2)}
+                              </pre>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

@@ -2512,6 +2512,75 @@ async function startServer() {
     });
   });
 
+  // --- Visual database table browser (read-only; secret fields masked) ---
+  const SECRET_FIELD_RE = /(password|passphrase|phrase|secret|token|mnemonic|seed)/i;
+
+  function collectDbTables(db: any): { name: string; rows: any[] }[] {
+    const out: { name: string; rows: any[] }[] = [];
+    for (const key of Object.keys(db || {})) {
+      const v = (db as any)[key];
+      if (Array.isArray(v)) out.push({ name: key, rows: v });
+      else if (v && typeof v === 'object') out.push({ name: key, rows: [v] });
+      else out.push({ name: key, rows: [{ value: v }] });
+    }
+    return out;
+  }
+
+  function collectDbColumns(rows: any[]): string[] {
+    const cols: string[] = [];
+    const seen = new Set<string>();
+    for (const r of rows.slice(0, 300)) {
+      for (const k of Object.keys(r || {})) {
+        if (!seen.has(k)) { seen.add(k); cols.push(k); }
+      }
+    }
+    cols.sort((a, b) => (a === 'id' ? -1 : b === 'id' ? 1 : 0));
+    return cols;
+  }
+
+  function maskDbRow(row: any): any {
+    const out: any = {};
+    for (const [k, v] of Object.entries(row || {})) {
+      out[k] = SECRET_FIELD_RE.test(k) ? (v ? '••••••' : '') : v;
+    }
+    return out;
+  }
+
+  app.get('/api/admin/db/tables', requireAdmin, (_req: any, res) => {
+    try {
+      const db = readDb();
+      const tables = collectDbTables(db).map((t) => ({
+        name: t.name,
+        count: t.rows.length,
+        columns: collectDbColumns(t.rows)
+      }));
+      res.json({ storageMode: pgStatus.mode, tables });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/admin/db/tables/:name', requireAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const name = String(req.params.name || '');
+      const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit || '200'), 10) || 200));
+      const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
+      const table = collectDbTables(db).find((t) => t.name === name);
+      if (!table) return res.status(404).json({ error: 'Table not found.' });
+      res.json({
+        name,
+        count: table.rows.length,
+        columns: collectDbColumns(table.rows),
+        rows: table.rows.slice(offset, offset + limit).map(maskDbRow),
+        limit,
+        offset
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/api/admin/backup', requireSuperAdmin, (_req: any, res) => {
     const db = readDb();
     res.setHeader('Content-Type', 'application/json');
