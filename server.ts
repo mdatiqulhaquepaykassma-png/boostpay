@@ -1905,6 +1905,7 @@ async function startServer() {
         role: 'SUPERADMIN',
         createdAt: Date.now()
       });
+      recordAuditLog(db, 'ADMIN_ACCOUNT_SEED', 'system', `No admin accounts found - seeded default SUPERADMIN ${email} (change its password!)`);
     }
     return db.admins;
   }
@@ -2110,6 +2111,7 @@ async function startServer() {
       }
 
       const restoredDb = {
+        ...existing,
         users: Array.from(mergedMap.values()),
         transactions: mergedTxs,
         conversations: payload.conversations || existing.conversations || [],
@@ -2117,7 +2119,12 @@ async function startServer() {
         notifications: payload.notifications || existing.notifications || [],
         config: payload.config || existing.config
       };
-
+      // SECURITY: ...existing preserves admins/sessions/auditLogs and any other
+      // collections that older backup files do not contain.
+      if (!Array.isArray(restoredDb.admins) || restoredDb.admins.length === 0) {
+        if (Array.isArray(existing.admins) && existing.admins.length > 0) restoredDb.admins = existing.admins;
+      }
+      recordAuditLog(restoredDb, 'ADMIN_DB_IMPORT', String(req.authAdmin), `Imported snapshot (users: ${restoredDb.users.length}, transactions: ${restoredDb.transactions.length})`);
       writeDb(restoredDb);
       res.json({
         success: true,
@@ -2493,6 +2500,14 @@ async function startServer() {
       const db = readDb();
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       fs.writeFileSync(path.join(BACKUP_DIR, `boostpay_db.pre-restore-${stamp}.json`), JSON.stringify(db, null, 2), 'utf-8');
+      // SECURITY: never let an older backup wipe admin accounts/sessions/audit history.
+      if (!Array.isArray(restored.admins) || restored.admins.length === 0) {
+        if (Array.isArray(db.admins) && db.admins.length > 0) restored.admins = db.admins;
+      }
+      if (!Array.isArray(restored.sessions) || restored.sessions.length === 0) {
+        if (Array.isArray(db.sessions)) restored.sessions = db.sessions;
+      }
+      if (!Array.isArray(restored.auditLogs)) restored.auditLogs = db.auditLogs || [];
       recordAuditLog(restored, 'ADMIN_BACKUP_RESTORE', String(req.authAdmin), `Restored data from ${name} (${restored.users.length} users)`);
       writeDb(restored);
       res.json({ success: true, users: restored.users.length });
@@ -2614,6 +2629,7 @@ async function startServer() {
     try {
       const name = String(req.params.name || '');
       const db = readDb();
+      if (name === 'admins') return res.status(400).json({ error: 'Admin accounts must be managed from the Admin panel (ADMINS tab).' });
       if (!Array.isArray(db[name])) return res.status(400).json({ error: 'Collection not found (rows can only be added to array collections).' });
       const row = (req.body && req.body.row) || {};
       if (typeof row !== 'object' || Array.isArray(row)) return res.status(400).json({ error: 'Row must be an object.' });
@@ -2660,6 +2676,7 @@ async function startServer() {
       const name = String(req.params.name || '');
       const id = String(req.params.id || '');
       const db = readDb();
+      if (name === 'admins') return res.status(400).json({ error: 'Admin accounts must be managed from the Admin panel (ADMINS tab).' });
       if (!Array.isArray(db[name])) return res.status(400).json({ error: 'Collection not found.' });
       const idx = db[name].findIndex((r: any) => String(r && r.id) === id);
       if (idx < 0) return res.status(404).json({ error: 'Row not found.' });
