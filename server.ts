@@ -364,7 +364,9 @@ const INITIAL_DB = {
       maxMessagesPerMin: 10,
       ipBlockEnabled: true,
       blockedIps: [] as any[],
-      ipAutoBlockThreshold: 50
+      ipAutoBlockThreshold: 50,
+      ipAutoBlockDurationMs: 600000, // 10 min default (user reported "10 min" block)
+      ipAutoBlockEnabled: true
     }
   },
   auditLogs: [
@@ -540,6 +542,9 @@ function readDb() {
     }
     if (parsed.config.antifraud && (parsed.config.antifraud as any).blockedIps === undefined) (parsed.config.antifraud as any).blockedIps = [];
     if (parsed.config.antifraud && (parsed.config.antifraud as any).ipBlockEnabled === undefined) (parsed.config.antifraud as any).ipBlockEnabled = true;
+    if (parsed.config.antifraud && (parsed.config.antifraud as any).ipAutoBlockThreshold === undefined) (parsed.config.antifraud as any).ipAutoBlockThreshold = 50;
+    if (parsed.config.antifraud && (parsed.config.antifraud as any).ipAutoBlockDurationMs === undefined) (parsed.config.antifraud as any).ipAutoBlockDurationMs = 600000;
+    if (parsed.config.antifraud && (parsed.config.antifraud as any).ipAutoBlockEnabled === undefined) (parsed.config.antifraud as any).ipAutoBlockEnabled = true;
     if (parsed.config.antifraud && Array.isArray((parsed.config.antifraud as any).blockedIps)) {
       const nowC=Date.now();
       (parsed.config.antifraud as any).blockedIps = (parsed.config.antifraud as any).blockedIps.filter((e:any)=> !e.until || Number(e.until) > nowC || e.enabled===false);
@@ -1249,10 +1254,16 @@ function rateLimit(maxPerMinute: number) {
     if (bucket.count > maxPerMinute) {
       // Add Retry-After header
       res.setHeader('Retry-After', String(Math.ceil((bucket.resetAt - now)/1000)));
-      // Auto-blacklist IPs that hammer 50 over limit (DDoS/backhole scan)
-      if (bucket.count > maxPerMinute + 50) {
-        ipBlacklist.set(ip, Date.now()+ 15*60*1000);
-      }
+      // Auto-blacklist IPs that hammer over limit — now configurable via antifraud settings
+      try {
+        const dbA:any = readDb(); const afA:any=(dbA.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+        const enabledA = afA.ipAutoBlockEnabled !== false && afA.enabled !== false;
+        const threshA = Number(afA.ipAutoBlockThreshold ?? 50);
+        const durA = Number(afA.ipAutoBlockDurationMs ?? 600000);
+        if (enabledA && bucket.count > maxPerMinute + threshA) {
+          ipBlacklist.set(ip, Date.now()+ Math.max(60000, durA));
+        }
+      } catch {}
       return res.status(429).json({ error: 'Too many requests — slow down (429). Try again in 60s.' });
     }
     next();
@@ -1336,8 +1347,10 @@ function checkBlacklist(req:any,res:any,next:any){
   }
   const until=ipBlacklist.get(ip);
   if (until && until > Date.now()) {
-    res.setHeader('Retry-After', String(Math.ceil((until - Date.now())/1000)));
-    return res.status(429).json({ error: 'Your IP is temporarily blocked for abuse (10 min).' });
+    const secs = Math.ceil((until - Date.now())/1000);
+    res.setHeader('Retry-After', String(secs));
+    const mins = Math.ceil(secs/60);
+    return res.status(429).json({ error: `Your IP is temporarily blocked for abuse (${mins} min).`, retryAfter: secs });
   }
   next();
 }
@@ -1724,9 +1737,9 @@ async function startServer() {
     next();
   });
 
-  // User API: everything except login/register requires a valid user token
+  // User API: login/register + forgot/reset are public (no auth)
   app.use('/api/users', (req: any, res: any, next: any) => {
-    if (req.path === '/login' || req.path === '/register') return next();
+    if (req.path === '/login' || req.path === '/register' || req.path === '/forgot-password' || req.path === '/reset-password') return next();
     return requireUser(req, res, next);
   });
 
@@ -5443,6 +5456,10 @@ async function startServer() {
     if (b.newAccountLargeTransferThreshold!==undefined) { const v=parseFloat(b.newAccountLargeTransferThreshold); if (!isNaN(v)&&v>=0) db.config.antifraud.newAccountLargeTransferThreshold=v; }
     if (b.maxLoginsPer10Min!==undefined) { const v=parseInt(b.maxLoginsPer10Min,10); if (!isNaN(v)&&v>=1) db.config.antifraud.maxLoginsPer10Min=v; }
     if (b.maxMessagesPerMin!==undefined) { const v=parseInt(b.maxMessagesPerMin,10); if (!isNaN(v)&&v>=1) db.config.antifraud.maxMessagesPerMin=v; }
+    if (b.ipBlockEnabled!==undefined) (db.config.antifraud as any).ipBlockEnabled=!!b.ipBlockEnabled;
+    if (b.ipAutoBlockEnabled!==undefined) (db.config.antifraud as any).ipAutoBlockEnabled=!!b.ipAutoBlockEnabled;
+    if (b.ipAutoBlockThreshold!==undefined) { const v=parseInt(String(b.ipAutoBlockThreshold),10); if (!isNaN(v)&&v>=1&&v<=500) (db.config.antifraud as any).ipAutoBlockThreshold=v; }
+    if (b.ipAutoBlockDurationMs!==undefined) { let v=parseInt(String(b.ipAutoBlockDurationMs),10); if (!isNaN(v)) { if (v<60000 && v<=1440) v*=60*1000; if (v>=60000 && v<=7*24*3600000) (db.config.antifraud as any).ipAutoBlockDurationMs=v; } }
     if (b.freezeDurations && typeof b.freezeDurations === 'object') {
       if (!db.config.antifraud.freezeDurations) db.config.antifraud.freezeDurations={};
       for (const k of Object.keys(b.freezeDurations)) {
