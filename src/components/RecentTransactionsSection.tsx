@@ -1,7 +1,7 @@
-import React, { FC, useState, memo } from 'react';
+import React, { FC, useState, useEffect, memo } from 'react';
 import { ArrowUpRight, ArrowDownLeft, Zap, ShieldAlert, X, Clock, Copy, Check, ChevronDown } from 'lucide-react';
 import { Transaction } from '../types';
-import { copyToClipboard } from '../services/store';
+import { BoostPayStore, copyToClipboard } from '../services/store';
 import { formatPrecisionAmount } from '../utils/format';
 
 interface Props {
@@ -10,17 +10,53 @@ interface Props {
   onViewAllTransactions?: () => void;
 }
 
+type FilterTab = 'ALL' | 'REWARD' | 'P2P' | 'REFERRAL';
+
 export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId, onViewAllTransactions }) => {
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [copiedTx, setCopiedTx] = useState(false);
   const [visibleCount, setVisibleCount] = useState(5);
+  const [filterTab, setFilterTab] = useState<FilterTab>('ALL');
+  const [liveTransactions, setLiveTransactions] = useState<Transaction[]>(()=> transactions && transactions.length ? transactions : BoostPayStore.getTransactions());
+  useEffect(()=>{ if (transactions && transactions.length) setLiveTransactions(transactions); }, [transactions]);
+  useEffect(()=>{
+    const id=setInterval(()=>{
+      const fresh=BoostPayStore.getTransactions();
+      setLiveTransactions(prev=>{
+        if (prev.length!==fresh.length) return fresh;
+        if (fresh[0] && prev[0] && (fresh[0].id!==prev[0].id || fresh[0].amount!==prev[0].amount)) return fresh;
+        return prev;
+      });
+    },2000);
+    return ()=>clearInterval(id);
+  },[]);
 
   // FIX: only show transactions where userId matches — prevents sent+received duplicate for same transfer
-  const userTxs = transactions
+  const userTxs = liveTransactions
     .filter(t => String((t as any).userId) === String(userId))
     .sort((a, b) => b.timestamp - a.timestamp);
 
-  const displayedTxs = userTxs.slice(0, visibleCount);
+  // counts for filter tabs
+  const counts = {
+    all: userTxs.length,
+    reward: userTxs.filter(t => String(t.type).includes('REWARD')).length,
+    p2p: userTxs.filter(t => t.type === 'TRANSFER_SENT' || t.type === 'TRANSFER_RECEIVED').length,
+    referral: userTxs.filter(t => String(t.type).includes('REFERRAL')).length,
+  };
+
+  const filteredTxs = userTxs.filter(t => {
+    if (filterTab === 'REWARD') return String(t.type).includes('REWARD');
+    if (filterTab === 'P2P') return t.type === 'TRANSFER_SENT' || t.type === 'TRANSFER_RECEIVED';
+    if (filterTab === 'REFERRAL') return String(t.type).includes('REFERRAL');
+    return true;
+  });
+
+  const displayedTxs = filteredTxs.slice(0, visibleCount);
+
+  const handleTab = (tab: FilterTab) => {
+    setFilterTab(tab);
+    setVisibleCount(5);
+  };
 
   const getTxDetails = (tx: Transaction) => {
     if (String(tx.type).includes('REWARD')) {
@@ -88,7 +124,7 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
 
   return (
     <div className="rounded-2xl border border-zinc-800 bg-zinc-900/80 p-5 shadow-xl">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <Clock className="w-4 h-4 text-zinc-400" />
           <h3 className="font-bold text-sm text-white">Recent Transactions</h3>
@@ -102,9 +138,17 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
           </button>
         ) : (
           <span className="text-[11px] font-mono text-zinc-500">
-            Showing {displayedTxs.length} of {userTxs.length}
+            Showing {displayedTxs.length} of {filteredTxs.length}
           </span>
         )}
+      </div>
+
+      {/* Filter tabs — fix: user can now see P2P vs Reward separately instead of only Reward flooding */}
+      <div className="grid grid-cols-4 gap-1 p-1 bg-zinc-950 rounded-2xl border border-zinc-800/80 mb-3">
+        <button onClick={()=>handleTab('ALL')} className={`py-1.5 text-[10px] font-bold rounded-xl transition cursor-pointer truncate ${filterTab==='ALL'?'bg-zinc-800 text-amber-400':'text-zinc-400 hover:text-zinc-200'}`}>All ({counts.all})</button>
+        <button onClick={()=>handleTab('REWARD')} className={`py-1.5 text-[10px] font-bold rounded-xl transition cursor-pointer truncate ${filterTab==='REWARD'?'bg-zinc-800 text-amber-400':'text-zinc-400 hover:text-zinc-200'}`}>Reward ({counts.reward})</button>
+        <button onClick={()=>handleTab('P2P')} className={`py-1.5 text-[10px] font-bold rounded-xl transition cursor-pointer truncate ${filterTab==='P2P'?'bg-zinc-800 text-amber-400':'text-zinc-400 hover:text-zinc-200'}`}>P2P ({counts.p2p})</button>
+        <button onClick={()=>handleTab('REFERRAL')} className={`py-1.5 text-[10px] font-bold rounded-xl transition cursor-pointer truncate ${filterTab==='REFERRAL'?'bg-zinc-800 text-amber-400':'text-zinc-400 hover:text-zinc-200'}`}>Refer ({counts.referral})</button>
       </div>
 
       <div className="space-y-2">
@@ -145,14 +189,14 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
           );
         })}
 
-        {userTxs.length === 0 && (
+        {filteredTxs.length === 0 && (
           <div className="py-8 text-center text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-xl">
-            No transactions recorded yet. Complete a boost cycle or receive a transfer to see history.
+            {filterTab==='P2P' ? 'No P2P transfers yet. Send money to a peer to see history.' : filterTab==='REWARD' ? 'No compounding rewards yet. Start boost to earn.' : filterTab==='REFERRAL' ? 'No referral commissions yet. Invite friends.' : 'No transactions recorded yet. Complete a boost cycle or receive a transfer to see history.'}
           </div>
         )}
 
         {/* Load More or Open Transactions Tab */}
-        {userTxs.length > displayedTxs.length && (
+        {filteredTxs.length > displayedTxs.length && (
           <div className="pt-2 text-center space-y-2">
             <button
               onClick={() => setVisibleCount(prev => prev + 5)}
