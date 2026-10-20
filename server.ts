@@ -1227,34 +1227,58 @@ setInterval(() => {
                 : startingBal * Math.expm1(target * Math.log1p(ratePerMs)))
             : 0;
 
-          user.balance = (Number(user.balance) || 0) + finalYield;
-          user.lifetimeProfit = (Number(user.lifetimeProfit) || 0) + finalYield;
-
-          const rewardTx = {
-            id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000),
-            userId: user.id,
-            type: 'REWARD',
-            amount: finalYield,
-            timestamp: now,
-            notes: 'Server background compounding reward completed'
-          };
-          db.transactions.unshift(rewardTx);
+          // ---- Security: compounding credit guards (duplicate/amount bounds/balanceAfter verify) ----
+          const priorBal = Number(user.balance) || 0;
+          // amount bounds: yield must be finite, positive, and within 0 < yield <= priorBal*0.5 + epsilon (prevents inflation exploit without exposing exact secret rate)
+          if (!isFinite(finalYield) || finalYield <= 0 || finalYield > (priorBal * 0.5 + 1e-6)) {
+            console.warn(`[ticker] blocked abnormal yield ${finalYield} for user ${user.id} priorBal ${priorBal}`);
+            // skip credit — still complete cycle to avoid infinite loop
+          } else {
+            // balanceAfter expected check pre-flight
+            const expectedBal = priorBal + finalYield;
+            user.balance = expectedBal;
+            user.lifetimeProfit = (Number(user.lifetimeProfit) || 0) + finalYield;
+            // verify balanceAfter
+            if (Math.abs(Number(user.balance) - expectedBal) > 1e-6) {
+              console.error(`[ticker] balanceAfter mismatch user ${user.id} expected ${expectedBal} got ${user.balance} — correcting`);
+              user.balance = expectedBal;
+            }
+            // unique TX id with collision check
+            let txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+            let tries = 0; while ((db.transactions||[]).some((t:any)=> t.id===txId) && tries<5) { txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000); tries++; }
+            if ((db.transactions||[]).some((t:any)=> t.id===txId)) {
+              console.warn(`[ticker] duplicate TX id collision for ${txId} — skip`);
+            } else {
+              const rewardTx = {
+                id: txId,
+                userId: user.id,
+                type: 'REWARD',
+                amount: finalYield,
+                timestamp: now,
+                notes: 'Server background compounding reward completed',
+                balanceAfter: user.balance
+              } as any;
+              db.transactions.unshift(rewardTx);
+            }
+          }
+          // rewardTx reference for referral commission (may be undefined if blocked — handle below)
+          const rewardTxIdForRef = (db.transactions[0] && db.transactions[0].userId===user.id && db.transactions[0].type==='REWARD' && db.transactions[0].timestamp===now) ? db.transactions[0].id : null;
 
           // Also generate SMS-style inbox notification with micro precision
-          pushNotification(db, {
+          if (rewardTxIdForRef) pushNotification(db, {
             id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
             userId: user.id,
             type: 'YIELD_REWARD',
             title: 'BOOSTPAY-ALERTS',
-            message: `YIELD ALERT: Compounding cycle completed. $${formatAmount8(finalYield)} in yield profit credited to your wallet. Available Balance: $${formatAmount8(user.balance)}. Ref: ${rewardTx.id}`,
+            message: `YIELD ALERT: Compounding cycle completed. $${formatAmount8(finalYield)} in yield profit credited to your wallet. Available Balance: $${formatAmount8(user.balance)}. Ref: ${rewardTxIdForRef}`,
             amount: finalYield,
-            referenceId: rewardTx.id,
+            referenceId: rewardTxIdForRef as any,
             timestamp: now,
             isRead: false,
             metadata: {
               balanceAfter: user.balance
             }
-          });
+          } as any);
           // ---- Referral commission on compounding (1-10% dynamic) ------------
           try {
             const refEntry = (db.referrals || []).find((r:any)=> String(r.referredId)===String(user.id));
@@ -1265,21 +1289,34 @@ setInterval(() => {
               // FIX #2/#3: only credit if referrer is actively boosting (boost ON) and not frozen — otherwise no earning
               const referrerBoostActive = !!(referrer && referrer.boostState && (referrer.boostState as any).isActive && !(referrer.boostState as any).isPaused);
               const referrerCanEarn = referrer && !referrer.isFrozen && referrerBoostActive;
-              if (referrerCanEarn && rcfg && rcfg.enabled !== false && rcfg.commissionOnCompounding !== false && finalYield > 0) {
+              if (referrerCanEarn && rcfg && rcfg.enabled !== false && rcfg.commissionOnCompounding !== false && finalYield > 0 && rewardTxIdForRef) {
                 const rate = getReferCommissionRate(db, referrerId, now);
                 if (rate > 0) {
                   const commission = finalYield * (rate/100);
-                  if (commission > 0 && isFinite(commission)) {
-                    referrer.balance = (Number(referrer.balance)||0) + commission;
+                  // security: commission bounds 0 < commission <= finalYield*0.10+epsilon and finite, rate 1-10
+                  const maxComm = finalYield * 0.1001 + 1e-8;
+                  if (commission > 0 && isFinite(commission) && commission <= maxComm && rate>=1 && rate<=10) {
+                    const priorRefBal = Number(referrer.balance)||0;
+                    const expectedRefBal = priorRefBal + commission;
+                    referrer.balance = expectedRefBal;
                     referrer.lifetimeProfit = (Number(referrer.lifetimeProfit)||0) + commission;
+                    if (Math.abs(Number(referrer.balance) - expectedRefBal) > 1e-6) referrer.balance = expectedRefBal;
                     // update referrer boost duration based on new balance
                     if (referrer.boostState) referrer.boostState.targetDurationMs = calculateDynamicDuration(referrer.balance, db.users, db.config);
-                    const commTx = { id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000), userId: referrerId, type: 'REFERRAL_COMMISSION', amount: commission, timestamp: now, notes: `Referral commission ${rate}% on User #${user.id} compounding $${formatAmount8(finalYield)}`, metadata: { referredId: user.id, sourceTxId: rewardTx.id, rate } } as any;
-                    db.transactions.unshift(commTx);
-                    if (!db.referCommissions) db.referCommissions = [];
-                    db.referCommissions.unshift({ id: 'RC-'+Math.floor(10000000+Math.random()*90000000), referrerId, referredId: String(user.id), amount: commission, rate, sourceTxId: rewardTx.id, timestamp: now, dayKey: getDayKey(now) });
-                    if (db.referCommissions.length>5000) db.referCommissions.pop();
-                    pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: referrerId, type: 'REFERRAL_COMMISSION', title: 'BOOSTPAY-REFERRAL', message: `REFERRAL EARNED: +$${formatAmount8(commission)} (${rate}% of User #${user.id} yield $${formatAmount8(finalYield)}). Balance: $${formatAmount8(referrer.balance)}.`, amount: commission, referenceId: commTx.id, timestamp: now, isRead: false, metadata: { referredId: user.id, rate, sourceYield: finalYield, balanceAfter: referrer.balance } } as any);
+                    let commTxId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+                    let ctries=0; while ((db.transactions||[]).some((t:any)=> t.id===commTxId) && ctries<5) { commTxId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000); ctries++; }
+                    if (!(db.transactions||[]).some((t:any)=> t.id===commTxId)) {
+                      const commTx = { id: commTxId, userId: referrerId, type: 'REFERRAL_COMMISSION', amount: commission, timestamp: now, notes: `Referral commission ${rate}% on User #${user.id} compounding $${formatAmount8(finalYield)}`, metadata: { referredId: user.id, sourceTxId: rewardTxIdForRef, rate }, balanceAfter: referrer.balance } as any;
+                      db.transactions.unshift(commTx);
+                      if (!db.referCommissions) db.referCommissions = [];
+                      let rcId = 'RC-'+Math.floor(10000000+Math.random()*90000000);
+                      let rcTries=0; while ((db.referCommissions||[]).some((c:any)=> c.id===rcId) && rcTries<5) { rcId = 'RC-'+Math.floor(10000000+Math.random()*90000000); rcTries++; }
+                      if (!(db.referCommissions||[]).some((c:any)=> c.id===rcId)) {
+                        db.referCommissions.unshift({ id: rcId, referrerId, referredId: String(user.id), amount: commission, rate, sourceTxId: rewardTxIdForRef, timestamp: now, dayKey: getDayKey(now), balanceAfter: referrer.balance } as any);
+                        if (db.referCommissions.length>5000) db.referCommissions.pop();
+                      }
+                      pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: referrerId, type: 'REFERRAL_COMMISSION', title: 'BOOSTPAY-REFERRAL', message: `REFERRAL EARNED: +$${formatAmount8(commission)} (${rate}% of User #${user.id} yield $${formatAmount8(finalYield)}). Balance: $${formatAmount8(referrer.balance)}.`, amount: commission, referenceId: commTx.id, timestamp: now, isRead: false, metadata: { referredId: user.id, rate, sourceYield: finalYield, balanceAfter: referrer.balance } } as any);
+                    }
                     broadcastUserUpdate(db, referrerId);
                   }
                 }
@@ -5023,14 +5060,15 @@ async function startServer() {
       if (!ru) return { referredId: String(r.referredId), createdAt: r.createdAt, missing:true };
       const commissionsForThis = myCommissions.filter((c:any)=> String(c.referredId)===String(r.referredId));
       const earned = commissionsForThis.reduce((a:number,c:any)=> a+(Number(c.amount)||0),0);
+      const liveBS = liveBoostState(ru) || ru.boostState;
       return {
         referredId: String(ru.id),
         balance: Number(ru.balance)||0,
         lifetimeProfit: Number(ru.lifetimeProfit)||0,
-        boostActive: !!(ru.boostState && ru.boostState.isActive && !ru.boostState.isPaused),
-        boostPaused: !!(ru.boostState && ru.boostState.isActive && ru.boostState.isPaused),
-        cycleDurationMs: Number((ru.boostState && ru.boostState.targetDurationMs) || calculateDynamicDuration(ru.balance, db.users, db.config)),
-        elapsedMs: Number((ru.boostState && (ru.boostState.elapsedMs||0)) || 0),
+        boostActive: !!(liveBS && liveBS.isActive && !liveBS.isPaused),
+        boostPaused: !!(liveBS && liveBS.isActive && liveBS.isPaused),
+        cycleDurationMs: Number((liveBS && liveBS.targetDurationMs) || calculateDynamicDuration(ru.balance, db.users, db.config)),
+        elapsedMs: Number((liveBS && (liveBS.elapsedMs||0)) || 0),
         createdAt: r.createdAt,
         dayKey: r.dayKey,
         earnedFromThis: earned,

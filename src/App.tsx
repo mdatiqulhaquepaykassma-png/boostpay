@@ -469,7 +469,7 @@ export default function App() {
             )}
 
             {activeTab === 'REFERRAL' && (
-              <ReferView userId={currentUser.id} />
+              <ReferView userId={currentUser.id} onMessageUser={handleOpenPeerChatFromLeaderboard} />
             )}
 
             {activeTab === 'INBOX' && (
