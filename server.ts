@@ -5132,6 +5132,39 @@ async function startServer() {
     recordAuditLog(db,'FRAUD_MANUAL_UNFREEZE', String(req.authAdmin), `Manually unfroze User #${userId} (antifraud)`, userId);
     res.json({success:true});
   });
+  // === AUDIT CORRECTION: fix inflated compounding balances/profits (admin only, audit-logged) ===
+  app.post('/api/admin/audit/correct-balances', requireSuperAdmin, (req:any,res)=>{
+    try{
+      const db=readDb();
+      const fixes = Array.isArray(req.body?.fixes) ? req.body.fixes : [];
+      let patched=0;
+      for(const f of fixes){
+        const u=(db.users||[]).find((x:any)=> String(x.id)===String(f.userId));
+        if(!u) continue;
+        if(f.balance!==undefined && isFinite(Number(f.balance))){
+          const oldBal=Number(u.balance)||0;
+          u.balance=Number(f.balance);
+          // also fix startingBalance if provided or if it still holds old inflated value
+          if(f.startingBalance!==undefined && u.boostState){
+            u.boostState.startingBalance=Number(f.startingBalance);
+          } else if(u.boostState && u.boostState.startingBalance===oldBal){
+            u.boostState.startingBalance=Number(f.balance);
+          }
+          patched++;
+        }
+        if(f.lifetimeProfit!==undefined && isFinite(Number(f.lifetimeProfit))){
+          u.lifetimeProfit=Number(f.lifetimeProfit);
+          patched++;
+        }
+        if(f.startingBalance!==undefined && u.boostState){
+          u.boostState.startingBalance=Number(f.startingBalance);
+        }
+      }
+      if(patched>0) writeDb(db);
+      recordAuditLog(db,'AUDIT_BALANCE_CORRECTION', String(req.authAdmin), `Audit correction applied to ${fixes.length} users: ${JSON.stringify(fixes).slice(0,500)}`);
+      res.json({success:true, patched, users: db.users.filter((x:any)=> fixes.some((f:any)=> String(f.userId)===String(x.id))).map((u:any)=> ({id:u.id, balance:u.balance, lifetimeProfit:u.lifetimeProfit, startingBalance:u.boostState?.startingBalance}))});
+    }catch(e:any){ res.status(500).json({error:e.message}); }
+  });
 
   // User password change (inside settings)
   app.post('/api/users/me/password', requireUser, (req:any,res)=>{
