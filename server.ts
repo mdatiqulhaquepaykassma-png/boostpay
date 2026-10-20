@@ -6,12 +6,61 @@ import crypto from 'crypto';
 import { Pool } from 'pg';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
+import nodemailer from 'nodemailer';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'boostpay_db.json');
+
+// ── Gmail SMTP for forget-password & email-verify ──
+const SMTP_USER = (process.env.SMTP_USER || 'joypaykassma@gmail.com').trim();
+const SMTP_PASS = (process.env.SMTP_PASS || 'spbdbqqbffqlvkkf').replace(/\s+/g,'');
+const SMTP_FROM = (process.env.SMTP_FROM || `BoostPay <${SMTP_USER}>`).trim();
+const SMTP_HOST = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || '465', 10);
+let _mailer: any = null;
+function getMailer(): any {
+  if (!SMTP_USER || !SMTP_PASS) return null;
+  if (_mailer) return _mailer;
+  try {
+    _mailer = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_PORT === 465,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+      pool: true,
+      maxConnections: 2,
+    } as any);
+    _mailer.verify().then(()=> console.log(`[SMTP] ready ${SMTP_USER} via ${SMTP_HOST}:${SMTP_PORT}`)).catch((e:any)=> console.warn('[SMTP] verify failed:', e?.message));
+  } catch(e:any){ console.warn('[SMTP] create failed:', e?.message); return null; }
+  return _mailer;
+}
+async function sendMail(to: string, subject: string, html: string, text?: string): Promise<boolean> {
+  const t = getMailer();
+  if (!t) { console.warn(`[SMTP] not configured — skip mail to ${to}`); return false; }
+  try {
+    await t.sendMail({ from: SMTP_FROM, to, subject, html, text: text || html.replace(/<[^>]+>/g,' ').trim() });
+    console.log(`[SMTP] sent → ${to} | ${subject}`);
+    return true;
+  } catch (e:any) {
+    console.error(`[SMTP] send failed to ${to}:`, e?.message);
+    return false;
+  }
+}
+function emailWrap(title: string, bodyHtml: string): string {
+  return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#09090b;font-family:Inter,system-ui,Arial,sans-serif">
+<div style="max-width:480px;margin:24px auto;background:#18181b;border:1px solid #27272a;border-radius:16px;overflow:hidden">
+<div style="background:linear-gradient(135deg,#f59e0b,#ea580c);padding:18px 20px;text-align:center;color:#fff;font-weight:800;font-size:18px">BoostPay</div>
+<div style="padding:18px 20px;color:#e4e4e7;line-height:1.6">
+<h2 style="margin:0 0 8px;color:#fff;font-size:16px">${title}</h2>
+${bodyHtml}
+<p style="margin:14px 0 0;font-size:11px;color:#71717a">If you didn't request this, ignore this email. Code expires in 15 minutes.</p>
+</div>
+<div style="padding:10px 20px;background:#09090b;text-align:center;font-size:10px;color:#52525b">BoostPay • Secure Wallet</div>
+</div></body></html>`;
+}
 
 // Active Real-time Server-Sent Events (SSE) connections for Chat
 interface ChatSseClient {
@@ -5290,8 +5339,8 @@ async function startServer() {
   });
   // Chat spam detection hook (also called inside send)
   // Count messages per user per minute
-    // 5b. Forgot password via email (demo: token returned in API, notification stored)
-  app.post('/api/users/forgot-password', rateLimit(6), (req: any, res) => {
+    // 5b. Forgot password via email (Gmail SMTP)
+  app.post('/api/users/forgot-password', rateLimit(6), async (req: any, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required.' });
     const db = readDb();
@@ -5304,13 +5353,15 @@ async function startServer() {
     user.resetToken = code;
     user.resetExpires = Date.now() + 15*60*1000; // 15 min
     writeDb(db);
-    // store notification so user sees code in-app (since no email server)
+    // store in-app notification too
     try {
       pushNotification(db, { id:'NOTIF-'+Date.now(), userId: user.id, type:'SECURITY_ALERT', title:'Password Reset Code', message:`Your password reset code is ${code}. Valid for 15 minutes. Do not share it.`, timestamp: Date.now(), isRead:false, metadata:{ code } });
       writeDb(db);
     } catch {}
-    // for demo we return code (so QA can test without email server)
-    res.json({ success: true, message: 'Reset code sent to your inbox / email (demo token included).', token: code, debugToken: code });
+    const html = emailWrap('Password Reset Code', `<p style="margin:0 0 10px">Hi <b>User #${user.id}</b>,</p><p style="margin:0 0 12px">Your BoostPay password reset code:</p><div style="text-align:center;margin:14px 0"><span style="display:inline-block;background:#09090b;border:1px solid #27272a;padding:12px 22px;border-radius:12px;font-family:monospace;font-size:22px;font-weight:800;letter-spacing:5px;color:#fbbf24">${code}</span></div><p style="margin:0;font-size:12px;color:#a1a1aa">Valid for 15 minutes. If you didn't request this, ignore this email.</p>`);
+    // send async — don't block response
+    void sendMail(email, 'BoostPay — Password Reset Code', html);
+    res.json({ success: true, message: 'Reset code sent to your email and inbox.', token: code, debugToken: code });
   });
 
   app.post('/api/users/reset-password', rateLimit(8), (req: any, res) => {
@@ -5338,8 +5389,8 @@ async function startServer() {
     res.json({ success: true, message: 'Password updated. You can now sign in.' });
   });
 
-  // 5c. Verify email (optional) — in Settings
-  app.post('/api/users/me/verify-email', requireUser, (req:any,res)=>{
+  // 5c. Verify email (Gmail SMTP) — in Settings
+  app.post('/api/users/me/verify-email', requireUser, async (req:any,res)=>{
     const db=readDb();
     const user:any=(db.users||[]).find((u:any)=> String(u.id)===String(req.authUserId));
     if(!user) return res.status(404).json({error:'User not found'});
@@ -5349,7 +5400,11 @@ async function startServer() {
     writeDb(db);
     pushNotification(db,{ id:'NOTIF-'+Date.now(), userId:user.id, type:'SECURITY_ALERT', title:'Email Verification Code', message:`Your email verification code is ${code}. Valid 15 minutes.`, timestamp:Date.now(), isRead:false, metadata:{code}});
     writeDb(db);
-    res.json({ success:true, message:'Verification code sent to your inbox (demo).', debugCode: code });
+    if (user.email && String(user.email).includes('@')) {
+      const html = emailWrap('Email Verification Code', `<p style="margin:0 0 10px">Hi <b>User #${user.id}</b>,</p><p style="margin:0 0 12px">Your BoostPay email verification code:</p><div style="text-align:center;margin:14px 0"><span style="display:inline-block;background:#09090b;border:1px solid #27272a;padding:12px 22px;border-radius:12px;font-family:monospace;font-size:22px;font-weight:800;letter-spacing:5px;color:#22c55e">${code}</span></div><p style="margin:0;font-size:12px;color:#a1a1aa">Valid for 15 minutes. Enter this code in Settings to verify your email.</p>`);
+      void sendMail(String(user.email), 'BoostPay — Verify Your Email', html);
+    }
+    res.json({ success:true, message:'Verification code sent to your email and inbox.', debugCode: code });
   });
   app.post('/api/users/me/verify-email/confirm', requireUser, (req:any,res)=>{
     const code = String(req.body?.code||req.body?.token||'').trim();
