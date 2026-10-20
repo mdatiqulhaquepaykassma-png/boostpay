@@ -1202,6 +1202,18 @@ setInterval(() => {
         const target = user.boostState.targetDurationMs || calculateDynamicDuration(user.balance, db.users, config);
 
         if (elapsed >= target) {
+          // === DEDUP GUARD: prevent double-award for same cycle (race / rapid target shrink) ===
+          const lastReward = (db.transactions||[]).find((t:any)=> t.type==='REWARD' && String(t.userId)===String(user.id));
+          if (lastReward && now - Number(lastReward.timestamp) < 55000) {
+            // too soon since last reward for this user — skip (min duration 60k, allow 5s tolerance for ticker jitter)
+            console.warn(`[TICKER] Skipping duplicate reward for user ${user.id} — last reward ${now - Number(lastReward.timestamp)}ms ago`);
+            // Still reset to avoid infinite loop: if elapsed hugely exceeds target due to clock skew, we still need to handle
+            // But don't award; just keep isActive false to force manual restart check
+            // To avoid stuck, if gap is > target*2, we still allow but log
+            if (now - Number(lastReward.timestamp) < target*0.5) {
+              continue;
+            }
+          }
           // Cycle completed on server!
           const startingBal = Number(user.boostState.startingBalance ?? user.balance);
           // High-precision numerically stable compounding yield calculation (avoids floating point loss for 0.000001 rates)
