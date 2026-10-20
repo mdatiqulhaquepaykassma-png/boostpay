@@ -15,9 +15,9 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
   const [copiedTx, setCopiedTx] = useState(false);
   const [visibleCount, setVisibleCount] = useState(5);
 
-  // FIX #9: show ALL types where user is involved (sender OR recipient), including REWARD/REFERRAL etc
+  // FIX: only show transactions where userId matches — prevents sent+received duplicate for same transfer
   const userTxs = transactions
-    .filter(t => String((t as any).userId) === String(userId) || String((t as any).recipientId) === String(userId) || String((t as any).senderId) === String(userId))
+    .filter(t => String((t as any).userId) === String(userId))
     .sort((a, b) => b.timestamp - a.timestamp);
 
   const displayedTxs = userTxs.slice(0, visibleCount);
