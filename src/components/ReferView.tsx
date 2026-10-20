@@ -226,11 +226,9 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
                 <div className="mt-2 h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden">
                   <div className="h-full bg-gradient-to-r from-amber-500 to-amber-300 transition-all" style={{ width: `${r.cycleDurationMs>0 ? Math.min(100, ((r.elapsedMs + (r.boostActive ? (nowTick - lastFetch) : 0)) / r.cycleDurationMs)*100) : 0}%` }}/>
                 </div>
-                {(r.boostActive || r.boostPaused) && (
-                  <div className="mt-2 flex justify-end">
-                    <button onClick={()=> onMessageUser?.(r.referredId)} className="rounded-lg bg-amber-500/10 border border-amber-500/20 px-3 py-1 text-[10px] font-bold text-amber-300 hover:bg-amber-500/20 transition cursor-pointer flex items-center gap-1"><MessageCircle className="w-3 h-3"/> Message</button>
-                  </div>
-                )}
+                <div className="mt-2 flex justify-end">
+                  <button onClick={()=> onMessageUser?.(String(r.referredId))} className="rounded-lg bg-amber-500/10 border border-amber-500/20 px-3 py-1 text-[10px] font-bold text-amber-300 hover:bg-amber-500/20 transition cursor-pointer flex items-center gap-1"><MessageCircle className="w-3 h-3"/> Message</button>
+                </div>
               </div>
             ))}
           </div>

@@ -1456,7 +1456,7 @@ async function startServer() {
     res.setHeader('X-XSS-Protection','0'); // modern browsers use CSP instead
     res.setHeader('Cross-Origin-Opener-Policy','same-origin');
     res.setHeader('Cross-Origin-Resource-Policy','same-origin');
-    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self' https: wss:; img-src 'self' data: blob: https:; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'none'");
+    res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self' https: wss:; img-src 'self' data: blob: https:; media-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'none'");
     // HSTS only when behind TLS — Traefik terminates TLS, Express sees http, so set header anyway; browser will upgrade if https
     res.setHeader('Strict-Transport-Security','max-age=31536000; includeSubDomains; preload');
     res.setHeader('X-Download-Options','noopen');

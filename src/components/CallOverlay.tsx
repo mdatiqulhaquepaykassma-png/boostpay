@@ -399,12 +399,33 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
       const callId = String(signal?.callId || '');
 
       if (kind === 'offer') {
-        // ICE-restart re-offer on the same active call -> renegotiate, don't ring
+        // ICE-restart or media-switch re-offer on same active call -> renegotiate, handle video upgrade
         if (phase === 'active' && callId && callId === callIdRef.current) {
           void (async () => {
             try {
               const pc = pcRef.current;
               if (!pc || !signal.sdp) return;
+              const wantVideo = signal.media === 'video';
+              if (wantVideo && callMediaRef.current !== 'video') {
+                try {
+                  const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video:{ facingMode:'user', width:{ideal:640}} });
+                  try { localStreamRef.current?.getTracks().forEach(t=>t.stop()); } catch {}
+                  localStreamRef.current = stream;
+                  if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+                  for (const track of stream.getTracks()) {
+                    const sender = pc.getSenders().find(s=> s.track && s.track.kind===track.kind);
+                    if (sender) { try { await sender.replaceTrack(track); } catch { pc.addTrack(track, stream); } }
+                    else pc.addTrack(track, stream);
+                  }
+                  setMedia('video');
+                  setSpeakerOn(true);
+                  void applyAudioRoute(true);
+                } catch {}
+              } else if (!wantVideo && callMediaRef.current === 'video') {
+                setMedia('audio');
+                setSpeakerOn(false);
+                void applyAudioRoute(false);
+              }
               await pc.setRemoteDescription({ type: 'offer', sdp: String(signal.sdp) });
               const answer = await pc.createAnswer();
               await pc.setLocalDescription(answer);
@@ -540,6 +561,63 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
       setCameraOff(!video.enabled);
     }
   }, []);
+  const switchToVideo = useCallback(async () => {
+    if (phase !== 'active' || media === 'video') return;
+    try {
+      setError('');
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: 'user', width: { ideal: 640 } } });
+      const pc = pcRef.current;
+      if (!pc) { try { stream.getTracks().forEach(t=>t.stop()); } catch {}; return; }
+      // stop old tracks and replace local stream
+      try { localStreamRef.current?.getTracks().forEach(t=>t.stop()); } catch {}
+      localStreamRef.current = stream;
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      // add new tracks to peer connection
+      for (const track of stream.getTracks()) {
+        const sender = pc.getSenders().find(s=> s.track && s.track.kind===track.kind);
+        if (sender) { try { await sender.replaceTrack(track); } catch { pc.addTrack(track, stream); } }
+        else pc.addTrack(track, stream);
+      }
+      setMedia('video');
+      setCameraOff(false);
+      setSpeakerOn(true);
+      void applyAudioRoute(true);
+      // renegotiate: create new offer with video
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await BoostPayStore.sendCallSignal(peerRef.current.id, { kind: 'offer', callId: callIdRef.current, media: 'video', sdp: offer.sdp });
+    } catch (e:any) {
+      setError(e?.name==='NotAllowedError' ? 'Camera permission denied.' : 'Could not switch to video.');
+      setTimeout(()=>setError(''),3000);
+    }
+  }, [phase, media, applyAudioRoute]);
+  const switchToAudio = useCallback(async () => {
+    if (phase !== 'active' || media !== 'video') return;
+    try {
+      const pc = pcRef.current;
+      if (pc) {
+        const videoSenders = pc.getSenders().filter(s=> s.track && s.track.kind==='video');
+        for (const s of videoSenders) { try { pc.removeTrack(s); } catch {} }
+      }
+      try { localStreamRef.current?.getVideoTracks().forEach(t=>t.stop()); } catch {}
+      // keep audio track alive - if removed we need new audio stream
+      let audioStream = localStreamRef.current;
+      if (!audioStream || !audioStream.getAudioTracks().length) {
+        audioStream = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
+        localStreamRef.current = audioStream;
+        if (pc) for (const track of audioStream.getTracks()) pc.addTrack(track, audioStream);
+      }
+      setMedia('audio');
+      setCameraOff(false);
+      setSpeakerOn(false);
+      void applyAudioRoute(false);
+      if (pc) {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await BoostPayStore.sendCallSignal(peerRef.current.id, { kind: 'offer', callId: callIdRef.current, media: 'audio', sdp: offer.sdp });
+      }
+    } catch {}
+  }, [phase, media, applyAudioRoute]);
 
   const hangup = useCallback(() => {
     finishCall('completed', true);
@@ -628,13 +706,22 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
             >
               {muted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
             </button>
-            {isVideo && (
-              <button
-                onClick={toggleCamera}
-                className={`flex h-12 w-12 items-center justify-center rounded-full border transition cursor-pointer ${cameraOff ? 'border-red-500/50 bg-red-500/20 text-red-300' : 'border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'}`}
-                title={cameraOff ? 'Camera on' : 'Camera off'}
-              >
-                {cameraOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
+            {isVideo ? (
+              <>
+                <button
+                  onClick={toggleCamera}
+                  className={`flex h-12 w-12 items-center justify-center rounded-full border transition cursor-pointer ${cameraOff ? 'border-red-500/50 bg-red-500/20 text-red-300' : 'border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800'}`}
+                  title={cameraOff ? 'Camera on' : 'Camera off'}
+                >
+                  {cameraOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
+                </button>
+                <button onClick={switchToAudio} className="flex h-12 w-12 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800 transition cursor-pointer" title="Switch to voice">
+                  <Phone className="w-5 h-5" />
+                </button>
+              </>
+            ) : (
+              <button onClick={switchToVideo} className="flex h-12 w-12 items-center justify-center rounded-full border border-amber-500/50 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition cursor-pointer" title="Switch to video">
+                <Video className="w-5 h-5" />
               </button>
             )}
             <button

@@ -25,12 +25,21 @@ const VoiceNotePlayer: FC<{ data: string; durationMs?: number; isMe: boolean }> 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [cur, setCur] = useState(0);
+  const [err, setErr] = useState<string| null>(null);
   const total = Math.max(1, Math.round((durationMs || 0) / 1000));
+  const src = data?.startsWith('data:') ? data : `data:audio/webm;base64,${data}`;
   const toggle = () => {
     const el = audioRef.current;
     if (!el) return;
     if (el.paused) {
-      el.play().then(() => setPlaying(true)).catch(() => {});
+      setErr(null);
+      const p = el.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => setPlaying(true)).catch((e:any) => {
+          setErr(e?.message || 'Playback failed');
+          setTimeout(()=>setErr(null),2500);
+        });
+      } else setPlaying(true);
     } else {
       el.pause();
       setPlaying(false);
@@ -59,12 +68,14 @@ const VoiceNotePlayer: FC<{ data: string; durationMs?: number; isMe: boolean }> 
       </div>
       <audio
         ref={audioRef}
-        src={data}
+        src={src}
         preload="metadata"
         onTimeUpdate={() => setCur(audioRef.current?.currentTime || 0)}
         onEnded={() => { setPlaying(false); setCur(0); }}
+        onError={() => { setErr('Audio load failed'); setPlaying(false); }}
         className="hidden"
       />
+      {err && <span className="text-[8px] text-red-400 font-mono">{err}</span>}
     </div>
   );
 };
@@ -107,7 +118,6 @@ interface MessageItemProps {
   onPin: (m: Message) => void;
   onEdit: (m: Message) => void;
   onDelete: (m: Message) => void;
-  onForwardSms?: (m: Message) => void;
   showSeen?: boolean;
   onOpenImage?: (dataUrl: string) => void;
   onVotePoll?: (m: Message, optionIndex: number) => void;
@@ -124,7 +134,6 @@ const MessageItem = memo(({
   copiedMsgId,
   onReply,
   onForward,
-  onForwardSms,
   onPin,
   onEdit,
   onDelete,
@@ -377,9 +386,6 @@ const MessageItem = memo(({
           <button type="button" onClick={() => onForward(m)} className="text-zinc-400 hover:text-sky-300 p-1 rounded transition cursor-pointer" title="Forward">
             <Forward className="w-3 h-3" />
           </button>
-          <button type="button" onClick={() => onForwardSms?.(m)} className="text-zinc-400 hover:text-emerald-300 p-1 rounded transition cursor-pointer" title="Forward via SMS">
-            <span className="text-[9px] font-bold border border-current rounded px-1 py-0.5">SMS</span>
-          </button>
           <button type="button" onClick={() => onPin(m)} className={`p-1 rounded transition cursor-pointer ${m.pinned ? 'text-amber-400' : 'text-zinc-400 hover:text-amber-300'}`} title={m.pinned ? 'Unpin' : 'Pin'}>
             <Pin className="w-3 h-3" />
           </button>
@@ -451,21 +457,27 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const [peerStatus, setPeerStatus] = useState<{lastSeen:number, allowMessages:boolean, allowVoiceCall:boolean}|null>(null);
   const fetchNearby = async () => {
     setShowNearby(true);
-    // Request location permission, save to settings, then fetch nearby sorted by distance
+    setNearbyUsers([]);
+    // fire geolocation in background — do not block list loading (fixes perceived empty list)
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(async (pos) => {
+        try { await BoostPayStore.updateMyChatSettings({ lat: pos.coords.latitude, lng: pos.coords.longitude } as any); } catch {}
+      }, () => {}, { enableHighAccuracy: false, timeout: 8000 });
+    }
     try {
-      if (navigator.geolocation) {
-        await new Promise<void>((resolve) => {
-          navigator.geolocation.getCurrentPosition(async (pos) => {
-            try { await BoostPayStore.updateMyChatSettings({ lat: pos.coords.latitude, lng: pos.coords.longitude } as any); } catch {}
-            resolve();
-          }, () => resolve(), { enableHighAccuracy: false, timeout: 5000 });
-        });
+      const n = await BoostPayStore.getNearbyUsers();
+      n.sort((a:any,b:any)=> (a.distanceKm ?? a.distance ?? 9999) - (b.distanceKm ?? b.distance ?? 9999));
+      setNearbyUsers(n);
+      if (!n || n.length===0) {
+        // fallback retry once after 500ms if empty due to race
+        setTimeout(async ()=>{
+          try { const m=await BoostPayStore.getNearbyUsers(); if (m.length) setNearbyUsers(m); } catch {}
+        },500);
       }
-    } catch {}
-    const n = await BoostPayStore.getNearbyUsers();
-    // Sort nearest-first if distance present
-    n.sort((a:any,b:any)=> (a.distanceKm ?? a.distance ?? 9999) - (b.distanceKm ?? b.distance ?? 9999));
-    setNearbyUsers(n);
+    } catch (e) {
+      console.warn('nearby fetch failed', e);
+      setNearbyUsers([]);
+    }
   };
   const [infoMsg, setInfoMsg] = useState<Message | null>(null);
   const [msgFilter, setMsgFilter] = useState<'all'|'p2p'|'support'|'groups'>('all');
@@ -873,14 +885,6 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     }
   };
   const isPeerBlocked = activeConv && activeConv.type !== 'group' ? blockedIds.includes(getOtherParticipant(activeConv)) : false;
-  const handleForwardViaSms = (m: Message) => {
-    const body = encodeURIComponent(m.text || '');
-    // sms: URI opens native SMS app; fallback to share API
-    try { window.location.href = `sms:?&body=${body}`; } catch {}
-    // also copy to clipboard as fallback
-    try { navigator.clipboard?.writeText(m.text || ''); } catch {}
-    BoostPayStore.triggerToast('SMS app opened — message copied');
-  };
 
   // ───────────────── GROUP CALL (MESH) ─────────────────
   const gcEnsurePeer = (peerId: string): RTCPeerConnection => {
@@ -1521,7 +1525,6 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                       copiedMsgId={copiedMsgId}
                       onReply={handleReply}
                       onForward={handleForwardStart}
-                      onForwardSms={handleForwardViaSms}
                       onPin={handlePin}
                       onEdit={handleEdit}
                       onDelete={handleDelete}
@@ -2233,7 +2236,11 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             </div>
             <p className="text-[11px] text-zinc-400">Users near you (random sample — demo nearby).</p>
             {nearbyUsers.length===0 ? (
-              <p className="text-xs text-zinc-500 text-center py-6">No nearby users found.</p>
+              <div className="text-center py-6 space-y-2">
+                <div className="w-6 h-6 border-2 border-amber-500/30 border-t-amber-400 rounded-full animate-spin mx-auto" />
+                <p className="text-xs text-zinc-500">Searching nearby users...</p>
+                <button onClick={fetchNearby} className="text-xs text-amber-400 hover:underline cursor-pointer">Retry</button>
+              </div>
             ) : (
               <div className="space-y-2">
                 {nearbyUsers.map((u:any)=> (
