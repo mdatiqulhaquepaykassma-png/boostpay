@@ -1582,11 +1582,12 @@ async function startServer() {
       // token the account restarts at zero — this blocks free-money minting via
       // fake "restore" requests while keeping legitimate self-heal working.
       if (lookupId && !db.users.some((u: any) => u.id === lookupId)) {
+        // SECURITY FIX: never trust client-supplied balance/profit even with valid token — always restore at 0 (prevents token-leak minting up to 1e12)
         const restoreTok = getBearerToken(req);
         const restoreClaims = restoreTok ? verifyToken(restoreTok) : null;
         const tokenOk = !!(restoreClaims && String(restoreClaims.sub) === String(lookupId) && restoreClaims.role === 'USER');
-        const restoreBal = tokenOk && balance !== undefined && isFinite(Number(balance)) && Number(balance) > 0 ? Math.min(Number(balance), 1e12) : 0;
-        const restoreProfit = tokenOk && lifetimeProfit !== undefined && isFinite(Number(lifetimeProfit)) && Number(lifetimeProfit) > 0 ? Math.min(Number(lifetimeProfit), 1e12) : 0;
+        const restoreBal = 0;
+        const restoreProfit = 0;
         const restoredUser = {
           id: lookupId,
           email: cleanEmail || `user${lookupId}@boostpay.app`,
@@ -1664,18 +1665,24 @@ async function startServer() {
         }
       };
 
-      // create referral link if valid and not self
+      // create referral link if valid and not self — CRITICAL: limit 20 referrals per referrer per day to prevent wash-trading tier boost
       if (referrerForNew && String(referrerForNew.id) !== String(userId)) {
         const cfgRef: any = (db.config || INITIAL_DB.config).referral;
         if (cfgRef && cfgRef.enabled !== false) {
-          if (!db.referrals) db.referrals = [];
           const dayK = getDayKey(Date.now());
-          db.referrals.unshift({ id: 'REF-'+Math.floor(10000000+Math.random()*90000000), referrerId: String(referrerForNew.id), referredId: String(userId), createdAt: Date.now(), dayKey: dayK });
+          const dailyCount = getReferDailyCount(db, String(referrerForNew.id), dayK);
+          if (dailyCount >= 20) {
+            // Allow signup but without referral (prevent tier inflation via fake accounts)
+            recordAuditLog(db, 'REFERRAL_LIMIT_HIT', String(referrerForNew.id), `Referral limit 20/day hit for #${referrerForNew.id} — new user #${userId} signup without referral`, userId);
+          } else {
+            if (!db.referrals) db.referrals = [];
+            db.referrals.unshift({ id: 'REF-'+Math.floor(10000000+Math.random()*90000000), referrerId: String(referrerForNew.id), referredId: String(userId), createdAt: Date.now(), dayKey: dayK });
           // attach referredBy to new user for quick lookup
           (newUser as any).referredBy = String(referrerForNew.id);
           (newUser as any).referCode = String(userId);
           recordAuditLog(db, 'REFERRAL_CREATED', referrerForNew.id, `User #${userId} referred by #${referrerForNew.id}`, userId);
           pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: String(referrerForNew.id), type: 'REFERRAL_JOINED', title: 'BOOSTPAY-REFERRAL', message: `New referral joined: User #${userId} used your code. You now have ${getReferralsCount(db, String(referrerForNew.id))} referrals — current rate ${getReferCommissionRate(db, String(referrerForNew.id))}% (1-10% daily).`, timestamp: Date.now(), isRead: false, metadata: { referredId: userId } } as any);
+          }
         }
       }
       // ensure every user has a referCode field
@@ -3341,8 +3348,11 @@ async function startServer() {
   });
 
   // 7b2. Payment Provider Callback — verified HMAC, idempotent, atomic ledger
-  // Secrets must NEVER be in repo — use PAYMENT_WEBHOOK_SECRET env
-  const PAYMENT_WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET || API_SECRET; // fallback to API_SECRET for demo; production must set distinct env
+  // CRITICAL: PAYMENT_WEBHOOK_SECRET must be set via env — no fallback to weak API_SECRET (prevents forged callbacks)
+  const PAYMENT_WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET;
+  if (!PAYMENT_WEBHOOK_SECRET) {
+    console.warn('[SECURITY] PAYMENT_WEBHOOK_SECRET not set — payment callbacks will be rejected. Set env PAYMENT_WEBHOOK_SECRET to enable.');
+  }
   const processedPayments = new Map<string, number>(); // providerTxId -> timestamp for idempotency (24h)
   setInterval(()=>{ const now=Date.now(); for (const [k,v] of processedPayments.entries()) if (now - v > 24*3600000) processedPayments.delete(k); }, 3600000);
   app.post('/api/payments/callback', rateLimit(30), (req:any,res:any)=>{
@@ -3353,6 +3363,9 @@ async function startServer() {
         return res.status(400).json({ error: 'Missing payment callback fields.' });
       }
       // 2) Verify signature — provider must sign raw body with shared secret (HMAC SHA256 of transactionId+amount+currency+orderId)
+      if (!PAYMENT_WEBHOOK_SECRET) {
+        return res.status(500).json({ error: 'Payment processing not configured (PAYMENT_WEBHOOK_SECRET missing). Contact administrator.' });
+      }
       const payloadToSign = `${provider}|${transactionId}|${amount}|${currency}|${orderId||''}|${userId}`;
       const expectedSig = crypto.createHmac('sha256', PAYMENT_WEBHOOK_SECRET).update(payloadToSign).digest('hex');
       const gotSig = String(signature||'');
@@ -3963,7 +3976,7 @@ async function startServer() {
   });
 
   // Account freeze toggle endpoint
-  app.post('/api/admin/users/freeze', requireSuperAdmin, (req: any, res) => {
+  app.post('/api/admin/users/freeze', requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const { userId, isFrozen, reason, adminEmail } = req.body;
       const db = readDb();
@@ -4063,7 +4076,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/users/delete', requireSuperAdmin, (req: any, res) => {
+  app.post('/api/admin/users/delete', requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const { userId } = req.body;
       const db = readDb();
@@ -4082,7 +4095,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/users/boost-override', requireSuperAdmin, (req: any, res) => {
+  app.post('/api/admin/users/boost-override', requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const { userId, action } = req.body; // 'START' | 'PAUSE' | 'RESUME' | 'RESET'
       const db = readDb();
@@ -4131,7 +4144,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/rate', requireSuperAdmin, (req: any, res) => {
+  app.post('/api/admin/rate', requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const { hourlyRatePercent } = req.body;
       const db = readDb();
@@ -4146,7 +4159,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/config', requireSuperAdmin, (req: any, res) => {
+  app.post('/api/admin/config', requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const incomingConfig = req.body || {};
       const db = readDb();
@@ -4261,7 +4274,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/backup/restore', requireAdmin, requireSuperAdmin, (req: any, res) => {
+  app.post('/api/admin/backup/restore', requireAdmin, requireSuperAdmin, requireMfa, (req: any, res) => {
     const name = String((req.body && req.body.name) || '');
     if (!name.startsWith('boostpay_db.') || name.includes('..') || name.includes('/')) {
       return res.status(400).json({ error: 'Invalid backup name.' });
@@ -4492,7 +4505,7 @@ async function startServer() {
   const SAFE_FIELD_KEY = (k: any) =>
     typeof k === 'string' && k.length >= 1 && k.length <= 64 && !['__proto__', 'constructor', 'prototype'].includes(k);
 
-  app.post('/api/admin/db/tables', requireAdmin, requireSuperAdmin, (req: any, res) => {
+  app.post('/api/admin/db/tables', requireAdmin, requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const name = String((req.body && req.body.name) || '').trim();
       if (!/^[A-Za-z][A-Za-z0-9_]{0,32}$/.test(name)) {
@@ -4509,7 +4522,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/db/tables/:name/rows', requireAdmin, requireSuperAdmin, (req: any, res) => {
+  app.post('/api/admin/db/tables/:name/rows', requireAdmin, requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const name = String(req.params.name || '');
       const db = readDb();
@@ -4531,7 +4544,7 @@ async function startServer() {
     }
   });
 
-  app.patch('/api/admin/db/tables/:name/rows/:id', requireAdmin, requireSuperAdmin, (req: any, res) => {
+  app.patch('/api/admin/db/tables/:name/rows/:id', requireAdmin, requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const name = String(req.params.name || '');
       const id = String(req.params.id || '');
@@ -4544,6 +4557,10 @@ async function startServer() {
       for (const k of Object.keys(set)) if (!SAFE_FIELD_KEY(k)) return res.status(400).json({ error: `Invalid field name: ${k}` });
       for (const k of unset) if (!SAFE_FIELD_KEY(k)) return res.status(400).json({ error: `Invalid field name: ${k}` });
       if (set.id !== undefined && String(set.id) !== id) return res.status(400).json({ error: 'Changing the id is not allowed.' });
+      // CRITICAL: block direct balance/profit edits via generic table patch — must use audited endpoints with MFA
+      if (name === 'users' && (set.balance !== undefined || set.lifetimeProfit !== undefined || (set as any).boostState !== undefined)) {
+        return res.status(400).json({ error: 'Direct balance/boostState edits are not allowed via DB Studio. Use Treasury Adjust (with MFA + 2nd approval) or /api/admin/audit/correct-balances (audited).' });
+      }
       const row = db[name][idx];
       for (const [k, v] of Object.entries(set)) row[k] = v;
       for (const k of unset) delete row[k];
@@ -4555,7 +4572,7 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/admin/db/tables/:name/rows/:id', requireAdmin, requireSuperAdmin, (req: any, res) => {
+  app.delete('/api/admin/db/tables/:name/rows/:id', requireAdmin, requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const name = String(req.params.name || '');
       const id = String(req.params.id || '');
@@ -4573,7 +4590,7 @@ async function startServer() {
     }
   });
 
-  app.delete('/api/admin/db/tables/:name', requireAdmin, requireSuperAdmin, (req: any, res) => {
+  app.delete('/api/admin/db/tables/:name', requireAdmin, requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const name = String(req.params.name || '');
       const CORE = new Set(['users', 'transactions', 'messages', 'conversations', 'notifications', 'sessions', 'auditLogs', 'admins', 'config']);
@@ -4590,7 +4607,7 @@ async function startServer() {
     }
   });
 
-  app.patch('/api/admin/db/tables/:name', requireAdmin, requireSuperAdmin, (req: any, res) => {
+  app.patch('/api/admin/db/tables/:name', requireAdmin, requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const name = String(req.params.name || '');
       const db = readDb();
@@ -5144,8 +5161,8 @@ async function startServer() {
     recordAuditLog(db,'FRAUD_MANUAL_UNFREEZE', String(req.authAdmin), `Manually unfroze User #${userId} (antifraud)`, userId);
     res.json({success:true});
   });
-  // === AUDIT CORRECTION: fix inflated compounding balances/profits (admin only, audit-logged) ===
-  app.post('/api/admin/audit/correct-balances', requireSuperAdmin, (req:any,res)=>{
+  // === AUDIT CORRECTION: fix inflated compounding balances/profits (admin only, MFA + audit-logged) ===
+  app.post('/api/admin/audit/correct-balances', requireSuperAdmin, requireMfa, (req:any,res)=>{
     try{
       const db=readDb();
       const fixes = Array.isArray(req.body?.fixes) ? req.body.fixes : [];
