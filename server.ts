@@ -172,7 +172,7 @@ const INITIAL_DB = {
         chatSpam: true,
         scam: true
       },
-      maxLoginsPer10Min: 5,
+      maxLoginsPer10Min: 10, // FIX 5→10 for same-device typo tolerance
       maxMessagesPerMin: 10
     }
   },
@@ -1725,52 +1725,25 @@ async function startServer() {
         return res.status(404).json({ error: 'No account found with this email or User ID. Please create an account.' });
       }
 
-      // ---- login spam check ----
+      // ---- FIX #1 & #2: login spam + device fingerprint — no false freeze on same device wrong pass or re-login ----
+      // Prepare per-user login fail tracking (per-user key fixes same-device cross-account freeze)
       try {
         const af:any = (db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
         if (af && af.enabled !== false) {
-          const ip = clientIp(req);
-          const key = `loginFail:${ip}`;
+          const key = `loginFail:user:${user.id}`;
           if (!db.loginAttempts) db.loginAttempts = {};
           const nowTs = Date.now();
-          // clean old
           const windowMs = 10*60*1000;
           const arr = (db.loginAttempts[key]||[]).filter((t:number)=> nowTs - t < windowMs);
-          // will push after failure below
-          // store for later use
           (req as any)._loginFailKey = key;
           (req as any)._loginFailArr = arr;
         }
-        // device fingerprint check on login
-        const fpL = String((req.headers['x-device-fingerprint']||'') || (req.body && (req.body as any).deviceFingerprint) || '').trim();
-        const fpUse = fpL || String(clientIp(req)||'') + '|' + String(req.headers['user-agent']||'').slice(0,80);
-        if (fpUse) {
-          if (!db.deviceFingerprints) db.deviceFingerprints = {};
-          const k = fpUse.slice(0,120);
-          const set = new Set<string>((db.deviceFingerprints[k]||[]).map((x:string)=> String(x)));
-          set.add(String(user.id));
-          db.deviceFingerprints[k]= Array.from(set).slice(-10);
-          if (isAntifraudFeatureEnabled(db, 'deviceFingerprint') && set.size >= 5) {
-            // FIX: raised from 3→5 to reduce false positives on shared devices (hasan@gmail.com case)
-            const recent = Array.from(set).filter(uid=>{
-              const u=(db.users||[]).find((x:any)=> String(x.id)===uid);
-              return u && (Date.now() - (u.createdAt||0) < 24*3600000);
-            });
-            if (recent.length >= 3) {
-              const dur = getFreezeMsForReason(db, 'deviceFingerprint');
-              if (!user.isFrozen) {
-                user.isFrozen=true; user.frozenReason=`Auto anti-fraud device fingerprint: ${set.size} accounts on same device`; (user as any).frozenUntil=Date.now()+dur; (user as any).isTempFreeze=true;
-                if (!db.antifraudLogs) db.antifraudLogs=[];
-                db.antifraudLogs.unshift({ id:'AFL-'+Math.floor(10000000+Math.random()*90000000), userId: String(user.id), ip: clientIp(req), reason: `Device fingerprint multi-account (${set.size} users)`, timestamp: Date.now(), frozenUntil: (user as any).frozenUntil, auto:true });
-                writeDb(db);
-                return res.status(403).json({ error: 'Account temporarily frozen due to multiple accounts on same device. Contact support.' });
-              }
-            }
-          }
-        }
+        // Device fingerprint check is intentionally NOT done here (pre-password)
+        // — it will run only AFTER successful password verification, only for explicit fingerprint,
+        // and only when a NEW distinct account is added to the device (fixes re-login freeze)
       } catch {}
       if (!verifyPassword(user.password, password.trim())) {
-        // record failed attempt
+        // record failed attempt per-user (same device wrong password no longer freezes other accounts)
         try {
           const key = (req as any)._loginFailKey;
           let arr = (req as any)._loginFailArr || [];
@@ -1779,8 +1752,10 @@ async function startServer() {
             if (!db.loginAttempts) db.loginAttempts={};
             db.loginAttempts[key]=arr;
             const af2:any = (db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
-            if (arr.length >= (af2.maxLoginsPer10Min||5)) {
-              // spam -> freeze this account temporarily
+            // FIX: raise threshold 5→10 and freeze only at 15+ with feature check — normal typos never freeze
+            const threshold = Number(af2.maxLoginsPer10Min||10);
+            if (arr.length >= 15 && isAntifraudFeatureEnabled(db, 'loginSpam')) {
+              // extreme brute force (15 fails/10min) → temp freeze
               const targetUser = user;
               if (!targetUser.isFrozen) {
                 const dur2 = getFreezeMsForReason(db, 'loginSpam');
@@ -1788,6 +1763,9 @@ async function startServer() {
                 if (!db.antifraudLogs) db.antifraudLogs=[];
                 db.antifraudLogs.unshift({ id:'AFL-'+Math.floor(10000000+Math.random()*90000000), userId: String(user.id), ip: clientIp(req), reason: `Login spam ${arr.length} fails/10min`, timestamp: Date.now(), frozenUntil: (targetUser as any).frozenUntil, auto:true });
               }
+              writeDb(db);
+            } else if (arr.length >= threshold) {
+              // at threshold just persist counter, add warning but NO freeze (fixes issue #1)
               writeDb(db);
             } else {
               writeDb(db);
@@ -1800,6 +1778,40 @@ async function startServer() {
         try {
           const key = (req as any)._loginFailKey;
           if (key && db.loginAttempts) { delete db.loginAttempts[key]; writeDb(db); }
+        } catch {}
+        // Device fingerprint check — ONLY after successful login, ONLY explicit fingerprint, ONLY new account
+        try {
+          const af3:any = (db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+          const fpL = String((req.headers['x-device-fingerprint']||'') || (req.body && (req.body as any).deviceFingerprint) || '').trim();
+          if (fpL) {
+            if (!db.deviceFingerprints) db.deviceFingerprints = {};
+            const k = fpL.slice(0,120);
+            const beforeSet = new Set<string>((db.deviceFingerprints[k]||[]).map((x:string)=> String(x)));
+            const isNewAccountForDevice = !beforeSet.has(String(user.id));
+            const set = new Set<string>(beforeSet);
+            set.add(String(user.id));
+            db.deviceFingerprints[k]= Array.from(set).slice(-10);
+            // Only evaluate freeze when a NEW distinct account is added and set just crossed threshold
+            if (isAntifraudFeatureEnabled(db, 'deviceFingerprint') && isNewAccountForDevice && set.size >= 5) {
+              const recent = Array.from(set).filter(uid=>{
+                const u=(db.users||[]).find((x:any)=> String(x.id)===uid);
+                return u && (Date.now() - (u.createdAt||0) < 24*3600000);
+              });
+              if (recent.length >= 3) {
+                const dur = getFreezeMsForReason(db, 'deviceFingerprint');
+                if (!user.isFrozen) {
+                  user.isFrozen=true; user.frozenReason=`Auto anti-fraud device fingerprint: ${set.size} accounts on same device`; (user as any).frozenUntil=Date.now()+dur; (user as any).isTempFreeze=true;
+                  if (!db.antifraudLogs) db.antifraudLogs=[];
+                  db.antifraudLogs.unshift({ id:'AFL-'+Math.floor(10000000+Math.random()*90000000), userId: String(user.id), ip: clientIp(req), reason: `Device fingerprint multi-account (${set.size} users)`, timestamp: Date.now(), frozenUntil: (user as any).frozenUntil, auto:true });
+                  writeDb(db);
+                  return res.status(403).json({ error: 'Account temporarily frozen due to multiple accounts on same device. Contact support.' });
+                }
+              }
+            } else if (!isNewAccountForDevice) {
+              // re-login of already-known account on same device — never freeze, just persist fingerprint
+              writeDb(db);
+            }
+          }
         } catch {}
       }
 
