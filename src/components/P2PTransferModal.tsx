@@ -128,92 +128,36 @@ export const P2PTransferModal: FC<Props> = ({
         }
       }
     } catch {
-      // Offline fallback: perform locally
-    }
-
-    // Local Fallback Execution
-    const allUsers = BoostPayStore.getUsers();
-    const recipient = allUsers.find(u => u.id === cleanRecipient);
-    if (!recipient) {
-      setError(`Recipient User ID #${cleanRecipient} was not found on BoostPay.`);
+      setError('Network error — please try again. Server transfer required.');
       setIsProcessing(false);
       return;
     }
-
-    if (recipient.isBlocked) {
-      setError('Recipient account is currently restricted.');
-      setIsProcessing(false);
-      return;
-    }
-
-    const sender = allUsers.find(u => u.id === currentUser.id);
-    if (!sender) {
-      setError('Transaction failed: User not found.');
-      setIsProcessing(false);
-      return;
-    }
-
-    sender.balance -= numAmount;
-    recipient.balance += numAmount;
-
-    const sentTx = BoostPayStore.addTransaction({
-      userId: sender.id,
-      type: 'TRANSFER_SENT',
-      amount: numAmount,
-      recipientId: recipient.id,
-      notes: `P2P transfer sent to #${recipient.id}`
-    });
-
-    const recvTx = BoostPayStore.addTransaction({
-      userId: recipient.id,
-      type: 'TRANSFER_RECEIVED',
-      amount: numAmount,
-      senderId: sender.id,
-      notes: `P2P transfer received from #${sender.id}`
-    });
-
-    // Create notifications for local fallback
-    BoostPayStore.addNotification({
-      id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
-      userId: sender.id,
-      type: 'TRANSFER_SENT',
-      title: 'BOOSTPAY-ALERTS',
-      message: `DEBIT ALERT: $${numAmount.toFixed(2)} was transferred to Peer #${recipient.id}. Remaining Balance: $${sender.balance.toFixed(2)}. Ref: ${sentTx.id}`,
-      amount: numAmount,
-      referenceId: sentTx.id,
-      timestamp: Date.now(),
-      isRead: false,
-      metadata: {
-        recipientId: recipient.id,
-        balanceAfter: sender.balance
-      }
-    });
-
-    BoostPayStore.addNotification({
-      id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
-      userId: recipient.id,
-      type: 'TRANSFER_RECEIVED',
-      title: 'BOOSTPAY-ALERTS',
-      message: `CREDIT ALERT: $${numAmount.toFixed(2)} has been credited to your wallet from Peer #${sender.id}. Available Balance: $${recipient.balance.toFixed(2)}. Ref: ${recvTx.id}`,
-      amount: numAmount,
-      referenceId: recvTx.id,
-      timestamp: Date.now(),
-      isRead: false,
-      metadata: {
-        senderId: sender.id,
-        balanceAfter: recipient.balance
-      }
-    });
-
-    sender.boostState.targetDurationMs = BoostPayStore.calculateDynamicDuration(sender.balance, allUsers);
-    recipient.boostState.targetDurationMs = BoostPayStore.calculateDynamicDuration(recipient.balance, allUsers);
-
-    BoostPayStore.saveUsers(allUsers);
-    BoostPayStore.setCurrentUser(sender);
-
+    setError('Transfer failed — server validation required. Please try again.');
     setIsProcessing(false);
-    setStep('SUCCESS');
-    onSuccess(sender);
+    return;
+    // Local fallback removed for security (server authoritative only)
+    // const allUsers = BoostPayStore.getUsers();
+    // const recipient = allUsers.find(u => u.id === cleanRecipient);
+    // if (!recipient) {
+    //   setError(`Recipient User ID #${cleanRecipient} was not found on BoostPay.`);
+    //   setIsProcessing(false);
+    //   return;
+    // }
+    // if (recipient.isBlocked) {
+    //   setError('Recipient account is currently restricted.');
+    //   setIsProcessing(false);
+    //   return;
+    // }
+    // const sender = allUsers.find(u => u.id === currentUser.id);
+    // if (!sender) {
+    //   setError('Transaction failed: User not found.');
+    //   setIsProcessing(false);
+    //   return;
+    // }
+    // sender.balance -= numAmount;
+    // recipient.balance += numAmount;
+    // Local fallback fully disabled — server authoritative only
+    // (removed for security: local balance manipulation bypass)
   };
 
   return (

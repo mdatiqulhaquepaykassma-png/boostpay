@@ -127,7 +127,7 @@ export class BoostPayStore {
             mergedMap.set(serverU.id, serverU);
           }
 
-          // 2. Intelligently merge local users (preserve secrets, credentials & higher balances)
+          // 2. Merge local users — server is authoritative for balances (no Math.max inflation)
           let needsPushToServer = false;
           for (const localU of localUsers) {
             if (mergedMap.has(localU.id)) {
@@ -136,8 +136,8 @@ export class BoostPayStore {
                 ...serverU,
                 phrase: localU.phrase || serverU.phrase,
                 password: localU.password || serverU.password,
-                balance: Math.max(Number(serverU.balance) || 0, Number(localU.balance) || 0),
-                lifetimeProfit: Math.max(Number(serverU.lifetimeProfit) || 0, Number(localU.lifetimeProfit) || 0),
+                balance: Number(serverU.balance) || 0,
+                lifetimeProfit: Number(serverU.lifetimeProfit) || 0,
                 boostState: (serverU.boostState && serverU.boostState.isActive)
                   ? serverU.boostState
                   : (localU.boostState || serverU.boostState)
@@ -996,82 +996,8 @@ export class BoostPayStore {
     }
   }
 
-  static adminAuthHeaders(): Record<string, string> {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    try {
-      const adminRaw = localStorage.getItem('boostpay_admin_session_v1');
-      if (adminRaw) {
-        const sess = JSON.parse(adminRaw);
-        if (sess && sess.token) { headers['Authorization'] = `Bearer ${sess.token}`; return headers; }
-      }
-      // fallback: also try admin store key
-      const alt = localStorage.getItem('bp_admin_token') || localStorage.getItem('admin_token');
-      if (alt) { headers['Authorization'] = `Bearer ${alt}`; return headers; }
-    } catch {}
-    const fp = this.getDeviceFingerprint();
-    if (fp) headers['X-Device-Fingerprint'] = fp;
-    const tok = this.getAuthToken();
-    if (tok) headers['Authorization'] = `Bearer ${tok}`;
-    return headers;
-  }
-  static getAdminSession(): any {
-    try {
-      const raw = localStorage.getItem('boostpay_admin_session_v1');
-      if (raw) return JSON.parse(raw);
-    } catch {}
-    return null;
-  }
-  static setAdminSession(s: any): any {
-    const val = { ...s, isLoggedIn: true };
-    localStorage.setItem('boostpay_admin_session_v1', JSON.stringify(val));
-    return val;
-  }
-  static clearAdminSession(): void {
-    localStorage.removeItem('boostpay_admin_session_v1');
-  }
-  static async probeDatabaseStorage(): Promise<any> {
-    try { const res = await fetch('/api/admin/db/ping', { headers: this.adminAuthHeaders() }); if (res.ok) return await res.json(); } catch {}
-    return null;
-  }
-  static async exportDatabase(): Promise<Blob | null> {
-    try {
-      const res = await fetch('/api/admin/backup/save', { method: 'POST', headers: this.adminAuthHeaders() });
-      if (res.ok) { const data = await res.json(); return new Blob([JSON.stringify(data)], { type: 'application/json' }); }
-      // fallback to /api/db dump
-      const r2 = await fetch('/api/db', { headers: this.adminAuthHeaders() });
-      if (r2.ok) { const j = await r2.json(); return new Blob([JSON.stringify(j,null,2)], { type:'application/json' }); }
-    } catch {}
-    return null;
-  }
-  static async importDatabase(parsed:any): Promise<any> {
-    // not implemented local; admin does via file upload to server separately
-    return { success:false, error:'Use admin panel file import' };
-  }
-  static async getAuditLogs(): Promise<any[]> {
-    try { const res = await fetch('/api/admin/audit-logs', { headers: this.adminAuthHeaders() }); if(res.ok){ const j=await res.json(); return j.logs||[]; } } catch {}
-    return [];
-  }
-  static async adminAdjustBalance(userId:string, type:'CREDIT'|'DEBIT', amount:number, note:string): Promise<any> {
-    try {
-      const ep = type==='CREDIT' ? '/api/admin/adjust/credit' : '/api/admin/adjust/debit';
-      // try generic endpoint
-      let res = await fetch(ep, { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId, amount, note }) });
-      if (!res.ok) {
-        res = await fetch('/api/admin/users/adjust', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId, type, amount, note }) });
-      }
-      if (res.ok) return await res.json();
-      const j = await res.json().catch(()=>({}));
-      return { success:false, error: j.error||'Failed' };
-    } catch(e:any){ return { success:false, error: e.message } }
-  }
-  static async adminToggleFreezeUser(userId:string, isFrozen:boolean, reason:string, adminEmail?:string, extra?: { isPermanent?:boolean; durationMs?:number }): Promise<any>{
-    try{
-      const res = await fetch('/api/admin/users/freeze', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId, isFrozen, reason, adminEmail, ...(extra||{}) }) });
-      if (res.ok) return await res.json();
-      const j=await res.json().catch(()=>({}));
-      return { success:false, error: j.error||'Failed' };
-    } catch(e:any){ return { success:false, error:e.message } }
-  }
+  // Admin helpers removed from user bundle — admin panel has separate store
+  static getAuditLogs(): Promise<any[]> { return Promise.resolve([]); }
   /** Headers for endpoints that require a signed user token. */
   static getDeviceFingerprint(): string {
     try {
@@ -1888,33 +1814,7 @@ export class BoostPayStore {
     } catch {}
     return null;
   }
-  // Admin refer/antifraud
-  static async adminGetReferOverview(): Promise<any | null> {
-    try {
-      const res = await fetch('/api/admin/refer/overview', { headers: this.adminAuthHeaders() });
-      if (res.ok) return await res.json();
-    } catch {}
-    return null;
-  }
-  static async adminSetReferConfig(cfg: any): Promise<boolean> {
-    try {
-      const res = await fetch('/api/admin/refer/config', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify(cfg) });
-      return res.ok;
-    } catch { return false; }
-  }
-  static async adminGetAntifraud(): Promise<any | null> {
-    try {
-      const res = await fetch('/api/admin/antifraud/logs', { headers: this.adminAuthHeaders() });
-      if (res.ok) return await res.json();
-    } catch {}
-    return null;
-  }
-  static async adminSetAntifraudConfig(cfg:any): Promise<boolean> {
-    try{
-      const res = await fetch('/api/admin/antifraud/config', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify(cfg) });
-      return res.ok;
-    } catch { return false; }
-  }
+  // admin refer/antifraud removed — admin panel only
   static async changeMyPassword(currentPassword: string, newPassword: string): Promise<{ success:boolean, error?:string }> {
     try {
       const res = await fetch('/api/users/me/password', { method:'POST', headers: this.authHeaders(), body: JSON.stringify({ currentPassword, newPassword }) });
@@ -1992,12 +1892,7 @@ export class BoostPayStore {
       return {emailVerified: !!j.emailVerified, email: j.email||''};
     }catch{ return {emailVerified:false, email:''} }
   }
-  static async adminAntifraudUnfreeze(userId:string): Promise<boolean>{
-    try{
-      const res = await fetch('/api/admin/antifraud/unfreeze', { method:'POST', headers: this.adminAuthHeaders(), body: JSON.stringify({ userId }) });
-      return res.ok;
-    } catch { return false; }
-  }
+  // admin unfreeze removed — admin panel handles it
 
   // ── Group voice calls (mesh) ──
   static async gcStart(conversationId: string): Promise<any | null> {
