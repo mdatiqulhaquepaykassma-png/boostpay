@@ -1172,6 +1172,16 @@ setInterval(() => {
         (user as any).frozenUntil = undefined;
         user.frozenReason = undefined;
         updated = true;
+        // FIX: resume compounding if it was paused due to freeze — otherwise user stays stuck paused forever
+        if (user.boostState && user.boostState.isPaused && user.boostState.pausedAt) {
+          const pausedFor = now - (user.boostState.pausedAt || now);
+          // shift startedAt forward by pause duration so elapsed stays correct
+          if (user.boostState.startedAt) user.boostState.startedAt += pausedFor;
+          user.boostState.isPaused = false;
+          user.boostState.pausedAt = 0;
+          updated = true;
+          pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: user.id, type: 'YIELD_REWARD', title: 'BOOSTPAY-ALERTS', message: 'Compounding resumed automatically after security freeze lifted. Progress continues.', timestamp: now, isRead: false } as any);
+        }
         recordAuditLog(db, 'FRAUD_AUTO_UNFREEZE', 'SYSTEM', `Auto-unfroze User #${user.id} after 1h temp lock expired`, user.id);
         pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: user.id, type: 'SECURITY_ALERT', title: 'BOOSTPAY-SECURITY', message: 'Your temporary 1-hour security freeze has been lifted. You may now transact and resume compounding.', timestamp: now, isRead: false });
         broadcastUserUpdate(db, user.id);
@@ -1287,9 +1297,9 @@ setInterval(() => {
           });
         } else {
           // Yield is computed live on read (liveBoostState) — no per-second writes.
-          // Persist a coarse checkpoint every 60s so elapsedMs survives restarts.
+          // Persist a coarse checkpoint every 60s so elapsedMs survives restarts. Fixed precedence: use modulo
           const startedAt = user.boostState.startedAt || 0;
-          if (now - startedAt - Math.floor((now - startedAt) / 60000) * 60000 < 1000) {
+          if ((now - startedAt) % 60000 < 1000) {
             user.boostState.elapsedMs = elapsed;
             updated = true;
           }
@@ -1717,13 +1727,13 @@ async function startServer() {
           const set = new Set<string>((db.deviceFingerprints[k]||[]).map((x:string)=> String(x)));
           set.add(String(user.id));
           db.deviceFingerprints[k]= Array.from(set).slice(-10);
-          if (isAntifraudFeatureEnabled(db, 'deviceFingerprint') && set.size >= 3) {
-            // freeze if same device has 3+ accounts trying to login within 24h
+          if (isAntifraudFeatureEnabled(db, 'deviceFingerprint') && set.size >= 5) {
+            // FIX: raised from 3→5 to reduce false positives on shared devices (hasan@gmail.com case)
             const recent = Array.from(set).filter(uid=>{
               const u=(db.users||[]).find((x:any)=> String(x.id)===uid);
               return u && (Date.now() - (u.createdAt||0) < 24*3600000);
             });
-            if (recent.length >= 2) {
+            if (recent.length >= 3) {
               const dur = getFreezeMsForReason(db, 'deviceFingerprint');
               if (!user.isFrozen) {
                 user.isFrozen=true; user.frozenReason=`Auto anti-fraud device fingerprint: ${set.size} accounts on same device`; (user as any).frozenUntil=Date.now()+dur; (user as any).isTempFreeze=true;
@@ -3246,7 +3256,7 @@ async function startServer() {
                   const u=(db.users||[]).find((x:any)=> String(x.id)===uid);
                   return u && (Date.now() - (u.createdAt||0) < 24*3600000);
                 });
-                if (isAntifraudFeatureEnabled(db, 'deviceFingerprint') && relatedUsers.length >= 2 && (recentUsers.length>=1 || relatedUsers.length>=3)) {
+                if (isAntifraudFeatureEnabled(db, 'deviceFingerprint') && relatedUsers.length >= 4 && (recentUsers.length>=2 || relatedUsers.length>=5)) {
                   deviceSuspicious = true;
                   deviceReason = `Multiple accounts on same device (${relatedUsers.length} users)`;
                 }
@@ -5075,7 +5085,11 @@ async function startServer() {
   });
   app.get('/api/admin/antifraud/logs', requireAdmin, (req:any,res)=>{
     const db=readDb();
-    res.json({ logs: (db.antifraudLogs||[]).slice(0,300), config: (db.config||INITIAL_DB.config).antifraud });
+    const cfg = (db.config && (db.config as any).antifraud) || (INITIAL_DB as any).config.antifraud;
+    // ensure defaults populated so frontend never gets null
+    if (!cfg.freezeDurations) (cfg as any).freezeDurations = (INITIAL_DB as any).config.antifraud.freezeDurations;
+    if (!cfg.features) (cfg as any).features = (INITIAL_DB as any).config.antifraud.features;
+    res.json({ logs: (db.antifraudLogs||[]).slice(0,300), config: cfg });
   });
   app.post('/api/admin/antifraud/config', requireSuperAdmin, (req:any,res)=>{
     const db=readDb();

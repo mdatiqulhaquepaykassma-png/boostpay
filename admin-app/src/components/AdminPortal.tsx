@@ -290,12 +290,26 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           if (Array.isArray(dbData.transactions)) {
             setTransactions(dbData.transactions);
             try { localStorage.setItem('boostpay_transactions', JSON.stringify(dbData.transactions)); } catch {}
+          } else {
+            // FIX: fallback to admin tables API if /api/db returns no transactions array (empty ledger bug)
+            try {
+              const tb = await fetch('/api/admin/db/tables/transactions', { headers: BoostPayStore.adminAuthHeaders() });
+              if (tb.ok) { const td = await tb.json(); if (Array.isArray(td.rows)) setTransactions(td.rows); }
+            } catch {}
           }
         } else {
-          const txs = BoostPayStore.getTransactions();
-          if (txs) setTransactions(txs);
+          // try tables endpoint before local fallback
+          try {
+            const tb2 = await fetch('/api/admin/db/tables/transactions', { headers: BoostPayStore.adminAuthHeaders() });
+            if (tb2.ok) { const td2 = await tb2.json(); if (Array.isArray(td2.rows) && td2.rows.length) setTransactions(td2.rows); else { const txs = BoostPayStore.getTransactions(); if (txs) setTransactions(txs); } }
+            else { const txs = BoostPayStore.getTransactions(); if (txs) setTransactions(txs); }
+          } catch { const txs = BoostPayStore.getTransactions(); if (txs) setTransactions(txs); }
         }
       } catch {
+        try {
+          const tb3 = await fetch('/api/admin/db/tables/transactions', { headers: BoostPayStore.adminAuthHeaders() });
+          if (tb3.ok) { const td3 = await tb3.json(); if (Array.isArray(td3.rows)) setTransactions(td3.rows); }
+        } catch {}
         const txs = BoostPayStore.getTransactions();
         if (txs) setTransactions(txs);
       }
@@ -333,7 +347,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         if(r.ok){ const d=await r.json(); setUsers(d.users); BoostPayStore.saveUsers(d.users); }
       }
       if (tab==='AUDIT') { const logs=await BoostPayStore.getAuditLogs(); if(logs) setAuditLogs(logs); }
-      if (tab==='TRANSACTIONS') { try{ const dbRes=await fetch('/api/db',{headers:BoostPayStore.adminAuthHeaders()}); if(dbRes.ok){ const dbData=await dbRes.json(); if(Array.isArray(dbData.transactions)) setTransactions(dbData.transactions); } }catch{} }
+      if (tab==='TRANSACTIONS') { try{ const dbRes=await fetch('/api/db',{headers:BoostPayStore.adminAuthHeaders()}); if(dbRes.ok){ const dbData=await dbRes.json(); if(Array.isArray(dbData.transactions) && dbData.transactions.length) setTransactions(dbData.transactions); else { // fallback to tables API for empty ledger fix
+          const tb=await fetch('/api/admin/db/tables/transactions',{headers:BoostPayStore.adminAuthHeaders()}); if(tb.ok){ const td=await tb.json(); if(Array.isArray(td.rows)) setTransactions(td.rows); }
+        } } else { const tb2=await fetch('/api/admin/db/tables/transactions',{headers:BoostPayStore.adminAuthHeaders()}); if(tb2.ok){ const td2=await tb2.json(); if(Array.isArray(td2.rows)) setTransactions(td2.rows); } } }catch{} }
       if (tab==='SUPPORT' || tab==='OVERVIEW') { await BoostPayStore.syncChatState('ADMIN_SUPPORT'); setConversations(BoostPayStore.getConversations()); setMessages(BoostPayStore.getMessages()); }
     } catch(e){ console.warn('Tab refresh failed',e); }
   };

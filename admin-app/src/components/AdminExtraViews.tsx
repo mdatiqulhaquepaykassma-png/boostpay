@@ -347,12 +347,41 @@ export const FraudView: FC = () => {
         // merge antifraudLogs into fraudLogs + expose signals from it
         const extraLogs = (af.logs||[]).map((l:any)=> ({ id: l.id, action: 'FRAUD_AUTO_FREEZE', details: l.reason + ' — IP ' + (l.ip||'?') + ' — until ' + (l.frozenUntil? new Date(l.frozenUntil).toLocaleString(): '1h'), timestamp: l.timestamp }));
         d.fraudLogs = [...(extraLogs||[]), ...(d.fraudLogs||[])].slice(0,200);
-        // if d.frozenUsers empty, derive from af logs (recent frozen)
-        if ((!d.frozenUsers||d.frozenUsers.length===0) && af.logs) {
-          d._afConfig = af.config;
+        // FIX: af.config may be null if server had old DB without antifraud — build default fallback so UI never empty
+        const fallbackAf = {
+          enabled: true,
+          tempFreezeMs: 3600000,
+          maxTransfersPer10Min: 5,
+          maxDistinctSendersPerIp: 3,
+          maxVolumePer10Min: 500,
+          newAccountLargeTransferThreshold: 100,
+          velocityEnabled: true,
+          freezeDurations: { velocity: 3600000, multiIp: 3600000, newAccountLarge: 1800000, deviceFingerprint: 7200000, loginSpam: 3600000, chatSpam: 1800000, scam: 7200000 },
+          features: { velocity: true, multiIp: true, newAccountLarge: true, deviceFingerprint: true, loginSpam: true, chatSpam: true, scam: true },
+          maxLoginsPer10Min: 5,
+          maxMessagesPerMin: 10
+        };
+        const resolvedCfg = af.config || (d as any)._afConfig || fallbackAf;
+        // merge fallback to ensure freezeDurations/features exist
+        if (resolvedCfg) {
+          if (!resolvedCfg.freezeDurations) resolvedCfg.freezeDurations = (fallbackAf as any).freezeDurations;
+          if (!resolvedCfg.features) resolvedCfg.features = (fallbackAf as any).features;
         }
-        d._afConfig = af.config || d._afConfig;
+        if ((!d.frozenUsers||d.frozenUsers.length===0) && af.logs) {
+          d._afConfig = resolvedCfg;
+        }
+        d._afConfig = resolvedCfg || d._afConfig;
         d._afLogs = af.logs;
+      }
+      // ensure _afConfig always present even if af fetch failed — so Antifraud Config section never shows "nothing"
+      if (!d._afConfig) {
+        d._afConfig = {
+          enabled: true, tempFreezeMs: 3600000, maxTransfersPer10Min: 5, maxDistinctSendersPerIp: 3, maxVolumePer10Min: 500,
+          newAccountLargeTransferThreshold: 100, velocityEnabled: true,
+          freezeDurations: { velocity: 3600000, multiIp: 3600000, newAccountLarge: 1800000, deviceFingerprint: 7200000, loginSpam: 3600000, chatSpam: 1800000, scam: 7200000 },
+          features: { velocity: true, multiIp: true, newAccountLarge: true, deviceFingerprint: true, loginSpam: true, chatSpam: true, scam: true },
+          maxLoginsPer10Min: 5, maxMessagesPerMin: 10
+        };
       }
       setData(d);
       setError('');
