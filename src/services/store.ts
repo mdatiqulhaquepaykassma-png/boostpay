@@ -1775,11 +1775,12 @@ export class BoostPayStore {
 
   // ── Referral system ──
   static async getReferMy(): Promise<any | null> {
-    try {
-      const res = await fetch('/api/refer/my', { headers: this.authHeaders() });
-      if (res.ok) return await res.json();
-    } catch {}
-    return null;
+    const res = await fetch('/api/refer/my', { headers: this.authHeaders() });
+    if (res.ok) return await res.json();
+    let msg = `HTTP ${res.status}`;
+    try { const j = await res.json(); if (j?.error) msg = j.error; else if (j?.detail) msg = j.error + ': ' + j.detail; } catch {}
+    if (res.status === 401) msg = 'Session expired — please re-login';
+    throw new Error(msg);
   }
   static async getReferCode(): Promise<{ referCode:string, referLink:string } | null> {
     try {

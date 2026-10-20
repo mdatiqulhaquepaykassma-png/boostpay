@@ -33,6 +33,18 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      chunkSizeWarningLimit: 600,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) return 'vendor';
+            if (id.includes('node_modules/lucide-react')) return 'icons';
+            if (id.includes('node_modules/motion')) return 'motion';
+          },
+        },
+      },
+    },
     server: {
       hmr: false,
       watch: {

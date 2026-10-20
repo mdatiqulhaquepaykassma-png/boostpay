@@ -26,16 +26,24 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
   const [lastFetch, setLastFetch] = useState(Date.now());
   const [selectedCommission, setSelectedCommission] = useState<any>(null);
   const [recentPage, setRecentPage] = useState(0);
+  const [referErr, setReferErr] = useState<string | null>(null);
   const recentPageSize = 5;
 
   const refresh = async () => {
-    const d = await BoostPayStore.getReferMy();
-    setData(d);
-    setLoading(false);
-    setLastFetch(Date.now());
+    try {
+      setReferErr(null);
+      const d = await BoostPayStore.getReferMy();
+      if (d) setData(d);
+      else setReferErr('Empty response — please retry');
+    } catch (e:any) {
+      setReferErr(e?.message || 'Network error');
+    } finally {
+      setLoading(false);
+      setLastFetch(Date.now());
+    }
   };
 
-  useEffect(()=>{ refresh(); const id=setInterval(refresh, 5000); return ()=> clearInterval(id); }, [userId]);
+  useEffect(()=>{ refresh(); const id=setInterval(()=> { if (document.visibilityState==='visible') refresh(); }, 15000); return ()=> clearInterval(id); }, [userId]);
   useEffect(()=>{ const id=setInterval(()=> setNowTick(Date.now()), 1000); return ()=> clearInterval(id); },[]);
   // live countdown to UTC midnight
   useEffect(()=>{
@@ -71,7 +79,13 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
   }
 
   if (!data) {
-    return <div className="p-6 text-center text-zinc-500 text-xs">Failed to load referral data. Pull to retry.</div>;
+    return (
+      <div className="p-6 text-center space-y-3">
+        <p className="text-xs text-zinc-500">Failed to load referral data.{referErr ? ` ${referErr}` : ''}</p>
+        <button onClick={refresh} className="rounded-xl bg-amber-500 px-4 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer">Retry</button>
+        <p className="text-[10px] text-zinc-600">Pull to retry or tap Retry — will auto-retry in 15s</p>
+      </div>
+    );
   }
 
   const referrals: any[] = data.referrals || [];

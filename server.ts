@@ -1411,11 +1411,13 @@ async function startServer() {
   app.use(checkBlacklist);
   app.use('/api', rateLimit(200));
 
-  // Body parser — 100kb globally to stop DDoS; chat uploads allow larger via route-specific parsers BEFORE global
+  // Body parser — global 1mb (was 100kb → caused PayloadTooLarge on /api/sync with photos/history); chat uploads allow larger via route-specific parsers BEFORE global
   // NOTE: route-specific parsers must come BEFORE global parser so they consume body first
   app.use('/api/chat/send', express.json({ limit: '5mb' }));
   app.use('/api/chat/group-call', express.json({ limit: '1mb' }));
-  app.use(express.json({ limit: '100kb' }));
+  app.use('/api/sync', express.json({ limit: '10mb' }));
+  app.use('/api/db', express.json({ limit: '5mb' }));
+  app.use(express.json({ limit: '1mb' }));
   // Reject direct wallet manipulation — client must never send balance/creditAmount to any endpoint except admin/adjust (which is RBAC guarded)
   app.use((req:any,res:any,next:any)=>{
     const badKeys = ['balance','creditAmount','credit_amount','lifetimeProfit','walletBalance'];
@@ -5050,6 +5052,7 @@ async function startServer() {
 
   // ================= Referral endpoints =================
   app.get('/api/refer/my', requireUser, (req:any,res)=>{
+    try {
     const db=readDb(); const uid=String(req.authUserId||'');
     const me=(db.users||[]).find((u:any)=> String(u.id)===uid);
     if (!me) return res.status(404).json({error:'User not found'});
@@ -5058,13 +5061,14 @@ async function startServer() {
     const rate=getReferCommissionRate(db, uid);
     const dailyCount=getReferDailyCount(db, uid);
     const lifetime=myCommissions.reduce((a:number,c:any)=> a+(Number(c.amount)||0),0);
-    // Build live snapshots for each referred user (balance + boost + cycle)
+    // Build live snapshots for each referred user (balance + boost + cycle) — wrapped to never throw 500
     const referredDetails = myReferrals.map((r:any)=>{
+      try {
       const ru=(db.users||[]).find((u:any)=> String(u.id)===String(r.referredId));
       if (!ru) return { referredId: String(r.referredId), createdAt: r.createdAt, missing:true };
       const commissionsForThis = myCommissions.filter((c:any)=> String(c.referredId)===String(r.referredId));
       const earned = commissionsForThis.reduce((a:number,c:any)=> a+(Number(c.amount)||0),0);
-      const liveBS = liveBoostState(ru) || ru.boostState;
+      const liveBS = (()=>{ try{ return liveBoostState(ru); } catch { return ru.boostState; } })() || ru.boostState;
       return {
         referredId: String(ru.id),
         balance: Number(ru.balance)||0,
@@ -5078,6 +5082,9 @@ async function startServer() {
         earnedFromThis: earned,
         totalCommissionsCount: commissionsForThis.length
       };
+      } catch (inner:any) {
+        return { referredId: String(r.referredId), createdAt: r.createdAt, missing:true, error: String(inner?.message||'err') };
+      }
     });
     // upline lookup: who referred me?
     const myReferral = (db.referrals||[]).find((r:any)=> String(r.referredId)===uid);
@@ -5112,6 +5119,10 @@ async function startServer() {
       recentCommissions: myCommissions.slice(0,50),
       upline
     });
+    } catch (e:any) {
+      console.error('[refer/my] error:', e?.message || e);
+      res.status(500).json({ error: 'Failed to load referral data', detail: String(e?.message||e).slice(0,200) });
+    }
   });
   app.get('/api/refer/code', requireUser, (req:any,res)=>{
     const uid=String(req.authUserId||'');

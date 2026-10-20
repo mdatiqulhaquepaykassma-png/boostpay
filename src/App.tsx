@@ -3,18 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { Wallet, Trophy, MessageSquare, Inbox, Download, RefreshCw, Gift, LogOut } from 'lucide-react';
 import { BoostPayStore, ToastData } from './services/store';
 import { User, SystemConfig } from './types';
 import { Navbar } from './components/Navbar';
 import { AuthGate } from './components/AuthGate';
 import { WalletView } from './components/WalletView';
-import { LeaderboardView } from './components/LeaderboardView';
-import { ReferView } from './components/ReferView';
-
-import { MessengerView } from './components/MessengerView';
-import { InboxView } from './components/InboxView';
+const LeaderboardView = lazy(()=> import('./components/LeaderboardView').then(m=> ({ default: m.LeaderboardView })));
+const ReferView = lazy(()=> import('./components/ReferView').then(m=> ({ default: m.ReferView })));
+const MessengerView = lazy(()=> import('./components/MessengerView').then(m=> ({ default: m.MessengerView })));
+const InboxView = lazy(()=> import('./components/InboxView').then(m=> ({ default: m.InboxView })));
 import { FloatingToastContainer } from './components/FloatingToast';
 import { PWAInstallHelp } from './components/PWAInstallHelp';
 import { usePWAInstall } from './hooks/usePWAInstall';
@@ -48,23 +47,24 @@ export default function App() {
   // System config state
   const [config, setConfig] = useState<SystemConfig>(BoostPayStore.getConfig());
 
-  // Initialize backend sync without logging out the user
+  // Initialize backend sync without blocking UI — wallet renders instantly from local cache
   useEffect(() => {
-    BoostPayStore.initSync()
-      .then(async () => {
-        const freshUser = BoostPayStore.getCurrentUser();
-        if (freshUser) {
-          setCurrentUser(freshUser);
-          // Refresh single user boost status from authoritative backend
-          const synced = await BoostPayStore.syncUserFromServer(freshUser.id);
-          if (synced) setCurrentUser(synced);
-        }
+    const local = BoostPayStore.getCurrentUser();
+    if (local) {
+      // Show wallet immediately; authoritative sync in background
+      setIsInitialSyncing(false);
+      BoostPayStore.initSync().then(async () => {
+        const fresh = BoostPayStore.getCurrentUser();
+        if (fresh) setCurrentUser(fresh);
+        const synced = fresh ? await BoostPayStore.syncUserFromServer(fresh.id).catch(()=> null) : null;
+        if (synced) setCurrentUser(synced);
         setConfig(BoostPayStore.getConfig());
-        setIsInitialSyncing(false);
-      })
-      .catch(() => {
-        setIsInitialSyncing(false);
-      });
+      }).catch(()=>{});
+    } else {
+      // No local session — show auth gate instantly, sync config in background
+      setIsInitialSyncing(false);
+      BoostPayStore.initSync().then(()=> setConfig(BoostPayStore.getConfig())).catch(()=>{});
+    }
   }, []);
 
   // Listen for real-time incoming transfer toasts (chat popups disabled)
@@ -147,8 +147,8 @@ export default function App() {
 
     refreshState();
     BoostPayStore.getBanner().then(setSystemBanner);
-    // Full-site realtime: SSE instant + 4s fallback poll (renderless — only state diff triggers isolated re-render)
-    const interval = setInterval(refreshState, 4000);
+    // Full-site realtime: SSE instant + 12s fallback poll (renderless — only diff triggers re-render; pause when tab hidden)
+    const interval = setInterval(()=> { if (document.visibilityState === 'visible') refreshState(); }, 12000);
     // also listen for storage events (cross-tab) to keep in sync without reload
     const onStorage = (e: StorageEvent) => {
       if (e.key?.includes('boostpay_') || e.key?.includes('boostpay_current')) {
@@ -491,25 +491,27 @@ export default function App() {
             )}
 
             {activeTab === 'LEADERBOARD' && (
-              <LeaderboardView
-                currentUserId={currentUser.id}
-                onSelectPeerForChat={handleOpenPeerChatFromLeaderboard}
-              />
+              <Suspense fallback={<div className="p-6 space-y-3"><div className="h-24 rounded-2xl bg-zinc-900 animate-pulse"/><div className="h-40 rounded-2xl bg-zinc-900 animate-pulse"/></div>}>
+                <LeaderboardView currentUserId={currentUser.id} onSelectPeerForChat={handleOpenPeerChatFromLeaderboard} />
+              </Suspense>
             )}
 
             {activeTab === 'REFERRAL' && (
-              <ReferView userId={currentUser.id} onMessageUser={handleOpenPeerChatFromLeaderboard} />
+              <Suspense fallback={<div className="p-6 space-y-3"><div className="h-24 rounded-2xl bg-zinc-900 animate-pulse"/><div className="h-40 rounded-2xl bg-zinc-900 animate-pulse"/></div>}>
+                <ReferView userId={currentUser.id} onMessageUser={handleOpenPeerChatFromLeaderboard} />
+              </Suspense>
             )}
 
             {activeTab === 'INBOX' && (
-              <InboxView userId={currentUser.id} />
+              <Suspense fallback={<div className="p-6 text-center text-xs text-zinc-500">Loading inbox…</div>}>
+                <InboxView userId={currentUser.id} />
+              </Suspense>
             )}
 
             {activeTab === 'MESSENGER' && (
-              <MessengerView
-                currentUser={currentUser}
-                initialPeerId={chatTargetPeerId}
-              />
+              <Suspense fallback={<div className="p-6 text-center text-xs text-zinc-500">Loading chat…</div>}>
+                <MessengerView currentUser={currentUser} initialPeerId={chatTargetPeerId} />
+              </Suspense>
             )}
           </main>
 
