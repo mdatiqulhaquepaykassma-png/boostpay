@@ -1,5 +1,5 @@
 /**
- * Currency & decimal precision formatting utilities for micro compounding
+ * Currency & decimal precision formatting utilities for micro boosting
  */
 
 /**
@@ -55,7 +55,7 @@ export function formatRatePercent(value: number | string | undefined | null): st
 }
 
 /**
- * Formats compounding rate display with both per-minute and equivalent hourly rates
+ * Formats boosting rate display with both per-minute and equivalent hourly rates
  * e.g. "0.001605%/min (~0.0963%/hr)"
  */
 export function formatCompoundingRateDual(minuteRate: number | string | undefined | null): string {

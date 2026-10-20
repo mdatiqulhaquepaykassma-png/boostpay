@@ -64,8 +64,8 @@ export const P2PTransferModal: FC<Props> = ({
     }
 
     const numAmount = parseFloat(amount);
-    if (isNaN(numAmount) || numAmount <= 0) {
-      setError('Please enter a valid transfer amount.');
+    if (isNaN(numAmount) || numAmount < 0.1) {
+      setError('Minimum transfer is 0.1 — enter at least 0.10');
       return;
     }
 
@@ -190,7 +190,7 @@ export const P2PTransferModal: FC<Props> = ({
               <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-3 flex items-start gap-2.5 text-xs text-amber-300">
                 <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                 <div>
-                  <strong className="block font-semibold">Active Compounding Boost Running</strong>
+                  <strong className="block font-semibold">Active Boosting Running</strong>
                   Funds are currently locked in session. You must pause your boost on the wallet screen before sending funds.
                 </div>
               </div>

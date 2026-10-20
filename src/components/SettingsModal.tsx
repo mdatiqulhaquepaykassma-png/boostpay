@@ -46,6 +46,7 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
   const [allowMessages, setAllowMessages] = useState(true);
   const [allowVoiceCall, setAllowVoiceCall] = useState(true);
   const [privacyLoading, setPrivacyLoading] = useState(false);
+  const [buildInfo, setBuildInfo] = useState<{ version?: string; bootTime?: number } | null>(null);
 
   useEffect(() => {
     if (!isOpen) {
@@ -57,6 +58,8 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
       BoostPayStore.getVerifyEmailStatus().then(r=> setEmailVerified(r.emailVerified));
       // load chat privacy settings
       BoostPayStore.getMyChatSettings().then(r=> { setAllowMessages(r.allowMessages); setAllowVoiceCall(r.allowVoiceCall); });
+      // load build version
+      fetch('/api/version', { cache: 'no-store' }).then(r=> r.json()).then(j=> setBuildInfo(j)).catch(()=>{});
     }
   }, [isOpen]);
 
@@ -152,6 +155,7 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
                   <div className="flex justify-between"><span className="text-zinc-500">Email</span><span className="text-white truncate max-w-[160px]">{currentUser.email || '—'}</span></div>
                   <div className="flex justify-between"><span className="text-zinc-500">Balance</span><span className="font-mono text-emerald-400">${Number(currentUser.balance||0).toFixed(2)}</span></div>
                   <div className="flex justify-between"><span className="text-zinc-500">Verified</span><span className={`font-mono text-xs ${emailVerified ? 'text-emerald-400' : 'text-zinc-400'}`}>{emailVerified ? '✓ Verified' : 'Not verified (optional)'}</span></div>
+                  <div className="flex justify-between"><span className="text-zinc-500">Build</span><span className="font-mono text-[11px] text-zinc-500">{buildInfo?.version ? `v${String(buildInfo.version).slice(-6)}` : buildInfo?.bootTime ? `b${String(buildInfo.bootTime).slice(-7)}` : '—'}</span></div>
                 </div>
               </section>
 

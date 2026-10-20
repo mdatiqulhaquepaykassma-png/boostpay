@@ -148,7 +148,7 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
         };
       case 'REWARD':
         return {
-          label: 'Compounding Yield',
+          label: 'Boosting Yield',
           badge: 'Yield Reward',
           icon: Zap,
           iconBg: 'bg-amber-500/15 border-amber-500/30 text-amber-400',
@@ -384,7 +384,7 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
               <p className="text-[11px] text-zinc-500 mt-1 max-w-xs">
                 {searchQuery
                   ? `No transactions matching "${searchQuery}".`
-                  : 'Your transfers and compounding yields will appear here.'}
+                  : 'Your transfers and boosting yields will appear here.'}
               </p>
               {searchQuery && (
                 <button

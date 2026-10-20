@@ -143,7 +143,7 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
           {boostState.isActive && (
             <span
               className="flex items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold text-amber-300"
-              title={"Yield accrued in the current compounding cycle: +$" + formatPrecisionAmount(liveAccrued, 8)}
+              title={"Yield accrued in the current boosting cycle: +$" + formatPrecisionAmount(liveAccrued, 8)}
             >
               <TrendingUp className="w-3 h-3 text-amber-400" />
               <span className="font-mono">+${formatPrecisionAmount(liveAccrued, 6)}</span>
@@ -192,7 +192,7 @@ IsolatedLiveBalanceCard.displayName = 'IsolatedLiveBalanceCard';
 // ===============================================
 // 2. ISOLATED COMPOUNDING CARD (MEMOIZED PROGRESS)
 // ===============================================
-interface CompoundingCardProps {
+interface BoostingCardProps {
   userId: string;
   baseBalance: number;
   boostState: BoostState;
@@ -205,7 +205,7 @@ interface CompoundingCardProps {
   isFrozen?: boolean;
 }
 
-const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
+const IsolatedBoostingCard: FC<BoostingCardProps> = memo(({
   userId,
   baseBalance,
   boostState,
@@ -300,7 +300,7 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
             <Zap className="w-5 h-5 fill-current" />
           </div>
           <div>
-            <h3 className="text-sm font-bold text-white tracking-tight">Compounding</h3>
+            <h3 className="text-sm font-bold text-white tracking-tight">Boosting</h3>
           </div>
         </div>
         <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold tracking-wide ${
@@ -361,19 +361,19 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
           <button
             onClick={onStartBoost}
             disabled={isFrozen}
-            title={isFrozen ? 'Account frozen — compounding disabled' : 'Start a compounding cycle'}
+            title={isFrozen ? 'Account frozen — boosting disabled' : 'Start a boosting cycle'}
             className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-amber-500"
           >
-            <Zap className="w-4 h-4 fill-current" /> {isFrozen ? 'Compounding Disabled (Frozen)' : 'Start Compounding'}
+            <Zap className="w-4 h-4 fill-current" /> {isFrozen ? 'Boosting Disabled (Frozen)' : 'Start Boosting'}
           </button>
         ) : isPaused ? (
           <button
             onClick={onResumeBoost}
             disabled={isFrozen}
-            title={isFrozen ? 'Account frozen — compounding disabled' : 'Resume compounding'}
+            title={isFrozen ? 'Account frozen — boosting disabled' : 'Resume boosting'}
             className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-amber-500"
           >
-            <Play className="w-4 h-4 fill-current" /> {isFrozen ? 'Compounding Disabled (Frozen)' : 'Resume Compounding'}
+            <Play className="w-4 h-4 fill-current" /> {isFrozen ? 'Boosting Disabled (Frozen)' : 'Resume Boosting'}
           </button>
         ) : (
           <>
@@ -381,7 +381,7 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
               onClick={onPauseBoost}
               className="w-full h-11 rounded-2xl border border-zinc-700 bg-zinc-800/70 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer"
             >
-              <Pause className="w-4 h-4" /> Pause Compounding
+              <Pause className="w-4 h-4" /> Pause Boosting
             </button>
             <p className="mt-2 text-center text-[10px] text-zinc-500">Pausing freezes progress and unlocks transfers.</p>
           </>
@@ -391,7 +391,7 @@ const IsolatedCompoundingCard: FC<CompoundingCardProps> = memo(({
   );
 });
 
-IsolatedCompoundingCard.displayName = 'IsolatedCompoundingCard';
+IsolatedBoostingCard.displayName = 'IsolatedBoostingCard';
 
 
 // ==========================================
@@ -445,7 +445,7 @@ export const WalletView: FC<Props> = ({
 
   const handleStartBoost = useCallback(async () => {
     if (user.isFrozen) return;
-    if (user.balance <= 0) {
+    if (user.balance < 0.1) {
       setZeroBalanceWarning(true);
       setTimeout(() => setZeroBalanceWarning(false), 3500);
       return;
@@ -484,7 +484,7 @@ export const WalletView: FC<Props> = ({
           <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
           <div className="text-xs text-red-200">
             <span className="font-bold text-red-400 block">Account Frozen</span>
-            Compounding is paused and transfers are locked
+            Boosting is paused and transfers are locked
             {user.frozenReason ? ` — ${user.frozenReason}` : ''}. Contact support for assistance.
           </div>
         </div>
@@ -509,12 +509,12 @@ export const WalletView: FC<Props> = ({
         </div>
       )}
 
-      {/* Zero balance warning dialog */}
+      {/* Min balance warning dialog */}
       {zeroBalanceWarning && (
         <div className="rounded-2xl border border-red-500/30 bg-red-950/40 p-3.5 flex items-center gap-2.5 shadow-lg">
           <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
           <div className="text-xs text-red-200">
-            Account balance is $0.00. Receive a transfer or credit to begin boosting.
+            Minimum 0.1 balance required to start boosting. Current ${Number(user.balance||0).toFixed(2)} — receive a transfer to begin.
           </div>
         </div>
       )}
@@ -531,7 +531,7 @@ export const WalletView: FC<Props> = ({
       />
 
       {/* 3. ISOLATED DYNAMIC COMPOUNDING CARD */}
-          <IsolatedCompoundingCard
+          <IsolatedBoostingCard
             userId={user.id}
             baseBalance={user.balance}
             boostState={user.boostState}

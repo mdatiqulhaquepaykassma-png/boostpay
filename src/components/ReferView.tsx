@@ -25,6 +25,8 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
   const [nowTick, setNowTick] = useState(Date.now());
   const [lastFetch, setLastFetch] = useState(Date.now());
   const [selectedCommission, setSelectedCommission] = useState<any>(null);
+  const [recentPage, setRecentPage] = useState(0);
+  const recentPageSize = 5;
 
   const refresh = async () => {
     const d = await BoostPayStore.getReferMy();
@@ -80,7 +82,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
       <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
         <div>
           <h1 className="text-lg font-bold text-white flex items-center gap-2"><Gift className="w-5 h-5 text-amber-400"/> Refer & Earn</h1>
-          <p className="text-xs text-zinc-400 mt-0.5">Earn 1-10% on your referrals compounding — auto tier by daily joins</p>
+          <p className="text-xs text-zinc-400 mt-0.5">Earn 1-10% on your referrals boosting — auto tier by daily joins</p>
         </div>
         <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-mono font-bold text-amber-300">{data.rate}% RATE</span>
       </div>
@@ -107,7 +109,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
               {copied==='link'? <Check className="w-3 h-3 text-emerald-400"/> : <Share2 className="w-3 h-3"/>} Share
             </button>
           </div>
-          <p className="text-[11px] text-zinc-500 mt-2 leading-relaxed">Share your link: <span className="font-mono text-zinc-300">{data.referLink}</span> — new users signup with your code, you get <span className="text-amber-400 font-bold">1-10% daily tier</span> of their compounding profits.</p>
+          <p className="text-[11px] text-zinc-500 mt-2 leading-relaxed">Share your link: <span className="font-mono text-zinc-300">{data.referLink}</span> — new users signup with your code, you get <span className="text-amber-400 font-bold">1-10% daily tier</span> of their boosting profits.</p>
         </div>
       </div>
 
@@ -129,7 +131,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
             <span className="text-[11px] text-zinc-400">Upline earned from you</span>
             <span className="font-mono text-xs font-bold text-emerald-400">+${formatPrecisionAmount(data.upline.earnedFromMe||0,8)}</span>
           </div>
-          <p className="text-[10px] text-zinc-500 mt-1">Your compounding rewards give your upline {data.upline.referRate}% commission (global tier).</p>
+          <p className="text-[10px] text-zinc-500 mt-1">Your boosting rewards give your upline {data.upline.referRate}% commission (global tier).</p>
           <button onClick={()=> onMessageUser?.(String(data.upline.referrerId))} className="mt-2 w-full rounded-xl bg-sky-500/15 border border-sky-500/20 py-2 text-[11px] font-bold text-sky-300 hover:bg-sky-500/25 transition cursor-pointer flex items-center justify-center gap-1.5"><MessageCircle className="w-3.5 h-3.5"/> Message Upline</button>
         </div>
       )}
@@ -172,7 +174,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
         <div>
           <div className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5"><Activity className="w-3.5 h-3.5"/> Today Active Boosted</div>
           <div className="font-mono text-sm font-bold text-white mt-0.5">{referrals.filter((r:any)=> r.boostActive).length} active <span className="text-zinc-500 text-xs font-normal">of {referrals.length} referred</span></div>
-          <div className="text-[10px] text-zinc-500">Referred users currently compounding</div>
+          <div className="text-[10px] text-zinc-500">Referred users currently boosting</div>
         </div>
         <span className="h-8 w-8 rounded-xl bg-emerald-500/20 flex items-center justify-center text-emerald-400 font-mono text-xs font-bold">{referrals.filter((r:any)=> r.boostActive).length}</span>
       </div>
@@ -187,7 +189,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
           <div className="rounded-2xl border border-dashed border-zinc-800 p-6 text-center">
             <Users className="w-6 h-6 text-zinc-600 mx-auto mb-2"/>
             <p className="text-xs font-bold text-zinc-400">No referrals yet</p>
-            <p className="text-[11px] text-zinc-500 mt-1">Share your code above — when they join and start compounding, you earn 1-10% automatically.</p>
+            <p className="text-[11px] text-zinc-500 mt-1">Share your code above — when they join and start boosting, you earn 1-10% automatically.</p>
             <button onClick={()=> setShowApply(false)} className="mt-3 text-xs text-amber-400 hover:underline cursor-pointer">Invite friends</button>
           </div>
         ) : (
@@ -244,18 +246,21 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
               </div>
               {applyMsg && <p className="text-[11px] text-emerald-400 font-medium">{applyMsg}</p>}
               {applyErr && <p className="text-[11px] text-red-400">{applyErr}</p>}
-              <p className="text-[10px] text-zinc-500">You can only set referrer once. Commission stays 1-10% on your compounding.</p>
+              <p className="text-[10px] text-zinc-500">You can only set referrer once. Commission stays 1-10% on your boosting.</p>
             </form>
           )}
         </div>
       </div>
 
-      {/* Recent commissions */}
+      {/* Recent commissions — paginated sliding 5-window to prevent crush */}
       {recent.length>0 && (
         <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4">
-          <h3 className="text-xs font-bold text-white flex items-center gap-2 mb-3"><DollarSign className="w-4 h-4 text-emerald-400"/> Recent Referral Earnings</h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-bold text-white flex items-center gap-2"><DollarSign className="w-4 h-4 text-emerald-400"/> Recent Referral Earnings</h3>
+            <span className="text-[11px] font-mono text-zinc-500">{recent.length>0 ? `${Math.min(recentPage*recentPageSize+1, recent.length)}–${Math.min((recentPage+1)*recentPageSize, recent.length)} of ${recent.length}` : ''}</span>
+          </div>
           <div className="space-y-2">
-            {recent.slice(0,10).map((c:any)=>(
+            {recent.slice(recentPage*recentPageSize, (recentPage+1)*recentPageSize).map((c:any)=>(
               <button key={c.id} onClick={()=> setSelectedCommission(c)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 hover:border-amber-500/30 hover:bg-zinc-900 transition text-left cursor-pointer">
                 <div>
                   <div className="text-xs font-mono font-bold text-emerald-400">+${formatPrecisionAmount(c.amount,8)}</div>
@@ -265,6 +270,13 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
               </button>
             ))}
           </div>
+          {recent.length > recentPageSize && (
+            <div className="mt-3 flex items-center justify-between gap-2">
+              <button disabled={recentPage===0} onClick={()=> setRecentPage(p=> Math.max(0,p-1))} className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 py-2 text-xs font-semibold text-zinc-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-zinc-900 cursor-pointer">← Load Previous</button>
+              <span className="text-[11px] font-mono text-zinc-500">{recentPage+1}/{Math.ceil(recent.length/recentPageSize)}</span>
+              <button disabled={(recentPage+1)*recentPageSize >= recent.length} onClick={()=> setRecentPage(p=> Math.min(Math.ceil(recent.length/recentPageSize)-1, p+1))} className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 py-2 text-xs font-semibold text-zinc-300 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-zinc-900 cursor-pointer">Load More →</button>
+            </div>
+          )}
         </div>
       )}
 
@@ -285,7 +297,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
               {selectedCommission.sourceTxId && <div className="flex justify-between gap-2"><span className="text-zinc-500 shrink-0">Source TX</span><span className="font-mono text-[11px] text-zinc-400 break-all text-right">{selectedCommission.sourceTxId}</span></div>}
               {selectedCommission.dayKey && <div className="flex justify-between"><span className="text-zinc-500">Day Key</span><span className="font-mono text-zinc-400">{selectedCommission.dayKey}</span></div>}
               {selectedCommission.balanceAfter != null && <div className="flex justify-between"><span className="text-zinc-500">Balance After</span><span className="font-mono text-zinc-300">${formatPrecisionAmount(selectedCommission.balanceAfter,6)}</span></div>}
-              <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-[11px] text-zinc-400">This commission was earned when User #{selectedCommission.referredId} completed a compounding cycle. Your rate {selectedCommission.rate}% was applied to their yield. Duplicate commission IDs are blocked server-side.</div>
+              <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-[11px] text-zinc-400">This commission was earned when User #{selectedCommission.referredId} completed a boosting cycle. Your rate {selectedCommission.rate}% was applied to their yield. Duplicate commission IDs are blocked server-side.</div>
             </div>
             <button onClick={()=> setSelectedCommission(null)} className="w-full rounded-xl bg-zinc-800 py-2 text-xs font-semibold text-white hover:bg-zinc-700 cursor-pointer">Close</button>
           </div>
@@ -294,7 +306,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
 
       {/* Tier explainer */}
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3 text-[11px] leading-relaxed text-zinc-400">
-        <span className="font-bold text-zinc-200">How rate works — Global Ranking (24h UTC):</span> Each day your referral count is ranked vs everyone. Highest referrals get 10%, lowest 1% (linear). Single user = 10%. You earn that % of each referred user’s compounding reward. Resets at UTC midnight.
+        <span className="font-bold text-zinc-200">How rate works — Global Ranking (24h UTC):</span> Each day your referral count is ranked vs everyone. Highest referrals get 10%, lowest 1% (linear). Single user = 10%. You earn that % of each referred user’s boosting reward. Resets at UTC midnight.
       </div>
     </div>
   );

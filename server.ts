@@ -97,7 +97,7 @@ const INITIAL_DB = {
       type: "REWARD",
       amount: 14.50,
       timestamp: Date.now() - 3600000,
-      notes: "Compounding reward credited"
+      notes: "Boosting reward credited"
     }
   ],
   conversations: [],
@@ -112,7 +112,7 @@ const INITIAL_DB = {
       userId: "1",
       type: "YIELD_REWARD",
       title: "BOOSTPAY-ALERTS",
-      message: "YIELD ALERT: Compounding reward credited. $14.50 profit credited to your wallet balance. Ref: TX-99014120",
+      message: "YIELD ALERT: Boosting reward credited. $14.50 profit credited to your wallet balance. Ref: TX-99014120",
       amount: 14.50,
       referenceId: "TX-99014120",
       timestamp: Date.now() - 3600000,
@@ -1176,7 +1176,7 @@ setInterval(() => {
         (user as any).frozenUntil = undefined;
         user.frozenReason = undefined;
         updated = true;
-        // FIX: resume compounding if it was paused due to freeze — otherwise user stays stuck paused forever
+        // FIX: resume boosting if it was paused due to freeze — otherwise user stays stuck paused forever
         if (user.boostState && user.boostState.isPaused && user.boostState.pausedAt) {
           const pausedFor = now - (user.boostState.pausedAt || now);
           // shift startedAt forward by pause duration so elapsed stays correct
@@ -1184,14 +1184,14 @@ setInterval(() => {
           user.boostState.isPaused = false;
           user.boostState.pausedAt = 0;
           updated = true;
-          pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: user.id, type: 'YIELD_REWARD', title: 'BOOSTPAY-ALERTS', message: 'Compounding resumed automatically after security freeze lifted. Progress continues.', timestamp: now, isRead: false } as any);
+          pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: user.id, type: 'YIELD_REWARD', title: 'BOOSTPAY-ALERTS', message: 'Boosting resumed automatically after security freeze lifted. Progress continues.', timestamp: now, isRead: false } as any);
         }
         recordAuditLog(db, 'FRAUD_AUTO_UNFREEZE', 'SYSTEM', `Auto-unfroze User #${user.id} after 1h temp lock expired`, user.id);
-        pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: user.id, type: 'SECURITY_ALERT', title: 'BOOSTPAY-SECURITY', message: 'Your temporary 1-hour security freeze has been lifted. You may now transact and resume compounding.', timestamp: now, isRead: false });
+        pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: user.id, type: 'SECURITY_ALERT', title: 'BOOSTPAY-SECURITY', message: 'Your temporary 1-hour security freeze has been lifted. You may now transact and resume boosting.', timestamp: now, isRead: false });
         broadcastUserUpdate(db, user.id);
       }
       }
-      // Frozen accounts: compounding is paused (can never progress while frozen)
+      // Frozen accounts: boosting is paused (can never progress while frozen)
       if (user.isFrozen && user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
         user.boostState.isPaused = true;
         user.boostState.pausedAt = now;
@@ -1255,7 +1255,7 @@ setInterval(() => {
                 type: 'REWARD',
                 amount: finalYield,
                 timestamp: now,
-                notes: 'Server background compounding reward completed',
+                notes: 'Server background boosting reward completed',
                 balanceAfter: user.balance
               } as any;
               db.transactions.unshift(rewardTx);
@@ -1270,7 +1270,7 @@ setInterval(() => {
             userId: user.id,
             type: 'YIELD_REWARD',
             title: 'BOOSTPAY-ALERTS',
-            message: `YIELD ALERT: Compounding cycle completed. $${formatAmount8(finalYield)} in yield profit credited to your wallet. Available Balance: $${formatAmount8(user.balance)}. Ref: ${rewardTxIdForRef}`,
+            message: `YIELD ALERT: Boosting cycle completed. $${formatAmount8(finalYield)} in yield profit credited to your wallet. Available Balance: $${formatAmount8(user.balance)}. Ref: ${rewardTxIdForRef}`,
             amount: finalYield,
             referenceId: rewardTxIdForRef as any,
             timestamp: now,
@@ -1289,7 +1289,8 @@ setInterval(() => {
               // FIX #2/#3: only credit if referrer is actively boosting (boost ON) and not frozen — otherwise no earning
               const referrerBoostActive = !!(referrer && referrer.boostState && (referrer.boostState as any).isActive && !(referrer.boostState as any).isPaused);
               const referrerCanEarn = referrer && !referrer.isFrozen && referrerBoostActive;
-              if (referrerCanEarn && rcfg && rcfg.enabled !== false && rcfg.commissionOnCompounding !== false && finalYield > 0 && rewardTxIdForRef) {
+              const commissionEnabled = (rcfg?.commissionOnCompounding !== false) && (rcfg?.commissionOnBoosting !== false);
+              if (referrerCanEarn && rcfg && rcfg.enabled !== false && commissionEnabled && finalYield > 0 && rewardTxIdForRef) {
                 const rate = getReferCommissionRate(db, referrerId, now);
                 if (rate > 0) {
                   const commission = finalYield * (rate/100);
@@ -1893,13 +1894,13 @@ async function startServer() {
       }
 
       if (user.isFrozen) {
-        return res.status(403).json({ error: 'Your account is frozen. Compounding is disabled — contact support.' });
+        return res.status(403).json({ error: 'Your account is frozen. Boosting is disabled — contact support.' });
       }
       if (user.isBlocked) {
         return res.status(403).json({ error: 'Your account is suspended.' });
       }
-      if (Number(user.balance) <= 0) {
-        return res.status(400).json({ error: 'Cannot boost with zero balance' });
+      if (Number(user.balance) < 0.1) {
+        return res.status(400).json({ error: 'Minimum 0.1 balance required to start boosting' });
       }
 
       const targetDuration = calculateDynamicDuration(user.balance, db.users, db.config);
@@ -1973,7 +1974,7 @@ async function startServer() {
       }
 
       if (user.isFrozen) {
-        return res.status(403).json({ error: 'Your account is frozen. Compounding is disabled — contact support.' });
+        return res.status(403).json({ error: 'Your account is frozen. Boosting is disabled — contact support.' });
       }
       if (user.isBlocked) {
         return res.status(403).json({ error: 'Your account is suspended.' });
@@ -3183,8 +3184,8 @@ async function startServer() {
     try {
       const { senderId, recipientId } = req.body as any;
       const numAmount = Number(rawAmount);
-      if (!isFinite(numAmount) || isNaN(numAmount) || numAmount <= 0 || numAmount > 100000) {
-        return res.status(400).json({ error: 'Please enter a valid transfer amount (0 < x ≤ 100,000).' });
+      if (!isFinite(numAmount) || isNaN(numAmount) || numAmount < 0.1 || numAmount > 100000) {
+        return res.status(400).json({ error: 'Minimum transfer is 0.1 — enter 0.1 ≤ x ≤ 100,000.' });
       }
       // Prevent float precision abuse — max 2 decimals (BigDecimal policy)
       if (!/^\d+(\.\d{1,2})?$/.test(String(rawAmount).trim())) {
@@ -4270,10 +4271,13 @@ async function startServer() {
       if (incomingConfig.maintenanceMode !== undefined) (db.config as any).maintenanceMode = !!incomingConfig.maintenanceMode;
       // referral passthrough
       if (incomingConfig.referral && typeof incomingConfig.referral==='object') {
-        if (!db.config.referral) (db.config as any).referral={ enabled:true, baseRatePercent:1, maxRatePercent:10, dailyTierEnabled:true, commissionOnCompounding:true };
-        for (const rk of ['enabled','baseRatePercent','maxRatePercent','dailyTierEnabled','commissionOnCompounding']) {
+        if (!db.config.referral) (db.config as any).referral={ enabled:true, baseRatePercent:1, maxRatePercent:10, dailyTierEnabled:true, commissionOnCompounding:true, commissionOnBoosting:true };
+        for (const rk of ['enabled','baseRatePercent','maxRatePercent','dailyTierEnabled','commissionOnCompounding','commissionOnBoosting']) {
           if ((incomingConfig.referral as any)[rk] !== undefined) (db.config as any).referral[rk]=(incomingConfig.referral as any)[rk];
         }
+        // keep both keys in sync
+        if ((db.config as any).referral.commissionOnBoosting !== undefined) (db.config as any).referral.commissionOnCompounding = !!(db.config as any).referral.commissionOnBoosting;
+        if ((db.config as any).referral.commissionOnCompounding !== undefined) (db.config as any).referral.commissionOnBoosting = !!(db.config as any).referral.commissionOnCompounding;
       }
       // antifraud passthrough (also via dedicated endpoint)
       if (incomingConfig.antifraud && typeof incomingConfig.antifraud==='object') {

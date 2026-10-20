@@ -319,7 +319,7 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                   className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 pl-9 pr-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none font-mono"
                 />
               </div>
-              {referralCode && <p className="text-[10px] text-emerald-400/80 mt-1 font-mono">✓ You will be linked to User #{referralCode.replace(/^#/,'').replace(/^REF-?/i,'')} — they earn {1}–10% on your compounding rewards.</p>}
+              {referralCode && <p className="text-[10px] text-emerald-400/80 mt-1 font-mono">✓ You will be linked to User #{referralCode.replace(/^#/,'').replace(/^REF-?/i,'')} — they earn {1}–10% on your boosting rewards.</p>}
             </div>
 
             {signupError && (

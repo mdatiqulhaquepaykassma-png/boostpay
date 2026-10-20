@@ -581,7 +581,7 @@ export class BoostPayStore {
               this.triggerToast({
                 id: 'toast-cyc-' + Date.now(),
                 type: 'SUCCESS',
-                title: 'Compounding Cycle Complete',
+                title: 'Boosting Cycle Complete',
                 message: `Yield reward of $${Number(data.reward || 0).toFixed(8)} was credited to your wallet.`
               } as any);
             } else if (data.type === 'typing' && data.conversationId) {

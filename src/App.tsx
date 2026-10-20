@@ -147,12 +147,20 @@ export default function App() {
 
     refreshState();
     BoostPayStore.getBanner().then(setSystemBanner);
-    // SSE pushes changes instantly; this poll is only a 15s safety net (was 1s).
-    const interval = setInterval(refreshState, 15000);
+    // Full-site realtime: SSE instant + 4s fallback poll (renderless — only state diff triggers isolated re-render)
+    const interval = setInterval(refreshState, 4000);
+    // also listen for storage events (cross-tab) to keep in sync without reload
+    const onStorage = (e: StorageEvent) => {
+      if (e.key?.includes('boostpay_') || e.key?.includes('boostpay_current')) {
+        refreshState();
+      }
+    };
+    window.addEventListener('storage', onStorage);
     return () => {
       unsubUser();
       unsubBanner();
       clearInterval(interval);
+      window.removeEventListener('storage', onStorage);
     };
   }, [currentUser?.id]);
 
@@ -169,11 +177,32 @@ export default function App() {
 
   // Gentle "new version available" prompt
   const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [bootVersion, setBootVersion] = useState<string | null>(null);
   useEffect(() => {
     const onUpdate = () => setUpdateAvailable(true);
     window.addEventListener('boostpay:update-available', onUpdate);
+    fetch('/api/version', { cache: 'no-store' }).then(r=>r.json()).then(j=> setBootVersion(String(j.version||j.bootTime||''))).catch(()=>{});
     return () => window.removeEventListener('boostpay:update-available', onUpdate);
   }, []);
+  useEffect(() => {
+    if (!bootVersion) return;
+    const id = setInterval(async () => {
+      try {
+        const r = await fetch('/api/version', { cache: 'no-store' });
+        if (!r.ok) return;
+        const j = await r.json().catch(()=> null);
+        const v = String(j?.version || j?.bootTime || '');
+        if (v && bootVersion && v !== bootVersion) {
+          try {
+            if ('serviceWorker' in navigator) { try { const reg = await navigator.serviceWorker.getRegistration(); await reg?.update(); } catch {} }
+            window.location.reload();
+            setTimeout(()=> setUpdateAvailable(true), 1500);
+          } catch { setUpdateAvailable(true); }
+        }
+      } catch {}
+    }, 30000);
+    return () => clearInterval(id);
+  }, [bootVersion]);
 
   // Pull-to-refresh (custom — browser PTR stays disabled)
   const mainScrollRef = useRef<HTMLElement | null>(null);

@@ -28,7 +28,7 @@ export const WalletSkeleton: FC = memo(() => {
         <div className="flex-1 h-9 bg-zinc-850/50 rounded-xl ml-1" />
       </div>
 
-      {/* 3. Compounding Card Skeleton */}
+      {/* 3. Boosting Card Skeleton */}
       <div className="rounded-3xl border border-zinc-800/80 bg-zinc-900/90 p-5 shadow-xl shimmer-mask space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
