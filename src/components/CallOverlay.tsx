@@ -112,6 +112,8 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
   const [error, setError] = useState('');
   const [speakerOn, setSpeakerOn] = useState(true);
   const [netStatus, setNetStatus] = useState<'ok' | 'reconnecting'>('ok');
+  const [videoSwitchPrompt, setVideoSwitchPrompt] = useState<{from:string, callId:string} | null>(null);
+  const [waitingForVideoAccept, setWaitingForVideoAccept] = useState(false);
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -179,6 +181,8 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
     iAmCallerRef.current = false;
     callIdRef.current = '';
     pendingOfferRef.current = null;
+    setVideoSwitchPrompt(null);
+    setWaitingForVideoAccept(false);
     setPhase('idle');
     void logCall(outcome, duration);
   }, [cleanupMedia, logCall, startedAt]);
@@ -392,11 +396,68 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
     // The caller logs the declined/missed row
   }, [ring]);
 
+  const performVideoUpgrade = useCallback(async () => {
+    if (phase !== 'active' || media === 'video') return;
+    try {
+      setError('');
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: 'user', width: { ideal: 640 } } });
+      const pc = pcRef.current;
+      if (!pc) { try { stream.getTracks().forEach(t=>t.stop()); } catch {}; return; }
+      try { localStreamRef.current?.getTracks().forEach(t=>t.stop()); } catch {}
+      localStreamRef.current = stream;
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      for (const track of stream.getTracks()) {
+        const sender = pc.getSenders().find(s=> s.track && s.track.kind===track.kind);
+        if (sender) { try { await sender.replaceTrack(track); } catch { pc.addTrack(track, stream); } }
+        else pc.addTrack(track, stream);
+      }
+      setMedia('video');
+      setCameraOff(false);
+      setSpeakerOn(true);
+      void applyAudioRoute(true);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await BoostPayStore.sendCallSignal(peerRef.current.id, { kind: 'offer', callId: callIdRef.current, media: 'video', sdp: offer.sdp });
+    } catch (e:any) {
+      setError(e?.name==='NotAllowedError' ? 'Camera permission denied.' : 'Could not switch to video.');
+      setTimeout(()=>setError(''),3000);
+    }
+  }, [phase, media, applyAudioRoute]);
+  const requestVideoSwitch = useCallback(async () => {
+    if (phase !== 'active' || media === 'video') return;
+    setWaitingForVideoAccept(true);
+    try { await BoostPayStore.sendCallSignal(peerRef.current.id, { kind: 'video-request', callId: callIdRef.current }); } catch {}
+    setTimeout(()=> setWaitingForVideoAccept(false), 30000);
+  }, [phase, media]);
+
   // ------------------------- SIGNAL HANDLING -------------------------
   useEffect(() => {
     const unsub = BoostPayStore.onCallSignal(({ from, signal }) => {
       const kind = String(signal?.kind || '');
       const callId = String(signal?.callId || '');
+
+      // Video switch handshake (audio -> video requires explicit accept)
+      if (kind === 'video-request') {
+        if (phase === 'active' && callId && callId === callIdRef.current && callMediaRef.current !== 'video') {
+          setVideoSwitchPrompt({ from: String(from), callId });
+        }
+        return;
+      }
+      if (kind === 'video-accept') {
+        if (phase === 'active' && callId && callId === callIdRef.current) {
+          setWaitingForVideoAccept(false);
+          void performVideoUpgrade();
+        }
+        return;
+      }
+      if (kind === 'video-decline' || kind === 'video-cancel') {
+        if (phase === 'active' && callId && callId === callIdRef.current) {
+          setWaitingForVideoAccept(false);
+          setError(kind === 'video-decline' ? 'Peer declined video switch' : 'Video request cancelled');
+          setTimeout(()=> setError(''), 3000);
+        }
+        return;
+      }
 
       if (kind === 'offer') {
         // ICE-restart or media-switch re-offer on same active call -> renegotiate, handle video upgrade
@@ -462,6 +523,8 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
           // Missed (nobody answered)
           pendingOfferRef.current = null;
           ring.stop();
+          setVideoSwitchPrompt(null);
+          setWaitingForVideoAccept(false);
           setPhase('idle');
         }, 45000);
         return;
@@ -516,6 +579,8 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
         if (phase === 'incoming') {
           ring.stop();
           pendingOfferRef.current = null;
+          setVideoSwitchPrompt(null);
+          setWaitingForVideoAccept(false);
           setPhase('idle');
         }
         return;
@@ -529,7 +594,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
       }
     });
     return unsub;
-  }, [phase, ring, finishCall, applyAudioRoute]);
+  }, [phase, ring, finishCall, applyAudioRoute, performVideoUpgrade]);
 
   // Start-call request from anywhere in the app
   useEffect(() => {
@@ -561,36 +626,6 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
       setCameraOff(!video.enabled);
     }
   }, []);
-  const switchToVideo = useCallback(async () => {
-    if (phase !== 'active' || media === 'video') return;
-    try {
-      setError('');
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: 'user', width: { ideal: 640 } } });
-      const pc = pcRef.current;
-      if (!pc) { try { stream.getTracks().forEach(t=>t.stop()); } catch {}; return; }
-      // stop old tracks and replace local stream
-      try { localStreamRef.current?.getTracks().forEach(t=>t.stop()); } catch {}
-      localStreamRef.current = stream;
-      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-      // add new tracks to peer connection
-      for (const track of stream.getTracks()) {
-        const sender = pc.getSenders().find(s=> s.track && s.track.kind===track.kind);
-        if (sender) { try { await sender.replaceTrack(track); } catch { pc.addTrack(track, stream); } }
-        else pc.addTrack(track, stream);
-      }
-      setMedia('video');
-      setCameraOff(false);
-      setSpeakerOn(true);
-      void applyAudioRoute(true);
-      // renegotiate: create new offer with video
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await BoostPayStore.sendCallSignal(peerRef.current.id, { kind: 'offer', callId: callIdRef.current, media: 'video', sdp: offer.sdp });
-    } catch (e:any) {
-      setError(e?.name==='NotAllowedError' ? 'Camera permission denied.' : 'Could not switch to video.');
-      setTimeout(()=>setError(''),3000);
-    }
-  }, [phase, media, applyAudioRoute]);
   const switchToAudio = useCallback(async () => {
     if (phase !== 'active' || media !== 'video') return;
     try {
@@ -664,6 +699,21 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
           {isVideo && <span className="text-[10px] rounded-full border border-zinc-700 px-2 py-0.5 text-zinc-400">VIDEO</span>}
         </div>
         {error && <p className="mt-3 max-w-xs text-center text-xs text-red-400">{error}</p>}
+        {waitingForVideoAccept && (
+          <div className="mt-4 flex flex-col items-center gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+            <p className="text-xs font-semibold text-amber-300">Waiting for peer to accept video…</p>
+            <button onClick={()=> { setWaitingForVideoAccept(false); void BoostPayStore.sendCallSignal(peerRef.current.id, { kind: 'video-cancel', callId: callIdRef.current }); }} className="rounded-xl bg-zinc-800 px-3 py-1 text-xs font-semibold text-zinc-300 hover:bg-zinc-700 cursor-pointer">Cancel</button>
+          </div>
+        )}
+        {videoSwitchPrompt && (
+          <div className="mt-4 flex flex-col items-center gap-3 rounded-2xl border border-sky-500/30 bg-sky-500/10 px-5 py-4">
+            <p className="text-xs font-bold text-sky-300 text-center">Peer wants to switch to video — accept?</p>
+            <div className="flex gap-3">
+              <button onClick={()=> { const p=videoSwitchPrompt; setVideoSwitchPrompt(null); if(p) void BoostPayStore.sendCallSignal(p.from, { kind: 'video-decline', callId: p.callId }); }} className="rounded-xl bg-zinc-800 px-4 py-2 text-xs font-bold text-zinc-300 hover:bg-zinc-700 cursor-pointer">Decline</button>
+              <button onClick={()=> { const p=videoSwitchPrompt; setVideoSwitchPrompt(null); if(p) void BoostPayStore.sendCallSignal(p.from, { kind: 'video-accept', callId: p.callId }); }} className="rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-400 cursor-pointer">Accept</button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Local video preview (PiP) */}
@@ -720,7 +770,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
                 </button>
               </>
             ) : (
-              <button onClick={switchToVideo} className="flex h-12 w-12 items-center justify-center rounded-full border border-amber-500/50 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition cursor-pointer" title="Switch to video">
+              <button onClick={requestVideoSwitch} disabled={waitingForVideoAccept} className={`flex h-12 w-12 items-center justify-center rounded-full border transition cursor-pointer ${waitingForVideoAccept ? 'border-zinc-700 bg-zinc-900 text-zinc-500' : 'border-amber-500/50 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25'}`} title={waitingForVideoAccept ? 'Waiting for accept…' : 'Switch to video'}>
                 <Video className="w-5 h-5" />
               </button>
             )}
