@@ -306,6 +306,9 @@ export class BoostPayStore {
 
   private static chatEventSource: EventSource | null = null;
   private static activeStreamUserId: string | null = null;
+  private static adminRealtimeListeners: ((evt:any)=>void)[] = [];
+  static onAdminRealtime(cb:(evt:any)=>void){ this.adminRealtimeListeners.push(cb); return ()=>{ this.adminRealtimeListeners=this.adminRealtimeListeners.filter(x=>x!==cb); }; }
+  static triggerAdminRealtime(evt:any){ for(const cb of this.adminRealtimeListeners) try{cb(evt);}catch{}}
 
   /**
    * Generates a stable canonical conversation ID regardless of which user started the chat:
@@ -411,6 +414,14 @@ export class BoostPayStore {
             } else if (data.type === 'user_update' && data.user) {
               // Authoritative realtime profile/balance/boost update
               this.mergeRealtimeUser(data.user);
+              // Admin realtime: push to admin panel instantly (new user on top etc)
+              if (this.activeStreamUserId==='ADMIN_SUPPORT') {
+                this.triggerAdminRealtime(data);
+                // also handle adminUser view if server sent it
+                if (data.adminUser) data.user = data.adminUser;
+              }
+            } else if (data.type === 'stats_invalidate') {
+              if (this.activeStreamUserId==='ADMIN_SUPPORT') this.triggerAdminRealtime(data);
             } else if (data.type === 'notification' && data.notification) {
               const notifs = this.getNotifications();
               if (!notifs.some(n => n.id === data.notification.id)) {

@@ -824,11 +824,15 @@ function pushToAdmins(event: Record<string, any>) {
   }
 }
 
-/** Push a fresh (live-computed) user snapshot to that user's open tabs. */
+/** Push a fresh (live-computed) user snapshot to that user's open tabs + admins (realtime). */
 function broadcastUserUpdate(db: any, userId: string) {
   const u = (db.users || []).find((x: any) => x.id === String(userId));
   if (!u) return;
-  pushToUser(String(userId), { type: 'user_update', user: publicUser(u), timestamp: Date.now() });
+  const evt = { type: 'user_update', user: publicUser(u), adminUser: adminUserView(u), timestamp: Date.now() };
+  pushToUser(String(userId), evt);
+  pushToAdmins(evt);
+  // also notify admins about transaction stream updates (ledger realtime)
+  pushToAdmins({ type: 'stats_invalidate', timestamp: Date.now() });
 }
 
 // ---------------------------------------------------------------------------
@@ -3630,7 +3634,13 @@ async function startServer() {
 
   app.get('/api/admin/users', requireAdmin, (_req, res) => {
     const db = readDb();
-    res.json({ users: db.users.map(adminUserView), config: db.config });
+    const sorted = [...db.users].sort((a:any,b:any)=>{
+      const aT = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const bT = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (aT || bT) return (bT||0)-(aT||0);
+      return Number(b.id)-Number(a.id);
+    });
+    res.json({ users: sorted.map(adminUserView), config: db.config });
   });
 
   // Storage Diagnostic Probe: Live read/write verification and stats

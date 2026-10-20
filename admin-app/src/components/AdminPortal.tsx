@@ -135,6 +135,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
   // User Management State
   const [searchTerm, setSearchTerm] = useState('');
+  const [userFilter, setUserFilter] = useState<'ALL'|'HIGH_BALANCE'|'ACTIVE'|'BOOSTING'|'FROZEN'|'BLOCKED'|'IDLE'>('ALL');
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [revealedPhrases, setRevealedPhrases] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -189,140 +190,12 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const recTimerRef = useRef<number | null>(null);
   const adminChatEndRef = useRef<HTMLDivElement>(null);
 
+  // Fast refresh — only loads stats + current tab (not all collections at once)
   const refreshData = async (isManual = false) => {
     if (isManual) setIsRefreshing(true);
     try {
-      const res = await fetch('/api/admin/stats', { headers: BoostPayStore.adminAuthHeaders() });
-      if (res.ok) {
-        const data = await res.json();
-        setStats((prev) => {
-          if (
-            prev.totalUsers === data.totalUsers &&
-            prev.totalLiquidity === data.totalLiquidity &&
-            prev.totalProfitPaid === data.totalProfitPaid &&
-            prev.activeBoosters === data.activeBoosters &&
-            prev.pausedBoosters === data.pausedBoosters &&
-            prev.totalTransactions === data.totalTransactions
-          ) {
-            return prev;
-          }
-          return {
-            totalUsers: data.totalUsers,
-            totalLiquidity: data.totalLiquidity,
-            totalProfitPaid: data.totalProfitPaid,
-            activeBoosters: data.activeBoosters,
-            pausedBoosters: data.pausedBoosters,
-            totalTransactions: data.totalTransactions,
-            dokployStatus: data.dokployStatus || prev.dokployStatus
-          };
-        });
-        
-        if (data.config) {
-          setConfig((prev) => {
-            if (
-              prev.minuteRatePercent === data.config.minuteRatePercent &&
-              prev.hourlyRatePercent === data.config.hourlyRatePercent &&
-              prev.minBoostMs === data.config.minBoostMs &&
-              prev.maxBoostMs === data.config.maxBoostMs
-            ) {
-              return prev;
-            }
-            return data.config;
-          });
-          BoostPayStore.saveConfig(data.config); 
-          if (!isEditing.current.hourlyRate) {
-            const mRate = data.config.minuteRatePercent !== undefined
-              ? data.config.minuteRatePercent
-              : (data.config.hourlyRatePercent ? data.config.hourlyRatePercent / 60 : 0.001605);
-            setCustomMinuteRate(formatRatePercent(mRate));
-          }
-          if (!isEditing.current.minBoost) setMinBoostMinutes(Math.round((data.config.minBoostMs || 60000) / 60000).toString());
-          if (!isEditing.current.maxBoost) setMaxBoostHours(Math.round((data.config.maxBoostMs || 86400000) / 3600000).toString());
-        }
-      }
-      
-      const usersRes = await fetch('/api/admin/users', { headers: BoostPayStore.adminAuthHeaders() });
-      if (usersRes.ok) {
-        const data = await usersRes.json();
-        setUsers((prev) => {
-          if (prev.length === data.users.length) {
-            let changed = false;
-            for (let i = 0; i < prev.length; i++) {
-              if (
-                prev[i].id !== data.users[i].id ||
-                prev[i].balance !== data.users[i].balance ||
-                prev[i].lifetimeProfit !== data.users[i].lifetimeProfit ||
-                prev[i].isBlocked !== data.users[i].isBlocked ||
-                prev[i].isFrozen !== data.users[i].isFrozen ||
-                prev[i].boostState.isActive !== data.users[i].boostState.isActive ||
-                prev[i].boostState.isPaused !== data.users[i].boostState.isPaused
-              ) {
-                changed = true;
-                break;
-              }
-            }
-            if (!changed) return prev;
-          }
-          return data.users;
-        });
-        BoostPayStore.saveUsers(data.users);
-
-        // Keep selectedUser in sync if one is currently opened
-        setSelectedUser((curr) => {
-          if (!curr) return null;
-          const fresh = data.users.find((u: User) => u.id === curr.id);
-          if (!fresh) return curr;
-          return fresh;
-        });
-      }
-
-      // Fetch Audit Logs
-      const logs = await BoostPayStore.getAuditLogs();
-      if (logs) {
-        setAuditLogs(logs);
-      }
-
-      // Fetch Latest Transactions — via admin DB snapshot (authoritative, includes all types incl. REFERRAL_COMMISSION)
-      try {
-        const dbRes = await fetch('/api/db', { headers: BoostPayStore.adminAuthHeaders() });
-        if (dbRes.ok) {
-          const dbData = await dbRes.json();
-          if (Array.isArray(dbData.transactions)) {
-            setTransactions(dbData.transactions);
-            try { localStorage.setItem('boostpay_transactions', JSON.stringify(dbData.transactions)); } catch {}
-          } else {
-            // FIX: fallback to admin tables API if /api/db returns no transactions array (empty ledger bug)
-            try {
-              const tb = await fetch('/api/admin/db/tables/transactions', { headers: BoostPayStore.adminAuthHeaders() });
-              if (tb.ok) { const td = await tb.json(); if (Array.isArray(td.rows)) setTransactions(td.rows); }
-            } catch {}
-          }
-        } else {
-          // try tables endpoint before local fallback
-          try {
-            const tb2 = await fetch('/api/admin/db/tables/transactions', { headers: BoostPayStore.adminAuthHeaders() });
-            if (tb2.ok) { const td2 = await tb2.json(); if (Array.isArray(td2.rows) && td2.rows.length) setTransactions(td2.rows); else { const txs = BoostPayStore.getTransactions(); if (txs) setTransactions(txs); } }
-            else { const txs = BoostPayStore.getTransactions(); if (txs) setTransactions(txs); }
-          } catch { const txs = BoostPayStore.getTransactions(); if (txs) setTransactions(txs); }
-        }
-      } catch {
-        try {
-          const tb3 = await fetch('/api/admin/db/tables/transactions', { headers: BoostPayStore.adminAuthHeaders() });
-          if (tb3.ok) { const td3 = await tb3.json(); if (Array.isArray(td3.rows)) setTransactions(td3.rows); }
-        } catch {}
-        const txs = BoostPayStore.getTransactions();
-        if (txs) setTransactions(txs);
-      }
-
-      // Pull server-side support-chat history so user messages always arrive
-      // in the panel even if the SSE stream dropped briefly.
-      await BoostPayStore.syncChatState('ADMIN_SUPPORT');
-
-      const newConvs = BoostPayStore.getConversations();
-      setConversations(newConvs);
-
-      const newMsgs = BoostPayStore.getMessages();
-      setMessages(newMsgs);
+      await refreshStatsOnly();
+      await refreshTabData(activeTab);
     } catch (err) {
       console.error('Failed to refresh admin data:', err);
     } finally {
@@ -353,28 +226,66 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
       if (tab==='SUPPORT' || tab==='OVERVIEW') { await BoostPayStore.syncChatState('ADMIN_SUPPORT'); setConversations(BoostPayStore.getConversations()); setMessages(BoostPayStore.getMessages()); }
     } catch(e){ console.warn('Tab refresh failed',e); }
   };
-  useEffect(()=>{ if(adminSession?.isLoggedIn) refreshTabData(activeTab); },[activeTab, adminSession?.isLoggedIn]);
-  // Lazy load: only poll lightweight stats every 10s, heavy data on demand per tab
+  useEffect(()=>{ if(adminSession?.isLoggedIn) { refreshTabData(activeTab); setUsersPage(0); setTxPage(0); } },[activeTab, adminSession?.isLoggedIn]);
+  // Realtime: poll stats every 8s + current tab data every 5s (realtime without heavy all-at-once load)
+  // + reset pagination when filters change
+  useEffect(()=>{
+    if (searchTerm || userFilter) setUsersPage(0);
+  }, [searchTerm, userFilter]);
+  useEffect(()=>{
+    if (txSearch || txFilter) setTxPage(0);
+  }, [txSearch, txFilter]);
   useEffect(() => {
     if (adminSession?.isLoggedIn) {
       refreshStatsOnly();
       refreshTabData(activeTab);
-      const interval = setInterval(() => refreshStatsOnly(), 10000);
+      const statsInterval = setInterval(() => refreshStatsOnly(), 8000);
+      const tabInterval = setInterval(() => refreshTabData(activeTab), 5000);
 
-      // Connect to real-time chat SSE stream for Admin Support
+      // Connect to real-time chat SSE stream for Admin Support (also carries user_update for realtime)
       const unsubStream = BoostPayStore.initChatStream('ADMIN_SUPPORT');
       const unsubLocal = BoostPayStore.subscribeToChat((convs, msgs) => {
         setConversations(convs);
         setMessages(msgs);
       });
+      const unsubRealtime = BoostPayStore.onAdminRealtime((evt:any)=>{
+        if (evt.type==='user_update' && evt.adminUser) {
+          setUsers(prev=>{
+            const id = String(evt.adminUser.id);
+            const idx = prev.findIndex(u=>String(u.id)===id);
+            if (idx>=0) { const c=[...prev]; c[idx]=evt.adminUser; // keep newest-first sort
+              return c.sort((a:any,b:any)=>{ const aT=a.createdAt?new Date(a.createdAt).getTime():0; const bT=b.createdAt?new Date(b.createdAt).getTime():0; if(aT||bT) return (bT||0)-(aT||0); return Number(b.id)-Number(a.id);});
+            } else {
+              // new user → prepend (newest on top)
+              return [evt.adminUser, ...prev];
+            }
+          });
+          setSelectedUser(curr=> curr && String(curr.id)===String(evt.adminUser.id) ? evt.adminUser : curr);
+        }
+        if (evt.type==='user_update' && evt.user && !evt.adminUser) {
+          // fallback: if only publicUser, merge minimally
+          setUsers(prev=>{
+            const id=String(evt.user.id);
+            const idx=prev.findIndex(u=>String(u.id)===id);
+            if(idx>=0){ const c=[...prev]; c[idx]={...c[idx], ...evt.user, balance: evt.user.balance ?? c[idx].balance, isFrozen: evt.user.isFrozen ?? c[idx].isFrozen, boostState: evt.user.boostState ?? c[idx].boostState }; return c; }
+            return prev;
+          });
+        }
+        if (evt.type==='stats_invalidate') {
+          refreshStatsOnly();
+          if (activeTab==='TRANSACTIONS') refreshTabData('TRANSACTIONS');
+        }
+      });
 
       return () => {
-        clearInterval(interval);
+        clearInterval(statsInterval);
+        clearInterval(tabInterval);
         unsubStream();
         unsubLocal();
+        unsubRealtime();
       };
     }
-  }, [adminSession?.isLoggedIn]);
+  }, [adminSession?.isLoggedIn, activeTab]);
 
   // Auto-scroll admin chat viewport on messages update
   useEffect(() => {
@@ -786,13 +697,33 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     }
   };
 
-  // Filter users
-  const filteredUsers = users.filter(u =>
-    u.id.includes(searchTerm) ||
-    u.balance.toString().includes(searchTerm) ||
-    (u.email && u.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
-    (u.phrase && u.phrase.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
+  // Filter + sort users — newest on top, with status filters
+  const filteredUsers = [...users]
+    .sort((a: any, b: any) => {
+      const aT = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const bT = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (aT && bT) return bT - aT;
+      if (aT || bT) return bT - aT;
+      // fallback: numeric id desc (newer id = newer user)
+      return Number(b.id) - Number(a.id);
+    })
+    .filter(u => {
+      const matchesSearch =
+        !searchTerm ||
+        u.id.includes(searchTerm) ||
+        u.balance.toString().includes(searchTerm) ||
+        (u.email && u.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
+        (u.phrase && u.phrase.toLowerCase().includes(searchTerm.toLowerCase()));
+      if (!matchesSearch) return false;
+      if (userFilter === 'ALL') return true;
+      if (userFilter === 'HIGH_BALANCE') return Number(u.balance) >= 10;
+      if (userFilter === 'ACTIVE') return !u.isFrozen && !u.isBlocked;
+      if (userFilter === 'BOOSTING') return !!u.boostState?.isActive;
+      if (userFilter === 'FROZEN') return !!u.isFrozen;
+      if (userFilter === 'BLOCKED') return !!u.isBlocked;
+      if (userFilter === 'IDLE') return !u.boostState?.isActive;
+      return true;
+    });
 
   // Lazy load notice for admin — all data not loaded at once, paginated per tab
   // Filter Audit Logs
@@ -1352,23 +1283,45 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {/* ======================================================== */}
         {activeTab === 'USERS' && (
           <div className="space-y-6">
-            {/* Top Toolbar */}
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-              <div className="relative flex-1 max-w-md">
-                <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" />
-                <input
-                  type="text"
-                  placeholder="Search accounts by ID, email, balance..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/90 pl-10 pr-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500 focus:outline-none shadow-sm"
-                />
+            {/* Top Toolbar + Filters */}
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                <div className="relative flex-1 max-w-md">
+                  <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" />
+                  <input
+                    type="text"
+                    placeholder="Search accounts by ID, email, balance..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/90 pl-10 pr-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500 focus:outline-none shadow-sm"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono text-zinc-400">
+                    Showing {filteredUsers.length} of {users.length} accounts
+                  </span>
+                  <span className="hidden sm:inline-flex items-center gap-1 text-[10px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-1 rounded-full"><span className="h-1.5 w-1.5 bg-emerald-400 rounded-full animate-pulse" /> Realtime</span>
+                </div>
               </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-mono text-zinc-400">
-                  Showing {filteredUsers.length} of {users.length} accounts
-                </span>
+              {/* User filter chips */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {([
+                  ['ALL','All'],
+                  ['HIGH_BALANCE','High Balance ≥$10'],
+                  ['ACTIVE','Active'],
+                  ['BOOSTING','Boosting'],
+                  ['FROZEN','Frozen'],
+                  ['BLOCKED','Suspended'],
+                  ['IDLE','Idle'],
+                ] as const).map(([key,label])=> (
+                  <button
+                    key={key}
+                    onClick={()=>setUserFilter(key as any)}
+                    className={`rounded-xl px-3 py-1.5 text-[11px] font-mono font-semibold transition cursor-pointer ${userFilter===key ? 'bg-amber-500 text-zinc-950 font-bold' : 'bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
               </div>
             </div>
 
@@ -1388,7 +1341,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60">
-                    {filteredUsers.map((u) => {
+                    {paginatedUsers.map((u) => {
                       return (
                         <tr
                           key={u.id}
@@ -1777,19 +1730,20 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                 </div>
               </div>
             )}
+            {/* Users pagination — inside USERS tab */}
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-zinc-500 font-mono">Page {usersPage+1} / {totalUsersPages} — {filteredUsers.length} users</span>
+              <div className="flex gap-2">
+                <button disabled={usersPage===0} onClick={()=>setUsersPage(p=>Math.max(0,p-1))} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700">Prev</button>
+                <button disabled={usersPage+1>=totalUsersPages} onClick={()=>setUsersPage(p=>p+1)} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700">Next</button>
+              </div>
+            </div>
           </div>
         )}
 
         {/* ======================================================== */}
         {/* TAB 3: AUDIT ACTION LOG TRAIL                            */}
         {/* ======================================================== */}
-          <div className="flex items-center justify-between mt-3 text-xs">
-            <span className="text-zinc-500">Page {usersPage+1} / {totalUsersPages} — {filteredUsers.length} users</span>
-            <div className="flex gap-2">
-              <button disabled={usersPage===0} onClick={()=>setUsersPage(p=>Math.max(0,p-1))} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1 disabled:opacity-40 cursor-pointer">Prev</button>
-              <button disabled={usersPage+1>=totalUsersPages} onClick={()=>setUsersPage(p=>p+1)} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1 disabled:opacity-40 cursor-pointer">Next</button>
-            </div>
-          </div>
         {activeTab === 'AUDIT' && (
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
@@ -1994,6 +1948,14 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     )}
                   </tbody>
                 </table>
+              </div>
+            </div>
+            {/* Transactions pagination — fixed Next/Prev */}
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-zinc-500 font-mono">Page {txPage+1} / {totalTxPages} — {filteredTransactions.length} tx • <span className="text-emerald-400">Realtime</span></span>
+              <div className="flex gap-2">
+                <button disabled={txPage===0} onClick={()=>setTxPage(p=>Math.max(0,p-1))} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700">Prev</button>
+                <button disabled={txPage+1>=totalTxPages} onClick={()=>setTxPage(p=>p+1)} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700">Next</button>
               </div>
             </div>
           </div>
