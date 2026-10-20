@@ -104,7 +104,7 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
     const res = await BoostPayStore.requestVerifyEmail();
     setVerifyLoading(false);
     if (res.success) {
-      setVerifyMsg({ type: 'ok', text: 'Code sent to inbox' + (res.debugCode ? ` (demo: ${res.debugCode})` : '') });
+      setVerifyMsg({ type: 'ok', text: 'Code sent to your email. Check inbox/spam.' });
     } else setVerifyMsg({ type: 'err', text: res.error || 'Failed' });
   };
   const handleConfirmVerify = async (e: React.FormEvent) => {

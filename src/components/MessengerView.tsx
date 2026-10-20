@@ -2234,7 +2234,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               <h3 className="text-sm font-bold text-white flex items-center gap-2">Nearby Users</h3>
               <button onClick={()=> setShowNearby(false)} className="rounded-xl p-1 text-zinc-500 hover:text-white cursor-pointer">✕</button>
             </div>
-            <p className="text-[11px] text-zinc-400">Users near you (random sample — demo nearby).</p>
+            <p className="text-[11px] text-zinc-400">Users near you</p>
             {nearbyUsers.length===0 ? (
               <div className="text-center py-6 space-y-2">
                 <div className="w-6 h-6 border-2 border-amber-500/30 border-t-amber-400 rounded-full animate-spin mx-auto" />

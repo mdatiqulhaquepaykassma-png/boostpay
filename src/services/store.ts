@@ -1824,11 +1824,11 @@ export class BoostPayStore {
       return { success:false, error: j.error || 'Failed' };
     } catch(e:any){ return { success:false, error: e.message } }
   }
-  static async forgotPassword(email:string): Promise<{success:boolean, error?:string, token?:string}> {
+  static async forgotPassword(email:string): Promise<{success:boolean, error?:string}> {
     try{
       const res=await fetch('/api/users/forgot-password',{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({email})});
       const j=await res.json().catch(()=>({}));
-      if(res.ok) return {success:true, token: j.token || j.debugToken};
+      if(res.ok) return {success:true};
       return {success:false, error: j.error||'Failed'};
     }catch(e:any){ return {success:false, error:e.message} }
   }
@@ -1840,11 +1840,11 @@ export class BoostPayStore {
       return {success:false, error: j.error||'Failed'};
     }catch(e:any){ return {success:false, error:e.message} }
   }
-  static async requestVerifyEmail(): Promise<{success:boolean, error?:string, debugCode?:string}> {
+  static async requestVerifyEmail(): Promise<{success:boolean, error?:string}> {
     try{
       const res=await fetch('/api/users/me/verify-email',{method:'POST', headers: this.authHeaders()});
       const j=await res.json().catch(()=>({}));
-      if(res.ok) return {success:true, debugCode: j.debugCode};
+      if(res.ok) return {success:true};
       return {success:false, error: j.error};
     }catch(e:any){ return {success:false, error:e.message} }
   }

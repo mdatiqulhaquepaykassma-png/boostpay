@@ -5628,15 +5628,21 @@ async function startServer() {
     user.resetToken = code;
     user.resetExpires = Date.now() + 15*60*1000; // 15 min
     writeDb(db);
-    // store in-app notification too
-    try {
-      pushNotification(db, { id:'NOTIF-'+Date.now(), userId: user.id, type:'SECURITY_ALERT', title:'Password Reset Code', message:`Your password reset code is ${code}. Valid for 15 minutes. Do not share it.`, timestamp: Date.now(), isRead:false, metadata:{ code } });
-      writeDb(db);
-    } catch {}
     const html = emailWrap('Password Reset Code', `<p style="margin:0 0 10px">Hi <b>User #${user.id}</b>,</p><p style="margin:0 0 12px">Your BoostPay password reset code:</p><div style="text-align:center;margin:14px 0"><span style="display:inline-block;background:#09090b;border:1px solid #27272a;padding:12px 22px;border-radius:12px;font-family:monospace;font-size:22px;font-weight:800;letter-spacing:5px;color:#fbbf24">${code}</span></div><p style="margin:0;font-size:12px;color:#a1a1aa">Valid for 15 minutes. If you didn't request this, ignore this email.</p>`);
-    // send async — don't block response
-    void sendMail(email, 'BoostPay — Password Reset Code', html);
-    res.json({ success: true, message: 'Reset code sent to your email and inbox.', token: code, debugToken: code });
+    // production: email via SMTP pool, inbox only generic (no code leak)
+    const mailRes = await sendMail(email, 'BoostPay — Password Reset Code', html);
+    if (!mailRes.ok) {
+      // fallback to inbox only if enabled — still no code in message for security
+      try {
+        const cfgFallback = ensureSmtpDefaults(readDb()).config.fallbackToInbox;
+        if (cfgFallback !== false) {
+          pushNotification(db, { id:'NOTIF-'+Date.now(), userId: user.id, type:'SECURITY_ALERT', title:'Password Reset Code', message:`A password reset code was requested. Email delivery via ${mailRes.via||'SMTP'} failed (${mailRes.error||'unknown'}). Please try again or contact support.`, timestamp: Date.now(), isRead:false, metadata:{} });
+          writeDb(db);
+        }
+      } catch {}
+    }
+    // never expose code in API response (production ready)
+    res.json({ success: true, message: 'Reset code sent to your email. Please check inbox/spam folder.' });
   });
 
   app.post('/api/users/reset-password', rateLimit(8), (req: any, res) => {
@@ -5681,13 +5687,14 @@ async function startServer() {
     user.emailVerificationCode = code;
     user.emailVerificationExpires = Date.now()+15*60*1000;
     writeDb(db);
-    pushNotification(db,{ id:'NOTIF-'+Date.now(), userId:user.id, type:'SECURITY_ALERT', title:'Email Verification Code', message:`Your email verification code is ${code}. Valid 15 minutes.`, timestamp:Date.now(), isRead:false, metadata:{code}});
-    writeDb(db);
     if (user.email && String(user.email).includes('@')) {
       const html = emailWrap('Email Verification Code', `<p style="margin:0 0 10px">Hi <b>User #${user.id}</b>,</p><p style="margin:0 0 12px">Your BoostPay email verification code:</p><div style="text-align:center;margin:14px 0"><span style="display:inline-block;background:#09090b;border:1px solid #27272a;padding:12px 22px;border-radius:12px;font-family:monospace;font-size:22px;font-weight:800;letter-spacing:5px;color:#22c55e">${code}</span></div><p style="margin:0;font-size:12px;color:#a1a1aa">Valid for 15 minutes. Enter this code in Settings to verify your email.</p>`);
-      void sendMail(String(user.email), 'BoostPay — Verify Your Email', html);
+      const mailRes2 = await sendMail(String(user.email), 'BoostPay — Verify Your Email', html);
+      if (!mailRes2.ok) {
+        try { pushNotification(db,{ id:'NOTIF-'+Date.now(), userId:user.id, type:'SECURITY_ALERT', title:'Email Verification — Delivery Failed', message:`Verification email via ${mailRes2.via||'SMTP'} failed (${mailRes2.error||'unknown'}). Please try again.`, timestamp:Date.now(), isRead:false }); writeDb(db); } catch {}
+      }
     }
-    res.json({ success:true, message:'Verification code sent to your email and inbox.', debugCode: code });
+    res.json({ success:true, message:'Verification code sent to your email. Please check inbox/spam.' });
   });
   app.post('/api/users/me/verify-email/confirm', requireUser, (req:any,res)=>{
     const code = String(req.body?.code||req.body?.token||'').trim();

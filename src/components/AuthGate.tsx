@@ -132,7 +132,7 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
     const res = await BoostPayStore.forgotPassword(forgotEmail.trim().toLowerCase());
     setForgotLoading(false);
     if (res.success) {
-      setForgotMsg('Code sent to your inbox / email (demo code: ' + (res.token||'check inbox') + ')');
+      setForgotMsg('Code sent to your email. Please check inbox/spam folder.');
       setForgotStep('RESET');
     } else setForgotErr(res.error||'Failed');
   };
@@ -244,6 +244,9 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                 </>
               )}
             </button>
+            <div className="pt-1 flex justify-end">
+              <button type="button" onClick={()=> { setShowForgot(true); setForgotStep('EMAIL'); setForgotErr(''); setForgotMsg(''); }} className="text-[11px] font-semibold text-amber-400 hover:text-amber-300 cursor-pointer">Forgot password?</button>
+            </div>
           </form>
         )}
 
@@ -366,7 +369,7 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                   <input type="email" value={forgotEmail} onChange={e=> setForgotEmail(e.target.value)} placeholder="user@gmail.com" className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-white placeholder-zinc-600 focus:border-amber-500 focus:outline-none"/>
                 </div>
                 <button type="submit" disabled={forgotLoading} className="w-full rounded-xl bg-amber-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer">{forgotLoading? <Loader2 className="w-4 h-4 animate-spin"/>: <Mail className="w-4 h-4"/>} {forgotLoading?'Sending...':'Send Reset Code'}</button>
-                <p className="text-[10px] text-zinc-500 text-center">Code arrives in your Inbox (demo email). Check your Inbox tab after sending.</p>
+                <p className="text-[10px] text-zinc-500 text-center">Code sent to your email inbox. Check spam folder if not found.</p>
               </form>
             ) : (
               <form onSubmit={handleForgotReset} className="space-y-3">
