@@ -21,7 +21,17 @@ import {
   Search,
   ChevronLeft,
   ChevronRight,
-  Lock
+  Lock,
+  Mail,
+  MailCheck,
+  Gauge,
+  ShieldCheck,
+  Power,
+  Eye,
+  EyeOff,
+  Copy,
+  Settings2,
+  Zap
 } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 
@@ -831,6 +841,238 @@ export const ReferAdminView: FC = () => {
 /* ==========================================================================
    Admin accounts & roles (role-bounded backend)
    ========================================================================== */
+
+export const SmtpAdminView: FC = () => {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [showPass, setShowPass] = useState<Record<string, boolean>>({});
+  const [testTo, setTestTo] = useState('');
+  const [testing, setTesting] = useState<string | null>(null);
+  // add form
+  const [addEmail, setAddEmail] = useState('');
+  const [addPass, setAddPass] = useState('');
+  const [addLabel, setAddLabel] = useState('');
+  const [addHost, setAddHost] = useState('smtp.gmail.com');
+  const [addPort, setAddPort] = useState('465');
+  const [savingAdd, setSavingAdd] = useState(false);
+  // config form
+  const [cfgForm, setCfgForm] = useState<any>(null);
+  const [savingCfg, setSavingCfg] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const d = await BoostPayStore.adminApi('/api/admin/smtp/overview');
+      setData(d);
+      if (d?.config) setCfgForm({ ...d.config });
+      setErr('');
+    } catch(e:any){ setErr(e.message); }
+    setLoading(false);
+  }, []);
+  useEffect(()=>{ load(); },[load]);
+
+  const addAccount = async () => {
+    if(!addEmail.includes('@') || !addPass.trim()){ setErr('Email + App password required'); return; }
+    setSavingAdd(true); setErr(''); setMsg('');
+    try{
+      await BoostPayStore.adminApi('/api/admin/smtp/accounts', { method:'POST', body:{ email:addEmail, appPassword:addPass, host:addHost, port:addPort, label:addLabel }});
+      setMsg('SMTP account added ✅'); setAddEmail(''); setAddPass(''); setAddLabel('');
+      await load();
+    } catch(e:any){ setErr(e.message); }
+    setSavingAdd(false);
+  };
+  const toggleEnabled = async (acc:any) => {
+    try{ await BoostPayStore.adminApi(`/api/admin/smtp/accounts/${acc.id}`, { method:'PUT', body:{ enabled: !acc.enabled }}); setMsg(acc.enabled ? 'Disabled' : 'Enabled'); load(); } catch(e:any){ setErr(e.message); }
+  };
+  const resetDaily = async (acc:any) => {
+    try{ await BoostPayStore.adminApi(`/api/admin/smtp/accounts/${acc.id}`, { method:'PUT', body:{ resetDaily:true }}); setMsg('Daily count reset'); load(); } catch(e:any){ setErr(e.message); }
+  };
+  const removeAcc = async (acc:any) => {
+    if(!confirm(`Delete SMTP ${acc.email} ?`)) return;
+    try{ await BoostPayStore.adminApi(`/api/admin/smtp/accounts/${acc.id}`, { method:'DELETE' }); setMsg('Removed'); load(); } catch(e:any){ setErr(e.message); }
+  };
+  const testSend = async (acc:any) => {
+    const recipient = testTo.trim() || (prompt('Send test to which email?')||'').trim();
+    if(!recipient || !recipient.includes('@')){ setErr('Enter valid recipient email'); return; }
+    setTesting(acc.id); setErr(''); setMsg('');
+    try{
+      const r = await BoostPayStore.adminApi('/api/admin/smtp/test', { method:'POST', body:{ accountId: acc.id, to: recipient }});
+      setMsg(`Test sent via ${r.via} → ${r.to} ✅`);
+    } catch(e:any){ setErr(e.message); }
+    setTesting(null);
+  };
+  const saveConfig = async () => {
+    if(!cfgForm) return;
+    setSavingCfg(true); setErr(''); setMsg('');
+    try{
+      await BoostPayStore.adminApi('/api/admin/smtp/config', { method:'PUT', body: cfgForm });
+      setMsg('SMTP config saved ✅'); load();
+    } catch(e:any){ setErr(e.message); }
+    setSavingCfg(false);
+  };
+
+  if(loading) return <div className="flex justify-center py-10"><Loader2 className="w-6 h-6 animate-spin text-zinc-500"/></div>;
+  if(!data) return <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-xs text-red-300">{err||'Failed to load SMTP'}</div>;
+
+  const accounts:any[] = data.accounts || [];
+  const cfg:any = data.config || {};
+  const stats:any = data.stats || { totalSent:0, totalFailed:0, byDay:{} };
+  const pool:any = data.pool || { total:0, available:0, exhausted:0, limit:500 };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h2 className="text-base font-bold text-white flex items-center gap-2"><Mail className="w-5 h-5 text-sky-400"/> Email / SMTP — Unlimited Gmail Pool</h2>
+          <p className="text-[11px] text-zinc-400">1 ta Gmail e 500/day limit ses hole auto porer Gmail diye OTP jabe. Monitoring + rate-limit + easy setup.</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={load} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-amber-500/40 cursor-pointer flex items-center gap-1"><RefreshCw className="w-3.5 h-3.5"/> Refresh</button>
+          <button onClick={()=> setShowGuide(v=>!v)} className="rounded-xl bg-sky-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-sky-400 cursor-pointer">{showGuide ? 'Hide Guide' : 'Easy Setup Guide'}</button>
+        </div>
+      </div>
+
+      {err && <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4"/>{err}</div>}
+      {msg && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300 flex items-center gap-2"><Check className="w-4 h-4"/>{msg}</div>}
+
+      {showGuide && (
+        <div className="rounded-3xl border border-sky-500/30 bg-sky-950/20 p-5 space-y-3 text-xs text-sky-100">
+          <h3 className="font-bold text-white flex items-center gap-2"><Settings2 className="w-4 h-4 text-sky-400"/> Easy Setup — Gmail App Password kivabe banaben</h3>
+          <ol className="list-decimal ml-4 space-y-1.5 text-[11px] leading-relaxed text-zinc-300">
+            <li>Google Account → <b>Security</b> → <b>2-Step Verification</b> ON koren</li>
+            <li>Tar por <b>App passwords</b> → New app → Name: <code className="bg-zinc-800 px-1.5 py-0.5 rounded">BoostPay</code> → Generate</li>
+            <li>16 char code paben e.g. <code className="bg-zinc-800 px-1 py-0.5 rounded">spbd bqqb ffql vkkf</code> — eta copy kore niche form e paste koren (space soho dileo auto clean hobe)</li>
+            <li>Host: <code>smtp.gmail.com</code> Port: <code>465</code> (SSL) — label e jekono nam din e.g. Gmail #1</li>
+            <li>Add kore <b>Test</b> button e nijer email e test pathan — <b>SMTP OK</b> mail asle ready</li>
+            <li><b>500/day limit:</b> Gmail proti account e 500 mail/day dey — 500 ses hole system auto porer Gmail diye pathabe. Unlimited account add korte paren.</li>
+          </ol>
+          <p className="text-[10px] text-zinc-500">Tip: 3-5 ta Gmail add kore rakhle 1500-2500 OTP/day handle hobe bina limit e.</p>
+        </div>
+      )}
+
+      {/* Top stats */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold flex items-center gap-1"><Mail className="w-3 h-3 text-sky-400"/> Total Accounts</div>
+          <div className="text-xl font-black text-white font-mono mt-1">{pool.total}</div>
+          <div className="text-[11px] text-zinc-500">{pool.available} available • {pool.exhausted} exhausted (500/day)</div>
+        </div>
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold flex items-center gap-1"><MailCheck className="w-3 h-3 text-emerald-400"/> Today Sent</div>
+          <div className="text-xl font-black text-emerald-400 font-mono mt-1">{((stats.byDay && stats.byDay[data.today]?.sent) || 0)}</div>
+          <div className="text-[11px] text-zinc-500">Total {stats.totalSent||0} • Failed {stats.totalFailed||0}</div>
+        </div>
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold flex items-center gap-1"><Gauge className="w-3 h-3 text-amber-400"/> Daily Limit / Acct</div>
+          <div className="text-xl font-black text-amber-400 font-mono mt-1">{cfg.dailyLimitPerAccount||500}/day</div>
+          <div className="text-[11px] text-zinc-500">Strategy: {cfg.strategy||'round-robin'}</div>
+        </div>
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold flex items-center gap-1"><ShieldCheck className="w-3 h-3 text-violet-400"/> Rate Limit (anti-abuse)</div>
+          <div className="text-sm font-bold text-white font-mono mt-1">{cfg.rateLimitPerEmailPerMin||3}/15m per email</div>
+          <div className="text-[11px] text-zinc-500">{cfg.rateLimitPerIpPerHour||20}/hour per IP • Fallback inbox {cfg.fallbackToInbox!==false?'ON':'OFF'}</div>
+        </div>
+      </div>
+
+      {/* Global config */}
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+        <h3 className="text-xs font-bold text-white flex items-center gap-2"><Sliders className="w-4 h-4 text-amber-400"/> Global SMTP Config + Rate Limit</h3>
+        {cfgForm && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div><label className="text-[10px] font-mono text-zinc-500">Daily limit per Gmail (10-2000)</label><input type="number" value={cfgForm.dailyLimitPerAccount} onChange={e=> setCfgForm({...cfgForm, dailyLimitPerAccount: parseInt(e.target.value)||500})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+            <div><label className="text-[10px] font-mono text-zinc-500">Max OTP per email /15min (1-20)</label><input type="number" value={cfgForm.rateLimitPerEmailPerMin} onChange={e=> setCfgForm({...cfgForm, rateLimitPerEmailPerMin: parseInt(e.target.value)||3})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+            <div><label className="text-[10px] font-mono text-zinc-500">Max OTP per IP /hour (1-100)</label><input type="number" value={cfgForm.rateLimitPerIpPerHour} onChange={e=> setCfgForm({...cfgForm, rateLimitPerIpPerHour: parseInt(e.target.value)||20})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+            <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" checked={!!cfgForm.enabled} onChange={e=> setCfgForm({...cfgForm, enabled: e.target.checked})} className="h-4 w-4 accent-emerald-500"/> SMTP pool enabled</label>
+            <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" checked={!!cfgForm.fallbackToInbox} onChange={e=> setCfgForm({...cfgForm, fallbackToInbox: e.target.checked})} className="h-4 w-4 accent-amber-500"/> Fallback to inbox if all exhausted</label>
+            <div className="flex items-center gap-2"><span className="text-[11px] text-zinc-400">Strategy</span><select value={cfgForm.strategy||'round-robin'} onChange={e=> setCfgForm({...cfgForm, strategy: e.target.value})} className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white"><option value="round-robin">Round-robin (recommended)</option><option value="failover">Failover (first → next on fail)</option></select></div>
+          </div>
+        )}
+        <button onClick={saveConfig} disabled={savingCfg} className="rounded-xl bg-amber-500 px-5 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 disabled:opacity-50 cursor-pointer flex items-center gap-1.5">{savingCfg? <Loader2 className="w-4 h-4 animate-spin"/> : <Check className="w-4 h-4"/>} Save Config</button>
+        <p className="text-[11px] text-zinc-500">Abu*se protection: same email e 15min e max {cfg.rateLimitPerEmailPerMin} ta OTP, same IP theke 1h te max {cfg.rateLimitPerIpPerHour} ta. 500/day per Gmail ses hole auto next Gmail e switch.</p>
+      </div>
+
+      {/* Add account */}
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+        <h3 className="text-xs font-bold text-white flex items-center gap-2"><Plus className="w-4 h-4 text-emerald-400"/> Add Gmail SMTP Account — unlimited</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div><label className="text-[10px] font-mono text-zinc-500">Gmail email</label><input value={addEmail} onChange={e=> setAddEmail(e.target.value)} placeholder="you@gmail.com" className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-600"/></div>
+          <div><label className="text-[10px] font-mono text-zinc-500">App Password (16 chars)</label><div className="flex gap-1"><input type={showPass['add']?'text':'password'} value={addPass} onChange={e=> setAddPass(e.target.value)} placeholder="spbd bqqb ffql vkkf" className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white placeholder-zinc-600"/><button type="button" onClick={()=> setShowPass(s=>({...s, add: !s['add']}))} className="rounded-xl border border-zinc-800 bg-zinc-900 px-2 text-zinc-400 hover:text-white cursor-pointer">{showPass['add']? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}</button></div></div>
+          <div><label className="text-[10px] font-mono text-zinc-500">Label (e.g. Gmail #2)</label><input value={addLabel} onChange={e=> setAddLabel(e.target.value)} placeholder="Primary" className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-600"/></div>
+          <div className="flex gap-2">
+            <div className="flex-1"><label className="text-[10px] font-mono text-zinc-500">Host</label><input value={addHost} onChange={e=> setAddHost(e.target.value)} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+            <div className="w-24"><label className="text-[10px] font-mono text-zinc-500">Port</label><input value={addPort} onChange={e=> setAddPort(e.target.value)} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
+          </div>
+        </div>
+        <button onClick={addAccount} disabled={savingAdd} className="rounded-xl bg-emerald-500 px-5 py-2 text-xs font-bold text-zinc-950 hover:bg-emerald-400 disabled:opacity-50 cursor-pointer flex items-center gap-1.5">{savingAdd? <Loader2 className="w-4 h-4 animate-spin"/> : <Plus className="w-4 h-4"/>} Add to Pool</button>
+        <p className="text-[10px] text-zinc-500">Unlimited add korte paren — 10 ta Gmail = 5000 OTP/day. Test er por active hobe.</p>
+      </div>
+
+      {/* Accounts list */}
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs font-bold text-white">SMTP Pool — {accounts.length} accounts</h3>
+          <div className="flex items-center gap-2">
+            <input value={testTo} onChange={e=> setTestTo(e.target.value)} placeholder="test recipient email" className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-xs text-white placeholder-zinc-600 w-44"/>
+            <span className="text-[10px] text-zinc-500">Test To ↑ then Test per row</span>
+          </div>
+        </div>
+        {accounts.length===0 ? <p className="text-center text-xs text-zinc-500 py-6">No SMTP accounts yet — add one above. Env fallback: {data.envFallback?.email||'none'}</p> : (
+          <div className="space-y-2.5">
+            {accounts.map((acc:any)=>(
+              <div key={acc.id} className={`rounded-2xl border p-4 ${acc.available ? 'border-emerald-500/30 bg-emerald-950/10' : 'border-amber-500/30 bg-amber-950/10 opacity-80'} space-y-3`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-bold text-white font-mono truncate">{acc.email}</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold border ${acc.enabled ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-zinc-800 text-zinc-500 border-zinc-700'}`}>{acc.enabled ? 'ENABLED' : 'DISABLED'}</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-mono ${acc.available ? 'bg-sky-500/20 text-sky-300' : 'bg-rose-500/20 text-rose-300'}`}>{acc.available ? 'AVAILABLE' : 'EXHAUSTED'}</span>
+                    </div>
+                    <div className="text-[11px] text-zinc-400 truncate">{acc.label||''} • {acc.host}:{acc.port} • {acc.dailyCount}/{acc.dailyLimit} today ({acc.usagePct}%) • Total {acc.totalSent} sent • Failed {acc.failedCount}</div>
+                    {acc.lastError && <div className="text-[10px] text-rose-400 truncate">Last error: {acc.lastError}</div>}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 shrink-0">
+                    <button onClick={()=> testSend(acc)} disabled={!!testing} className="rounded-xl bg-sky-500 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-sky-400 disabled:opacity-50 cursor-pointer flex items-center gap-1">{testing===acc.id? <Loader2 className="w-3 h-3 animate-spin"/> : <Send className="w-3 h-3"/>} Test</button>
+                    <button onClick={()=> toggleEnabled(acc)} className={`rounded-xl px-3 py-1.5 text-[11px] font-bold border cursor-pointer ${acc.enabled ? 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:border-amber-500/40' : 'bg-emerald-500 border-emerald-400 text-zinc-950'}`}><Power className="w-3 h-3 inline mr-1"/>{acc.enabled ? 'Disable' : 'Enable'}</button>
+                    <button onClick={()=> resetDaily(acc)} className="rounded-xl bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-[11px] text-zinc-300 hover:text-white cursor-pointer">Reset</button>
+                    <button onClick={()=> removeAcc(acc)} className="rounded-xl bg-red-500/15 border border-red-500/30 px-3 py-1.5 text-[11px] text-red-400 hover:bg-red-500/25 cursor-pointer flex items-center gap-1"><Trash2 className="w-3 h-3"/> Delete</button>
+                  </div>
+                </div>
+                <div className="h-2 w-full rounded-full bg-zinc-800 overflow-hidden">
+                  <div className={`h-full transition-all ${acc.available ? 'bg-gradient-to-r from-sky-500 to-emerald-400' : 'bg-rose-500'}`} style={{ width: `${Math.min(100, acc.usagePct)}%` }}/>
+                </div>
+                <div className="flex flex-wrap gap-2 text-[10px] font-mono text-zinc-500">
+                  <span>AppPass: {showPass[acc.id] ? (acc.appPassword||'—') : '•••• •••• •••• ••••'} <button onClick={()=> setShowPass(s=>({...s, [acc.id]: !s[acc.id]}))} className="ml-1 text-amber-400 hover:text-amber-300 cursor-pointer">{showPass[acc.id]? <EyeOff className="w-3 h-3 inline"/> : <Eye className="w-3 h-3 inline"/>}</button> <button onClick={()=> { navigator.clipboard.writeText(acc.appPassword||''); setMsg('Copied password'); }} className="ml-1 text-zinc-400 hover:text-white cursor-pointer"><Copy className="w-3 h-3 inline"/></button></span>
+                  <span className="ml-auto">{acc.lastSentAt ? 'Last sent: '+new Date(acc.lastSentAt).toLocaleString() : 'Never sent'}</span>
+                  <span>• Created {new Date(acc.createdAt).toLocaleDateString()}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Monitoring byDay */}
+      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+        <h3 className="text-xs font-bold text-white mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-amber-400"/> Monitoring — Last 7 days</h3>
+        {Object.keys(stats.byDay||{}).length===0 ? <p className="text-[11px] text-zinc-500 text-center py-4">No sends yet — test email diye suru koren</p> : (
+          <div className="space-y-1.5">
+            {Object.entries(stats.byDay).sort((a:any,b:any)=> String(b[0]).localeCompare(String(a[0]))).slice(0,7).map(([day, v]:any)=>(
+              <div key={day} className="flex justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono">
+                <span className="text-zinc-400">{day}</span>
+                <span className="text-emerald-400">Sent {v.sent}</span>
+                <span className={v.failed? 'text-rose-400':'text-zinc-600'}>Failed {v.failed||0}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="text-[10px] text-zinc-500 mt-3">Full audit: every SMTP add/update/delete/test is audit-logged (Admin → Audit Log).</p>
+      </div>
+    </div>
+  );
+};
 
 export const AdminAccountsView: FC<{ myEmail: string; myRole: string }> = ({ myEmail, myRole }) => {
   const [admins, setAdmins] = useState<any[]>([]);

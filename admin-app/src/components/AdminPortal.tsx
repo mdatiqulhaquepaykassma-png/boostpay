@@ -40,11 +40,12 @@ import {
   Mic,
   Play,
   Pause,
-  X
+  X,
+  Mail
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { CallManager, startCallTo } from './CallOverlay';
-import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, DatabaseBrowser, ReferAdminView, AdminSystemSettingsView } from './AdminExtraViews';
+import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, DatabaseBrowser, ReferAdminView, AdminSystemSettingsView, SmtpAdminView } from './AdminExtraViews';
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
 
@@ -88,7 +89,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // 2. Admin Portal Views
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'SETTINGS' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'SMTP' | 'SETTINGS' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS'>('OVERVIEW');
 
   // 3. Database Storage & Diagnostics State
   const [storageProbe, setStorageProbe] = useState<any>(null);
@@ -1021,6 +1022,18 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           </button>
 
           <button
+            onClick={() => setActiveTab('SMTP')}
+            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+              activeTab === 'SMTP'
+                ? 'bg-sky-500 text-white font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <Mail className="w-4 h-4" />
+            <span>Email / SMTP</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('SETTINGS')}
             className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
               activeTab === 'SETTINGS'
@@ -1103,6 +1116,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {activeTab === 'BROADCAST' && <BroadcastView />}
         {activeTab === 'FRAUD' && <FraudView />}
         {activeTab === 'REFER' && <ReferAdminView />}
+        {activeTab === 'SMTP' && <SmtpAdminView />}
         {activeTab === 'SETTINGS' && <AdminSystemSettingsView />}
         {activeTab === 'ADMINS' && (
           <AdminAccountsView

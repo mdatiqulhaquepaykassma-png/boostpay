@@ -14,40 +14,150 @@ const __dirname = path.dirname(__filename);
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'boostpay_db.json');
 
-// ── Gmail SMTP for forget-password & email-verify ──
-const SMTP_USER = (process.env.SMTP_USER || 'joypaykassma@gmail.com').trim();
-const SMTP_PASS = (process.env.SMTP_PASS || 'spbdbqqbffqlvkkf').replace(/\s+/g,'');
-const SMTP_FROM = (process.env.SMTP_FROM || `BoostPay <${SMTP_USER}>`).trim();
-const SMTP_HOST = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
-const SMTP_PORT = parseInt(process.env.SMTP_PORT || '465', 10);
-let _mailer: any = null;
-function getMailer(): any {
-  if (!SMTP_USER || !SMTP_PASS) return null;
-  if (_mailer) return _mailer;
+// ── Gmail SMTP pool (unlimited accounts, round-robin after 500/day) ──
+const SMTP_ENV_USER = (process.env.SMTP_USER || 'joypaykassma@gmail.com').trim();
+const SMTP_ENV_PASS = (process.env.SMTP_PASS || 'spbdbqqbffqlvkkf').replace(/\s+/g,'');
+const SMTP_ENV_FROM = (process.env.SMTP_FROM || `BoostPay <${SMTP_ENV_USER}>`).trim();
+const SMTP_ENV_HOST = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+const SMTP_ENV_PORT = parseInt(process.env.SMTP_PORT || '465', 10);
+// per-transport cache
+const _smtpTransporters = new Map<string, any>();
+function getMailerForAccount(acct:any): any {
+  const key = String(acct.id || acct.email);
+  if (_smtpTransporters.has(key)) return _smtpTransporters.get(key);
   try {
-    _mailer = nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: SMTP_PORT,
-      secure: SMTP_PORT === 465,
-      auth: { user: SMTP_USER, pass: SMTP_PASS },
-      pool: true,
-      maxConnections: 2,
+    const t = nodemailer.createTransport({
+      host: acct.host || 'smtp.gmail.com',
+      port: Number(acct.port || 465),
+      secure: Number(acct.port || 465) === 465,
+      auth: { user: acct.email, pass: (acct.appPassword||'').replace(/\s+/g,'') },
+      pool: true, maxConnections: 2,
     } as any);
-    _mailer.verify().then(()=> console.log(`[SMTP] ready ${SMTP_USER} via ${SMTP_HOST}:${SMTP_PORT}`)).catch((e:any)=> console.warn('[SMTP] verify failed:', e?.message));
-  } catch(e:any){ console.warn('[SMTP] create failed:', e?.message); return null; }
-  return _mailer;
+    t.verify().then(()=> console.log(`[SMTP] ready ${acct.email} via ${acct.host||'smtp.gmail.com'}:${acct.port||465}`)).catch((e:any)=> console.warn(`[SMTP] verify failed ${acct.email}:`, e?.message));
+    _smtpTransporters.set(key, t);
+    return t;
+  } catch(e:any){ console.warn('[SMTP] create failed for', acct.email, e?.message); return null; }
 }
-async function sendMail(to: string, subject: string, html: string, text?: string): Promise<boolean> {
-  const t = getMailer();
-  if (!t) { console.warn(`[SMTP] not configured — skip mail to ${to}`); return false; }
-  try {
-    await t.sendMail({ from: SMTP_FROM, to, subject, html, text: text || html.replace(/<[^>]+>/g,' ').trim() });
-    console.log(`[SMTP] sent → ${to} | ${subject}`);
-    return true;
-  } catch (e:any) {
-    console.error(`[SMTP] send failed to ${to}:`, e?.message);
-    return false;
+function smtpDayKey(ts?: number): string {
+  const d = ts ? new Date(ts) : new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+}
+function ensureSmtpDefaults(db:any): any {
+  if (!db.smtp) db.smtp = { accounts: [], config: { dailyLimitPerAccount: 500, strategy:'round-robin', rateLimitPerEmailPerMin: 1, rateLimitPerIpPerHour: 12, enabled:true, fallbackToInbox:true }, stats:{ totalSent:0, totalFailed:0, byDay:{} }, roundRobinIndex:0 } as any;
+  if (!db.smtp.accounts) db.smtp.accounts = [];
+  if (!db.smtp.config) db.smtp.config = { dailyLimitPerAccount: 500, strategy:'round-robin', rateLimitPerEmailPerMin: 1, rateLimitPerIpPerHour: 12, enabled:true, fallbackToInbox:true } as any;
+  if (!db.smtp.stats) db.smtp.stats = { totalSent:0, totalFailed:0, byDay:{} } as any;
+  if (db.smtp.roundRobinIndex === undefined) db.smtp.roundRobinIndex = 0;
+  // seed from env if pool empty (first run)
+  if (db.smtp.accounts.length===0 && SMTP_ENV_USER && SMTP_ENV_PASS) {
+    const today = smtpDayKey();
+    db.smtp.accounts.push({
+      id: 'smtp-'+Math.floor(100000+Math.random()*900000),
+      email: SMTP_ENV_USER,
+      appPassword: SMTP_ENV_PASS,
+      host: SMTP_ENV_HOST, port: SMTP_ENV_PORT, secure: SMTP_ENV_PORT===465,
+      label: 'Primary Gmail (env)',
+      enabled: true, dailyCount: 0, totalSent: 0, failedCount:0, lastError:'', lastSentAt:0, dayKey: today, createdAt: Date.now()
+    });
   }
+  // ensure per-account fields + daily reset
+  const today = smtpDayKey();
+  for (const a of db.smtp.accounts) {
+    if (a.dailyCount===undefined) a.dailyCount=0;
+    if (a.totalSent===undefined) a.totalSent=0;
+    if (a.failedCount===undefined) a.failedCount=0;
+    if (!a.dayKey) a.dayKey=today;
+    if (a.dayKey !== today) { a.dailyCount=0; a.dayKey=today; a.lastError=''; }
+    if (a.enabled===undefined) a.enabled=true;
+  }
+  return db.smtp;
+}
+function pickSmtpAccount(db:any): any | null {
+  const smtp = ensureSmtpDefaults(db);
+  if (smtp.config.enabled === false) return null;
+  const today = smtpDayKey();
+  const limit = Number(smtp.config.dailyLimitPerAccount||500);
+  let pool = smtp.accounts.filter((a:any)=> a.enabled && (a.dailyCount||0) < limit);
+  // daily reset check
+  for (const a of pool) if (a.dayKey!==today) { a.dailyCount=0; a.dayKey=today; }
+  pool = pool.filter((a:any)=> (a.dailyCount||0) < limit);
+  if (pool.length===0) return null;
+  const idx = (smtp.roundRobinIndex || 0) % pool.length;
+  const picked = pool[idx];
+  smtp.roundRobinIndex = (idx + 1) % Math.max(1, smtp.accounts.filter((a:any)=>a.enabled).length);
+  return picked;
+}
+function recordSmtpSent(db:any, accountId:string, success:boolean, errMsg?:string): void {
+  const smtp = ensureSmtpDefaults(db);
+  const today = smtpDayKey();
+  if (!smtp.stats.byDay[today]) smtp.stats.byDay[today]={ sent:0, failed:0 };
+  if (success) {
+    smtp.stats.totalSent = (smtp.stats.totalSent||0)+1;
+    smtp.stats.byDay[today].sent +=1;
+    const acc = smtp.accounts.find((a:any)=> String(a.id)===String(accountId));
+    if (acc) { acc.dailyCount=(acc.dailyCount||0)+1; acc.totalSent=(acc.totalSent||0)+1; acc.lastSentAt=Date.now(); acc.lastError=''; }
+  } else {
+    smtp.stats.totalFailed=(smtp.stats.totalFailed||0)+1;
+    smtp.stats.byDay[today].failed+=1;
+    const acc = smtp.accounts.find((a:any)=> String(a.id)===String(accountId));
+    if (acc) { acc.failedCount=(acc.failedCount||0)+1; acc.lastError=String(errMsg||'send failed').slice(0,300); }
+  }
+}
+// legacy single-mailer fallback (if smtp pool disabled)
+let _legacyMailer:any=null;
+function getLegacyMailer(): any {
+  if (!SMTP_ENV_USER || !SMTP_ENV_PASS) return null;
+  if (_legacyMailer) return _legacyMailer;
+  try {
+    _legacyMailer = nodemailer.createTransport({ host: SMTP_ENV_HOST, port: SMTP_ENV_PORT, secure: SMTP_ENV_PORT===465, auth:{ user:SMTP_ENV_USER, pass:SMTP_ENV_PASS }, pool:true, maxConnections:2 } as any);
+    _legacyMailer.verify().then(()=> console.log(`[SMTP-LEGACY] ready ${SMTP_ENV_USER}`)).catch((e:any)=> console.warn('[SMTP-LEGACY] verify failed', e?.message));
+  } catch(e:any){ return null; }
+  return _legacyMailer;
+}
+async function sendMail(to: string, subject: string, html: string, text?: string): Promise<{ ok:boolean; via?:string; error?:string }> {
+  const db = readDb();
+  const smtp = ensureSmtpDefaults(db);
+  // try pool first
+  let lastErr = '';
+  const tried = new Set<string>();
+  for (let attempt=0; attempt < Math.max(1, smtp.accounts.length); attempt++) {
+    const acct = pickSmtpAccount(db);
+    if (!acct || tried.has(String(acct.id))) break;
+    tried.add(String(acct.id));
+    const t = getMailerForAccount(acct);
+    if (!t) { lastErr='no transporter'; continue; }
+    try {
+      await t.sendMail({ from: acct.email, to, subject, html, text: text || html.replace(/<[^>]+>/g,' ').trim() });
+      console.log(`[SMTP] sent via ${acct.email} → ${to} | ${subject}`);
+      recordSmtpSent(db, acct.id, true);
+      writeDb(db);
+      return { ok:true, via: acct.email };
+    } catch (e:any) {
+      lastErr = e?.message || String(e);
+      console.error(`[SMTP] send failed via ${acct.email} to ${to}:`, lastErr);
+      recordSmtpSent(db, acct.id, false, lastErr);
+      writeDb(db);
+      // if limit hit (Gmail 421/ 550 Daily limit) try next account automatically
+      if (/limit|quota|exceeded|too many/i.test(lastErr) && smtp.accounts.filter((a:any)=>a.enabled).length>1) continue;
+      // auth error -> try next as well
+      if (/auth|credentials|password/i.test(lastErr)) continue;
+      break;
+    }
+  }
+  // fallback to legacy env if pool exhausted or disabled
+  if (SMTP_ENV_USER && SMTP_ENV_PASS) {
+    const t2 = getLegacyMailer();
+    if (t2) {
+      try {
+        await t2.sendMail({ from: SMTP_ENV_FROM, to, subject, html, text: text || html.replace(/<[^>]+>/g,' ').trim() });
+        console.log(`[SMTP-LEGACY] sent → ${to} | ${subject}`);
+        return { ok:true, via: SMTP_ENV_USER };
+      } catch(e:any){ lastErr = e?.message||String(e); console.error(`[SMTP-LEGACY] fail to ${to}:`, lastErr); }
+    }
+  }
+  if (!lastErr) lastErr='no available SMTP account (all 500/day exhausted or disabled)';
+  console.warn(`[SMTP] all pools failed for ${to}: ${lastErr}`);
+  return { ok:false, error:lastErr };
 }
 function emailWrap(title: string, bodyHtml: string): string {
   return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#09090b;font-family:Inter,system-ui,Arial,sans-serif">
@@ -61,6 +171,35 @@ ${bodyHtml}
 <div style="padding:10px 20px;background:#09090b;text-align:center;font-size:10px;color:#52525b">BoostPay • Secure Wallet</div>
 </div></body></html>`;
 }
+// rate-limit for OTP (per email + per IP) — in-memory
+const otpEmailBuckets = new Map<string, { count:number; resetAt:number }>();
+const otpIpBuckets = new Map<string, { count:number; resetAt:number }>();
+function checkOtpRateLimit(email:string, ip:string): { ok:boolean; error?:string; retryAfter?:number } {
+  const db = readDb();
+  const smtp = ensureSmtpDefaults(db);
+  const cfg = smtp.config || { rateLimitPerEmailPerMin:1, rateLimitPerIpPerHour:12 };
+  const perEmail = Number(cfg.rateLimitPerEmailPerMin||1); // per minute actually 15min window
+  const perIp = Number(cfg.rateLimitPerIpPerHour||12); // per hour
+  const now = Date.now();
+  const eKey = `otp:email:${email.toLowerCase()}`;
+  let eb = otpEmailBuckets.get(eKey);
+  if (!eb || eb.resetAt < now) { eb={ count:0, resetAt: now+15*60*1000 }; otpEmailBuckets.set(eKey, eb); }
+  eb.count++;
+  if (eb.count > perEmail) {
+    const sec = Math.ceil((eb.resetAt-now)/1000);
+    return { ok:false, error:`Too many codes to ${email} — wait ${Math.ceil(sec/60)} min`, retryAfter: sec };
+  }
+  const iKey = `otp:ip:${ip}`;
+  let ib = otpIpBuckets.get(iKey);
+  if (!ib || ib.resetAt < now) { ib={ count:0, resetAt: now+60*60*1000 }; otpIpBuckets.set(iKey, ib); }
+  ib.count++;
+  if (ib.count > perIp) {
+    const sec2 = Math.ceil((ib.resetAt-now)/1000);
+    return { ok:false, error:`Too many requests from your network — wait ${Math.ceil(sec2/60)} min`, retryAfter: sec2 };
+  }
+  return { ok:true };
+}
+setInterval(()=>{ const n=Date.now(); for(const [k,v] of otpEmailBuckets) if(v.resetAt < n-5*60*1000) otpEmailBuckets.delete(k); for(const [k,v] of otpIpBuckets) if(v.resetAt < n-60*60*1000) otpIpBuckets.delete(k); }, 5*60*1000);
 
 // Active Real-time Server-Sent Events (SSE) connections for Chat
 interface ChatSseClient {
@@ -233,7 +372,13 @@ const INITIAL_DB = {
       details: "System initialized with minute compounding engine (0.001605%/min)",
       timestamp: Date.now() - 3600000
     }
-  ]
+  ],
+  smtp: {
+    accounts: [],
+    config: { dailyLimitPerAccount: 500, strategy:'round-robin', rateLimitPerEmailPerMin: 3, rateLimitPerIpPerHour: 20, enabled:true, fallbackToInbox:true },
+    stats: { totalSent:0, totalFailed:0, byDay:{} },
+    roundRobinIndex: 0
+  }
 };
 
 function recordAuditLog(db: any, action: string, adminEmail: string, details: string, targetUserId?: string) {
@@ -343,6 +488,7 @@ function readDb() {
   // When PostgreSQL holds the state, it is the single source of truth
   if (pgDoc) {
     if (pgDoc.config) lastKnownConfig = pgDoc.config;
+    ensureSmtpDefaults(pgDoc);
     return pgDoc;
   }
   try {
@@ -388,6 +534,16 @@ function readDb() {
       for (const k of Object.keys((INITIAL_DB as any).config.antifraud.features)) {
         if ((parsed.config.antifraud as any).features[k] === undefined) (parsed.config.antifraud as any).features[k] = (INITIAL_DB as any).config.antifraud.features[k];
       }
+    }
+    if (!parsed.smtp) parsed.smtp = (INITIAL_DB as any).smtp;
+    if (!parsed.smtp.accounts) parsed.smtp.accounts = [];
+    if (!parsed.smtp.config) parsed.smtp.config = (INITIAL_DB as any).smtp.config;
+    if (!parsed.smtp.stats) parsed.smtp.stats = (INITIAL_DB as any).smtp.stats;
+    if (parsed.smtp.roundRobinIndex===undefined) parsed.smtp.roundRobinIndex=0;
+    // seed from env if empty (first run)
+    if (parsed.smtp.accounts.length===0 && SMTP_ENV_USER && SMTP_ENV_PASS) {
+      const today = smtpDayKey();
+      parsed.smtp.accounts.push({ id:'smtp-'+Math.floor(100000+Math.random()*900000), email: SMTP_ENV_USER, appPassword: SMTP_ENV_PASS, host: SMTP_ENV_HOST, port: SMTP_ENV_PORT, secure: SMTP_ENV_PORT===465, label:'Primary Gmail (env)', enabled:true, dailyCount:0, totalSent:0, failedCount:0, lastError:'', lastSentAt:0, dayKey: today, createdAt: Date.now() });
     }
     if (!parsed.notifications) parsed.notifications = INITIAL_DB.notifications || [];
     // FIX #8: migrate old permanently frozen users that were auto-freeze but missing temp flags
@@ -5319,6 +5475,122 @@ async function startServer() {
     }catch(e:any){ res.status(500).json({error:e.message}); }
   });
 
+  // ================= SMTP pool admin (unlimited Gmail) =================
+  app.get('/api/admin/smtp/overview', requireAdmin, (req:any,res)=>{
+    const db=readDb();
+    const smtp=ensureSmtpDefaults(db);
+    const today=smtpDayKey();
+    const limit=Number(smtp.config.dailyLimitPerAccount||500);
+    const accounts=smtp.accounts.map((a:any)=>({
+      id:a.id, email:a.email, host:a.host, port:a.port, secure:!!a.secure, label:a.label||'', enabled:!!a.enabled,
+      dailyCount: a.dayKey===today ? (a.dailyCount||0) : 0,
+      dailyLimit: limit,
+      totalSent: a.totalSent||0, failedCount: a.failedCount||0, lastError: a.lastError||'', lastSentAt: a.lastSentAt||0, dayKey: a.dayKey||today, createdAt: a.createdAt||0,
+      appPassword: a.appPassword || '', // admin sees full (owner requested visibility)
+      available: !!a.enabled && ((a.dayKey===today? (a.dailyCount||0):0) < limit),
+      usagePct: Math.round(((a.dayKey===today? (a.dailyCount||0):0)/limit)*100)
+    }));
+    const availableCount=accounts.filter((a:any)=>a.available).length;
+    res.json({
+      accounts,
+      config: smtp.config,
+      stats: smtp.stats,
+      pool: { total: accounts.length, available: availableCount, exhausted: accounts.length-availableCount, limit, strategy: smtp.config.strategy||'round-robin', enabled: smtp.config.enabled!==false },
+      today,
+      envFallback: { email: SMTP_ENV_USER, host: SMTP_ENV_HOST, port: SMTP_ENV_PORT, hasPass: !!SMTP_ENV_PASS }
+    });
+  });
+  app.post('/api/admin/smtp/accounts', requireSuperAdmin, (req:any,res)=>{
+    const db=readDb();
+    const smtp=ensureSmtpDefaults(db);
+    const email=String(req.body?.email||'').trim().toLowerCase();
+    const appPassword=String(req.body?.appPassword||req.body?.password||'').trim();
+    const host=String(req.body?.host||'smtp.gmail.com').trim();
+    const port=parseInt(req.body?.port||'465',10)||465;
+    const label=String(req.body?.label||'').trim().slice(0,60);
+    if(!email || !email.includes('@')) return res.status(400).json({error:'Valid Gmail email required'});
+    if(!appPassword || appPassword.replace(/\s+/g,'').length < 8) return res.status(400).json({error:'App password required (16 chars, like spbd bqqb ffql vkkf)'});
+    if(smtp.accounts.some((a:any)=> String(a.email).toLowerCase()===email)) return res.status(400).json({error:'This Gmail already exists in pool'});
+    const today=smtpDayKey();
+    const acct={ id:'smtp-'+Math.floor(100000+Math.random()*900000), email, appPassword: appPassword.replace(/\s+/g,''), host, port, secure: port===465, label: label||email.split('@')[0], enabled:true, dailyCount:0, totalSent:0, failedCount:0, lastError:'', lastSentAt:0, dayKey: today, createdAt: Date.now() };
+    smtp.accounts.push(acct);
+    writeDb(db);
+    recordAuditLog(db,'SMTP_ACCOUNT_ADD', String(req.authAdmin), `Added SMTP ${email} (${label})`);
+    res.json({ success:true, account: acct, total: smtp.accounts.length });
+  });
+  app.put('/api/admin/smtp/accounts/:id', requireSuperAdmin, (req:any,res)=>{
+    const db=readDb();
+    const smtp=ensureSmtpDefaults(db);
+    const id=String(req.params.id||'');
+    const acc=smtp.accounts.find((a:any)=> String(a.id)===id);
+    if(!acc) return res.status(404).json({error:'SMTP account not found'});
+    const b=req.body||{};
+    if(b.email!==undefined) { const e=String(b.email).trim().toLowerCase(); if(e && e.includes('@')) acc.email=e; }
+    if(b.appPassword!==undefined || b.password!==undefined) { const p=String(b.appPassword||b.password||'').trim(); if(p) acc.appPassword=p.replace(/\s+/g,''); _smtpTransporters.delete(String(acc.id)); }
+    if(b.host!==undefined) acc.host=String(b.host).trim();
+    if(b.port!==undefined) { const p=parseInt(b.port,10); if(!isNaN(p)) { acc.port=p; acc.secure=p===465; _smtpTransporters.delete(String(acc.id)); } }
+    if(b.label!==undefined) acc.label=String(b.label).trim().slice(0,60);
+    if(b.enabled!==undefined) acc.enabled=!!b.enabled;
+    if(b.resetDaily) { acc.dailyCount=0; acc.dayKey=smtpDayKey(); }
+    writeDb(db);
+    recordAuditLog(db,'SMTP_ACCOUNT_UPDATE', String(req.authAdmin), `Updated SMTP ${acc.email} enabled=${acc.enabled}`);
+    res.json({ success:true, account: acc });
+  });
+  app.delete('/api/admin/smtp/accounts/:id', requireSuperAdmin, (req:any,res)=>{
+    const db=readDb();
+    const smtp=ensureSmtpDefaults(db);
+    const id=String(req.params.id||'');
+    const idx=smtp.accounts.findIndex((a:any)=> String(a.id)===id);
+    if(idx<0) return res.status(404).json({error:'Not found'});
+    const removed=smtp.accounts.splice(idx,1)[0];
+    _smtpTransporters.delete(String(id));
+    writeDb(db);
+    recordAuditLog(db,'SMTP_ACCOUNT_REMOVE', String(req.authAdmin), `Removed SMTP ${removed.email}`);
+    res.json({ success:true, removed: removed.email });
+  });
+  app.post('/api/admin/smtp/test', requireSuperAdmin, async (req:any,res)=>{
+    const db=readDb();
+    const smtp=ensureSmtpDefaults(db);
+    const to=String(req.body?.to||req.body?.email||'').trim().toLowerCase();
+    const accountId=String(req.body?.accountId||'').trim();
+    if(!to || !to.includes('@')) return res.status(400).json({error:'Valid recipient email required'});
+    let acct:any=null;
+    if(accountId) acct=smtp.accounts.find((a:any)=> String(a.id)===accountId);
+    else acct=pickSmtpAccount(db) || smtp.accounts.find((a:any)=>a.enabled) || null;
+    if(!acct) return res.status(400).json({error:'No SMTP account available to test'});
+    const html=emailWrap('BoostPay SMTP Test', `<p style="margin:0 0 10px">Hi admin,</p><p>This is a test email from <b>${acct.email}</b> to verify Gmail SMTP is working.</p><div style="text-align:center;margin:12px 0"><span style="display:inline-block;background:#09090b;border:1px solid #27272a;padding:8px 16px;border-radius:10px;font-family:monospace;font-size:12px;color:#22c55e">SMTP OK — ${new Date().toLocaleString()}</span></div><p style="font-size:12px;color:#a1a1aa">Pool: ${smtp.accounts.length} accounts • Daily limit ${smtp.config.dailyLimitPerAccount}/account • Strategy ${smtp.config.strategy}</p>`);
+    const t=getMailerForAccount(acct);
+    if(!t) return res.status(500).json({error:'No transporter for '+acct.email});
+    try{
+      await t.sendMail({ from: acct.email, to, subject:'BoostPay — SMTP Test OK', html, text:'BoostPay SMTP test OK — '+new Date().toISOString() });
+      recordSmtpSent(db, acct.id, true); writeDb(db);
+      res.json({ success:true, via: acct.email, to });
+    } catch(e:any){
+      recordSmtpSent(db, acct.id, false, e?.message); writeDb(db);
+      res.status(500).json({ error: e?.message||String(e), via: acct.email });
+    }
+  });
+  app.put('/api/admin/smtp/config', requireSuperAdmin, (req:any,res)=>{
+    const db=readDb();
+    const smtp=ensureSmtpDefaults(db);
+    const b=req.body||{};
+    if(b.dailyLimitPerAccount!==undefined){ const v=parseInt(b.dailyLimitPerAccount,10); if(!isNaN(v)&&v>=10&&v<=2000) smtp.config.dailyLimitPerAccount=v; }
+    if(b.rateLimitPerEmailPerMin!==undefined){ const v=parseInt(b.rateLimitPerEmailPerMin,10); if(!isNaN(v)&&v>=1&&v<=20) smtp.config.rateLimitPerEmailPerMin=v; }
+    if(b.rateLimitPerIpPerHour!==undefined){ const v=parseInt(b.rateLimitPerIpPerHour,10); if(!isNaN(v)&&v>=1&&v<=100) smtp.config.rateLimitPerIpPerHour=v; }
+    if(b.strategy!==undefined && ['round-robin','failover'].includes(String(b.strategy))) smtp.config.strategy=String(b.strategy);
+    if(b.enabled!==undefined) smtp.config.enabled=!!b.enabled;
+    if(b.fallbackToInbox!==undefined) smtp.config.fallbackToInbox=!!b.fallbackToInbox;
+    writeDb(db);
+    recordAuditLog(db,'SMTP_CONFIG_UPDATE', String(req.authAdmin), `SMTP config updated: ${JSON.stringify(smtp.config)}`);
+    res.json({ success:true, config: smtp.config });
+  });
+  app.get('/api/admin/smtp/stats', requireAdmin, (req:any,res)=>{
+    const db=readDb();
+    const smtp=ensureSmtpDefaults(db);
+    const today=smtpDayKey();
+    res.json({ stats: smtp.stats, today, config: smtp.config, accounts: smtp.accounts.map((a:any)=>({ id:a.id, email:a.email, dailyCount:a.dayKey===today?a.dailyCount:0, totalSent:a.totalSent, failedCount:a.failedCount, lastError:a.lastError, lastSentAt:a.lastSentAt, enabled:a.enabled })) });
+  });
+
   // User password change (inside settings)
   app.post('/api/users/me/password', requireUser, (req:any,res)=>{
     try {
@@ -5339,10 +5611,13 @@ async function startServer() {
   });
   // Chat spam detection hook (also called inside send)
   // Count messages per user per minute
-    // 5b. Forgot password via email (Gmail SMTP)
+    // 5b. Forgot password via email (Gmail SMTP pool + rate limit)
   app.post('/api/users/forgot-password', rateLimit(6), async (req: any, res) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
     if (!email || !email.includes('@')) return res.status(400).json({ error: 'Valid email required.' });
+    const ip = clientIp(req);
+    const rl = checkOtpRateLimit(email, ip);
+    if (!rl.ok) return res.status(429).json({ error: rl.error, retryAfter: rl.retryAfter });
     const db = readDb();
     const user:any = (db.users || []).find((u:any) => String(u.email||'').toLowerCase() === email);
     if (!user) {
@@ -5389,8 +5664,16 @@ async function startServer() {
     res.json({ success: true, message: 'Password updated. You can now sign in.' });
   });
 
-  // 5c. Verify email (Gmail SMTP) — in Settings
+  // 5c. Verify email (Gmail SMTP pool + rate limit) — in Settings
   app.post('/api/users/me/verify-email', requireUser, async (req:any,res)=>{
+    const dbPre=readDb();
+    const userPre:any=(dbPre.users||[]).find((u:any)=> String(u.id)===String(req.authUserId));
+    const eTest = userPre ? String(userPre.email||'').toLowerCase() : '';
+    const ipV = clientIp(req);
+    if (eTest) {
+      const rl2 = checkOtpRateLimit(eTest, ipV);
+      if (!rl2.ok) return res.status(429).json({ error: rl2.error, retryAfter: rl2.retryAfter });
+    }
     const db=readDb();
     const user:any=(db.users||[]).find((u:any)=> String(u.id)===String(req.authUserId));
     if(!user) return res.status(404).json({error:'User not found'});
