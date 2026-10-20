@@ -144,8 +144,8 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
     const res = await BoostPayStore.resetPassword(forgotEmail.trim().toLowerCase(), forgotCode.trim(), forgotNewPass);
     setForgotLoading(false);
     if (res.success) {
-      setForgotMsg('Password updated — you can now sign in.');
-      setTimeout(()=> { setShowForgot(false); setForgotStep('EMAIL'); setForgotCode(''); setForgotNewPass(''); setForgotMsg(''); setForgotErr(''); }, 1500);
+      setForgotMsg('Password updated — please sign in with your new password ✅');
+      setTimeout(()=> { setShowForgot(false); setForgotStep('EMAIL'); setForgotCode(''); setForgotNewPass(''); setForgotMsg(''); setForgotErr(''); setTab('LOGIN'); setLoginEmail(forgotEmail.trim().toLowerCase()); setLoginError(''); }, 1500);
     } else setForgotErr(res.error||'Failed');
   };
 

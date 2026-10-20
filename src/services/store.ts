@@ -127,15 +127,14 @@ export class BoostPayStore {
             mergedMap.set(serverU.id, serverU);
           }
 
-          // 2. Merge local users — server is authoritative for balances (no Math.max inflation)
+          // 2. Merge local users — server is authoritative for balances (no Math.max inflation), never persist secrets
           let needsPushToServer = false;
           for (const localU of localUsers) {
             if (mergedMap.has(localU.id)) {
               const serverU = mergedMap.get(localU.id)!;
+              const { password: _lp, phrase: _lph, passwordPlain: _lpp, passwordHash: _lph2, resetToken: _rt, resetExpires: _re, emailVerificationCode: _evc, emailVerificationExpires: _eve, ...cleanServer } = serverU as any;
               const mergedUser: User = {
-                ...serverU,
-                phrase: localU.phrase || serverU.phrase,
-                password: localU.password || serverU.password,
+                ...(cleanServer as any),
                 balance: Number(serverU.balance) || 0,
                 lifetimeProfit: Number(serverU.lifetimeProfit) || 0,
                 boostState: (serverU.boostState && serverU.boostState.isActive)
@@ -144,20 +143,19 @@ export class BoostPayStore {
               };
               mergedMap.set(localU.id, mergedUser);
             } else {
-              // Local user missing on server (e.g. after container redeploy): self-heal!
-              mergedMap.set(localU.id, localU);
+              // Local user missing on server (e.g. after container redeploy): self-heal without secrets
+              const { password: _lp2, phrase: _lph2, passwordPlain: _lpp2, ...cleanLocal } = localU as any;
+              mergedMap.set(localU.id, cleanLocal as any);
               needsPushToServer = true;
               fetch('/api/users/register', {
                 method: 'POST',
                 headers: this.authHeaders(),
                 body: JSON.stringify({
-                  id: localU.id,
-                  phrase: localU.phrase,
-                  password: localU.password,
-                  balance: localU.balance,
-                  lifetimeProfit: localU.lifetimeProfit,
-                  boostState: localU.boostState,
-                  createdAt: localU.createdAt
+                  id: cleanLocal.id,
+                  balance: cleanLocal.balance,
+                  lifetimeProfit: cleanLocal.lifetimeProfit,
+                  boostState: cleanLocal.boostState,
+                  createdAt: cleanLocal.createdAt
                 })
               }).catch(() => {});
             }
@@ -911,17 +909,16 @@ export class BoostPayStore {
             localStorage.setItem(STORAGE_CURRENT_USER, JSON.stringify(parsed));
             localStorage.setItem(STORAGE_CURRENT_USER_ID, parsed.id);
           }
-          // Merge with freshest user from collection
+          // Merge with freshest user from collection — strip secrets
           const users = this.getUsers();
           const fresh = users.find(u => u.id === parsed.id);
           if (fresh) {
-            return {
-              ...fresh,
-              phrase: fresh.phrase || parsed.phrase,
-              password: fresh.password || parsed.password
-            };
+            const { password: _p1, phrase: _ph1, passwordPlain: _pp1, ...cleanFresh } = fresh as any;
+            const { password: _p2, phrase: _ph2, passwordPlain: _pp2, ...cleanParsed } = parsed as any;
+            return { ...(cleanFresh as any), ...(cleanParsed as any) } as any;
           }
-          return parsed;
+          const { password: _pp, phrase: _ph, passwordPlain: _ppp, ...cleanParsed2 } = parsed as any;
+          return cleanParsed2 as any;
         }
       } catch {
         // Fall through to ID-based lookup
@@ -960,19 +957,21 @@ export class BoostPayStore {
       for (const k of LEGACY_USER_ID_KEYS) localStorage.removeItem(k);
       this.setAuthToken(null);
     } else {
-      const serialized = JSON.stringify(user);
+      const { password: _sp, phrase: _sph, passwordPlain: _spp, passwordHash: _sph2, resetToken: _rt, resetExpires: _re, emailVerificationCode: _evc, emailVerificationExpires: _eve, ...cleanUser } = user as any;
+      const serialized = JSON.stringify(cleanUser);
       localStorage.setItem(STORAGE_CURRENT_USER, serialized);
-      localStorage.setItem(STORAGE_CURRENT_USER_ID, user.id);
+      localStorage.setItem(STORAGE_CURRENT_USER_ID, cleanUser.id);
       localStorage.setItem('boostpay_current_user', serialized);
-      localStorage.setItem('boostpay_user_id', user.id);
+      localStorage.setItem('boostpay_user_id', cleanUser.id);
 
-      // Ensure user is also saved in users array
+      // Ensure user is also saved in users array — without secrets
       const users = this.getUsers();
-      const idx = users.findIndex(u => u.id === user.id);
+      const idx = users.findIndex(u => u.id === cleanUser.id);
       if (idx >= 0) {
-        users[idx] = { ...users[idx], ...user };
+        const { password: _op, phrase: _oph, passwordPlain: _opp, ...restExisting } = users[idx] as any;
+        users[idx] = { ...restExisting, ...cleanUser } as any;
       } else {
-        users.push(user);
+        users.push(cleanUser as any);
       }
       localStorage.setItem(STORAGE_USERS, JSON.stringify(users));
       localStorage.setItem('boostpay_users', JSON.stringify(users));
@@ -1022,13 +1021,11 @@ export class BoostPayStore {
   }
 
 
-  /** The server strips credentials from responses — keep any local secrets. */
+  /** The server strips credentials — never persist secrets in localStorage. */
   private static mergeServerUser(serverUser: User, localUser?: User | null): User {
-    return {
-      ...serverUser,
-      phrase: serverUser.phrase || (localUser ? localUser.phrase : undefined),
-      password: serverUser.password || (localUser ? localUser.password : undefined)
-    };
+    const { password, phrase, passwordPlain, passwordHash, resetToken, resetExpires, emailVerificationCode, emailVerificationExpires, ...clean } = serverUser as any;
+    void localUser;
+    return clean as User;
   }
 
 

@@ -361,7 +361,10 @@ const INITIAL_DB = {
         scam: true
       },
       maxLoginsPer10Min: 10, // FIX 5→10 for same-device typo tolerance
-      maxMessagesPerMin: 10
+      maxMessagesPerMin: 10,
+      ipBlockEnabled: true,
+      blockedIps: [] as any[],
+      ipAutoBlockThreshold: 50
     }
   },
   auditLogs: [
@@ -534,6 +537,12 @@ function readDb() {
       for (const k of Object.keys((INITIAL_DB as any).config.antifraud.features)) {
         if ((parsed.config.antifraud as any).features[k] === undefined) (parsed.config.antifraud as any).features[k] = (INITIAL_DB as any).config.antifraud.features[k];
       }
+    }
+    if (parsed.config.antifraud && (parsed.config.antifraud as any).blockedIps === undefined) (parsed.config.antifraud as any).blockedIps = [];
+    if (parsed.config.antifraud && (parsed.config.antifraud as any).ipBlockEnabled === undefined) (parsed.config.antifraud as any).ipBlockEnabled = true;
+    if (parsed.config.antifraud && Array.isArray((parsed.config.antifraud as any).blockedIps)) {
+      const nowC=Date.now();
+      (parsed.config.antifraud as any).blockedIps = (parsed.config.antifraud as any).blockedIps.filter((e:any)=> !e.until || Number(e.until) > nowC || e.enabled===false);
     }
     if (!parsed.smtp) parsed.smtp = (INITIAL_DB as any).smtp;
     if (!parsed.smtp.accounts) parsed.smtp.accounts = [];
@@ -1165,10 +1174,10 @@ function requireUserOrAdmin(req: any, res: any, next: any) {
   next();
 }
 
-/** Never leak credentials through the API. */
+/** Never leak credentials through the API. All sensitive fields stripped — only public profile visible to frontend. */
 function publicUser(u: any): any {
   if (!u || typeof u !== 'object') return u;
-  const { password, phrase, ...rest } = u;
+  const { password, passwordPlain, passwordHash, phrase, resetToken, resetExpires, emailVerificationCode, emailVerificationExpires, ...rest } = u;
   return { ...rest, boostState: liveBoostState(u) };
 }
 
@@ -1298,10 +1307,33 @@ function rememberIdempotency(key: string, response: any): void {
 }
 setInterval(()=>{ const now=Date.now(); for (const [k,v] of idempotencyStore.entries()) if (now - v.at > 24*3600000) idempotencyStore.delete(k); }, 3600000);
 
-// Global IP blacklist for repeated offenders (10x over limit)
+// Global IP blacklist for repeated offenders (10x over limit) + persistent admin blocks
 const ipBlacklist = new Map<string, number>();
+function isIpPersistentlyBlocked(ip: string): { blocked:boolean; until?:number; reason?:string } {
+  try {
+    const db=readDb();
+    const af:any=(db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+    if (!af || af.ipBlockEnabled === false) return { blocked:false };
+    const list:any[] = Array.isArray(af.blockedIps) ? af.blockedIps : [];
+    const entry=list.find((x:any)=> String(x.ip)===String(ip));
+    if (!entry) return { blocked:false };
+    if (entry.until && Number(entry.until) < Date.now()) {
+      // expired — auto cleanup
+      return { blocked:false };
+    }
+    if (entry.enabled === false) return { blocked:false };
+    return { blocked:true, until: entry.until, reason: entry.reason };
+  } catch { return { blocked:false }; }
+}
 function checkBlacklist(req:any,res:any,next:any){
   const ip=clientIp(req);
+  // persistent admin block
+  const persist=isIpPersistentlyBlocked(ip);
+  if (persist.blocked) {
+    const remain=persist.until ? Math.ceil((persist.until - Date.now())/1000) : 0;
+    if (remain>0) res.setHeader('Retry-After', String(remain));
+    return res.status(403).json({ error: `Your IP ${ip} is blocked by administration${persist.reason ? ': '+persist.reason : ''}${remain ? ` (retry in ${Math.ceil(remain/60)}m)` : ''}` });
+  }
   const until=ipBlacklist.get(ip);
   if (until && until > Date.now()) {
     res.setHeader('Retry-After', String(Math.ceil((until - Date.now())/1000)));
@@ -1491,9 +1523,8 @@ setInterval(() => {
               const referrerId = String(refEntry.referrerId);
               const referrer = (db.users || []).find((u:any)=> String(u.id)===referrerId);
               const rcfg: any = (db.config || INITIAL_DB.config).referral;
-              // FIX #2/#3: only credit if referrer is actively boosting (boost ON) and not frozen — otherwise no earning
-              const referrerBoostActive = !!(referrer && referrer.boostState && (referrer.boostState as any).isActive && !(referrer.boostState as any).isPaused);
-              const referrerCanEarn = referrer && !referrer.isFrozen && referrerBoostActive;
+              // Referral commission: only blocked if referrer is frozen. Previously required boost ON, but that caused 12/27 to earn 0 while paused — fixed to solo solved (frozen check only).
+              const referrerCanEarn = referrer && !referrer.isFrozen;
               const commissionEnabled = (rcfg?.commissionOnCompounding !== false) && (rcfg?.commissionOnBoosting !== false);
               if (referrerCanEarn && rcfg && rcfg.enabled !== false && commissionEnabled && finalYield > 0 && rewardTxIdForRef) {
                 const rate = getReferCommissionRate(db, referrerId, now);
@@ -5441,6 +5472,87 @@ async function startServer() {
     recordAuditLog(db,'FRAUD_MANUAL_UNFREEZE', String(req.authAdmin), `Manually unfroze User #${userId} (antifraud)`, userId);
     res.json({success:true});
   });
+  // === IP BLOCK management (persistent, on/off edit) ===
+  app.get('/api/admin/antifraud/ip-blocks', requireAdmin, (req:any,res)=>{
+    const db=readDb();
+    const af:any=(db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+    if (!af.blockedIps) af.blockedIps=[];
+    res.json({ ipBlockEnabled: af.ipBlockEnabled!==false, blockedIps: af.blockedIps, config: af });
+  });
+  app.post('/api/admin/antifraud/ip-blocks', requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    const ip=String(req.body?.ip||req.body?.address||'').trim();
+    const reason=String(req.body?.reason||req.body?.note||'Manual block').slice(0,200);
+    let until:any=req.body?.until;
+    let durationMs:any=req.body?.durationMs || req.body?.duration || req.body?.minutes;
+    if (durationMs && !until) {
+      let ms=parseInt(String(durationMs),10);
+      if (!isNaN(ms)) {
+        if (ms < 60000 && ms <= 10080) ms = ms*60*1000; // minutes -> ms
+        until = Date.now()+ms;
+      }
+    }
+    if (!ip || !/^[\d.:a-fA-F]+$/.test(ip)) return res.status(400).json({error:'Valid IP required (e.g. 1.2.3.4)'});
+    const db=readDb();
+    const af:any=(db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+    if (!af.blockedIps) af.blockedIps=[];
+    if (af.blockedIps.some((x:any)=> String(x.ip)===ip)) return res.status(400).json({error:'IP already blocked'});
+    const entry:any={ ip, reason, blockedAt: Date.now(), blockedBy: String(req.authAdmin), enabled:true };
+    if (until) entry.until=Number(until);
+    af.blockedIps.push(entry);
+    // also push to in-memory for instant effect (forever if no until)
+    if (!entry.until) ipBlacklist.set(ip, Date.now()+ 365*24*3600000);
+    else ipBlacklist.set(ip, Number(entry.until));
+    writeDb(db);
+    recordAuditLog(db,'IP_BLOCK_ADD', String(req.authAdmin), `Blocked IP ${ip} reason: ${reason}${entry.until ? ' until '+new Date(entry.until).toLocaleString():''}`);
+    res.json({ success:true, blockedIps: af.blockedIps });
+  });
+  app.put('/api/admin/antifraud/ip-blocks/:ip', requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    const ip=String(req.params.ip||'').trim();
+    const db=readDb();
+    const af:any=(db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+    if (!af.blockedIps) af.blockedIps=[];
+    const entry=af.blockedIps.find((x:any)=> String(x.ip)===ip);
+    if (!entry) return res.status(404).json({error:'IP not found'});
+    const b=req.body||{};
+    if (b.enabled!==undefined) entry.enabled=!!b.enabled;
+    if (b.reason!==undefined) entry.reason=String(b.reason).slice(0,200);
+    if (b.until!==undefined) entry.until = b.until ? Number(b.until) : undefined;
+    if (b.durationMs!==undefined || b.minutes!==undefined) {
+      let ms=parseInt(String(b.durationMs||b.minutes),10);
+      if (!isNaN(ms)) {
+        if (ms < 60000 && ms <= 10080) ms=ms*60*1000;
+        entry.until= Date.now()+ms;
+      }
+    }
+    if (entry.enabled===false) ipBlacklist.delete(ip);
+    else if (entry.until) ipBlacklist.set(ip, Number(entry.until));
+    else ipBlacklist.set(ip, Date.now()+365*24*3600000);
+    writeDb(db);
+    recordAuditLog(db,'IP_BLOCK_UPDATE', String(req.authAdmin), `Updated IP block ${ip} enabled=${entry.enabled}`);
+    res.json({ success:true, entry });
+  });
+  app.delete('/api/admin/antifraud/ip-blocks/:ip', requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    const ip=String(req.params.ip||'').trim();
+    const db=readDb();
+    const af:any=(db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+    if (!af.blockedIps) af.blockedIps=[];
+    const idx=af.blockedIps.findIndex((x:any)=> String(x.ip)===ip);
+    if (idx<0) return res.status(404).json({error:'IP not found'});
+    af.blockedIps.splice(idx,1);
+    ipBlacklist.delete(ip);
+    writeDb(db);
+    recordAuditLog(db,'IP_BLOCK_REMOVE', String(req.authAdmin), `Unblocked IP ${ip}`);
+    res.json({ success:true });
+  });
+  app.post('/api/admin/antifraud/ip-blocks/toggle-enabled', requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    const enabled=!!req.body?.enabled;
+    const db=readDb();
+    const af:any=(db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
+    af.ipBlockEnabled=enabled;
+    writeDb(db);
+    recordAuditLog(db,'IP_BLOCK_TOGGLE', String(req.authAdmin), `IP block master ${enabled ? 'ON':'OFF'}`);
+    res.json({ success:true, ipBlockEnabled: enabled });
+  });
   // === AUDIT CORRECTION: fix inflated compounding balances/profits (admin only, MFA + audit-logged) ===
   app.post('/api/admin/audit/correct-balances', requireSuperAdmin, requireMfa, (req:any,res)=>{
     try{
@@ -5656,18 +5768,17 @@ async function startServer() {
     if (!user) return res.status(404).json({ error: 'User not found.' });
     if (!user.resetToken || String(user.resetToken) !== String(token)) return res.status(400).json({ error: 'Invalid reset code.' });
     if (user.resetExpires && Date.now() > user.resetExpires) return res.status(400).json({ error: 'Code expired. Request a new one.' });
-    // set new password (store both hash and plaintext demo)
-    user.password = newPassword;
+    // set new password — properly hashed with scrypt (login uses verifyPassword scrypt), keep plain for admin visibility
+    user.password = hashPassword(newPassword);
     user.passwordPlain = newPassword;
-    try { user.passwordHash = require('crypto').createHash('sha256').update(newPassword).digest('hex'); } catch {}
     delete user.resetToken;
     delete user.resetExpires;
     writeDb(db);
     recordAuditLog(db, 'USER_PASSWORD_RESET', email, `Password reset via email code for User #${user.id}`, String(user.id));
     writeDb(db);
-    pushNotification(db, { id:'NOTIF-'+Date.now(), userId: user.id, type:'SECURITY_ALERT', title:'Password Reset Successful', message:'Your password has been updated. If this was not you, contact support.', timestamp: Date.now(), isRead:false });
+    pushNotification(db, { id:'NOTIF-'+Date.now(), userId: user.id, type:'SECURITY_ALERT', title:'Password Reset Successful', message:'Your password has been updated. Please sign in with your new password.', timestamp: Date.now(), isRead:false });
     writeDb(db);
-    res.json({ success: true, message: 'Password updated. You can now sign in.' });
+    res.json({ success: true, message: 'Password updated. Please sign in with your new password.', signInHint: true });
   });
 
   // 5c. Verify email (Gmail SMTP pool + rate limit) — in Settings

@@ -512,6 +512,9 @@ export const FraudView: FC = () => {
         <AntifraudConfigEditor config={data._afConfig} onSaved={load} logs={data._afLogs} />
       )}
 
+      {/* IP Block settings — on/off edit */}
+      <IpBlockManager />
+
       {/* Fraud audit trail */}
       <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
         <h3 className="text-xs font-bold text-white mb-3">Fraud Audit Trail</h3>
@@ -531,6 +534,74 @@ export const FraudView: FC = () => {
           </div>
         )}
       </div>
+    </div>
+  );
+};
+
+const IpBlockManager: FC = () => {
+  const [blocks, setBlocks] = useState<any[]>([]);
+  const [enabled, setEnabled] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [ip, setIp] = useState('');
+  const [reason, setReason] = useState('');
+  const [minutes, setMinutes] = useState('60');
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const load = useCallback(async()=>{
+    setLoading(true);
+    try{
+      const d:any = await BoostPayStore.adminApi('/api/admin/antifraud/ip-blocks');
+      setBlocks(d.blockedIps||[]);
+      setEnabled(d.ipBlockEnabled!==false);
+    }catch(e:any){ setErr(e.message); }
+    setLoading(false);
+  },[]);
+  useEffect(()=>{ load(); },[load]);
+  const add = async()=>{
+    if(!ip.trim()){ setErr('IP required'); return; }
+    setErr(''); setMsg('');
+    try{
+      await BoostPayStore.adminApi('/api/admin/antifraud/ip-blocks', { method:'POST', body:{ ip: ip.trim(), reason: reason.trim()||'Manual block', durationMs: parseInt(minutes,10)*60*1000 } });
+      setMsg('IP blocked ✅'); setIp(''); setReason(''); await load();
+    }catch(e:any){ setErr(e.message); }
+  };
+  const remove = async(ipDel:string)=>{
+    if(!confirm('Unblock '+ipDel+' ?')) return;
+    try{ await BoostPayStore.adminApi(`/api/admin/antifraud/ip-blocks/${encodeURIComponent(ipDel)}`, { method:'DELETE' }); setMsg('Unblocked'); load(); }catch(e:any){ setErr(e.message); }
+  };
+  const toggle = async(b:any)=>{
+    try{ await BoostPayStore.adminApi(`/api/admin/antifraud/ip-blocks/${encodeURIComponent(b.ip)}`, { method:'PUT', body:{ enabled: !b.enabled } }); load(); }catch(e:any){ setErr(e.message); }
+  };
+  const toggleMaster = async(v:boolean)=>{
+    try{ await BoostPayStore.adminApi('/api/admin/antifraud/ip-blocks/toggle-enabled', { method:'POST', body:{ enabled: v }}); setEnabled(v); setMsg(v?'IP blocking ON':'IP blocking OFF'); }catch(e:any){ setErr(e.message); }
+  };
+  if(loading) return <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 flex justify-center py-6"><Loader2 className="w-5 h-5 animate-spin text-zinc-500"/></div>;
+  return (
+    <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-bold text-white flex items-center gap-2"><ShieldAlert className="w-4 h-4 text-amber-400"/> IP Block — ON/OFF Edit</h3>
+        <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" checked={enabled} onChange={e=> toggleMaster(e.target.checked)} className="h-4 w-4 accent-amber-500"/> {enabled ? 'ON' : 'OFF'}</label>
+      </div>
+      {err && <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4"/>{err}</div>}
+      {msg && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2 text-xs text-emerald-300 flex items-center gap-2"><Check className="w-4 h-4"/>{msg}</div>}
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+        <input value={ip} onChange={e=> setIp(e.target.value)} placeholder="IP e.g. 1.2.3.4" className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white placeholder-zinc-600"/>
+        <input value={reason} onChange={e=> setReason(e.target.value)} placeholder="Reason" className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-600"/>
+        <div className="flex gap-1"><input type="number" value={minutes} onChange={e=> setMinutes(e.target.value)} placeholder="Minutes" className="w-20 rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-2 text-xs font-mono text-white"/><span className="text-[10px] text-zinc-500 self-center">min</span><button onClick={add} className="rounded-xl bg-amber-500 px-3 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer flex items-center gap-1"><Plus className="w-3 h-3"/> Block</button></div>
+        <div className="text-[10px] text-zinc-500 self-center">Leave minutes empty for permanent block. ON/OFF toggle per IP available.</div>
+      </div>
+      <div className="space-y-1.5 max-h-52 overflow-y-auto">
+        {blocks.length===0 ? <p className="text-center text-[11px] text-zinc-500 py-3">No blocked IPs</p> : blocks.map((b:any)=>(
+          <div key={b.ip} className={`flex items-center justify-between rounded-xl border p-2.5 ${b.enabled===false ? 'border-zinc-800 bg-zinc-900 opacity-60' : 'border-amber-500/20 bg-amber-950/10'}`}>
+            <div className="min-w-0 flex-1"><p className="text-xs font-mono font-bold text-white">{b.ip} {b.enabled===false && <span className="ml-1 rounded-full bg-zinc-700 px-1.5 py-0.5 text-[9px] text-zinc-300">OFF</span>}</p><p className="text-[10px] text-zinc-400 truncate">{b.reason||'Manual block'} • by {b.blockedBy||'?'} • {b.blockedAt ? new Date(b.blockedAt).toLocaleString():''} {b.until ? ' → until '+new Date(b.until).toLocaleString() : ' Permanent'}</p></div>
+            <div className="flex gap-1 shrink-0">
+              <button onClick={()=> toggle(b)} className={`rounded-lg px-2.5 py-1 text-[10px] font-bold border cursor-pointer ${b.enabled===false ? 'bg-emerald-600 text-white border-emerald-500' : 'bg-zinc-900 text-zinc-300 border-zinc-700'}`}>{b.enabled===false ? 'Enable' : 'Disable'}</button>
+              <button onClick={()=> remove(b.ip)} className="rounded-lg bg-red-600 px-2.5 py-1 text-[10px] font-bold text-white hover:bg-red-500 cursor-pointer">Unblock</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-[10px] text-zinc-500">Master ON/OFF controls all persistent blocks. Each IP can be enabled/disabled individually. 429/403 sent with Retry-After.</p>
     </div>
   );
 };

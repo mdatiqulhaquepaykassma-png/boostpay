@@ -583,10 +583,10 @@ export default function App() {
                 </button>
               )}
 
-              {/* 6. Logout — always last */}
+              {/* 6. Logout — red */}
               <button
                 onClick={handleLogout}
-                className="flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition cursor-pointer min-h-[44px] text-zinc-500 hover:text-red-400"
+                className="flex flex-col items-center justify-center gap-1 text-[11px] font-bold transition cursor-pointer min-h-[44px] text-red-500 hover:text-red-400 hover:bg-red-500/10 rounded-xl"
                 title="Sign out"
               >
                 <LogOut className="w-5 h-5 stroke-[2.2]" />

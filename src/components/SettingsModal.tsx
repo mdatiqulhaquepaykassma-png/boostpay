@@ -91,9 +91,9 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
     const res = await BoostPayStore.changeMyPassword(curPass, newPass);
     setSaving(false);
     if (res.success) {
-      setMsg({ type: 'ok', text: 'Password updated successfully ✅' });
+      setMsg({ type: 'ok', text: 'Password updated successfully ✅ Please sign in again if prompted.' });
       setCurPass(''); setNewPass(''); setConfirm('');
-      onUserUpdated({ ...currentUser, password: newPass } as any);
+      onUserUpdated({ ...currentUser } as any);
     } else {
       setMsg({ type: 'err', text: res.error || 'Failed to change password.' });
     }
@@ -204,7 +204,7 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
               </section>
 
               {onLogout && (
-                <button onClick={onLogout} className="w-full flex items-center justify-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 py-3 text-xs font-bold text-red-400 hover:bg-red-500/20 cursor-pointer">
+                <button onClick={onLogout} className="w-full flex items-center justify-center gap-2 rounded-2xl border border-red-600 bg-red-600 py-3 text-xs font-bold text-white hover:bg-red-500 cursor-pointer shadow-lg shadow-red-600/20">
                   <LogOut className="w-4 h-4" /> Sign out of this device
                 </button>
               )}
@@ -225,7 +225,7 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
               </section>
 
               {onLogout && (
-                <button onClick={onLogout} className="w-full flex items-center justify-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 py-3 text-xs font-bold text-red-400 hover:bg-red-500/20 cursor-pointer">
+                <button onClick={onLogout} className="w-full flex items-center justify-center gap-2 rounded-2xl border border-red-600 bg-red-600 py-3 text-xs font-bold text-white hover:bg-red-500 cursor-pointer shadow-lg shadow-red-600/20">
                   <LogOut className="w-4 h-4" /> Sign out of this device
                 </button>
               )}
