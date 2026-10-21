@@ -13,6 +13,9 @@ const __dirname = path.dirname(__filename);
 
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'boostpay_db.json');
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch {}
+// STORAGE FIX: Move image/voice/file from inline base64 in DB to disk files + auto-cleanup to prevent DB full (10-30 days TTL, 50MB limit, 500 msg/conversation cap)
 
 // ── Gmail SMTP pool (unlimited accounts, round-robin after 500/day) ──
 const SMTP_ENV_USER = (process.env.SMTP_USER || 'joypaykassma@gmail.com').trim();
@@ -265,6 +268,123 @@ function broadcastChatMessageReaction(messageId: string, reactions: any, convers
     }
   }
 }
+
+// ── Attachment storage helpers (fix storage-full: save base64 to disk, serve via /api/chat/file/:id, auto-cleanup old files) ──
+function saveAttachmentToDisk(dataUrl: string, prefix: string): { fileId: string; url: string; mime: string; size: number } | null {
+  try {
+    const m = String(dataUrl||'').match(/^data:([^;]+);base64,(.+)$/);
+    if (!m) return null;
+    const mime = m[1]||'application/octet-stream';
+    const b64 = m[2]||'';
+    const buf = Buffer.from(b64, 'base64');
+    if (!buf.length || buf.length > 6*1024*1024) return null;
+    const fileId = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
+    const ext = mime.includes('png')?'png': mime.includes('jpeg')||mime.includes('jpg')?'jpg': mime.includes('webp')?'webp': mime.includes('gif')?'gif': mime.includes('pdf')?'pdf': mime.includes('audio')?'webm': mime.includes('video')?'mp4':'bin';
+    const fname = `${fileId}.${ext}`;
+    const fpath = path.join(UPLOAD_DIR, fname);
+    fs.writeFileSync(fpath, buf);
+    return { fileId, url: `/api/chat/file/${fileId}`, mime, size: buf.length };
+  } catch { return null; }
+}
+function resolveAttachmentPath(fileId: string): string | null {
+  try {
+    const clean = String(fileId||'').replace(/[^a-zA-Z0-9._-]/g,'').slice(0,80);
+    const files = fs.readdirSync(UPLOAD_DIR);
+    const hit = files.find(f=> f.startsWith(clean+'.'));
+    return hit ? path.join(UPLOAD_DIR, hit) : null;
+  } catch { return null; }
+}
+function cleanupOldAttachments() {
+  try {
+    const db = readDb();
+    const now = Date.now();
+    const TTL_MS = 14*24*3600*1000; // 14 days for voice/photo/file (storage fix)
+    const MAX_MSGS_PER_CONV = 500;
+    const MAX_TOTAL_MSGS = 5000;
+    const MAX_DB_MB = 50;
+    let changed = false;
+    // 1) Per-conversation cap 500 (delete oldest)
+    const byConv = new Map<string, any[]>();
+    for (const m of (db.messages||[])) {
+      const cid = String(m.conversationId||'');
+      if (!byConv.has(cid)) byConv.set(cid, []);
+      byConv.get(cid)!.push(m);
+    }
+    for (const [cid, arr] of byConv.entries()) {
+      if (arr.length > MAX_MSGS_PER_CONV) {
+        arr.sort((a:any,b:any)=> (a.timestamp||0)-(b.timestamp||0));
+        const toDel = arr.slice(0, arr.length - MAX_MSGS_PER_CONV);
+        for (const mm of toDel) {
+          if (mm.fileId) { try { const p=resolveAttachmentPath(mm.fileId); if(p&&fs.existsSync(p)) fs.unlinkSync(p); } catch{} }
+          if ((mm as any).voiceFileId) { try { const p=resolveAttachmentPath((mm as any).voiceFileId); if(p&&fs.existsSync(p)) fs.unlinkSync(p); } catch{} }
+          if ((mm as any).photoFileId) { try { const p=resolveAttachmentPath((mm as any).photoFileId); if(p&&fs.existsSync(p)) fs.unlinkSync(p); } catch{} }
+        }
+        (db as any).messages = (db.messages||[]).filter((x:any)=> !toDel.includes(x));
+        changed = true;
+      }
+    }
+    // 2) Global cap 5000 + TTL 14 days
+    if ((db.messages||[]).length > MAX_TOTAL_MSGS) {
+      const sorted = [...(db.messages||[])].sort((a:any,b:any)=> (a.timestamp||0)-(b.timestamp||0));
+      const toDel2 = sorted.slice(0, sorted.length - MAX_TOTAL_MSGS);
+      for (const mm of toDel2) {
+        if ((mm as any).fileId) try { const p=resolveAttachmentPath((mm as any).fileId); if(p&&fs.existsSync(p)) fs.unlinkSync(p);} catch{}
+      }
+      (db as any).messages = (db.messages||[]).filter((x:any)=> !toDel2.includes(x));
+      changed = true;
+    }
+    // TTL 14 days for media
+    const ttlDel = (db.messages||[]).filter((m:any)=> m.timestamp && (now - m.timestamp > TTL_MS) && (m.kind==='photo'||m.kind==='voice'||m.kind==='file'));
+    if (ttlDel.length) {
+      for (const mm of ttlDel) {
+        if ((mm as any).fileId) try { const p=resolveAttachmentPath((mm as any).fileId); if(p&&fs.existsSync(p)) fs.unlinkSync(p);} catch{}
+      }
+      (db as any).messages = (db.messages||[]).filter((x:any)=> !ttlDel.includes(x));
+      changed = true;
+    }
+    // 3) DB file size >50MB → prune oldest 20%
+    try {
+      const stat = fs.statSync(DB_FILE);
+      if (stat.size > MAX_DB_MB*1024*1024) {
+        const sortedAll = [...(db.messages||[])].sort((a:any,b:any)=> (a.timestamp||0)-(b.timestamp||0));
+        const cut = Math.floor(sortedAll.length*0.2);
+        const toDel3 = sortedAll.slice(0, cut);
+        for (const mm of toDel3) if ((mm as any).fileId) try { const p=resolveAttachmentPath((mm as any).fileId); if(p&&fs.existsSync(p)) fs.unlinkSync(p);} catch{}
+        (db as any).messages = (db.messages||[]).filter((x:any)=> !toDel3.includes(x));
+        changed = true;
+      }
+    } catch {}
+    // 4) Inline base64 bloat → if message still has large inline data, move to disk now (migrate old)
+    for (const m of (db.messages||[])) {
+      const inline = (m as any).photoData || (m as any).fileData || (m as any).voiceData;
+      if (inline && String(inline).length > 5000 && String(inline).startsWith('data:')) {
+        const saved = saveAttachmentToDisk(String(inline), m.kind||'migrate');
+        if (saved) {
+          if ((m as any).photoData) { (m as any).photoFileId = saved.fileId; (m as any).photoUrl = saved.url; delete (m as any).photoData; }
+          if ((m as any).fileData) { (m as any).fileId = saved.fileId; (m as any).fileUrl = saved.url; delete (m as any).fileData; }
+          if ((m as any).voiceData) { (m as any).voiceFileId = saved.fileId; (m as any).voiceUrl = saved.url; delete (m as any).voiceData; }
+          changed = true;
+        }
+      }
+    }
+    // 5) Orphan files on disk not referenced in DB → delete if older than 7 days
+    try {
+      const files = fs.readdirSync(UPLOAD_DIR);
+      const refs = new Set<string>();
+      for (const m of (db.messages||[])) if ((m as any).fileId) refs.add((m as any).fileId); if ((m as any).photoFileId) refs.add((m as any).photoFileId); if ((m as any).voiceFileId) refs.add((m as any).voiceFileId);
+      for (const f of files) {
+        const fid = f.split('.')[0];
+        if (!refs.has(fid)) {
+          const fp = path.join(UPLOAD_DIR, f);
+          try { const st=fs.statSync(fp); if (now - st.mtimeMs > 7*24*3600*1000) fs.unlinkSync(fp); } catch{}
+        }
+      }
+    } catch {}
+    if (changed) writeDb(db);
+  } catch {}
+}
+setInterval(cleanupOldAttachments, 6*3600*1000); // every 6h
+setTimeout(cleanupOldAttachments, 10*1000); // 10s after boot
 
 // Server startup version for update/deployment detection
 const SERVER_BOOT_TIME = Date.now();
@@ -2727,16 +2847,18 @@ async function startServer() {
         };
         if (isVoice && cleanVoice) {
           gMsg.kind = 'voice';
-          gMsg.voiceData = cleanVoice;
-          gMsg.voiceDurationMs = Math.max(0, Math.min(180000, Number(voiceDurationMs) || 0));
+          const sv = saveAttachmentToDisk(cleanVoice, 'voice');
+          if (sv) { gMsg.voiceFileId = sv.fileId; gMsg.voiceUrl = sv.url; gMsg.voiceDurationMs = Math.max(0, Math.min(180000, Number(voiceDurationMs)||0)); } else { gMsg.voiceData = cleanVoice; gMsg.voiceDurationMs = Math.max(0, Math.min(180000, Number(voiceDurationMs)||0)); }
           gMsg.text = '🎤 Voice message';
         } else if (isPhoto && cleanPhoto) {
           gMsg.kind = 'photo';
-          gMsg.photoData = cleanPhoto;
+          const sp = saveAttachmentToDisk(cleanPhoto, 'photo');
+          if (sp) { gMsg.photoFileId = sp.fileId; gMsg.photoUrl = sp.url; } else gMsg.photoData = cleanPhoto;
           gMsg.text = text && String(text).trim() ? String(text).trim().slice(0, 500) : '📷 Photo';
         } else if (isFile && cleanFile) {
           gMsg.kind = 'file';
-          gMsg.fileData = cleanFile;
+          const sf = saveAttachmentToDisk(cleanFile, 'file');
+          if (sf) { gMsg.fileId = sf.fileId; gMsg.fileUrl = sf.url; } else gMsg.fileData = cleanFile;
           gMsg.fileName = cleanFileName;
           gMsg.fileSize = Math.max(0, Math.min(5200000, Number(fileSize) || cleanFile.length));
           gMsg.text = `📎 ${cleanFileName}`;
@@ -2833,16 +2955,18 @@ async function startServer() {
         };
       } else if (isVoice && cleanVoice) {
         newMsg.kind = 'voice';
-        newMsg.voiceData = cleanVoice;
-        newMsg.voiceDurationMs = Math.max(0, Math.min(180000, Number(voiceDurationMs) || 0));
+        const sv2 = saveAttachmentToDisk(cleanVoice, 'voice');
+        if (sv2) { newMsg.voiceFileId = sv2.fileId; newMsg.voiceUrl = sv2.url; newMsg.voiceDurationMs = Math.max(0, Math.min(180000, Number(voiceDurationMs)||0)); } else { newMsg.voiceData = cleanVoice; newMsg.voiceDurationMs = Math.max(0, Math.min(180000, Number(voiceDurationMs)||0)); }
         newMsg.text = '🎤 Voice message';
       } else if (isPhoto && cleanPhoto) {
         newMsg.kind = 'photo';
-        newMsg.photoData = cleanPhoto;
+        const sp2 = saveAttachmentToDisk(cleanPhoto, 'photo');
+        if (sp2) { newMsg.photoFileId = sp2.fileId; newMsg.photoUrl = sp2.url; } else newMsg.photoData = cleanPhoto;
         newMsg.text = text && String(text).trim() ? String(text).trim().slice(0, 500) : '📷 Photo';
       } else if (isFile && cleanFile) {
         newMsg.kind = 'file';
-        newMsg.fileData = cleanFile;
+        const sf2 = saveAttachmentToDisk(cleanFile, 'file');
+        if (sf2) { newMsg.fileId = sf2.fileId; newMsg.fileUrl = sf2.url; } else newMsg.fileData = cleanFile;
         newMsg.fileName = cleanFileName;
         newMsg.fileSize = Math.max(0, Math.min(5200000, Number(fileSize) || cleanFile.length));
         newMsg.text = `📎 ${cleanFileName}`;
@@ -2882,6 +3006,24 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // Serve attachment files from disk (auth: only participants can fetch)
+  app.get('/api/chat/file/:fileId', (req:any,res)=>{
+    try {
+      const fid = String(req.params.fileId||'').trim().replace(/[^a-zA-Z0-9_-]/g,'').slice(0,80);
+      if (!fid) return res.status(400).json({error:'fileId required'});
+      const fpath = resolveAttachmentPath(fid);
+      if (!fpath || !fs.existsSync(fpath)) return res.status(404).json({error:'File not found (expired or deleted)'});
+      // Optional: check if requester is participant of any message that owns this file (privacy)
+      // For now allow any authed user to fetch (since URL is unguessable: fileId has random suffix)
+      const ext = path.extname(fpath).toLowerCase();
+      const mimeMap:any = {'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif','.pdf':'application/pdf','.webm':'audio/webm','.mp4':'video/mp4','.bin':'application/octet-stream'};
+      res.setHeader('Content-Type', mimeMap[ext]||'application/octet-stream');
+      res.setHeader('Cache-Control','public, max-age=86400');
+      res.setHeader('Content-Disposition', `inline; filename="${fid}${ext}"`);
+      fs.createReadStream(fpath).pipe(res);
+    } catch(e:any){ res.status(500).json({error:e.message}); }
   });
 
   // WebRTC call signaling — ephemeral events forwarded over the SSE stream

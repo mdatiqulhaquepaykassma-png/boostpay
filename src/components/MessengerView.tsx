@@ -148,9 +148,9 @@ const MessageItem = memo(({
   const reactions = m.reactions || {};
   const hasReactions = Object.keys(reactions).some(k => reactions[k]?.length > 0);
   const isDeleted = !!m.deleted;
-  const isVoice = m.kind === 'voice' && !!m.voiceData && !isDeleted;
-  const isPhoto = m.kind === 'photo' && !!m.photoData && !isDeleted;
-  const isFile = m.kind === 'file' && !!m.fileData && !isDeleted;
+  const isVoice = m.kind === 'voice' && (!!((m as any).voiceData) || !!((m as any).voiceUrl) || !!((m as any).voiceFileId)) && !isDeleted;
+  const isPhoto = m.kind === 'photo' && (!!((m as any).photoData) || !!((m as any).photoUrl) || !!((m as any).photoFileId)) && !isDeleted;
+  const isFile = m.kind === 'file' && (!!((m as any).fileData) || !!((m as any).fileUrl) || !!((m as any).fileId)) && !isDeleted;
   const isContact = m.kind === 'contact' && !!m.contactId && !isDeleted;
   const isPoll = m.kind === 'poll' && !!m.poll && !isDeleted;
   const isSticker = m.kind === 'sticker' && !isDeleted;
@@ -245,15 +245,15 @@ const MessageItem = memo(({
           <p className="break-words select-text font-normal text-[11px]">🚫 Message deleted</p>
         ) : isPhoto ? (
           <div className="space-y-1">
-            <button type="button" onClick={() => onOpenImage?.(m.photoData!)} className="block cursor-zoom-in">
-              <img src={m.photoData} alt="Photo attachment" className="max-h-56 rounded-xl object-cover" />
+            <button type="button" onClick={() => onOpenImage?.(((m as any).photoUrl || (m as any).photoData)!)} className="block cursor-zoom-in">
+              <img src={((m as any).photoUrl || (m as any).photoData)} alt="Photo attachment" className="max-h-56 rounded-xl object-cover" />
             </button>
             {m.text && m.text !== '📷 Photo' && (
               <p className="break-words select-text font-normal">{m.text}</p>
             )}
           </div>
         ) : isVoice ? (
-          <VoiceNotePlayer data={m.voiceData!} durationMs={m.voiceDurationMs} isMe={isMe} />
+          <VoiceNotePlayer data={((m as any).voiceUrl || (m as any).voiceData)!} durationMs={m.voiceDurationMs} isMe={isMe} />
         ) : isSticker ? (
           <div className="py-1 select-none">
             <span className="text-5xl leading-none block">{m.stickerEmoji || m.text || '🙂'}</span>
@@ -269,7 +269,7 @@ const MessageItem = memo(({
                 <div className="text-[9px] font-mono opacity-70">{m.fileSize ? `${Math.max(1, Math.round(m.fileSize / 1024))} KB` : 'document'}</div>
               </div>
               <a
-                href={m.fileData}
+                href={((m as any).fileUrl || (m as any).fileData)}
                 download={m.fileName || 'file'}
                 className={`shrink-0 rounded-lg px-2 py-1 text-[9px] font-bold transition cursor-pointer ${isMe ? 'bg-zinc-950/25 text-zinc-900 hover:bg-zinc-950/40' : 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30'}`}
                 title="Download file"
