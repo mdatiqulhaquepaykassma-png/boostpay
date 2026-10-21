@@ -556,16 +556,7 @@ const IpBlockManager: FC = () => {
     }catch(e:any){ setErr(e.message); }
     setLoading(false);
   },[]);
-  const loadEmailLogs = useCallback(async (q:string, page:number)=>{
-    setEmailLogsLoading(true);
-    try{
-      const d:any = await BoostPayStore.adminApi(`/api/admin/smtp/logs?limit=50&offset=${page*50}&q=${encodeURIComponent(q)}`);
-      setEmailLogs(d.logs||[]); setEmailLogsTotal(d.total||0);
-    }catch(e:any){ /* ignore */ }
-    setEmailLogsLoading(false);
-  },[]);
   useEffect(()=>{ load(); },[load]);
-  useEffect(()=>{ loadEmailLogs(emailLogsQ, emailLogsPage); },[loadEmailLogs, emailLogsQ, emailLogsPage]);
   const add = async()=>{
     if(!ip.trim()){ setErr('IP required'); return; }
     setErr(''); setMsg('');
@@ -975,6 +966,15 @@ export const SmtpAdminView: FC = () => {
     setLoading(false);
   }, []);
   useEffect(()=>{ load(); },[load]);
+  const loadEmailLogs = useCallback(async (q:string, page:number)=>{
+    setEmailLogsLoading(true);
+    try{
+      const d:any = await BoostPayStore.adminApi(`/api/admin/smtp/logs?limit=50&offset=${page*50}&q=${encodeURIComponent(q)}`);
+      setEmailLogs(d.logs||[]); setEmailLogsTotal(d.total||0);
+    }catch(e:any){ /* ignore */ }
+    setEmailLogsLoading(false);
+  },[]);
+  useEffect(()=>{ loadEmailLogs(emailLogsQ, emailLogsPage); },[loadEmailLogs, emailLogsQ, emailLogsPage]);
 
   const addAccount = async () => {
     if(!addEmail.includes('@') || !addPass.trim()){ setErr('Email + App password required'); return; }
