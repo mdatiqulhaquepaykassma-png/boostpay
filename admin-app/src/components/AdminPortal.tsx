@@ -339,6 +339,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   useEffect(()=>{
     if (txSearch || txFilter) setTxPage(0);
   }, [txSearch, txFilter]);
+  useEffect(()=>{
+    if (auditSearch || auditFilter) setAuditPage(0);
+  }, [auditSearch, auditFilter]);
   useEffect(() => {
     if (adminSession?.isLoggedIn) {
       refreshStatsOnly();
@@ -847,6 +850,10 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     if (auditFilter === 'SYSTEM') return log.action.includes('SYSTEM') || log.action.includes('CONFIG');
     return true;
   });
+  const [auditPage, setAuditPage] = useState(0);
+  const auditPageSize = 25;
+  const paginatedAuditLogs = filteredAuditLogs.slice(auditPage*auditPageSize, (auditPage+1)*auditPageSize);
+  const totalAuditPages = Math.max(1, Math.ceil(filteredAuditLogs.length / auditPageSize));
 
   const [usersPage, setUsersPage] = useState(0);
   const usersPageSize = 25;
@@ -2148,7 +2155,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60">
-                    {filteredAuditLogs.map(log => {
+                    {paginatedAuditLogs.map(log => {
                       const isFreeze = log.action.includes('FREEZE');
                       const isTreasury = log.action.includes('TREASURY');
                       const isPassword = log.action.includes('PASSWORD');
@@ -2190,7 +2197,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                         </tr>
                       );
                     })}
-                    {filteredAuditLogs.length === 0 && (
+                    {paginatedAuditLogs.length === 0 && filteredAuditLogs.length === 0 && (
                       <tr>
                         <td colSpan={5} className="px-4 py-8 text-center text-zinc-500 font-sans">
                           No audit entries match the active search/filter criteria.
@@ -2203,7 +2210,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             </div>
             {/* Mobile audit cards — Android */}
             <div className="sm:hidden space-y-2">
-              {filteredAuditLogs.slice(0, 30).map(log => (
+              {paginatedAuditLogs.map(log => (
                 <div key={log.id} className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3">
                   <div className="flex items-center justify-between gap-2">
                     <span className={`rounded-lg px-2 py-0.5 text-[10px] font-bold border ${log.action.includes('FREEZE') ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' : log.action.includes('TREASURY') ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-zinc-800 text-amber-400 border-zinc-700'}`}>{log.action}</span>
@@ -2216,7 +2223,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   </div>
                 </div>
               ))}
-              {filteredAuditLogs.length===0 && <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-center text-xs text-zinc-500">No audit entries</div>}
+              {paginatedAuditLogs.length===0 && filteredAuditLogs.length===0 && <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-center text-xs text-zinc-500">No audit entries</div>}
+            </div>
+            {/* Audit pagination — mobile/shared */}
+            <div className="flex items-center justify-between gap-2 mt-3 px-1">
+              <span className="text-zinc-500 font-mono text-[11px]">Page {auditPage+1} / {totalAuditPages} — {filteredAuditLogs.length} logs</span>
+              <div className="flex items-center gap-2">
+                <button disabled={auditPage===0} onClick={()=>setAuditPage(p=>Math.max(0,p-1))} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700 text-xs">Prev</button>
+                <button disabled={auditPage+1>=totalAuditPages} onClick={()=>setAuditPage(p=>p+1)} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700 text-xs">Next</button>
+              </div>
             </div>
           </div>
         )}
