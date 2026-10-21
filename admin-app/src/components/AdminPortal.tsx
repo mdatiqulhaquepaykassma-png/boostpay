@@ -1034,12 +1034,58 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         </div>
       </header>
 
-      {/* Admin Navigation Tabs — desktop only, mobile uses bottom nav */}
+      {/* Admin Navigation Tabs — desktop only, mobile uses bottom nav — FIXED: desktop scroll with drag + wheel + arrow buttons */}
       <div className="hidden lg:block sticky top-[61px] z-30 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-md">
-        <div className="relative max-w-7xl mx-auto">
-          <div className="pointer-events-none absolute left-0 top-0 bottom-0 w-6 bg-gradient-to-r from-zinc-950 to-transparent z-10 hidden sm:block" />
-          <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-6 bg-gradient-to-l from-zinc-950 to-transparent z-10 hidden sm:block" />
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar snap-x px-4 sm:px-6 lg:px-8 py-2.5">
+        <div className="relative max-w-7xl mx-auto flex items-center">
+          <button
+            type="button"
+            onClick={() => document.getElementById('admin-tab-scroll')?.scrollBy({ left: -240, behavior: 'smooth' })}
+            className="hidden lg:flex shrink-0 ml-2 mr-1 h-8 w-8 items-center justify-center rounded-full border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white hover:border-zinc-600 hover:bg-zinc-800 transition cursor-pointer z-20"
+            title="Scroll left"
+            aria-label="Scroll tabs left"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+          <div className="pointer-events-none absolute left-12 top-0 bottom-0 w-6 bg-gradient-to-r from-zinc-950 to-transparent z-10 hidden sm:block" />
+          <div className="pointer-events-none absolute right-12 top-0 bottom-0 w-6 bg-gradient-to-l from-zinc-950 to-transparent z-10 hidden sm:block" />
+          <div
+            id="admin-tab-scroll"
+            className="flex-1 flex items-center gap-1.5 overflow-x-auto scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent snap-x px-2 py-2.5 scroll-smooth"
+            style={{ scrollbarWidth: 'thin', scrollbarColor: '#3f3f46 transparent' }}
+            onWheel={(e) => {
+              // vertical wheel → horizontal scroll on desktop (fixes mouse wheel not scrolling)
+              if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                const el = e.currentTarget as HTMLElement;
+                if ((e.deltaY > 0 && el.scrollLeft + el.clientWidth < el.scrollWidth - 2) || (e.deltaY < 0 && el.scrollLeft > 2)) {
+                  e.preventDefault();
+                  el.scrollLeft += e.deltaY;
+                }
+              }
+            }}
+            onMouseDown={(e) => {
+              const el = e.currentTarget as HTMLElement;
+              const startX = e.pageX - el.offsetLeft;
+              const scrollLeft = el.scrollLeft;
+              let isDown = true;
+              el.style.cursor = 'grabbing';
+              el.style.userSelect = 'none';
+              const onMove = (ev: MouseEvent) => {
+                if (!isDown) return;
+                ev.preventDefault();
+                const x = ev.pageX - el.offsetLeft;
+                el.scrollLeft = scrollLeft - (x - startX);
+              };
+              const onUp = () => {
+                isDown = false;
+                el.style.cursor = 'grab';
+                el.style.removeProperty('user-select');
+                window.removeEventListener('mousemove', onMove);
+                window.removeEventListener('mouseup', onUp);
+              };
+              window.addEventListener('mousemove', onMove);
+              window.addEventListener('mouseup', onUp);
+            }}
+          >
 
           <button
             onClick={() => setActiveTab('OVERVIEW')}
@@ -1212,6 +1258,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             <span>Admin Roles</span>
           </button>
         </div>
+          <button
+            type="button"
+            onClick={() => document.getElementById('admin-tab-scroll')?.scrollBy({ left: 240, behavior: 'smooth' })}
+            className="hidden lg:flex shrink-0 ml-1 mr-2 h-8 w-8 items-center justify-center rounded-full border border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-white hover:border-zinc-600 hover:bg-zinc-800 transition cursor-pointer z-20"
+            title="Scroll right"
+            aria-label="Scroll tabs right"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
         </div>
       </div>
 
