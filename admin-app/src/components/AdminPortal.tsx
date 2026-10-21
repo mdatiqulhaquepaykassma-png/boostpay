@@ -318,6 +318,13 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
       }
     } catch {}
   };
+  // pagination states — must be before fetch fns (avoid TDZ blackout)
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [txTotal, setTxTotal] = useState(0);
+  const [auditPage, setAuditPage] = useState(0);
+  const [txPage, setTxPage] = useState(0);
+  const auditPageSize = 25;
+  const txPageSize = 25;
   // super fast per-page fetch — only 25 rows per request, Next = realtime fetch
   const fetchAuditPage = async (page:number, search:string, filter:string) => {
     try{
@@ -853,12 +860,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     });
 
   // Lazy load notice for admin — all data not loaded at once, paginated per tab
-  // Filter Audit Logs — now server-side (auditLogs already paginated+filtered, keep local filter as fallback)
-  const [auditTotal, setAuditTotal] = useState(0);
-  const [txTotal, setTxTotal] = useState(0);
   const filteredAuditLogs = auditLogs; // server already filtered/searched
-  const [auditPage, setAuditPage] = useState(0);
-  const auditPageSize = 25;
   const paginatedAuditLogs = auditLogs; // already 25 per page from server
   const totalAuditPages = Math.max(1, Math.ceil((auditTotal || filteredAuditLogs.length) / auditPageSize));
 
@@ -867,8 +869,6 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const paginatedUsers = filteredUsers.slice(usersPage*usersPageSize, (usersPage+1)*usersPageSize);
   const totalUsersPages = Math.max(1, Math.ceil(filteredUsers.length / usersPageSize));
   // Filter Transactions — now server-side (transactions already paginated+filtered)
-  const [txPage, setTxPage] = useState(0);
-  const txPageSize = 25;
   const filteredTransactions = transactions; // server already filtered/searched
   const paginatedTransactions = transactions; // already 25 per page from server
   const totalTxPages = Math.max(1, Math.ceil((txTotal || filteredTransactions.length) / txPageSize));
