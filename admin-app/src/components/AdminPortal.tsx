@@ -1086,7 +1086,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             }`}
           >
             <FileText className="w-4 h-4" />
-            <span>Audit Action Log ({auditTotal || auditLogs.length})</span>
+            <span>Audit Action Log</span>
           </button>
 
           <button
@@ -1098,7 +1098,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             }`}
           >
             <ArrowRightLeft className="w-4 h-4" />
-            <span>Transactions Ledger ({txTotal || transactions.length})</span>
+            <span>Transactions Ledger</span>
           </button>
 
           <button
