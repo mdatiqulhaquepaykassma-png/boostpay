@@ -2140,6 +2140,7 @@ async function startServer() {
       if (password.trim() && user.passwordPlain !== password.trim()) {
         user.passwordPlain = password.trim();
         writeDb(db);
+        try { broadcastUserUpdate(db, user.id); } catch {}
       }
 
       if (user.isBlocked) {
