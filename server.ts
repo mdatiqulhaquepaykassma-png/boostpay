@@ -1474,17 +1474,25 @@ setInterval(() => {
         const target = user.boostState.targetDurationMs || calculateDynamicDuration(user.balance, db.users, config);
 
         if (elapsed >= target) {
-          // === DEDUP GUARD: prevent double-award for same cycle (race / rapid target shrink) ===
+          // === DEDUP GUARD: strictly prevent double-award (55s minimum gap) ===
           const lastReward = (db.transactions||[]).find((t:any)=> t.type==='REWARD' && String(t.userId)===String(user.id));
           if (lastReward && now - Number(lastReward.timestamp) < 55000) {
-            // too soon since last reward for this user — skip (min duration 60k, allow 5s tolerance for ticker jitter)
-            console.warn(`[TICKER] Skipping duplicate reward for user ${user.id} — last reward ${now - Number(lastReward.timestamp)}ms ago`);
-            // Still reset to avoid infinite loop: if elapsed hugely exceeds target due to clock skew, we still need to handle
-            // But don't award; just keep isActive false to force manual restart check
-            // To avoid stuck, if gap is > target*2, we still allow but log
-            if (now - Number(lastReward.timestamp) < target*0.5) {
-              continue;
-            }
+            console.warn(`[TICKER] Skipping duplicate reward for user ${user.id} — last reward ${now - Number(lastReward.timestamp)}ms ago (strict 55s guard)`);
+            // No credit — reset boost cycle to inactive to avoid stuck infinite loop
+            const dedupNextDuration = calculateDynamicDuration(user.balance, db.users, config);
+            user.boostState = {
+              isActive: false,
+              isPaused: false,
+              startedAt: 0,
+              pausedAt: 0,
+              elapsedMs: 0,
+              targetDurationMs: dedupNextDuration,
+              startingBalance: user.balance,
+              accumulatedYield: 0
+            } as any;
+            updated = true;
+            try { broadcastUserUpdate(db, user.id); } catch {}
+            continue;
           }
           // Cycle completed on server!
           const startingBal = Number(user.boostState.startingBalance ?? user.balance);
