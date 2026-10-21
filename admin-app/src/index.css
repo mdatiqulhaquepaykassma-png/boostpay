@@ -3,28 +3,27 @@
 html {
   height: auto;
   min-height: 100%;
-  overflow-y: auto;
   overflow-x: hidden;
+  overflow-y: auto;
   background: #09090b;
   scroll-behavior: smooth;
   -webkit-overflow-scrolling: touch;
 }
 body {
   height: auto;
-  min-height: 100vh;
-  min-height: 100dvh;
-  overflow-y: auto;
+  min-height: 100%;
   overflow-x: hidden;
+  overflow-y: visible;
   background: #09090b;
   color: #fafafa;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  overscroll-behavior-y: contain;
 }
 #root {
   min-height: 100vh;
   min-height: 100dvh;
   background: #09090b;
+  overflow: visible;
 }
 
 /* Custom scrollbar for admin tables & nav */
@@ -59,9 +58,6 @@ body {
   .admin-table th, .admin-table td { font-size: 11px; padding: 10px 12px; }
 }
 
-/* Ensure sticky works - no parent overflow hidden */
-.sticky-parent { overflow: visible; }
-
 /* Mobile bottom nav safe area */
 .mobile-bottom-nav {
   padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
@@ -69,8 +65,8 @@ body {
   -webkit-backdrop-filter: blur(16px);
 }
 
-/* Prevent pull-to-refresh trapping on Android */
-.main-scrollable {
-  overscroll-behavior-y: auto;
-  -webkit-overflow-scrolling: touch;
+/* Ensure outer flex does not trap scroll on Android */
+.min-h-screen.flex.flex-col {
+  min-height: 100vh;
+  min-height: 100dvh;
 }
