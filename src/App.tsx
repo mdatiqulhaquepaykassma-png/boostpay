@@ -400,7 +400,7 @@ export default function App() {
         </div>
       ) : (
         /* 3. LOGGED-IN MAIN USER INTERFACE */
-        <div className={`flex-1 min-h-0 flex flex-col max-w-md w-full mx-auto ${activeTab === 'MESSENGER' ? 'h-[100dvh] max-h-screen overflow-hidden pb-[calc(58px+env(safe-area-inset-bottom))]' : 'pb-[calc(5rem+env(safe-area-inset-bottom))]'}`}>
+        <div className={`flex-1 min-h-0 flex flex-col max-w-md w-full mx-auto ${activeTab === 'MESSENGER' ? 'h-[100dvh] max-h-screen overflow-hidden pb-[calc(58px+env(safe-area-inset-bottom))]' : 'pb-[calc(7rem+env(safe-area-inset-bottom))]'}`}>
           {/* Gentle new-version prompt */}
           {updateAvailable && (
             <div className="mx-4 mt-2 flex items-center justify-between gap-3 rounded-2xl border border-sky-500/30 bg-sky-950/50 px-4 py-2.5">

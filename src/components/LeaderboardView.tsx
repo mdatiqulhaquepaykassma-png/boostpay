@@ -322,7 +322,7 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
   }, []);
 
   return (
-    <div className="w-full max-w-4xl mx-auto px-4 py-4 space-y-4 text-zinc-100">
+    <div className="w-full max-w-4xl mx-auto px-4 py-4 pb-28 sm:pb-4 space-y-4 text-zinc-100">
       {/* 1. STICKY SEARCH BAR AT TOP OF LEADERBOARD VIEW */}
       <div className="sticky top-0 z-20 bg-zinc-950/95 backdrop-blur-md pt-1 pb-3 -mx-4 px-4 border-b border-zinc-800/80 shadow-md">
         <div className="relative flex items-center">
