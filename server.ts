@@ -2341,16 +2341,29 @@ async function startServer() {
 
       // Union-merge transactions by id so a stale client push can never wipe
       // server-generated rows (rewards, transfer alerts, admin credits).
+      // SECURITY FIX: REWARD/REFERRAL_COMMISSION are server-authoritative — never accept them from client
+      // (prevents re-introducing deleted duplicate rewards via sync).
+      const SERVER_ONLY_TX_TYPES = new Set(['REWARD','REFERRAL_COMMISSION','YIELD_REWARD','ADMIN_CREDIT','ADMIN_DEBIT']);
       const txMap = new Map<string, any>();
       for (const t of (current.transactions || [])) {
         if (t && t.id !== undefined) txMap.set(String(t.id), t);
       }
       if (Array.isArray(incoming.transactions)) {
         for (const t of incoming.transactions) {
-          if (t && t.id !== undefined) txMap.set(String(t.id), t);
+          if (t && t.id !== undefined) {
+            // Block server-only types from client push
+            if (SERVER_ONLY_TX_TYPES.has(String(t.type))) continue;
+            // Also block any incoming TX with id already deleted on server but gap would be duplicate
+            // (client may still hold old deleted dups in localStorage)
+            if (!txMap.has(String(t.id))) {
+              txMap.set(String(t.id), t);
+            }
+          }
         }
       }
-      const transactionsToSave = Array.from(txMap.values())
+      // Filter out any remaining client-injected REWARD/COMMISSION that slipped via older clients
+      let transactionsToSave = Array.from(txMap.values())
+        .filter((t:any)=> !SERVER_ONLY_TX_TYPES.has(String(t.type)) || (current.transactions||[]).some((ct:any)=> String(ct.id)===String(t.id)))
         .sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
 
       // Non-destructive merge of conversations
@@ -2388,6 +2401,8 @@ async function startServer() {
       const messagesToSave = Array.from(msgMap.values()).sort((a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0));
 
       // Union-merge notifications by id ("read" state is sticky) — server rows survive
+      // SECURITY FIX: server-generated notifications (YIELD/REFERRAL) cannot be re-added by client
+      const SERVER_ONLY_NOTIF_TYPES = new Set(['YIELD_REWARD','REFERRAL_COMMISSION','REFERRAL_JOINED']);
       const notifMap = new Map<string, any>();
       for (const n of (current.notifications || [])) {
         if (n && n.id !== undefined) notifMap.set(String(n.id), n);
@@ -2395,11 +2410,14 @@ async function startServer() {
       if (Array.isArray(incoming.notifications)) {
         for (const n of incoming.notifications) {
           if (!n || n.id === undefined) continue;
+          // Block server-only notif types from client push (prevents re-adding deleted dup notifs)
+          if (SERVER_ONLY_NOTIF_TYPES.has(String(n.type))) continue;
           const key = String(n.id);
           const existing = notifMap.get(key);
           if (existing) {
             notifMap.set(key, { ...n, isRead: !!(n.isRead || existing.isRead) });
           } else {
+            // Only add client-generated notifs if not server-only
             notifMap.set(key, n);
           }
         }
