@@ -49,6 +49,30 @@ import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, Databa
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
 
+const formatCreateDate = (ts?: number) => {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+};
+const formatRelative = (ts?: number) => {
+  if (!ts) return '';
+  const diff = Date.now() - ts;
+  const days = Math.floor(diff / 86400000);
+  if (days <= 0) {
+    const hrs = Math.floor(diff / 3600000);
+    if (hrs <= 0) {
+      const mins = Math.floor(diff / 60000);
+      return `${mins}m ago`;
+    }
+    return `${hrs}h ago`;
+  }
+  if (days === 1) return 'Yesterday';
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(months/12)}y ago`;
+};
+
 interface Props {
   onBack?: () => void;
 }
@@ -1428,6 +1452,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   <thead>
                     <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
                       <th className="px-4 py-3 font-semibold">User ID</th>
+                      <th className="px-4 py-3 font-semibold">Created</th>
                       <th className="px-4 py-3 font-semibold">Balance</th>
                       <th className="px-4 py-3 font-semibold">Profit</th>
                       <th className="px-4 py-3 font-semibold">Compounding</th>
@@ -1448,6 +1473,10 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                         >
                           <td className="px-4 py-3 font-bold text-amber-400">
                             #{u.id}
+                          </td>
+                          <td className="px-4 py-3 text-zinc-300 font-mono text-[11px] whitespace-nowrap" title={u.createdAt ? new Date(u.createdAt).toLocaleString() : ''}>
+                            <div className="leading-tight">{u.createdAt ? new Date(u.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</div>
+                            <div className="text-[10px] text-zinc-500">{u.createdAt ? formatRelative(u.createdAt) : ''}</div>
                           </td>
                           <td className="px-4 py-3 font-bold text-emerald-400 tabular-nums">
                             ${formatPrecisionAmount(u.balance, 8)}
@@ -1555,6 +1584,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <div>
                         <div className="text-xs font-bold text-white">User #{u.id}</div>
                         <div className="text-[10px] text-zinc-400 truncate max-w-[160px]">{u.email || `user${u.id}@boostpay.app`}</div>
+                        <div className="text-[9px] font-mono text-sky-400">{u.createdAt ? new Date(u.createdAt).toLocaleDateString() + ' • ' + formatRelative(u.createdAt) : ''}</div>
                       </div>
                     </div>
                     <div className={`rounded-full px-2 py-0.5 text-[10px] font-bold border ${u.isFrozen ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40' : u.isBlocked ? 'bg-red-500/20 text-red-400 border-red-500/30' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'}`}>{u.isFrozen ? 'FROZEN' : u.isBlocked ? 'SUSPENDED' : 'ACTIVE'}</div>
@@ -1648,6 +1678,74 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     >
                       Close
                     </button>
+                  </div>
+                </div>
+
+                {/* Account Details — create date + all info */}
+                <div className="rounded-2xl border border-sky-500/25 bg-sky-950/10 p-4">
+                  <h4 className="text-xs font-bold text-white flex items-center gap-2 mb-3">
+                    <Clock className="w-4 h-4 text-sky-400" /> Account Details — Full Info
+                    <span className="rounded-full bg-sky-500/15 border border-sky-500/30 px-2 py-0.5 text-[9px] font-mono text-sky-300">Created {selectedUser.createdAt ? new Date(selectedUser.createdAt).toLocaleDateString() : '—'}</span>
+                  </h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">User ID</div>
+                      <div className="font-mono font-bold text-amber-400">#{selectedUser.id}</div>
+                      <div className="text-[10px] text-zinc-500 mt-0.5">Numerical account identifier</div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Created At</div>
+                      <div className="font-mono text-white">{selectedUser.createdAt ? new Date(selectedUser.createdAt).toLocaleString() : '—'}</div>
+                      <div className="text-[10px] text-sky-400">{selectedUser.createdAt ? formatRelative(selectedUser.createdAt) + ' • ' + formatCreateDate(selectedUser.createdAt) : ''}</div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Account Age</div>
+                      <div className="font-mono text-white">{selectedUser.createdAt ? formatRelative(selectedUser.createdAt) : '—'}</div>
+                      <div className="text-[10px] text-zinc-500">{selectedUser.createdAt ? Math.floor((Date.now()-selectedUser.createdAt)/86400000) + ' days' : ''}</div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Email</div>
+                      <div className="text-white font-mono truncate">{selectedUser.email || '—'}</div>
+                      <div className="text-[10px] text-zinc-500 truncate">{selectedUser.email || 'No email set'}</div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Balance</div>
+                      <div className="font-mono font-bold text-emerald-400">${formatPrecisionAmount(selectedUser.balance, 8)}</div>
+                      <div className="text-[10px] text-zinc-500">Available + boosting base</div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Lifetime Profit</div>
+                      <div className="font-mono font-bold text-amber-400">+${formatPrecisionAmount(selectedUser.lifetimeProfit||0, 8)}</div>
+                      <div className="text-[10px] text-zinc-500">Total rewards earned</div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Status</div>
+                      <div className="flex flex-wrap gap-1.5 mt-1">
+                        {selectedUser.isFrozen ? <span className="rounded-full bg-cyan-500/20 border border-cyan-500/30 px-2 py-0.5 text-[10px] font-bold text-cyan-300">FROZEN</span> : <span className="rounded-full bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-[10px] text-emerald-400">ACTIVE</span>}
+                        {selectedUser.isBlocked && <span className="rounded-full bg-red-500/20 border border-red-500/30 px-2 py-0.5 text-[10px] font-bold text-red-400">BLOCKED</span>}
+                        {selectedUser.isTempLocked && <span className="rounded-full bg-amber-500/20 border border-amber-500/30 px-2 py-0.5 text-[10px] font-bold text-amber-400">TEMP LOCKED</span>}
+                        {!selectedUser.isFrozen && !selectedUser.isBlocked && !selectedUser.isTempLocked && <span className="rounded-full bg-zinc-800 border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-400">OK</span>}
+                      </div>
+                      <div className="text-[10px] text-zinc-500 mt-1 truncate">{selectedUser.frozenReason || (selectedUser.isFrozen ? 'Frozen' : 'No freeze')}</div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Anti-Phishing Code</div>
+                      <div className="font-mono text-white">{(selectedUser as any).antiPhishingCode || '—'}</div>
+                      <div className="text-[10px] text-zinc-500">Shown in alerts</div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 md:col-span-2 lg:col-span-3">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Boost State — Full</div>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] font-mono">
+                        <div><span className="text-zinc-500">Active:</span> <span className={selectedUser.boostState?.isActive ? 'text-emerald-400 font-bold' : 'text-zinc-400'}>{selectedUser.boostState?.isActive ? 'Yes' : 'No'}</span></div>
+                        <div><span className="text-zinc-500">Paused:</span> <span className={selectedUser.boostState?.isPaused ? 'text-amber-400 font-bold' : 'text-zinc-400'}>{selectedUser.boostState?.isPaused ? 'Yes' : 'No'}</span></div>
+                        <div><span className="text-zinc-500">Started:</span> <span className="text-white">{selectedUser.boostState?.startedAt ? new Date(selectedUser.boostState.startedAt).toLocaleString() : '—'}</span></div>
+                        <div><span className="text-zinc-500">Target:</span> <span className="text-amber-400">{Math.round((selectedUser.boostState?.targetDurationMs||0)/60000)}m</span></div>
+                        <div><span className="text-zinc-500">Elapsed:</span> <span className="text-sky-400">{Math.round((selectedUser.boostState?.elapsedMs||0)/1000)}s</span></div>
+                        <div><span className="text-zinc-500">Yield:</span> <span className="text-emerald-400">${formatPrecisionAmount(selectedUser.boostState?.accumulatedYield||0, 8)}</span></div>
+                        <div><span className="text-zinc-500">Start Bal:</span> <span className="text-white">${formatPrecisionAmount(selectedUser.boostState?.startingBalance||0, 2)}</span></div>
+                        <div><span className="text-zinc-500">PausedAt:</span> <span className="text-zinc-400">{selectedUser.boostState?.pausedAt ? new Date(selectedUser.boostState.pausedAt).toLocaleString() : '—'}</span></div>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -1897,6 +1995,12 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   <div className="flex-1 overflow-y-auto overscroll-contain p-4 pb-8 space-y-3 touch-pan-y" style={{ WebkitOverflowScrolling: 'touch' } as any}>
                     {mobileUserTab==='INFO' && (
                       <div className="space-y-3">
+                        <div className="rounded-2xl border border-sky-500/20 bg-sky-950/20 p-3">
+                          <div className="text-[9px] font-mono uppercase text-sky-400 mb-1">Account Created</div>
+                          <div className="text-xs font-mono font-bold text-white">{selectedUser.createdAt ? new Date(selectedUser.createdAt).toLocaleString() : '—'}</div>
+                          <div className="text-[10px] text-sky-400">{selectedUser.createdAt ? formatRelative(selectedUser.createdAt) + ' (' + Math.floor((Date.now()-selectedUser.createdAt)/86400000) + ' days ago)' : ''}</div>
+                          <div className="text-[10px] text-zinc-500 mt-1">User #{selectedUser.id} • ID #{selectedUser.id}</div>
+                        </div>
                         <div className="grid grid-cols-2 gap-2">
                           <div className="rounded-2xl bg-zinc-950 border border-zinc-800 p-3 text-center">
                             <div className="text-[10px] text-zinc-500 uppercase">Balance</div>
