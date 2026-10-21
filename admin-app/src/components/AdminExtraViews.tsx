@@ -556,7 +556,16 @@ const IpBlockManager: FC = () => {
     }catch(e:any){ setErr(e.message); }
     setLoading(false);
   },[]);
+  const loadEmailLogs = useCallback(async (q:string, page:number)=>{
+    setEmailLogsLoading(true);
+    try{
+      const d:any = await BoostPayStore.adminApi(`/api/admin/smtp/logs?limit=50&offset=${page*50}&q=${encodeURIComponent(q)}`);
+      setEmailLogs(d.logs||[]); setEmailLogsTotal(d.total||0);
+    }catch(e:any){ /* ignore */ }
+    setEmailLogsLoading(false);
+  },[]);
   useEffect(()=>{ load(); },[load]);
+  useEffect(()=>{ loadEmailLogs(emailLogsQ, emailLogsPage); },[loadEmailLogs, emailLogsQ, emailLogsPage]);
   const add = async()=>{
     if(!ip.trim()){ setErr('IP required'); return; }
     setErr(''); setMsg('');
@@ -949,6 +958,11 @@ export const SmtpAdminView: FC = () => {
   const [cfgForm, setCfgForm] = useState<any>(null);
   const [savingCfg, setSavingCfg] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
+  const [emailLogs, setEmailLogs] = useState<any[]>([]);
+  const [emailLogsTotal, setEmailLogsTotal] = useState(0);
+  const [emailLogsQ, setEmailLogsQ] = useState('');
+  const [emailLogsPage, setEmailLogsPage] = useState(0);
+  const [emailLogsLoading, setEmailLogsLoading] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1157,6 +1171,45 @@ export const SmtpAdminView: FC = () => {
           </div>
         )}
         <p className="text-[10px] text-zinc-500 mt-3">Full audit: every SMTP add/update/delete/test is audit-logged (Admin → Audit Log).</p>
+      </div>
+      {/* Full Email Logs — full details */}
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <h3 className="text-xs font-bold text-white flex items-center gap-2"><MailCheck className="w-4 h-4 text-sky-400"/> Email Monitoring — Full Details ({emailLogsTotal} logs)</h3>
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-2.5 top-1/2 -translate-y-1/2"/>
+              <input value={emailLogsQ} onChange={e=>{ setEmailLogsQ(e.target.value); setEmailLogsPage(0); }} placeholder="Search to, subject, via..." className="w-44 rounded-xl border border-zinc-800 bg-zinc-950 pl-8 pr-3 py-1.5 text-xs text-white placeholder:text-zinc-600"/>
+            </div>
+            <button onClick={()=> loadEmailLogs(emailLogsQ, emailLogsPage)} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-amber-500/40 cursor-pointer flex items-center gap-1"><RefreshCw className={`w-3.5 h-3.5 ${emailLogsLoading?'animate-spin':''}`}/> Refresh</button>
+          </div>
+        </div>
+        {emailLogsLoading ? <div className="flex justify-center py-6"><Loader2 className="w-5 h-5 animate-spin text-zinc-500"/></div> : emailLogs.length===0 ? <p className="text-center text-xs text-zinc-500 py-6">No email logs yet — send a test or wait for OTP</p> : (
+          <div className="space-y-2">
+            <div className="hidden sm:grid grid-cols-12 gap-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500 px-3">
+              <span className="col-span-3">To (recipient)</span><span className="col-span-4">Subject</span><span className="col-span-2">Via (Gmail)</span><span className="col-span-1">Status</span><span className="col-span-2">Time</span>
+            </div>
+            {emailLogs.map((l:any)=>(
+              <div key={l.id} className={`rounded-xl border p-3 text-xs ${l.success? 'border-emerald-500/20 bg-emerald-950/10' : 'border-rose-500/30 bg-rose-950/10'}`}>
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                  <span className="col-span-3 font-mono font-bold text-white truncate" title={l.to}>{l.to}</span>
+                  <span className="col-span-4 text-zinc-300 truncate" title={l.subject}>{l.subject}</span>
+                  <span className="col-span-2 font-mono text-sky-300 truncate" title={l.via}>{l.via}</span>
+                  <span className={`col-span-1 rounded-full px-2 py-0.5 text-[10px] font-bold text-center ${l.success? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}`}>{l.success?'SENT':'FAILED'}</span>
+                  <span className="col-span-2 font-mono text-zinc-500 text-[11px]">{new Date(l.timestamp).toLocaleString()}</span>
+                </div>
+                {!l.success && l.error && <div className="mt-1 text-[11px] text-rose-300 bg-rose-950/20 border border-rose-500/20 rounded-lg px-2 py-1 truncate" title={l.error}>Error: {l.error}</div>}
+              </div>
+            ))}
+            <div className="flex items-center justify-between pt-2">
+              <span className="text-[11px] font-mono text-zinc-500">Page {emailLogsPage+1} / {Math.max(1, Math.ceil(emailLogsTotal/50))} • {emailLogsTotal} total</span>
+              <div className="flex gap-2">
+                <button disabled={emailLogsPage===0} onClick={()=> setEmailLogsPage(p=> Math.max(0,p-1))} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 disabled:opacity-40 cursor-pointer">Prev</button>
+                <button disabled={(emailLogsPage+1)*50>=emailLogsTotal} onClick={()=> setEmailLogsPage(p=> p+1)} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 disabled:opacity-40 cursor-pointer">Next</button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
