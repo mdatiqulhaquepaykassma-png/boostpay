@@ -3173,3 +3173,4 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   );
 };
 // Amount restored per user request 2026-10-21 - agar moto
+// perf: hide tab counts 0/500 for super fast load — 1792614833
