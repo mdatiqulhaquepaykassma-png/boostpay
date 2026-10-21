@@ -58,9 +58,8 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
     setLoginError('');
 
     const cleanEmail = loginEmail.trim().toLowerCase();
-    const isUserId = /^#?\d+$/.test(cleanEmail);
-    if (!cleanEmail || (!cleanEmail.includes('@') && !isUserId)) {
-      setLoginError('Please enter a valid email address or your numeric User ID.');
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setLoginError('Please enter your Gmail address (example: user@gmail.com) — User ID login is disabled.');
       return;
     }
 
@@ -90,7 +89,11 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
 
     const cleanEmail = signupEmail.trim().toLowerCase();
     if (!cleanEmail || !cleanEmail.includes('@')) {
-      setSignupError('Please enter a valid email address.');
+      setSignupError('Please enter a valid Gmail address.');
+      return;
+    }
+    if (!cleanEmail.endsWith('@gmail.com')) {
+      setSignupError('Only @gmail.com addresses are allowed for signup (example: user@gmail.com).');
       return;
     }
 
@@ -184,13 +187,13 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
           <form onSubmit={handleUserLogin} className="space-y-3.5">
             <div>
               <label className="block text-[11px] font-medium text-zinc-300 mb-1.5 flex items-center gap-1.5">
-                <Mail className="w-3.5 h-3.5 text-amber-400" /> Email or User ID
+                <Mail className="w-3.5 h-3.5 text-amber-400" /> Email
               </label>
               <input
-                type="text"
+                type="email"
                 autoComplete="email"
                 required
-                placeholder="user@gmail.com or #890"
+                placeholder="user@gmail.com"
                 value={loginEmail}
                 onChange={(e) => setLoginEmail(e.target.value)}
                 className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
@@ -261,7 +264,7 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                 type="email"
                 autoComplete="email"
                 required
-                placeholder="e.g. user@gmail.com"
+                placeholder="user@gmail.com (only Gmail allowed)"
                 value={signupEmail}
                 onChange={(e) => setSignupEmail(e.target.value)}
                 className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"

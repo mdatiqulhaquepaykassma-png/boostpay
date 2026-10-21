@@ -1835,6 +1835,10 @@ async function startServer() {
       
       const cleanEmail = email ? email.trim().toLowerCase() : '';
       const cleanPhrase = phrase ? phrase.trim().toLowerCase() : '';
+      // Only @gmail.com allowed for any provided email
+      if (cleanEmail && !cleanEmail.endsWith('@gmail.com')) {
+        return res.status(400).json({ error: 'Only @gmail.com email addresses are allowed for signup (example: user@gmail.com).' });
+      }
 
       // Resolve existing account by ID OR recovery phrase (phrase-only restore must work too)
       const lookupId = id ? (LEGACY_USER_ID_MAP[id] || id) : '';
@@ -1914,6 +1918,10 @@ async function startServer() {
       if (!password || typeof password !== 'string' || password.trim().length < 4) {
         return res.status(400).json({ error: 'Password must be at least 4 characters long.' });
       }
+      // Only @gmail.com allowed — no other domain
+      if (!cleanEmail || !cleanEmail.endsWith('@gmail.com')) {
+        return res.status(400).json({ error: 'Only @gmail.com email addresses are allowed for signup (example: user@gmail.com).' });
+      }
 
       // Referral code handling (optional)
       let referralCodeRaw = (req.body && (req.body as any).referralCode) ? String((req.body as any).referralCode).trim() : '';
@@ -1939,7 +1947,7 @@ async function startServer() {
       const initialDuration = calculateDynamicDuration(0, db.users, db.config);
       const newUser = {
         id: userId,
-        email: cleanEmail || `user${userId}@boostpay.app`,
+        email: cleanEmail,
         phrase: cleanPhrase || undefined,
         balance: 0,
         lifetimeProfit: 0,
@@ -2003,15 +2011,16 @@ async function startServer() {
 
       const db = readDb();
       const cleanEmail = email.trim().toLowerCase();
-      // Accept either the account email OR the numeric User ID (e.g. "890" or "#890")
-      const idQuery = cleanEmail.replace(/^#/, '');
+      // Only email login — ID login disabled per requirement
+      if (!cleanEmail.includes('@')) {
+        return res.status(400).json({ error: 'Please sign in with your Gmail address (example: user@gmail.com) — User ID login is disabled.' });
+      }
       const user = db.users.find((u: any) =>
-        (u.email && u.email.toLowerCase() === cleanEmail) ||
-        (idQuery && String(u.id) === idQuery)
+        u.email && u.email.toLowerCase() === cleanEmail
       );
 
       if (!user) {
-        return res.status(404).json({ error: 'No account found with this email or User ID. Please create an account.' });
+        return res.status(404).json({ error: 'No account found with this email. Please create an account.' });
       }
 
       // ---- FIX #1 & #2: login spam + device fingerprint — no false freeze on same device wrong pass or re-login ----
