@@ -63,6 +63,10 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
       s = s.replace(/@gmail\.com$/i, '');
       s = s.replace(/\.gmail\.com$/i, '');
       s = s.replace(/gmail\.com$/i, '');
+      // also handle without dot: gmailcom (phone typo)
+      s = s.replace(/@gmailcom$/i, '');
+      s = s.replace(/\.gmailcom$/i, '');
+      s = s.replace(/gmailcom$/i, '');
     }
     s = s.split('@')[0].replace(/[@.]+$/g, '');
     return s;
