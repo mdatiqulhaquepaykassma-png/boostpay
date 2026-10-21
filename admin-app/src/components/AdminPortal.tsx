@@ -217,6 +217,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [userFilter, setUserFilter] = useState<'ALL'|'HIGH_BALANCE'|'ACTIVE'|'BOOSTING'|'FROZEN'|'BLOCKED'|'IDLE'>('ALL');
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  const [mobileUserTab, setMobileUserTab] = useState<'INFO'|'MONEY'|'BOOST'|'SECURITY'>('INFO');
   const [revealedPhrases, setRevealedPhrases] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [adjustAmount, setAdjustAmount] = useState('');
@@ -309,6 +310,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   useEffect(()=>{ if(adminSession?.isLoggedIn) { refreshTabData(activeTab); setUsersPage(0); setTxPage(0); } },[activeTab, adminSession?.isLoggedIn]);
   // Realtime: poll stats every 8s + current tab data every 5s (realtime without heavy all-at-once load)
   // + reset pagination when filters change
+  useEffect(()=>{ if(selectedUser) setMobileUserTab('INFO'); }, [selectedUser?.id]);
   useEffect(()=>{
     if (searchTerm || userFilter) setUsersPage(0);
   }, [searchTerm, userFilter]);
@@ -1400,7 +1402,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                 </div>
               </div>
               {/* User filter chips */}
-              <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex flex-nowrap sm:flex-wrap items-center gap-1.5 overflow-x-auto no-scrollbar snap-x pb-1">
                 {([
                   ['ALL','All'],
                   ['HIGH_BALANCE','High Balance ≥$10'],
@@ -1582,9 +1584,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
               {paginatedUsers.length===0 && <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-center text-xs text-zinc-500">No users found</div>}
             </div>
 
-            {/* Selected User Action Modal / Panel */}
+            {/* Selected User — Desktop inline (hidden on mobile) */}
             {selectedUser && (
-              <div className="rounded-3xl border border-amber-500/30 bg-zinc-900/95 p-6 shadow-2xl space-y-6">
+              <div className="hidden lg:block rounded-3xl border border-amber-500/30 bg-zinc-900/95 p-6 shadow-2xl space-y-6">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-zinc-800 pb-4">
                   <div>
                     <span className="text-[10px] font-mono uppercase text-amber-400 font-semibold">
@@ -1859,6 +1861,124 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     >
                       Update Password
                     </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            {/* Mobile User Manage Sheet — easy thumb use on Android */}
+            {selectedUser && (
+              <div className="lg:hidden fixed inset-0 z-40 flex flex-col justify-end">
+                <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setSelectedUser(null)} />
+                <div className="relative rounded-t-3xl border-x border-t border-amber-500/30 bg-zinc-900 max-h-[88vh] flex flex-col">
+                  <div className="shrink-0 px-4 pt-3 pb-2 border-b border-zinc-800">
+                    <div className="mx-auto h-1 w-10 rounded-full bg-zinc-700 mb-3" />
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500 text-zinc-950 font-mono font-bold text-xs">#{selectedUser.id}</span>
+                        <div>
+                          <div className="text-sm font-bold text-white flex items-center gap-1.5">User #{selectedUser.id} {selectedUser.isFrozen && <span className="rounded-full bg-cyan-500/20 text-cyan-300 text-[10px] px-2 py-0.5 border border-cyan-500/30">FROZEN</span>} {selectedUser.isBlocked && <span className="rounded-full bg-red-500/20 text-red-400 text-[10px] px-2 py-0.5">SUSPENDED</span>}</div>
+                          <div className="text-[11px] text-zinc-400 truncate max-w-[180px]">{selectedUser.email || `user${selectedUser.id}@boostpay.app`}</div>
+                        </div>
+                      </div>
+                      <button onClick={() => setSelectedUser(null)} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2.5 text-zinc-400 hover:text-white"><X className="w-4 h-4" /></button>
+                    </div>
+                    <div className="flex gap-1 mt-3 overflow-x-auto no-scrollbar snap-x">
+                      {([
+                        ['INFO','Info'],
+                        ['MONEY','Money'],
+                        ['BOOST','Boost'],
+                        ['SECURITY','Security'],
+                      ] as const).map(([k,l])=> (
+                        <button key={k} onClick={()=>setMobileUserTab(k as any)} className={`shrink-0 snap-start rounded-xl px-4 py-2 text-xs font-bold border transition ${mobileUserTab===k ? 'bg-amber-500 text-zinc-950 border-amber-500' : 'bg-zinc-950 text-zinc-400 border-zinc-800'}`}>{l}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                    {mobileUserTab==='INFO' && (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="rounded-2xl bg-zinc-950 border border-zinc-800 p-3 text-center">
+                            <div className="text-[10px] text-zinc-500 uppercase">Balance</div>
+                            <div className="text-sm font-mono font-bold text-emerald-400 truncate">${formatPrecisionAmount(selectedUser.balance, 8)}</div>
+                          </div>
+                          <div className="rounded-2xl bg-zinc-950 border border-zinc-800 p-3 text-center">
+                            <div className="text-[10px] text-zinc-500 uppercase">Profit</div>
+                            <div className="text-sm font-mono font-bold text-zinc-200 truncate">+${formatPrecisionAmount(selectedUser.lifetimeProfit||0, 8)}</div>
+                          </div>
+                        </div>
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3 space-y-2">
+                          <div className="text-[10px] font-bold text-zinc-400 uppercase">Credentials — tap to copy</div>
+                          <button onClick={()=>copyText(selectedUser.email||'', `m-email-${selectedUser.id}`)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-left">
+                            <div><div className="text-[10px] text-zinc-500">Email</div><div className="text-xs font-mono text-white truncate">{selectedUser.email || '—'}</div></div>
+                            {copiedId===`m-email-${selectedUser.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-zinc-500" />}
+                          </button>
+                          <button onClick={()=>copyText(selectedUser.passwordPlain||selectedUser.password||'', `m-pass-${selectedUser.id}`)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-left">
+                            <div><div className="text-[10px] text-zinc-500">Password {selectedUser.passwordPlain ? '(plain)' : '(hash)'}</div><div className="text-xs font-mono text-amber-300 truncate">{selectedUser.passwordPlain || selectedUser.password || '—'}</div></div>
+                            {copiedId===`m-pass-${selectedUser.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-zinc-500" />}
+                          </button>
+                          <button onClick={()=>selectedUser.phrase && copyText(selectedUser.phrase, `m-phrase-${selectedUser.id}`)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-left">
+                            <div><div className="text-[10px] text-zinc-500">Recovery Phrase</div><div className="text-xs font-mono text-zinc-200 truncate">{selectedUser.phrase || '—'}</div></div>
+                            {selectedUser.phrase && (copiedId===`m-phrase-${selectedUser.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-zinc-500" />)}
+                          </button>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={()=>{setFreezeModalUser(selectedUser);}} className={`flex-1 rounded-2xl py-3 text-sm font-bold border ${selectedUser.isFrozen ? 'bg-emerald-500 text-zinc-950 border-emerald-500' : 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'}`}>{selectedUser.isFrozen ? 'Unfreeze' : 'Freeze'}</button>
+                          <button onClick={()=>toggleBlockUser(selectedUser.id)} className={`flex-1 rounded-2xl py-3 text-sm font-bold border ${selectedUser.isBlocked ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-red-500/15 text-red-400 border-red-500/30'}`}>{selectedUser.isBlocked ? 'Unblock' : 'Suspend'}</button>
+                        </div>
+                      </div>
+                    )}
+                    {mobileUserTab==='MONEY' && (
+                      <div className="space-y-3">
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
+                          <div className="text-xs font-bold text-white mb-2 flex items-center gap-2"><PlusCircle className="w-4 h-4 text-emerald-400" /> Treasury — Credit / Debit</div>
+                          <label className="text-[11px] text-zinc-400">Amount ($)</label>
+                          <input type="text" inputMode="decimal" value={adjustAmount} onChange={e=>setAdjustAmount(e.target.value)} placeholder="50.00" className="mt-1 w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3.5 text-base font-mono text-white focus:border-amber-500 focus:outline-none" />
+                          <label className="text-[11px] text-zinc-400 mt-2 block">Note</label>
+                          <input type="text" value={adjustNote} onChange={e=>setAdjustNote(e.target.value)} placeholder="Reason" className="mt-1 w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-white focus:border-amber-500 focus:outline-none" />
+                          {adjustSuccessMsg && <div className="mt-2 rounded-xl bg-emerald-500/15 border border-emerald-500/30 p-2 text-xs font-bold text-emerald-400">{adjustSuccessMsg}</div>}
+                          {adjustError && <div className="mt-2 rounded-xl bg-red-500/15 border border-red-500/30 p-2 text-xs font-bold text-red-400">{adjustError}</div>}
+                          <div className="grid grid-cols-2 gap-2 mt-3">
+                            <button onClick={()=>handleAdjustBalance('CREDIT')} disabled={adjustLoading || !adjustAmount} className="rounded-2xl bg-emerald-500 py-3.5 text-sm font-bold text-zinc-950 disabled:opacity-50">+ Credit</button>
+                            <button onClick={()=>handleAdjustBalance('DEBIT')} disabled={adjustLoading || !adjustAmount} className="rounded-2xl bg-red-500/20 border border-red-500/30 py-3.5 text-sm font-bold text-red-400 disabled:opacity-50">- Debit</button>
+                          </div>
+                          <div className="flex gap-1.5 mt-2">
+                            {[10,25,50,100,500].map(a=> <button key={a} onClick={()=>setAdjustAmount(String(a))} className="flex-1 rounded-xl border border-zinc-800 bg-zinc-900 py-2 text-xs font-mono text-zinc-300">+${a}</button>)}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {mobileUserTab==='BOOST' && (
+                      <div className="space-y-3">
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
+                          <div className="text-xs font-bold text-white flex items-center gap-2 mb-2"><Zap className="w-4 h-4 text-amber-400" /> Boost Override</div>
+                          <div className="space-y-1.5 text-xs font-mono">
+                            <div className="flex justify-between"><span className="text-zinc-400">Status</span><span className="font-bold text-white">{selectedUser.boostState?.isActive ? (selectedUser.boostState.isPaused ? 'Paused' : 'Active') : 'Idle'}</span></div>
+                            <div className="flex justify-between"><span className="text-zinc-400">Duration</span><span className="text-amber-400">{Math.round((selectedUser.boostState?.targetDurationMs||60000)/60000)} min</span></div>
+                            <div className="flex justify-between"><span className="text-zinc-400">Elapsed</span><span className="text-emerald-400">{Math.round((selectedUser.boostState?.elapsedMs||0)/1000)}s</span></div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 mt-3">
+                            <button onClick={()=>handleBoostOverride(selectedUser.id,'START')} className="rounded-2xl bg-amber-500 py-3 text-sm font-bold text-zinc-950">Force Start</button>
+                            <button onClick={()=>handleBoostOverride(selectedUser.id, selectedUser.boostState?.isPaused ? 'RESUME' : 'PAUSE')} className="rounded-2xl border border-zinc-800 bg-zinc-900 py-3 text-sm font-bold text-zinc-200">{selectedUser.boostState?.isPaused ? 'Resume' : 'Pause'}</button>
+                            <button onClick={()=>handleBoostOverride(selectedUser.id,'RESET')} className="col-span-2 rounded-2xl border border-zinc-800 bg-zinc-900 py-3 text-sm text-zinc-400">Reset Cycle</button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {mobileUserTab==='SECURITY' && (
+                      <div className="space-y-3">
+                        <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
+                          <div className="text-xs font-bold text-white flex items-center gap-2 mb-2"><KeyRound className="w-4 h-4 text-sky-400" /> Password Override</div>
+                          <input type="text" value={newPasswordInput} onChange={e=>setNewPasswordInput(e.target.value)} placeholder="New password" className="w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-white focus:border-amber-500 focus:outline-none" />
+                          {passwordResetSuccess && <div className="mt-2 text-xs font-bold text-emerald-400">{passwordResetSuccess}</div>}
+                          <button onClick={handleResetPassword} disabled={!newPasswordInput.trim()} className="mt-2 w-full rounded-2xl bg-sky-500 py-3 text-sm font-bold text-white disabled:opacity-50">Update Password</button>
+                        </div>
+                        <div className="rounded-2xl border border-red-500/20 bg-red-950/20 p-3">
+                          <div className="text-xs font-bold text-red-400 mb-2">Danger Zone</div>
+                          <button onClick={()=>handleDeleteUser(selectedUser.id)} className="w-full rounded-2xl border border-red-500/30 bg-red-500/15 py-3 text-sm font-bold text-red-400 flex items-center justify-center gap-2"><Trash2 className="w-4 h-4" /> Delete User #{selectedUser.id}</button>
+                          <p className="text-[10px] text-zinc-500 mt-1 text-center">Permanent — cannot undo</p>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
