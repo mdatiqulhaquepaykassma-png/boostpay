@@ -11,9 +11,24 @@ try {
     onNeedRefresh() {
       (window as any).__boostpay_update_sw = updateSW;
       window.dispatchEvent(new CustomEvent('boostpay:update-available'));
+      // Auto-apply update without hard refresh — skipWaiting + reload
+      try { updateSW(true); } catch {}
+    },
+    onOfflineReady() {
+      // optional: app ready offline
     }
   });
   (window as any).__boostpay_update_sw = updateSW;
+  // Also listen for controlling change to auto-reload even if banner missed
+  if (typeof navigator !== 'undefined' && (navigator as any).serviceWorker) {
+    (navigator as any).serviceWorker.addEventListener('controllerchange', () => {
+      // only reload once per update
+      if (!(window as any).__boostpay_reloaded) {
+        (window as any).__boostpay_reloaded = true;
+        window.location.reload();
+      }
+    });
+  }
 } catch {
   // Ignore virtual SW error if any
 }

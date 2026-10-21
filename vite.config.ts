@@ -21,7 +21,10 @@ export default defineConfig(() => {
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          navigateFallback: '/index.html'
+          navigateFallback: '/index.html',
+          clientsClaim: true,
+          skipWaiting: true,
+          cleanupOutdatedCaches: true
         },
         devOptions: {
           enabled: false
