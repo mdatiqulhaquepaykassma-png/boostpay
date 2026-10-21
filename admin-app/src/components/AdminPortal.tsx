@@ -1867,9 +1867,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             )}
             {/* Mobile User Manage Sheet — easy thumb use on Android */}
             {selectedUser && (
-              <div className="lg:hidden fixed inset-0 z-40 flex flex-col justify-end">
+              <div className="lg:hidden fixed inset-0 z-40 flex flex-col justify-end overscroll-contain">
                 <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setSelectedUser(null)} />
-                <div className="relative rounded-t-3xl border-x border-t border-amber-500/30 bg-zinc-900 max-h-[88vh] flex flex-col">
+                <div className="relative rounded-t-3xl border-x border-t border-amber-500/30 bg-zinc-900 max-h-[88vh] flex flex-col overflow-hidden">
                   <div className="shrink-0 px-4 pt-3 pb-2 border-b border-zinc-800">
                     <div className="mx-auto h-1 w-10 rounded-full bg-zinc-700 mb-3" />
                     <div className="flex items-center justify-between">
@@ -1893,7 +1893,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       ))}
                     </div>
                   </div>
-                  <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                  <div className="flex-1 overflow-y-auto overscroll-contain p-4 space-y-3 touch-pan-y" style={{ WebkitOverflowScrolling: 'touch' } as any}>
                     {mobileUserTab==='INFO' && (
                       <div className="space-y-3">
                         <div className="grid grid-cols-2 gap-2">
