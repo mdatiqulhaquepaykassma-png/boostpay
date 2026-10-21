@@ -1517,6 +1517,8 @@ setInterval(() => {
             if ((db.transactions||[]).some((t:any)=> t.id===txId)) {
               console.warn(`[ticker] duplicate TX id collision for ${txId} — skip`);
             } else {
+              const boostStartAt = Number(user.boostState.startedAt || (now - elapsed)) || now;
+              const boostEndAt = now;
               const rewardTx = {
                 id: txId,
                 userId: user.id,
@@ -1524,7 +1526,10 @@ setInterval(() => {
                 amount: finalYield,
                 timestamp: now,
                 notes: 'Server background boosting reward completed',
-                balanceAfter: user.balance
+                balanceAfter: user.balance,
+                boostStartAt,
+                boostEndAt,
+                boostDurationMs: Number(target) || 0
               } as any;
               db.transactions.unshift(rewardTx);
             }

@@ -477,6 +477,36 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
                 <span className="text-zinc-500">Timestamp:</span>
                 <span className="text-zinc-200">{new Date(selectedTx.timestamp).toLocaleString()}</span>
               </div>
+              {(selectedTx as any).boostStartAt && (
+                <div className="flex justify-between py-1 border-b border-zinc-800/60">
+                  <span className="text-zinc-500">Boost Start:</span>
+                  <span className="text-emerald-300">{new Date((selectedTx as any).boostStartAt).toLocaleString()}</span>
+                </div>
+              )}
+              {(selectedTx as any).boostEndAt && (
+                <div className="flex justify-between py-1 border-b border-zinc-800/60">
+                  <span className="text-zinc-500">Boost End:</span>
+                  <span className="text-amber-300">{new Date((selectedTx as any).boostEndAt).toLocaleString()}</span>
+                </div>
+              )}
+              {(selectedTx as any).boostDurationMs && (
+                <div className="flex justify-between py-1 border-b border-zinc-800/60">
+                  <span className="text-zinc-500">Duration:</span>
+                  <span className="text-zinc-200">{Math.round(Number((selectedTx as any).boostDurationMs)/1000)}s ({(Number((selectedTx as any).boostDurationMs)/60000).toFixed(1)} min)</span>
+                </div>
+              )}
+              {selectedTx.type === "REWARD" && !(selectedTx as any).boostStartAt && (
+                <div className="flex justify-between py-1 border-b border-zinc-800/40 opacity-60">
+                  <span className="text-zinc-500">Boost Start:</span>
+                  <span className="text-zinc-400 text-xs">Legacy record — start time not stored (created before 21 Oct 2026)</span>
+                </div>
+              )}
+              {selectedTx.type === "REWARD" && !(selectedTx as any).boostEndAt && (
+                <div className="flex justify-between py-1 border-b border-zinc-800/40 opacity-60">
+                  <span className="text-zinc-500">Boost End:</span>
+                  <span className="text-zinc-400">{new Date(selectedTx.timestamp).toLocaleString()} (credited at)</span>
+                </div>
+              )}
               {selectedTx.recipientId && (
                 <div className="flex justify-between py-1 border-b border-zinc-800/60">
                   <span className="text-zinc-500">Recipient ID:</span>
