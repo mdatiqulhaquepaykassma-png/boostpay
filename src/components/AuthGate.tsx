@@ -53,8 +53,22 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
     if (referralCode) setTab('SIGNUP');
   },[]);
 
+  const cleanLocal = (v: string) => {
+    let s = v.trim().toLowerCase().replace(/\s+/g,'');
+    // auto-remove trailing gmail.com (with optional @/.) typed by mistake on phone to prevent double @gmail.com
+    // handles: abir567gmail.com, abir567@gmail.com, abir567@gmail.com@gmail.com, abir567.gmail.com
+    let prev = '';
+    while (prev !== s) {
+      prev = s;
+      s = s.replace(/@gmail\.com$/i, '');
+      s = s.replace(/\.gmail\.com$/i, '');
+      s = s.replace(/gmail\.com$/i, '');
+    }
+    s = s.split('@')[0].replace(/[@.]+$/g, '');
+    return s;
+  };
   const toGmail = (v: string) => {
-    const s = v.trim().toLowerCase().split('@')[0].replace(/\s+/g,'');
+    const s = cleanLocal(v);
     return s ? s + '@gmail.com' : '';
   };
   const handleUserLogin = async (e: React.FormEvent) => {
@@ -62,7 +76,7 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
     setLoginError('');
 
     const cleanEmail = toGmail(loginEmail);
-    if (!cleanEmail || !loginEmail.trim().split('@')[0].trim()) {
+    if (!cleanEmail || !cleanLocal(loginEmail)) {
       setLoginError('Please enter your Gmail username (example: abir567 → abir567@gmail.com)');
       return;
     }
@@ -92,7 +106,7 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
     setSignupError('');
 
     const cleanEmail = toGmail(signupEmail);
-    if (!cleanEmail || !signupEmail.trim().split('@')[0].trim()) {
+    if (!cleanEmail || !cleanLocal(signupEmail)) {
       setSignupError('Please enter your Gmail username (example: abir567 → abir567@gmail.com)');
       return;
     }
@@ -131,9 +145,10 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
   const handleForgotRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     setForgotErr(''); setForgotMsg('');
-    if (!forgotEmail.trim().includes('@')) { setForgotErr('Enter valid email'); return; }
+    const cleanForgot = toGmail(forgotEmail);
+    if (!cleanForgot || !cleanLocal(forgotEmail)) { setForgotErr('Enter Gmail username (e.g. abir567)'); return; }
     setForgotLoading(true);
-    const res = await BoostPayStore.forgotPassword(forgotEmail.trim().toLowerCase());
+    const res = await BoostPayStore.forgotPassword(cleanForgot);
     setForgotLoading(false);
     if (res.success) {
       setForgotMsg('Code sent to your email. Please check inbox/spam folder.');
@@ -145,11 +160,12 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
     setForgotErr(''); setForgotMsg('');
     if (!forgotCode.trim() || forgotNewPass.length < 4) { setForgotErr('Code and new password (min 4 chars) required'); return; }
     setForgotLoading(true);
-    const res = await BoostPayStore.resetPassword(forgotEmail.trim().toLowerCase(), forgotCode.trim(), forgotNewPass);
+    const cleanForgot = toGmail(forgotEmail);
+    const res = await BoostPayStore.resetPassword(cleanForgot, forgotCode.trim(), forgotNewPass);
     setForgotLoading(false);
     if (res.success) {
       setForgotMsg('Password updated — please sign in with your new password ✅');
-      setTimeout(()=> { setShowForgot(false); setForgotStep('EMAIL'); setForgotCode(''); setForgotNewPass(''); setForgotMsg(''); setForgotErr(''); setTab('LOGIN'); setLoginEmail(forgotEmail.trim().toLowerCase()); setLoginError(''); }, 1500);
+      setTimeout(()=> { setShowForgot(false); setForgotStep('EMAIL'); setForgotCode(''); setForgotNewPass(''); setForgotMsg(''); setForgotErr(''); setTab('LOGIN'); setLoginEmail(cleanForgot); setLoginError(''); }, 1500);
     } else setForgotErr(res.error||'Failed');
   };
 
@@ -196,8 +212,8 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                   autoComplete="username"
                   required
                   placeholder="abir567"
-                  value={loginEmail.split('@')[0]}
-                  onChange={(e) => setLoginEmail(e.target.value.split('@')[0].replace(/\s/g,''))}
+                  value={cleanLocal(loginEmail)}
+                  onChange={(e) => setLoginEmail(cleanLocal(e.target.value))}
                   className="flex-1 bg-transparent px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none"
                 />
                 <span className="pr-3.5 text-xs font-mono text-zinc-400 select-none">@gmail.com</span>
@@ -271,8 +287,8 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                   autoComplete="username"
                   required
                   placeholder="abir567"
-                  value={signupEmail.split('@')[0]}
-                  onChange={(e) => setSignupEmail(e.target.value.split('@')[0].replace(/\s/g,''))}
+                  value={cleanLocal(signupEmail)}
+                  onChange={(e) => setSignupEmail(cleanLocal(e.target.value))}
                   className="flex-1 bg-transparent px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none"
                 />
                 <span className="pr-3.5 text-xs font-mono text-zinc-400 select-none">@gmail.com</span>
@@ -378,7 +394,10 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
               <form onSubmit={handleForgotRequest} className="space-y-3">
                 <div>
                   <label className="block text-[10px] font-semibold text-zinc-400 mb-1">Your email</label>
-                  <input type="email" value={forgotEmail} onChange={e=> setForgotEmail(e.target.value)} placeholder="user@gmail.com" className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-white placeholder-zinc-600 focus:border-amber-500 focus:outline-none"/>
+                  <div className="flex items-center rounded-xl border border-zinc-800 bg-zinc-950 focus-within:border-amber-500 overflow-hidden">
+                    <input type="text" value={cleanLocal(forgotEmail)} onChange={e=> setForgotEmail(cleanLocal(e.target.value))} placeholder="abir567" className="flex-1 bg-transparent px-3.5 py-2.5 text-xs text-white placeholder-zinc-600 focus:outline-none"/>
+                    <span className="pr-3.5 text-xs font-mono text-zinc-400 select-none">@gmail.com</span>
+                  </div>
                 </div>
                 <button type="submit" disabled={forgotLoading} className="w-full rounded-xl bg-amber-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 disabled:opacity-50 flex items-center justify-center gap-1.5 cursor-pointer">{forgotLoading? <Loader2 className="w-4 h-4 animate-spin"/>: <Mail className="w-4 h-4"/>} {forgotLoading?'Sending...':'Send Reset Code'}</button>
                 <p className="text-[10px] text-zinc-500 text-center">Code sent to your email inbox. Check spam folder if not found.</p>
