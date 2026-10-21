@@ -4411,11 +4411,44 @@ async function startServer() {
     }
   });
 
-  // Audit logs retrieval endpoint
-  app.get('/api/admin/audit-logs', requireAdmin, (_req, res) => {
+  // Audit logs retrieval endpoint — super fast per-page fetch (limit/offset) + server-side search/filter
+  app.get('/api/admin/audit-logs', requireAdmin, (req: any, res) => {
     try {
       const db = readDb();
-      res.json({ success: true, logs: db.auditLogs || [] });
+      let logs: any[] = db.auditLogs || [];
+      const search = String(req.query.search || '').trim().toLowerCase();
+      const filter = String(req.query.filter || 'ALL').trim().toUpperCase();
+      const limitRaw = parseInt(String(req.query.limit || ''), 10);
+      const offsetRaw = parseInt(String(req.query.offset || ''), 10);
+      const hasPagination = !isNaN(limitRaw) && limitRaw > 0;
+      // server-side filter (same logic as client)
+      if (search) {
+        logs = logs.filter((log: any) =>
+          String(log.action || '').toLowerCase().includes(search) ||
+          String(log.adminEmail || '').toLowerCase().includes(search) ||
+          String(log.targetUserId || '').includes(search) ||
+          String(log.details || '').toLowerCase().includes(search)
+        );
+      }
+      if (filter && filter !== 'ALL') {
+        logs = logs.filter((log: any) => {
+          if (filter === 'TREASURY') return String(log.action || '').includes('TREASURY');
+          if (filter === 'FREEZE') return String(log.action || '').includes('FREEZE');
+          if (filter === 'USER') return String(log.action || '').startsWith('USER_');
+          if (filter === 'PASSWORD') return String(log.action || '').includes('PASSWORD');
+          if (filter === 'SYSTEM') return String(log.action || '').includes('SYSTEM') || String(log.action || '').includes('CONFIG');
+          return true;
+        });
+      }
+      const total = logs.length;
+      if (hasPagination) {
+        const limit = Math.min(500, Math.max(1, limitRaw));
+        const offset = Math.max(0, isNaN(offsetRaw) ? 0 : offsetRaw);
+        logs = logs.slice(offset, offset + limit);
+        res.json({ success: true, logs, total, limit, offset });
+      } else {
+        res.json({ success: true, logs, total });
+      }
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -4888,16 +4921,42 @@ async function startServer() {
       const name = String(req.params.name || '');
       const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit || '200'), 10) || 200));
       const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
-      const table = collectDbTables(db).find((t) => t.name === name);
+      const search = String(req.query.search || '').trim().toLowerCase();
+      const filter = String(req.query.filter || 'ALL').trim().toUpperCase();
+      let table = collectDbTables(db).find((t) => t.name === name);
       if (!table) return res.status(404).json({ error: 'Table not found.' });
+      let rows: any[] = table.rows;
+      // server-side search/filter for transactions ledger (super fast — only requested page is returned)
+      if (name === 'transactions' && (search || (filter && filter !== 'ALL'))) {
+        rows = rows.filter((tx: any) => {
+          if (search) {
+            const inSearch = String(tx.id || '').toLowerCase().includes(search) ||
+              String(tx.userId || '').includes(search) ||
+              String(tx.recipientId || '').includes(search) ||
+              String(tx.senderId || '').includes(search) ||
+              String(tx.notes || '').toLowerCase().includes(search);
+            if (!inSearch) return false;
+          }
+          if (filter && filter !== 'ALL') {
+            if (filter === 'P2P') return tx.type === 'TRANSFER_SENT' || tx.type === 'TRANSFER_RECEIVED';
+            if (filter === 'REWARD') return tx.type === 'REWARD' || tx.type === 'YIELD_REWARD' || String(tx.type).includes('REFERRAL');
+            if (filter === 'TREASURY') return tx.type === 'ADMIN_CREDIT' || tx.type === 'ADMIN_DEBIT';
+          }
+          return true;
+        });
+      }
+      const totalFiltered = rows.length;
+      const paged = rows.slice(offset, offset + limit);
       res.json({
         name,
         count: table.rows.length,
+        filteredCount: totalFiltered,
         columns: collectDbColumns(table.rows),
         // Owner decision: all fields always returned unmasked (incl. passwords/tokens).
-        rows: table.rows.slice(offset, offset + limit),
+        rows: paged,
         limit,
-        offset
+        offset,
+        total: totalFiltered
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

@@ -318,14 +318,31 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
       }
     } catch {}
   };
+  // super fast per-page fetch — only 25 rows per request, Next = realtime fetch
+  const fetchAuditPage = async (page:number, search:string, filter:string) => {
+    try{
+      const limit=25, offset=page*limit;
+      const url=`/api/admin/audit-logs?limit=${limit}&offset=${offset}&search=${encodeURIComponent(search)}&filter=${encodeURIComponent(filter)}`;
+      const r=await fetch(url, { headers: BoostPayStore.adminAuthHeaders() });
+      if(r.ok){ const d=await r.json(); setAuditLogs(Array.isArray(d.logs)? d.logs:[]); if(typeof d.total==='number') setAuditTotal(d.total); else setAuditTotal((d.logs||[]).length); }
+    }catch{}
+  };
+  const fetchTxPage = async (page:number, search:string, filter:string) => {
+    try{
+      const limit=25, offset=page*limit;
+      const url=`/api/admin/db/tables/transactions?limit=${limit}&offset=${offset}&search=${encodeURIComponent(search)}&filter=${encodeURIComponent(filter)}`;
+      const r=await fetch(url, { headers: BoostPayStore.adminAuthHeaders() });
+      if(r.ok){ const d=await r.json(); if(Array.isArray(d.rows)){ setTransactions(d.rows); setTxTotal(typeof d.filteredCount==='number'? d.filteredCount : (typeof d.total==='number'? d.total : d.count || d.rows.length)); } }
+    }catch{}
+  };
   const refreshTabData = async (tab:string) => {
     try {
       if (tab==='USERS' || tab==='OVERVIEW') {
         const r=await fetch('/api/admin/users', { headers: BoostPayStore.adminAuthHeaders() });
         if(r.ok){ const d=await r.json(); setUsers(d.users); BoostPayStore.saveUsers(d.users); }
       }
-      if (tab==='AUDIT') { const logs=await BoostPayStore.getAuditLogs(); if(logs) setAuditLogs(logs); }
-      if (tab==='TRANSACTIONS') { try{ const tb=await fetch('/api/admin/db/tables/transactions?limit=500',{headers:BoostPayStore.adminAuthHeaders()}); if(tb.ok){ const td=await tb.json(); if(Array.isArray(td.rows)) { setTransactions(td.rows); BoostPayStore.saveTransactions?.(td.rows); } else if(Array.isArray(td.rows)===false && Array.isArray(td)) setTransactions(td); } }catch{} }
+      if (tab==='AUDIT') { await fetchAuditPage(auditPage, auditSearch, auditFilter); }
+      if (tab==='TRANSACTIONS') { await fetchTxPage(txPage, txSearch, txFilter); }
       if (tab==='SUPPORT' || tab==='OVERVIEW') { await BoostPayStore.syncChatState('ADMIN_SUPPORT'); setConversations(BoostPayStore.getConversations()); setMessages(BoostPayStore.getMessages()); }
     } catch(e){ console.warn('Tab refresh failed',e); }
   };
@@ -342,6 +359,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   useEffect(()=>{
     if (auditSearch || auditFilter) setAuditPage(0);
   }, [auditSearch, auditFilter]);
+  // super fast: per-page server fetch — Next = realtime 25 fetch
+  useEffect(()=>{ if(adminSession?.isLoggedIn && activeTab==='AUDIT') fetchAuditPage(auditPage, auditSearch, auditFilter); }, [auditPage, auditSearch, auditFilter, activeTab, adminSession?.isLoggedIn]);
+  useEffect(()=>{ if(adminSession?.isLoggedIn && activeTab==='TRANSACTIONS') fetchTxPage(txPage, txSearch, txFilter); }, [txPage, txSearch, txFilter, activeTab, adminSession?.isLoggedIn]);
   useEffect(() => {
     if (adminSession?.isLoggedIn) {
       refreshStatsOnly();
@@ -833,52 +853,25 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     });
 
   // Lazy load notice for admin — all data not loaded at once, paginated per tab
-  // Filter Audit Logs
-  const filteredAuditLogs = auditLogs.filter(log => {
-    const matchesSearch =
-      log.action.toLowerCase().includes(auditSearch.toLowerCase()) ||
-      log.adminEmail.toLowerCase().includes(auditSearch.toLowerCase()) ||
-      (log.targetUserId && log.targetUserId.includes(auditSearch)) ||
-      log.details.toLowerCase().includes(auditSearch.toLowerCase());
-
-    if (!matchesSearch) return false;
-    if (auditFilter === 'ALL') return true;
-    if (auditFilter === 'TREASURY') return log.action.includes('TREASURY');
-    if (auditFilter === 'FREEZE') return log.action.includes('FREEZE');
-    if (auditFilter === 'USER') return log.action.startsWith('USER_');
-    if (auditFilter === 'PASSWORD') return log.action.includes('PASSWORD');
-    if (auditFilter === 'SYSTEM') return log.action.includes('SYSTEM') || log.action.includes('CONFIG');
-    return true;
-  });
+  // Filter Audit Logs — now server-side (auditLogs already paginated+filtered, keep local filter as fallback)
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [txTotal, setTxTotal] = useState(0);
+  const filteredAuditLogs = auditLogs; // server already filtered/searched
   const [auditPage, setAuditPage] = useState(0);
   const auditPageSize = 25;
-  const paginatedAuditLogs = filteredAuditLogs.slice(auditPage*auditPageSize, (auditPage+1)*auditPageSize);
-  const totalAuditPages = Math.max(1, Math.ceil(filteredAuditLogs.length / auditPageSize));
+  const paginatedAuditLogs = auditLogs; // already 25 per page from server
+  const totalAuditPages = Math.max(1, Math.ceil((auditTotal || filteredAuditLogs.length) / auditPageSize));
 
   const [usersPage, setUsersPage] = useState(0);
   const usersPageSize = 25;
   const paginatedUsers = filteredUsers.slice(usersPage*usersPageSize, (usersPage+1)*usersPageSize);
   const totalUsersPages = Math.max(1, Math.ceil(filteredUsers.length / usersPageSize));
-  // Filter Transactions — with pagination to avoid loading all at once
+  // Filter Transactions — now server-side (transactions already paginated+filtered)
   const [txPage, setTxPage] = useState(0);
   const txPageSize = 25;
-  const filteredTransactions = transactions.filter(tx => {
-    const matchesSearch =
-      tx.id.toLowerCase().includes(txSearch.toLowerCase()) ||
-      tx.userId.includes(txSearch) ||
-      (tx.recipientId && tx.recipientId.includes(txSearch)) ||
-      (tx.senderId && tx.senderId.includes(txSearch)) ||
-      (tx.notes && tx.notes.toLowerCase().includes(txSearch.toLowerCase()));
-
-    if (!matchesSearch) return false;
-    if (txFilter === 'ALL') return true;
-    if (txFilter === 'P2P') return tx.type === 'TRANSFER_SENT' || tx.type === 'TRANSFER_RECEIVED';
-    if (txFilter === 'REWARD') return tx.type === 'REWARD' || tx.type === 'YIELD_REWARD' || String(tx.type).includes('REFERRAL');
-    if (txFilter === 'TREASURY') return tx.type === 'ADMIN_CREDIT' || tx.type === 'ADMIN_DEBIT';
-    return true;
-  });
-  const paginatedTransactions = filteredTransactions.slice(txPage*txPageSize, (txPage+1)*txPageSize);
-  const totalTxPages = Math.max(1, Math.ceil(filteredTransactions.length / txPageSize));
+  const filteredTransactions = transactions; // server already filtered/searched
+  const paginatedTransactions = transactions; // already 25 per page from server
+  const totalTxPages = Math.max(1, Math.ceil((txTotal || filteredTransactions.length) / txPageSize));
 
   // -------------------------------------------------------------
   // RENDER: 1. ADMIN LOGIN FORM (When not logged in)
@@ -1093,7 +1086,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             }`}
           >
             <FileText className="w-4 h-4" />
-            <span>Audit Action Log ({auditLogs.length})</span>
+            <span>Audit Action Log ({auditTotal || auditLogs.length})</span>
           </button>
 
           <button
@@ -1105,7 +1098,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             }`}
           >
             <ArrowRightLeft className="w-4 h-4" />
-            <span>Transactions Ledger ({transactions.length})</span>
+            <span>Transactions Ledger ({txTotal || transactions.length})</span>
           </button>
 
           <button
@@ -2227,7 +2220,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             </div>
             {/* Audit pagination — mobile/shared */}
             <div className="flex items-center justify-between gap-2 mt-3 px-1">
-              <span className="text-zinc-500 font-mono text-[11px]">Page {auditPage+1} / {totalAuditPages} — {filteredAuditLogs.length} logs</span>
+              <span className="text-zinc-500 font-mono text-[11px]">Page {auditPage+1} / {totalAuditPages} — {auditTotal || filteredAuditLogs.length} logs • <span className="text-emerald-400">Realtime 25/page</span></span>
               <div className="flex items-center gap-2">
                 <button disabled={auditPage===0} onClick={()=>setAuditPage(p=>Math.max(0,p-1))} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700 text-xs">Prev</button>
                 <button disabled={auditPage+1>=totalAuditPages} onClick={()=>setAuditPage(p=>p+1)} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700 text-xs">Next</button>
@@ -2363,7 +2356,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             </div>
             {/* Transactions pagination — fixed Next/Prev */}
             <div className="flex items-center justify-between text-xs pb-12">
-              <span className="text-zinc-500 font-mono">Page {txPage+1} / {totalTxPages} — {filteredTransactions.length} tx • <span className="text-emerald-400">Realtime</span></span>
+              <span className="text-zinc-500 font-mono">Page {txPage+1} / {totalTxPages} — {txTotal || filteredTransactions.length} tx • <span className="text-emerald-400">Realtime 25/page</span></span>
               <div className="flex gap-2">
                 <button disabled={txPage===0} onClick={()=>setTxPage(p=>Math.max(0,p-1))} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700">Prev</button>
                 <button disabled={txPage+1>=totalTxPages} onClick={()=>setTxPage(p=>p+1)} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700">Next</button>
