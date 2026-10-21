@@ -79,6 +79,85 @@ const VoiceNotePlayer: FC<{ data: string; durationMs?: number }> = ({ data, dura
   );
 };
 
+const MobileBottomNav: FC<{ activeTab: string; setActiveTab: (t: any) => void; usersCount: number; txCount: number }> = ({ activeTab, setActiveTab, usersCount, txCount }) => {
+  const items: Array<{ id: string; label: string; icon: any; badge?: number }> = [
+    { id: 'OVERVIEW', label: 'Home', icon: Activity },
+    { id: 'USERS', label: 'Users', icon: Users, badge: usersCount },
+    { id: 'TRANSACTIONS', label: 'Ledger', icon: ArrowRightLeft, badge: txCount },
+    { id: 'SUPPORT', label: 'Support', icon: MessageSquare },
+    { id: 'MORE', label: 'More', icon: Sliders },
+  ];
+  const [showMore, setShowMore] = useState(false);
+  const moreTabs = [
+    { id: 'ANALYTICS', label: 'Analytics', icon: BarChart3 },
+    { id: 'AUDIT', label: 'Audit Log', icon: FileText },
+    { id: 'FRAUD', label: 'Anti-Fraud', icon: ShieldAlert },
+    { id: 'REFER', label: 'Referral', icon: Users },
+    { id: 'SMTP', label: 'Email/SMTP', icon: Mail },
+    { id: 'SETTINGS', label: 'Settings', icon: Sliders },
+    { id: 'BROADCAST', label: 'Broadcast', icon: Radio },
+    { id: 'DATABASE', label: 'Database', icon: Database },
+    { id: 'ENGINE', label: 'Engine', icon: Zap },
+    { id: 'ADMINS', label: 'Admins', icon: Users2 },
+  ];
+  return (
+    <>
+      <div className="lg:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-800 bg-zinc-950/95 mobile-bottom-nav">
+        <div className="flex items-center justify-around px-1 py-1">
+          {items.map(it => {
+            const Icon = it.icon;
+            const isActive = activeTab === it.id || (it.id === 'MORE' && moreTabs.some(m => m.id === activeTab));
+            const isMore = it.id === 'MORE';
+            return (
+              <button
+                key={it.id}
+                onClick={() => isMore ? setShowMore(true) : setActiveTab(it.id)}
+                className={`relative flex flex-col items-center gap-0.5 rounded-xl px-3 py-1.5 min-w-[56px] transition ${isActive ? 'text-amber-400' : 'text-zinc-500 hover:text-zinc-300'}`}
+              >
+                {isActive && <span className="absolute -top-1 left-1/2 -translate-x-1/2 h-0.5 w-6 rounded-full bg-amber-500" />}
+                <span className={`flex h-6 w-6 items-center justify-center rounded-lg ${isActive ? 'bg-amber-500 text-zinc-950' : 'bg-zinc-900'}`}>
+                  <Icon className="w-3.5 h-3.5" />
+                </span>
+                <span className="text-[9px] font-semibold leading-none">{it.label}</span>
+                {it.badge !== undefined && it.badge > 0 && <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 rounded-full bg-amber-500 px-1 text-[9px] font-bold text-zinc-950 flex items-center justify-center">{it.badge > 99 ? '99+' : it.badge}</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {showMore && (
+        <div className="lg:hidden fixed inset-0 z-50 flex flex-col justify-end">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowMore(false)} />
+          <div className="relative rounded-t-3xl border border-zinc-800 bg-zinc-900 p-4 pb-8 safe-pb max-h-[70vh] overflow-y-auto">
+            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-zinc-700" />
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-bold text-white">All Sections</h3>
+              <button onClick={() => setShowMore(false)} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 text-zinc-400"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {moreTabs.map(m => {
+                const Icon = m.icon;
+                const active = activeTab === m.id;
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => { setActiveTab(m.id as any); setShowMore(false); window.scrollTo({ top: 0, behavior: 'smooth' }); }}
+                    className={`flex flex-col items-center gap-1.5 rounded-2xl border p-3 text-xs font-semibold transition ${active ? 'border-amber-500 bg-amber-500 text-zinc-950' : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700'}`}
+                  >
+                    <Icon className="w-5 h-5" />
+                    <span className="text-[11px] leading-tight text-center">{m.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-center text-[10px] text-zinc-500 mt-3">Tap any section to switch — easy one-hand use on Android</p>
+          </div>
+        </div>
+      )}
+    </>
+  );
+};
+
 export const AdminPortal: FC<Props> = ({ onBack }) => {
   // 1. Persistent Admin Auth State (Role-Bounded Non-Superuser)
   const [adminSession, setAdminSession] = useState(() => BoostPayStore.getAdminSession());
@@ -931,8 +1010,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         </div>
       </header>
 
-      {/* Admin Navigation Tabs — polished scrollable pills with snap + fade */}
-      <div className="sticky top-[61px] z-30 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-md">
+      {/* Admin Navigation Tabs — desktop only, mobile uses bottom nav */}
+      <div className="hidden lg:block sticky top-[61px] z-30 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-md">
         <div className="relative max-w-7xl mx-auto">
           <div className="pointer-events-none absolute left-0 top-0 bottom-0 w-6 bg-gradient-to-r from-zinc-950 to-transparent z-10 hidden sm:block" />
           <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-6 bg-gradient-to-l from-zinc-950 to-transparent z-10 hidden sm:block" />
@@ -1114,7 +1193,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
       {/* Main Admin Content Body — polished spacing + max-width */}
       <style>{` .admin-tab-active { background: #f59e0b; color: #09090b; font-weight: 700; box-shadow: 0 4px 12px rgba(245,158,11,0.25); } `}</style>
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6 safe-pb">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6 safe-pb pb-20 lg:pb-8 main-scrollable">
         {activeTab === 'ANALYTICS' && <AnalyticsDashboard />}
         {activeTab === 'BROADCAST' && <BroadcastView />}
         {activeTab === 'FRAUD' && <FraudView />}
@@ -1343,7 +1422,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             </div>
 
             {/* Users Table */}
-            <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
+            <div className="hidden sm:block rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
               <div className="overflow-x-auto admin-scroll">
                 <table className="w-full min-w-[680px] text-left text-xs font-mono admin-table">
                   <thead>
@@ -1464,6 +1543,43 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   </tbody>
                 </table>
               </div>
+            </div>
+            {/* Mobile card view — Android optimized (hide table scroll on phone) */}
+            <div className="sm:hidden space-y-2">
+              {paginatedUsers.map(u => (
+                <div key={`m-${u.id}`} onClick={() => setSelectedUser(u)} className={`rounded-2xl border p-3 bg-zinc-900 active:scale-[0.99] transition ${selectedUser?.id === u.id ? 'border-amber-500/50 bg-amber-500/5' : 'border-zinc-800'}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-zinc-800 text-amber-400 font-mono font-bold text-xs">#{u.id}</span>
+                      <div>
+                        <div className="text-xs font-bold text-white">User #{u.id}</div>
+                        <div className="text-[10px] text-zinc-400 truncate max-w-[160px]">{u.email || `user${u.id}@boostpay.app`}</div>
+                      </div>
+                    </div>
+                    <div className={`rounded-full px-2 py-0.5 text-[10px] font-bold border ${u.isFrozen ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40' : u.isBlocked ? 'bg-red-500/20 text-red-400 border-red-500/30' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'}`}>{u.isFrozen ? 'FROZEN' : u.isBlocked ? 'SUSPENDED' : 'ACTIVE'}</div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 mt-2">
+                    <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-center">
+                      <div className="text-[9px] text-zinc-500 uppercase">Balance</div>
+                      <div className="text-xs font-mono font-bold text-emerald-400 truncate">${Number(u.balance).toFixed(2)}</div>
+                    </div>
+                    <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-center">
+                      <div className="text-[9px] text-zinc-500 uppercase">Profit</div>
+                      <div className="text-xs font-mono text-zinc-300 truncate">+${Number(u.lifetimeProfit||0).toFixed(2)}</div>
+                    </div>
+                    <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-center">
+                      <div className="text-[9px] text-zinc-500 uppercase">Boost</div>
+                      <div className={`text-xs font-bold ${u.boostState?.isActive ? 'text-emerald-400' : 'text-zinc-500'}`}>{u.boostState?.isActive ? (u.boostState.isPaused ? 'Paused' : 'Active') : 'Idle'}</div>
+                    </div>
+                  </div>
+                  <div className="flex gap-1.5 mt-2" onClick={e=>e.stopPropagation()}>
+                    <button onClick={()=>{setFreezeModalUser(u); setFreezeReason('');}} className={`flex-1 rounded-xl py-2 text-xs font-bold border ${u.isFrozen ? 'bg-cyan-500 text-zinc-950 border-cyan-400' : 'bg-zinc-950 text-zinc-300 border-zinc-800'}`}>{u.isFrozen ? 'Unfreeze' : 'Freeze'}</button>
+                    <button onClick={()=>{setQuickCreditModalUser(u); setQuickCreditAmount(''); setQuickCreditNote(''); setQuickCreditSuccess(''); setQuickCreditError('');}} className="flex-1 rounded-xl bg-emerald-500 py-2 text-xs font-bold text-zinc-950">+ Credit</button>
+                    <button onClick={()=>setSelectedUser(u)} className="flex-1 rounded-xl bg-zinc-800 border border-zinc-700 py-2 text-xs font-bold text-amber-400">Manage</button>
+                  </div>
+                </div>
+              ))}
+              {paginatedUsers.length===0 && <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-center text-xs text-zinc-500">No users found</div>}
             </div>
 
             {/* Selected User Action Modal / Panel */}
@@ -1794,7 +1910,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             </div>
 
             {/* Audit Logs Table */}
-            <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
+            <div className="hidden sm:block rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
               <div className="overflow-x-auto admin-scroll">
                 <table className="w-full min-w-[680px] text-left text-xs font-mono admin-table">
                   <thead>
@@ -1860,6 +1976,23 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                 </table>
               </div>
             </div>
+            {/* Mobile audit cards — Android */}
+            <div className="sm:hidden space-y-2">
+              {filteredAuditLogs.slice(0, 30).map(log => (
+                <div key={log.id} className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className={`rounded-lg px-2 py-0.5 text-[10px] font-bold border ${log.action.includes('FREEZE') ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' : log.action.includes('TREASURY') ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-zinc-800 text-amber-400 border-zinc-700'}`}>{log.action}</span>
+                    <span className="text-[10px] font-mono text-zinc-500">{new Date(log.timestamp).toLocaleString()}</span>
+                  </div>
+                  <div className="text-xs text-zinc-300 mt-1.5 leading-snug">{log.details}</div>
+                  <div className="flex items-center gap-2 mt-1.5 text-[11px] font-mono">
+                    <span className="text-zinc-500">by {log.adminEmail}</span>
+                    {log.targetUserId && <span className="rounded-full bg-amber-500/15 border border-amber-500/20 px-2 py-0.5 text-amber-400 text-[10px]">User #{log.targetUserId}</span>}
+                  </div>
+                </div>
+              ))}
+              {filteredAuditLogs.length===0 && <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-center text-xs text-zinc-500">No audit entries</div>}
+            </div>
           </div>
         )}
 
@@ -1899,7 +2032,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             </div>
 
             {/* Transactions Table */}
-            <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
+            <div className="hidden sm:block rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
               <div className="overflow-x-auto admin-scroll">
                 <table className="w-full min-w-[680px] text-left text-xs font-mono admin-table">
                   <thead>
@@ -1966,6 +2099,27 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   </tbody>
                 </table>
               </div>
+            </div>
+            {/* Mobile tx cards — Android swipe */}
+            <div className="sm:hidden space-y-2">
+              {paginatedTransactions.map(tx => {
+                const isCredit = tx.type === 'TRANSFER_RECEIVED' || tx.type === 'REWARD' || tx.type === 'YIELD_REWARD' || tx.type === 'ADMIN_CREDIT';
+                return (
+                  <div key={tx.id} className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-mono font-bold text-amber-400 truncate">{tx.id}</span>
+                      <span className={`text-xs font-mono font-bold ${isCredit ? 'text-emerald-400' : 'text-rose-400'}`}>{isCredit ? '+' : '-'}${formatPrecisionAmount(tx.amount, 8)}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <span className={`rounded-lg px-2 py-0.5 text-[10px] font-bold border ${tx.type.includes('TRANSFER') ? 'bg-sky-500/20 text-sky-400 border-sky-500/30' : tx.type.includes('REWARD') || tx.type.includes('REFERRAL') ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'}`}>{tx.type}</span>
+                      <span className="text-[11px] text-zinc-400 font-mono">User #{tx.userId}{tx.recipientId ? ` → #${tx.recipientId}` : ''}</span>
+                    </div>
+                    <div className="text-xs text-zinc-300 mt-1 leading-snug">{tx.notes || '—'}</div>
+                    <div className="text-[10px] font-mono text-zinc-500 mt-1">{new Date(tx.timestamp).toLocaleString()}</div>
+                  </div>
+                );
+              })}
+              {paginatedTransactions.length===0 && filteredTransactions.length===0 && <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-center text-xs text-zinc-500">No transactions found</div>}
             </div>
             {/* Transactions pagination — fixed Next/Prev */}
             <div className="flex items-center justify-between text-xs">
@@ -2523,9 +2677,14 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                 </div>
               )}
             </div>
-          </div>
-        )}
+        </div>
+      )}
       </main>
+
+      {/* Mobile Bottom Nav — Android easy one-hand */}
+      {adminSession?.isLoggedIn && (
+        <MobileBottomNav activeTab={activeTab} setActiveTab={(t) => { setActiveTab(t); window.scrollTo({ top: 0, behavior: 'smooth' }); }} usersCount={users.length} txCount={transactions.length} />
+      )}
 
       {/* Quick Balance Deposit / Credit Modal */}
       {quickCreditModalUser && (

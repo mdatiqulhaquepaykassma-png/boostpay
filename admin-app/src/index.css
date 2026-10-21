@@ -1,11 +1,30 @@
 @import "tailwindcss";
 
-html, body, #root {
+html {
+  height: auto;
   min-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: #09090b;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+body {
+  height: auto;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-y: auto;
+  overflow-x: hidden;
   background: #09090b;
   color: #fafafa;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overscroll-behavior-y: contain;
+}
+#root {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: #09090b;
 }
 
 /* Custom scrollbar for admin tables & nav */
@@ -24,6 +43,7 @@ html, body, #root {
 /* Mobile safe area */
 @supports (padding: max(0px)) {
   .safe-pb { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+  .safe-pt { padding-top: max(0px, env(safe-area-inset-top)); }
 }
 
 /* Card hover polish */
@@ -37,4 +57,20 @@ html, body, #root {
 /* Table polish on mobile - keep readable */
 @media (max-width: 640px) {
   .admin-table th, .admin-table td { font-size: 11px; padding: 10px 12px; }
+}
+
+/* Ensure sticky works - no parent overflow hidden */
+.sticky-parent { overflow: visible; }
+
+/* Mobile bottom nav safe area */
+.mobile-bottom-nav {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+/* Prevent pull-to-refresh trapping on Android */
+.main-scrollable {
+  overscroll-behavior-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
