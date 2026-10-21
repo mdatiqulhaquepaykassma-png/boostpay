@@ -1195,7 +1195,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
       {/* Main Admin Content Body — polished spacing + max-width */}
       <style>{` .admin-tab-active { background: #f59e0b; color: #09090b; font-weight: 700; box-shadow: 0 4px 12px rgba(245,158,11,0.25); } `}</style>
-      <main className="w-full max-w-7xl mx-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6 safe-pb pb-20 lg:pb-8">
+      <main className="w-full max-w-7xl mx-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6 safe-pb pb-28 lg:pb-8">
         {activeTab === 'ANALYTICS' && <AnalyticsDashboard />}
         {activeTab === 'BROADCAST' && <BroadcastView />}
         {activeTab === 'FRAUD' && <FraudView />}
