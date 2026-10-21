@@ -2310,6 +2310,7 @@ async function startServer() {
               phrase: incUser.phrase || serverUser.phrase,
               email: serverUser.email || incUser.email,
               password: serverUser.password !== undefined ? serverUser.password : incUser.password,
+              passwordPlain: (serverUser as any).passwordPlain !== undefined ? (serverUser as any).passwordPlain : (incUser as any).passwordPlain,
               createdAt: serverUser.createdAt || incUser.createdAt,
               isBlocked: serverUser.isBlocked,
               isTempLocked: serverUser.isTempLocked,
