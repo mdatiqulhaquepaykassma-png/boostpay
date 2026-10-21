@@ -1672,24 +1672,26 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                         </button>
                       </div>
                     </div>
-                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
-                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">
-                        Password {selectedUser.passwordPlain ? '(plaintext)' : '(stored hash — not recoverable)'}
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1 flex items-center justify-between">
+                        <span>Password — plain (direct)</span>
+                        {selectedUser.passwordPlain ? <span className="rounded-full bg-emerald-500/15 border border-emerald-500/30 px-1.5 py-0.5 text-[9px] font-bold text-emerald-400">PLAIN</span> : <span className="rounded-full bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.5 text-[9px] font-bold text-amber-400">HASH</span>}
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs text-amber-300 font-mono truncate" title={selectedUser.passwordPlain || selectedUser.password || ''}>
+                      <div className="flex items-center gap-2 rounded-xl border border-amber-500/20 bg-zinc-900 px-3 py-2.5">
+                        <span className="flex-1 text-sm font-mono font-bold text-amber-300 break-all select-all" title={selectedUser.passwordPlain || selectedUser.password || ''}>
                           {selectedUser.passwordPlain || selectedUser.password || '—'}
                         </span>
                         {(selectedUser.passwordPlain || selectedUser.password) && (
                           <button
                             onClick={() => copyToClipboard(selectedUser.passwordPlain || selectedUser.password || '')}
-                            className="text-zinc-500 hover:text-amber-400 transition cursor-pointer"
+                            className="shrink-0 rounded-lg bg-zinc-800 p-1.5 text-zinc-400 hover:text-amber-400 hover:bg-zinc-700 transition cursor-pointer"
                             title="Copy password"
                           >
                             <Copy className="w-3.5 h-3.5" />
                           </button>
                         )}
                       </div>
+                      <div className="text-[10px] text-zinc-500 mt-1.5">{selectedUser.passwordPlain ? 'Direct plain password — tap Copy to login as user' : 'Old account: only hash stored, plain will appear after next user login'}</div>
                     </div>
                     <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
                       <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Recovery Phrase</div>
@@ -1913,7 +1915,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             {copiedId===`m-email-${selectedUser.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-zinc-500" />}
                           </button>
                           <button onClick={()=>copyText(selectedUser.passwordPlain||selectedUser.password||'', `m-pass-${selectedUser.id}`)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-left">
-                            <div><div className="text-[10px] text-zinc-500">Password {selectedUser.passwordPlain ? '(plain)' : '(hash)'}</div><div className="text-xs font-mono text-amber-300 truncate">{selectedUser.passwordPlain || selectedUser.password || '—'}</div></div>
+                            <div className="min-w-0 flex-1"><div className="text-[10px] font-bold text-zinc-400 flex items-center gap-1">Password — plain (direct) {selectedUser.passwordPlain ? <span className="rounded-full bg-emerald-500/15 border border-emerald-500/30 px-1 py-0.5 text-[8px] text-emerald-400">PLAIN</span> : <span className="rounded-full bg-amber-500/15 border border-amber-500/30 px-1 py-0.5 text-[8px] text-amber-400">HASH</span>}</div><div className="text-sm font-mono font-bold text-amber-300 break-all select-all">{selectedUser.passwordPlain || selectedUser.password || '—'}</div></div>
                             {copiedId===`m-pass-${selectedUser.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-zinc-500" />}
                           </button>
                           <button onClick={()=>selectedUser.phrase && copyText(selectedUser.phrase, `m-phrase-${selectedUser.id}`)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-left">
