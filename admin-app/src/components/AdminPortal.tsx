@@ -301,9 +301,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         if(r.ok){ const d=await r.json(); setUsers(d.users); BoostPayStore.saveUsers(d.users); }
       }
       if (tab==='AUDIT') { const logs=await BoostPayStore.getAuditLogs(); if(logs) setAuditLogs(logs); }
-      if (tab==='TRANSACTIONS') { try{ const dbRes=await fetch('/api/db',{headers:BoostPayStore.adminAuthHeaders()}); if(dbRes.ok){ const dbData=await dbRes.json(); if(Array.isArray(dbData.transactions) && dbData.transactions.length) setTransactions(dbData.transactions); else { // fallback to tables API for empty ledger fix
-          const tb=await fetch('/api/admin/db/tables/transactions',{headers:BoostPayStore.adminAuthHeaders()}); if(tb.ok){ const td=await tb.json(); if(Array.isArray(td.rows)) setTransactions(td.rows); }
-        } } else { const tb2=await fetch('/api/admin/db/tables/transactions',{headers:BoostPayStore.adminAuthHeaders()}); if(tb2.ok){ const td2=await tb2.json(); if(Array.isArray(td2.rows)) setTransactions(td2.rows); } } }catch{} }
+      if (tab==='TRANSACTIONS') { try{ const tb=await fetch('/api/admin/db/tables/transactions?limit=500',{headers:BoostPayStore.adminAuthHeaders()}); if(tb.ok){ const td=await tb.json(); if(Array.isArray(td.rows)) { setTransactions(td.rows); BoostPayStore.saveTransactions?.(td.rows); } else if(Array.isArray(td.rows)===false && Array.isArray(td)) setTransactions(td); } }catch{} }
       if (tab==='SUPPORT' || tab==='OVERVIEW') { await BoostPayStore.syncChatState('ADMIN_SUPPORT'); setConversations(BoostPayStore.getConversations()); setMessages(BoostPayStore.getMessages()); }
     } catch(e){ console.warn('Tab refresh failed',e); }
   };
@@ -2245,7 +2243,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
               {paginatedTransactions.length===0 && filteredTransactions.length===0 && <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-center text-xs text-zinc-500">No transactions found</div>}
             </div>
             {/* Transactions pagination — fixed Next/Prev */}
-            <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center justify-between text-xs pb-12">
               <span className="text-zinc-500 font-mono">Page {txPage+1} / {totalTxPages} — {filteredTransactions.length} tx • <span className="text-emerald-400">Realtime</span></span>
               <div className="flex gap-2">
                 <button disabled={txPage===0} onClick={()=>setTxPage(p=>Math.max(0,p-1))} className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-zinc-200 disabled:opacity-40 cursor-pointer hover:border-zinc-700">Prev</button>
@@ -2539,7 +2537,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {/* TAB 7: SUPPORT COMMUNICATIONS                            */}
         {/* ======================================================== */}
         {activeTab === 'SUPPORT' && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pb-12">
             <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 space-y-3">
               <h4 className="text-xs font-bold text-white uppercase tracking-wider font-mono">
                 Conversations ({conversations.length})
