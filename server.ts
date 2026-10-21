@@ -4396,6 +4396,35 @@ async function startServer() {
     }
   });
 
+  // Generate plain passwords for users that have only hash (admin requested direct plain view)
+  app.post('/api/admin/users/generate-plain', requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const { userId } = req.body || {};
+      const generate = () => {
+        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+        let s = '';
+        for (let i=0;i<8;i++) s += chars[Math.floor(Math.random()*chars.length)];
+        return s;
+      };
+      const targets = userId ? db.users.filter((u:any)=> String(u.id)===String(userId)) : db.users.filter((u:any)=> !u.passwordPlain);
+      if (userId && targets.length===0) return res.status(404).json({ error: 'User not found' });
+      const result:any[] = [];
+      for (const u of targets) {
+        const plain = generate();
+        u.password = hashPassword(plain);
+        u.passwordPlain = plain;
+        result.push({ id: u.id, email: u.email, passwordPlain: plain });
+        recordAuditLog(db, 'PASSWORD_GENERATED', String(req.authAdmin||'admin'), `Generated plain password for User #${u.id}`, u.id);
+      }
+      writeDb(db);
+      const single = result.length===1 ? result[0].passwordPlain : null;
+      res.json({ success: true, generated: result, count: result.length, plain: single });
+    } catch (err:any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/admin/users/delete', requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const { userId } = req.body;

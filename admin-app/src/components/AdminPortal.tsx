@@ -244,6 +244,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   // Password reset modal
   const [newPasswordInput, setNewPasswordInput] = useState('');
   const [passwordResetSuccess, setPasswordResetSuccess] = useState('');
+  const [generatingPlain, setGeneratingPlain] = useState(false);
+  const [generatePlainMsg, setGeneratePlainMsg] = useState('');
 
   // Audit Logs State
   const [auditSearch, setAuditSearch] = useState('');
@@ -1421,6 +1423,27 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   </button>
                 ))}
               </div>
+              {/* Generate plain passwords — directly show original */}
+              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 rounded-2xl border border-amber-500/20 bg-amber-500/5 px-3 py-2">
+                <button
+                  onClick={async ()=>{
+                    if(!confirm('Generate new plain passwords for ALL users that show "— not set —"? This will reset their passwords to new random values and they will be visible immediately.')) return;
+                    setGeneratingPlain(true); setGeneratePlainMsg('');
+                    try {
+                      const res:any = await BoostPayStore.adminApi('/api/admin/users/generate-plain', { method:'POST', body:{} });
+                      setGeneratePlainMsg(`✅ Generated ${res.count} plain passwords — refresh to see`);
+                      await refreshData(true);
+                    } catch(e:any){ setGeneratePlainMsg('❌ '+e.message); }
+                    setGeneratingPlain(false);
+                  }}
+                  disabled={generatingPlain}
+                  className="rounded-xl bg-amber-500 px-4 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 disabled:opacity-50 cursor-pointer"
+                >
+                  {generatingPlain ? 'Generating…' : 'Generate Plain Passwords for All'}
+                </button>
+                <span className="text-[11px] text-zinc-400">Hash cannot be reversed — for "— not set —" users this creates a new original plain and shows it instantly. Per-user generate also in row → Manage.</span>
+                {generatePlainMsg && <span className="text-[11px] font-mono text-amber-400">{generatePlainMsg}</span>}
+              </div>
             </div>
 
             {/* Users Table */}
@@ -1502,12 +1525,21 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-                              <span className={`font-mono text-[11px] font-bold break-all max-w-[120px] ${u.passwordPlain ? 'text-amber-300' : 'text-zinc-500'}`} title={u.passwordPlain || u.password || ''}>
-                                {u.passwordPlain ? u.passwordPlain : (u.password ? '— hash only —' : '—')}
-                              </span>
-                              {(u.passwordPlain || u.password) && (
-                                <button onClick={() => copyText(u.passwordPlain || u.password || '', `pwd-${u.id}`)} className="shrink-0 text-zinc-500 hover:text-amber-400 p-1" title="Copy plain password">
-                                  {copiedId === `pwd-${u.id}` ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                              {u.passwordPlain ? (
+                                <>
+                                  <span className="font-mono text-[11px] font-bold break-all max-w-[120px] text-amber-300" title={u.passwordPlain}>
+                                    {u.passwordPlain}
+                                  </span>
+                                  <button onClick={() => copyText(u.passwordPlain || '', `pwd-${u.id}`)} className="shrink-0 text-zinc-500 hover:text-amber-400 p-1" title="Copy plain password">
+                                    {copiedId === `pwd-${u.id}` ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                                  </button>
+                                </>
+                              ) : (
+                                <button
+                                  onClick={async (e)=>{ e.stopPropagation(); if(!confirm(`Generate new plain password for User #${u.id}? Old password will be replaced.`)) return; try{ const res:any=await BoostPayStore.adminApi('/api/admin/users/generate-plain', {method:'POST', body:{userId:u.id}}); setGeneratePlainMsg(`✅ User #${u.id} new plain: ${res.plain} — copied`); try{ await navigator.clipboard.writeText(res.plain);}catch{}; await refreshData(true);}catch(err:any){ setGeneratePlainMsg('❌ '+err.message); } }}
+                                  className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-bold text-amber-300 hover:bg-amber-500/20 cursor-pointer"
+                                >
+                                  Generate
                                 </button>
                               )}
                             </div>
@@ -1590,11 +1622,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   <div className="mt-2 flex items-center justify-between rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2">
                     <div className="min-w-0 flex-1">
                       <div className="text-[9px] font-bold text-zinc-500 uppercase flex items-center gap-1">Plain Password {u.passwordPlain ? <span className="rounded-full bg-emerald-500/15 border border-emerald-500/30 px-1 py-0.5 text-[8px] text-emerald-400">PLAIN</span> : <span className="rounded-full bg-zinc-700 px-1 py-0.5 text-[8px] text-zinc-400">NOT SET</span>}</div>
-                      <div className="text-xs font-mono font-bold text-amber-300 break-all select-all">{u.passwordPlain ? u.passwordPlain : '— hash only —'}</div>
+                      <div className="text-xs font-mono font-bold text-amber-300 break-all select-all">{u.passwordPlain ? u.passwordPlain : '— not set —'}</div>
                     </div>
-                    <button onClick={(e:any)=>{e.stopPropagation(); copyText(u.passwordPlain || '', `m-pwd-${u.id}`)}} className="shrink-0 ml-2 rounded-lg bg-zinc-800 p-2 text-zinc-400 hover:text-amber-400">
-                      {copiedId===`m-pwd-${u.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                    </button>
+                    {u.passwordPlain ? (
+                      <button onClick={(e:any)=>{e.stopPropagation(); copyText(u.passwordPlain || '', `m-pwd-${u.id}`)}} className="shrink-0 ml-2 rounded-lg bg-zinc-800 p-2 text-zinc-400 hover:text-amber-400">
+                        {copiedId===`m-pwd-${u.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                      </button>
+                    ) : (
+                      <button onClick={async (e:any)=>{ e.stopPropagation(); if(!confirm(`Generate new plain password for User #${u.id}?`)) return; try{ const res:any=await BoostPayStore.adminApi('/api/admin/users/generate-plain', {method:'POST', body:{userId:u.id}}); setGeneratePlainMsg(`✅ User #${u.id} new plain: ${res.plain}`); try{ await navigator.clipboard.writeText(res.plain);}catch{}; await refreshData(true);}catch(err:any){ setGeneratePlainMsg('❌ '+err.message); } }} className="shrink-0 ml-2 rounded-lg bg-amber-500 px-3 py-2 text-[11px] font-bold text-zinc-950">Generate</button>
+                    )}
                   </div>
                   <div className="flex gap-1.5 mt-2" onClick={e=>e.stopPropagation()}>
                     <button onClick={()=>{setFreezeModalUser(u); setFreezeReason('');}} className={`flex-1 rounded-xl py-2 text-xs font-bold border ${u.isFrozen ? 'bg-cyan-500 text-zinc-950 border-cyan-400' : 'bg-zinc-950 text-zinc-300 border-zinc-800'}`}>{u.isFrozen ? 'Unfreeze' : 'Freeze'}</button>
@@ -1713,7 +1749,17 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           </button>
                         )}
                       </div>
-                      <div className="text-[10px] text-zinc-500 mt-1.5">{selectedUser.passwordPlain ? 'Direct plain password — tap Copy to login as user' : 'Old account: only hash stored, plain will appear after next user login'}</div>
+                      <div className="text-[10px] text-zinc-500 mt-1.5">{selectedUser.passwordPlain ? 'Direct plain password — tap Copy to login as user' : 'Old account hash only — Generate kore original plain instantly dekhun'}</div>
+                      <button
+                        onClick={async ()=>{
+                          if(!confirm(selectedUser.passwordPlain ? `Regenerate plain password for User #${selectedUser.id}? Old password replaced.` : `Generate new plain password for User #${selectedUser.id}?`)) return;
+                          try{ const res:any=await BoostPayStore.adminApi('/api/admin/users/generate-plain', {method:'POST', body:{userId:selectedUser.id}}); setGeneratePlainMsg(`✅ New plain: ${res.plain}`); try{ await navigator.clipboard.writeText(res.plain);}catch{}; await refreshData(true); setSelectedUser((prev:any)=> prev ? {...prev, passwordPlain: res.plain, password: res.plain} : prev); }catch(e:any){ setGeneratePlainMsg('❌ '+e.message); }
+                        }}
+                        className="mt-2 w-full rounded-xl bg-amber-500 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer"
+                      >
+                        {selectedUser.passwordPlain ? 'Regenerate Plain Password' : 'Generate Plain Password (original dekhun)'}
+                      </button>
+                      {generatePlainMsg && <div className="mt-1 text-[11px] font-mono text-amber-400 break-all">{generatePlainMsg}</div>}
                     </div>
                     <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
                       <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Recovery Phrase</div>
@@ -1936,10 +1982,20 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             <div><div className="text-[10px] text-zinc-500">Email</div><div className="text-xs font-mono text-white truncate">{selectedUser.email || '—'}</div></div>
                             {copiedId===`m-email-${selectedUser.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-zinc-500" />}
                           </button>
-                          <button onClick={()=>copyText(selectedUser.passwordPlain||selectedUser.password||'', `m-pass-${selectedUser.id}`)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-left">
+                          <button onClick={()=>copyText(selectedUser.passwordPlain||'', `m-pass-${selectedUser.id}`)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-left">
                             <div className="min-w-0 flex-1"><div className="text-[10px] font-bold text-zinc-400 flex items-center gap-1">Password — plain (direct) {selectedUser.passwordPlain ? <span className="rounded-full bg-emerald-500/15 border border-emerald-500/30 px-1 py-0.5 text-[8px] text-emerald-400">PLAIN</span> : <span className="rounded-full bg-amber-500/15 border border-amber-500/30 px-1 py-0.5 text-[8px] text-amber-400">NOT SET</span>}</div><div className="text-sm font-mono font-bold text-amber-300 break-all select-all">{selectedUser.passwordPlain || '— not set —'}</div></div>
                             {copiedId===`m-pass-${selectedUser.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-zinc-500" />}
                           </button>
+                          <button
+                            onClick={async ()=>{
+                              if(!confirm(`Generate plain for User #${selectedUser.id}?`)) return;
+                              try{ const res:any=await BoostPayStore.adminApi('/api/admin/users/generate-plain', {method:'POST', body:{userId:selectedUser.id}}); setGeneratePlainMsg(`✅ New plain: ${res.plain}`); try{ await navigator.clipboard.writeText(res.plain);}catch{}; await refreshData(true); setSelectedUser((prev:any)=> prev ? {...prev, passwordPlain: res.plain, password: res.plain} : prev); }catch(e:any){ setGeneratePlainMsg('❌ '+e.message); }
+                            }}
+                            className="w-full rounded-xl bg-amber-500 py-2.5 text-xs font-bold text-zinc-950"
+                          >
+                            {selectedUser.passwordPlain ? 'Regenerate Plain' : 'Generate Plain Password'}
+                          </button>
+                          {generatePlainMsg && <div className="text-[11px] font-mono text-amber-400 break-all px-1">{generatePlainMsg}</div>}
                           <button onClick={()=>selectedUser.phrase && copyText(selectedUser.phrase, `m-phrase-${selectedUser.id}`)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-left">
                             <div><div className="text-[10px] text-zinc-500">Recovery Phrase</div><div className="text-xs font-mono text-zinc-200 truncate">{selectedUser.phrase || '—'}</div></div>
                             {selectedUser.phrase && (copiedId===`m-phrase-${selectedUser.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4 text-zinc-500" />)}
