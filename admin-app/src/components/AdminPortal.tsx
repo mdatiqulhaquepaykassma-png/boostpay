@@ -337,7 +337,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const fetchTxPage = async (page:number, search:string, filter:string) => {
     try{
       const limit=25, offset=page*limit;
-      const url=`/api/admin/db/tables/transactions?limit=${limit}&offset=${offset}&search=${encodeURIComponent(search)}&filter=${encodeURIComponent(filter)}&hideAmount=1`;
+      const url=`/api/admin/db/tables/transactions?limit=${limit}&offset=${offset}&search=${encodeURIComponent(search)}&filter=${encodeURIComponent(filter)}`;
       const r=await fetch(url, { headers: BoostPayStore.adminAuthHeaders() });
       if(r.ok){ const d=await r.json(); if(Array.isArray(d.rows)){ setTransactions(d.rows); setTxTotal(typeof d.filteredCount==='number'? d.filteredCount : (typeof d.total==='number'? d.total : d.count || d.rows.length)); } }
     }catch{}
@@ -2274,11 +2274,13 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <th className="px-4 py-3 font-semibold">Timestamp</th>
                       <th className="px-4 py-3 font-semibold">Type</th>
                       <th className="px-4 py-3 font-semibold">User</th>
+                      <th className="px-4 py-3 font-semibold">Amount</th>
                       <th className="px-4 py-3 font-semibold">Details / Ledger Note</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60">
                     {paginatedTransactions.map(tx => {
+                      const isCredit = tx.type === 'TRANSFER_RECEIVED' || tx.type === 'REWARD' || tx.type === 'YIELD_REWARD' || tx.type === 'ADMIN_CREDIT';
                       return (
                         <tr key={tx.id} className="hover:bg-zinc-800/30 transition">
                           <td className="px-4 py-3 font-bold text-amber-400 whitespace-nowrap">
@@ -2306,15 +2308,23 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                               </span>
                             )}
                           </td>
+                          <td className={`px-4 py-3 font-bold tabular-nums ${isCredit ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {isCredit ? '+' : '-'}${formatPrecisionAmount(tx.amount, 8)}
+                          </td>
                           <td className="px-4 py-3 text-zinc-300 font-sans text-xs">
                             {tx.notes || '—'}
+                            {(tx as any).balanceAfter !== undefined && (
+                              <span className="block text-[10px] font-mono text-zinc-500 mt-0.5">
+                                balance after: ${formatPrecisionAmount(Number((tx as any).balanceAfter), 2)}
+                              </span>
+                            )}
                           </td>
                         </tr>
                       );
                     })}
                     {paginatedTransactions.length === 0 && filteredTransactions.length===0 && (
                       <tr>
-                        <td colSpan={5} className="px-4 py-8 text-center text-zinc-500 font-sans">
+                        <td colSpan={6} className="px-4 py-8 text-center text-zinc-500 font-sans">
                           No transactions found.
                         </td>
                       </tr>
@@ -2326,11 +2336,12 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             {/* Mobile tx cards — Android swipe */}
             <div className="sm:hidden space-y-2">
               {paginatedTransactions.map(tx => {
+                const isCredit = tx.type === 'TRANSFER_RECEIVED' || tx.type === 'REWARD' || tx.type === 'YIELD_REWARD' || tx.type === 'ADMIN_CREDIT';
                 return (
                   <div key={tx.id} className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3">
                     <div className="flex items-center justify-between">
                       <span className="text-[11px] font-mono font-bold text-amber-400 truncate">{tx.id}</span>
-                      <span className="text-[10px] font-mono text-zinc-500">{new Date(tx.timestamp).toLocaleDateString()}</span>
+                      <span className={`text-xs font-mono font-bold ${isCredit ? 'text-emerald-400' : 'text-rose-400'}`}>{isCredit ? '+' : '-'}${formatPrecisionAmount(tx.amount, 8)}</span>
                     </div>
                     <div className="flex items-center gap-1.5 mt-1">
                       <span className={`rounded-lg px-2 py-0.5 text-[10px] font-bold border ${tx.type.includes('TRANSFER') ? 'bg-sky-500/20 text-sky-400 border-sky-500/30' : tx.type.includes('REWARD') || tx.type.includes('REFERRAL') ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'}`}>{tx.type}</span>
