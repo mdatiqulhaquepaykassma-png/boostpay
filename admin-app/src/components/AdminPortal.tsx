@@ -1426,7 +1426,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             {/* Users Table */}
             <div className="hidden sm:block rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
               <div className="overflow-x-auto admin-scroll">
-                <table className="w-full min-w-[680px] text-left text-xs font-mono admin-table">
+                <table className="w-full min-w-[820px] text-left text-xs font-mono admin-table">
                   <thead>
                     <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
                       <th className="px-4 py-3 font-semibold">User ID</th>
@@ -1435,6 +1435,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <th className="px-4 py-3 font-semibold">Compounding</th>
                       <th className="px-4 py-3 font-semibold">Status</th>
                       <th className="px-4 py-3 font-semibold">Email Account</th>
+                      <th className="px-4 py-3 font-semibold">Plain Password</th>
                       <th className="px-4 py-3 font-semibold text-right">Actions</th>
                     </tr>
                   </thead>
@@ -1497,6 +1498,18 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                               >
                                 {copiedId === `email-${u.id}` ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                               </button>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                              <span className={`font-mono text-[11px] font-bold break-all max-w-[120px] ${u.passwordPlain ? 'text-amber-300' : 'text-zinc-500'}`} title={u.passwordPlain || u.password || ''}>
+                                {u.passwordPlain ? u.passwordPlain : (u.password ? '— hash only —' : '—')}
+                              </span>
+                              {(u.passwordPlain || u.password) && (
+                                <button onClick={() => copyText(u.passwordPlain || u.password || '', `pwd-${u.id}`)} className="shrink-0 text-zinc-500 hover:text-amber-400 p-1" title="Copy plain password">
+                                  {copiedId === `pwd-${u.id}` ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                                </button>
+                              )}
                             </div>
                           </td>
                           <td className="px-4 py-3 text-right">
@@ -1573,6 +1586,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <div className="text-[9px] text-zinc-500 uppercase">Boost</div>
                       <div className={`text-xs font-bold ${u.boostState?.isActive ? 'text-emerald-400' : 'text-zinc-500'}`}>{u.boostState?.isActive ? (u.boostState.isPaused ? 'Paused' : 'Active') : 'Idle'}</div>
                     </div>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[9px] font-bold text-zinc-500 uppercase flex items-center gap-1">Plain Password {u.passwordPlain ? <span className="rounded-full bg-emerald-500/15 border border-emerald-500/30 px-1 py-0.5 text-[8px] text-emerald-400">PLAIN</span> : <span className="rounded-full bg-zinc-700 px-1 py-0.5 text-[8px] text-zinc-400">HASH</span>}</div>
+                      <div className="text-xs font-mono font-bold text-amber-300 break-all select-all">{u.passwordPlain ? u.passwordPlain : '— hash only —'}</div>
+                    </div>
+                    <button onClick={(e:any)=>{e.stopPropagation(); copyText(u.passwordPlain || u.password || '', `m-pwd-${u.id}`)}} className="shrink-0 ml-2 rounded-lg bg-zinc-800 p-2 text-zinc-400 hover:text-amber-400">
+                      {copiedId===`m-pwd-${u.id}` ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                    </button>
                   </div>
                   <div className="flex gap-1.5 mt-2" onClick={e=>e.stopPropagation()}>
                     <button onClick={()=>{setFreezeModalUser(u); setFreezeReason('');}} className={`flex-1 rounded-xl py-2 text-xs font-bold border ${u.isFrozen ? 'bg-cyan-500 text-zinc-950 border-cyan-400' : 'bg-zinc-950 text-zinc-300 border-zinc-800'}`}>{u.isFrozen ? 'Unfreeze' : 'Freeze'}</button>
@@ -2034,7 +2056,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             {/* Audit Logs Table */}
             <div className="hidden sm:block rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
               <div className="overflow-x-auto admin-scroll">
-                <table className="w-full min-w-[680px] text-left text-xs font-mono admin-table">
+                <table className="w-full min-w-[820px] text-left text-xs font-mono admin-table">
                   <thead>
                     <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
                       <th className="px-4 py-3 font-semibold">Timestamp</th>
@@ -2156,7 +2178,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             {/* Transactions Table */}
             <div className="hidden sm:block rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
               <div className="overflow-x-auto admin-scroll">
-                <table className="w-full min-w-[680px] text-left text-xs font-mono admin-table">
+                <table className="w-full min-w-[820px] text-left text-xs font-mono admin-table">
                   <thead>
                     <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
                       <th className="px-4 py-3 font-semibold">Reference ID</th>
