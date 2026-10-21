@@ -126,7 +126,6 @@ export interface SystemBanner {
 
 export interface LeaderboardRow {
   id: string;
-  email: string;
   balance: number;
   lifetimeProfit: number;
   createdAt: number;

@@ -5405,7 +5405,6 @@ async function startServer() {
     const rows = db.users
       .map((u: any) => ({
         id: String(u.id),
-        email: u.email || '',
         balance: Number(u.balance) || 0,
         lifetimeProfit: Number(u.lifetimeProfit) || 0,
         createdAt: u.createdAt || 0,

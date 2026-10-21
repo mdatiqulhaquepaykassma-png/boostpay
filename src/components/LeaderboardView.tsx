@@ -267,16 +267,11 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
 
   const currentUserRank = useMemo(() => globalRankMap.get(effectiveUserId) || 0, [globalRankMap, effectiveUserId]);
 
-  // Filtered users matching search query by name, email, or user ID
+  // Filtered users matching search query by User ID only (email never exposed)
   const filteredUsers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase().replace(/^#/, '');
     if (!q) return users;
-    return users.filter(u => {
-      const matchId = u.id.toLowerCase().includes(q);
-      const matchEmail = (u.email || '').toLowerCase().includes(q);
-      const matchName = (u as any).name ? String((u as any).name).toLowerCase().includes(q) : false;
-      return matchId || matchEmail || matchName;
-    });
+    return users.filter(u => u.id.toLowerCase().includes(q));
   }, [users, searchQuery]);
 
   // Telegram-style paging: a moving window of 10 rows (previous 10 hide when loading next)
