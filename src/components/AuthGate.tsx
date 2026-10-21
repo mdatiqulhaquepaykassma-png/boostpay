@@ -53,13 +53,17 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
     if (referralCode) setTab('SIGNUP');
   },[]);
 
+  const toGmail = (v: string) => {
+    const s = v.trim().toLowerCase().split('@')[0].replace(/\s+/g,'');
+    return s ? s + '@gmail.com' : '';
+  };
   const handleUserLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
 
-    const cleanEmail = loginEmail.trim().toLowerCase();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
-      setLoginError('Please enter your Gmail address (example: user@gmail.com) — User ID login is disabled.');
+    const cleanEmail = toGmail(loginEmail);
+    if (!cleanEmail || !loginEmail.trim().split('@')[0].trim()) {
+      setLoginError('Please enter your Gmail username (example: abir567 → abir567@gmail.com)');
       return;
     }
 
@@ -87,15 +91,12 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
     e.preventDefault();
     setSignupError('');
 
-    const cleanEmail = signupEmail.trim().toLowerCase();
-    if (!cleanEmail || !cleanEmail.includes('@')) {
-      setSignupError('Please enter a valid Gmail address.');
+    const cleanEmail = toGmail(signupEmail);
+    if (!cleanEmail || !signupEmail.trim().split('@')[0].trim()) {
+      setSignupError('Please enter your Gmail username (example: abir567 → abir567@gmail.com)');
       return;
     }
-    if (!cleanEmail.endsWith('@gmail.com')) {
-      setSignupError('Only @gmail.com addresses are allowed for signup (example: user@gmail.com).');
-      return;
-    }
+    // only @gmail.com allowed — suffix is fixed, so always ok
 
     if (!signupPassword) {
       setSignupError('Please set a security password.');
@@ -189,15 +190,19 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
               <label className="block text-[11px] font-medium text-zinc-300 mb-1.5 flex items-center gap-1.5">
                 <Mail className="w-3.5 h-3.5 text-amber-400" /> Email
               </label>
-              <input
-                type="email"
-                autoComplete="email"
-                required
-                placeholder="user@gmail.com"
-                value={loginEmail}
-                onChange={(e) => setLoginEmail(e.target.value)}
-                className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
-              />
+              <div className="flex items-center rounded-2xl border border-zinc-800 bg-zinc-950 focus-within:border-amber-500 overflow-hidden">
+                <input
+                  type="text"
+                  autoComplete="username"
+                  required
+                  placeholder="abir567"
+                  value={loginEmail.split('@')[0]}
+                  onChange={(e) => setLoginEmail(e.target.value.split('@')[0].replace(/\s/g,''))}
+                  className="flex-1 bg-transparent px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none"
+                />
+                <span className="pr-3.5 text-xs font-mono text-zinc-400 select-none">@gmail.com</span>
+              </div>
+              <p className="text-[10px] text-zinc-500 mt-1">Just type abir567 → auto abir567@gmail.com (fixed, cannot remove)</p>
             </div>
 
             <div>
@@ -260,15 +265,19 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
               <label className="block text-[11px] font-medium text-zinc-300 mb-1.5 flex items-center gap-1.5">
                 <Mail className="w-3.5 h-3.5 text-amber-400" /> Email Address
               </label>
-              <input
-                type="email"
-                autoComplete="email"
-                required
-                placeholder="user@gmail.com (only Gmail allowed)"
-                value={signupEmail}
-                onChange={(e) => setSignupEmail(e.target.value)}
-                className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
-              />
+              <div className="flex items-center rounded-2xl border border-zinc-800 bg-zinc-950 focus-within:border-amber-500 overflow-hidden">
+                <input
+                  type="text"
+                  autoComplete="username"
+                  required
+                  placeholder="abir567"
+                  value={signupEmail.split('@')[0]}
+                  onChange={(e) => setSignupEmail(e.target.value.split('@')[0].replace(/\s/g,''))}
+                  className="flex-1 bg-transparent px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none"
+                />
+                <span className="pr-3.5 text-xs font-mono text-zinc-400 select-none">@gmail.com</span>
+              </div>
+              <p className="text-[10px] text-zinc-500 mt-1">Just type abir567 → auto abir567@gmail.com (fixed, cannot remove)</p>
               {/* sequential ID hint removed per user request */}
             </div>
 
