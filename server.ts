@@ -4946,13 +4946,17 @@ async function startServer() {
         });
       }
       const totalFiltered = rows.length;
-      const paged = rows.slice(offset, offset + limit);
+      let paged: any[] = rows.slice(offset, offset + limit);
+      // hide amount for super fast fetch when requested (Audit 464 & Ledger 500)
+      const hideAmount = String(req.query.hideAmount || '') === '1' || String(req.query.hideAmount || '').toLowerCase() === 'true';
+      if (hideAmount && name === 'transactions') {
+        paged = paged.map(({ amount, balanceAfter, ...rest }: any) => rest);
+      }
       res.json({
         name,
         count: table.rows.length,
         filteredCount: totalFiltered,
         columns: collectDbColumns(table.rows),
-        // Owner decision: all fields always returned unmasked (incl. passwords/tokens).
         rows: paged,
         limit,
         offset,
