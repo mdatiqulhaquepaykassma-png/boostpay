@@ -941,7 +941,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   // RENDER: 2. LOGGED-IN ADMIN CONSOLE (ROLE-BOUNDED)
   // -------------------------------------------------------------
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans">
       {/* Real-time audio/video call manager for the Admin Support mailbox */}
       <CallManager currentUser={{ id: 'ADMIN_SUPPORT' }} senderRole="ADMIN" />
       {/* Top Admin Header — polished responsive */}
@@ -1193,7 +1193,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
       {/* Main Admin Content Body — polished spacing + max-width */}
       <style>{` .admin-tab-active { background: #f59e0b; color: #09090b; font-weight: 700; box-shadow: 0 4px 12px rgba(245,158,11,0.25); } `}</style>
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6 safe-pb pb-20 lg:pb-8">
+      <main className="w-full max-w-7xl mx-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6 safe-pb pb-20 lg:pb-8">
         {activeTab === 'ANALYTICS' && <AnalyticsDashboard />}
         {activeTab === 'BROADCAST' && <BroadcastView />}
         {activeTab === 'FRAUD' && <FraudView />}
