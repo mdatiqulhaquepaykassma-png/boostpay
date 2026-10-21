@@ -203,13 +203,13 @@ export const AnalyticsDashboard: FC = () => {
       </div>
 
       {/* Charts */}
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5">
         <LineChart points={rewardPoints} color="#34d399" title="Daily Compounding Profit Payouts (USD)" />
       </div>
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5">
         <BarChart points={flowPoints} color="#fbbf24" title="Daily Net Liquidity Flow (credits − debits, USD)" />
       </div>
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5">
         <LineChart points={activePoints} color="#60a5fa" title="Daily Active Transacting Users" />
       </div>
     </div>
@@ -267,7 +267,7 @@ export const BroadcastView: FC = () => {
         <p className="text-[11px] text-zinc-400">Push a system notification (and optional urgent banner) to every user inbox in one click</p>
       </div>
 
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-4">
         {result && (
           <div className={`flex items-start gap-2 rounded-2xl border p-3 text-xs ${result.type === 'ok' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-red-500/30 bg-red-500/10 text-red-300'}`}>
             {result.type === 'ok' ? <Check className="w-3.5 h-3.5 mt-0.5 shrink-0" /> : <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />}
@@ -448,7 +448,7 @@ export const FraudView: FC = () => {
       )}
 
       {/* Risk signals */}
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5">
         <h3 className="text-xs font-bold text-white mb-3">Live Risk Signals</h3>
         {(data?.signals || []).length === 0 ? (
           <p className="py-6 text-center text-[11px] text-zinc-500">No suspicious same-IP activity in the last 10 minutes.</p>
@@ -472,7 +472,7 @@ export const FraudView: FC = () => {
       </div>
 
       {/* Frozen users — with live countdown for temp freeze */}
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5">
         <h3 className="text-xs font-bold text-white mb-3 flex items-center justify-between">Frozen Accounts ({(data?.frozenUsers || []).length}) <span className="text-[10px] text-zinc-500 font-normal">Live countdown for temp freeze</span></h3>
         {(data?.frozenUsers || []).length === 0 ? (
           <p className="py-6 text-center text-[11px] text-zinc-500">No frozen accounts.</p>
@@ -516,7 +516,7 @@ export const FraudView: FC = () => {
       <IpBlockManager />
 
       {/* Fraud audit trail */}
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5">
         <h3 className="text-xs font-bold text-white mb-3">Fraud Audit Trail</h3>
         {(data?.fraudLogs || []).length === 0 ? (
           <p className="py-6 text-center text-[11px] text-zinc-500">No fraud events recorded yet.</p>
@@ -575,9 +575,9 @@ const IpBlockManager: FC = () => {
   const toggleMaster = async(v:boolean)=>{
     try{ await BoostPayStore.adminApi('/api/admin/antifraud/ip-blocks/toggle-enabled', { method:'POST', body:{ enabled: v }}); setEnabled(v); setMsg(v?'IP blocking ON':'IP blocking OFF'); }catch(e:any){ setErr(e.message); }
   };
-  if(loading) return <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 flex justify-center py-6"><Loader2 className="w-5 h-5 animate-spin text-zinc-500"/></div>;
+  if(loading) return <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 flex justify-center py-6"><Loader2 className="w-5 h-5 animate-spin text-zinc-500"/></div>;
   return (
-    <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
+    <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-3">
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-bold text-white flex items-center gap-2"><ShieldAlert className="w-4 h-4 text-amber-400"/> IP Block — ON/OFF Edit</h3>
         <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" checked={enabled} onChange={e=> toggleMaster(e.target.checked)} className="h-4 w-4 accent-amber-500"/> {enabled ? 'ON' : 'OFF'}</label>
@@ -638,7 +638,7 @@ const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = 
   const labels:any = { velocity:'Velocity (same IP rapid)', multiIp:'Multi-IP cluster', newAccountLarge:'New account large', deviceFingerprint:'Device multi-account', loginSpam:'Login spam', chatSpam:'Chat spam', scam:'Scam' };
   const desc:any = { velocity:'High velocity transfers from same user (10m window)', multiIp:'Multiple users sharing same IP doing transfers', newAccountLarge:'New account <24h sending large amount', deviceFingerprint:'Same device/browser with multiple accounts', loginSpam:'Many login attempts in 10 min (brute force)', chatSpam:'Flooding chat with many messages per minute', scam:'General scam / suspicious pattern' };
   return (
-    <div id="antifraud-config-section" className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
+    <div id="antifraud-config-section" className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-3">
       <h3 className="text-xs font-bold text-white flex items-center justify-between">Antifraud Config — features & per-reason freeze {msg && <span className="text-emerald-400 text-[11px]">{msg}</span>} {err && <span className="text-red-400 text-[11px]">{err}</span>}</h3>
       <div className="flex flex-wrap gap-2 p-2 rounded-xl bg-zinc-950 border border-zinc-800">
         <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" checked={!!form.enabled} onChange={e=> setForm((f:any)=>({...f, enabled: e.target.checked}))} className="h-4 w-4 accent-amber-500"/> Antifraud Master ON</label>
@@ -646,7 +646,7 @@ const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = 
       </div>
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
         <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-2">Feature ON/OFF — kon feature active thakbe</div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {Object.keys(form.features||{}).map((k:string)=>(
             <label key={k} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 cursor-pointer">
               <span className="text-xs text-zinc-300">{labels[k]||k}</span>
@@ -655,7 +655,7 @@ const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = 
           ))}
         </div>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
         <div><label className="text-[10px] text-zinc-500 font-mono">Max transfers /10m</label><input type="number" value={form.maxTransfersPer10Min} onChange={e=> setForm((f:any)=>({...f, maxTransfersPer10Min: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
         <div><label className="text-[10px] text-zinc-500 font-mono">Max logins /10m</label><input type="number" value={form.maxLoginsPer10Min} onChange={e=> setForm((f:any)=>({...f, maxLoginsPer10Min: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
         <div><label className="text-[10px] text-zinc-500 font-mono">Max messages /min</label><input type="number" value={form.maxMessagesPerMin} onChange={e=> setForm((f:any)=>({...f, maxMessagesPerMin: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white"/></div>
@@ -668,7 +668,7 @@ const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = 
           <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" checked={!!form.ipBlockEnabled} onChange={e=> setForm((f:any)=>({...f, ipBlockEnabled: e.target.checked}))} className="h-4 w-4 accent-amber-500"/> Persistent IP block Master ON</label>
           <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer"><input type="checkbox" checked={!!form.ipAutoBlockEnabled} onChange={e=> setForm((f:any)=>({...f, ipAutoBlockEnabled: e.target.checked}))} className="h-4 w-4 accent-rose-500"/> Auto Temp-Block (\"Your IP blocked\" message) ON</label>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           <div><label className="text-[10px] text-zinc-500 font-mono">Auto-block threshold (over-limit by N)</label><input type="number" value={form.ipAutoBlockThreshold} onChange={e=> setForm((f:any)=>({...f, ipAutoBlockThreshold: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white" placeholder="50"/><span className="text-[9px] text-zinc-600">e.g. 50 means block when count &gt; maxPerMinute+50</span></div>
           <div><label className="text-[10px] text-zinc-500 font-mono">Temp block duration (minutes)</label><input type="number" value={form.ipAutoBlockDurationMs} onChange={e=> setForm((f:any)=>({...f, ipAutoBlockDurationMs: e.target.value}))} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs font-mono text-white" placeholder="10"/><span className="text-[9px] text-zinc-600">default 10 min as you requested; range 1m–10080m (7d)</span></div>
         </div>
@@ -676,7 +676,7 @@ const AntifraudConfigEditor: FC<{ config:any; onSaved:()=>void; logs:any[] }> = 
       </div>
       <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
         <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-2">Per-reason freeze time (minutes) — dynamically kon karon e koto khon freeze</div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {Object.keys(form.freezeDurations).map(k=>(
             <div key={k} className={`rounded-xl border p-2 ${form.features[k]===false ? 'border-zinc-800 bg-zinc-900 opacity-60' : 'border-zinc-800 bg-zinc-950'}`}>
               <div className="flex items-center justify-between">
@@ -771,7 +771,7 @@ export const AdminSystemSettingsView: FC = () => {
       </div>
       {err && <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4"/>{err}</div>}
       {msg && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300 flex items-center gap-2"><Check className="w-4 h-4"/>{msg}</div>}
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-4">
         <h3 className="text-xs font-bold text-white">Compounding Engine</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div><label className="text-[10px] font-mono text-zinc-500">Minute Rate %</label><input type="number" step="0.0001" value={cfg.minuteRatePercent ?? ''} onChange={e=> setCfg({...cfg, minuteRatePercent: parseFloat(e.target.value)||0})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
@@ -782,7 +782,7 @@ export const AdminSystemSettingsView: FC = () => {
           <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.maintenanceMode} onChange={e=> setCfg({...cfg, maintenanceMode: e.target.checked})} /> Maintenance mode</label>
         </div>
       </div>
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-4">
         <h3 className="text-xs font-bold text-white">Referral Control</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.referral?.enabled} onChange={e=> setCfg({...cfg, referral:{...cfg.referral, enabled:e.target.checked}})} /> Referral enabled</label>
@@ -792,7 +792,7 @@ export const AdminSystemSettingsView: FC = () => {
           <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.referral?.commissionOnCompounding} onChange={e=> setCfg({...cfg, referral:{...cfg.referral, commissionOnCompounding:e.target.checked}})} /> Commission on compounding</label>
         </div>
       </div>
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-4">
         <h3 className="text-xs font-bold text-white">Antifraud</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.antifraud?.enabled} onChange={e=> setCfg({...cfg, antifraud:{...cfg.antifraud, enabled:e.target.checked}})} /> Antifraud Master ON</label>
@@ -805,7 +805,7 @@ export const AdminSystemSettingsView: FC = () => {
         {cfg.antifraud?.features && (
           <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
             <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-2">Features ON/OFF — kon detection active</div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               {Object.keys(cfg.antifraud.features).map(k=> (
                 <label key={k} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 cursor-pointer">
                   <span className="text-xs text-zinc-300 capitalize">{k.replace(/([A-Z])/g,' $1')}</span>
@@ -883,7 +883,7 @@ export const ReferAdminView: FC = () => {
         <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4"><div className="text-[10px] uppercase text-zinc-500 font-semibold">Mode</div><div className="text-sm font-bold text-white">{form.enabled? 'Enabled ✅':'Disabled'}</div></div>
       </div>
 
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-4">
         <h3 className="text-xs font-bold text-white">Referral Settings (1-10% dynamic)</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={form.enabled} onChange={e=> setForm({...form, enabled: e.target.checked})} /> Referral system enabled</label>
@@ -898,7 +898,7 @@ export const ReferAdminView: FC = () => {
         <button onClick={save} disabled={saving} className="rounded-xl bg-amber-500 px-5 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer disabled:opacity-50">{saving?'Saving...':'Save Refer Config'}</button>
       </div>
 
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5">
         <h3 className="text-xs font-bold text-white mb-3">Recent Referrals ({(data?.referrals||[]).length})</h3>
         <div className="space-y-1.5 max-h-64 overflow-y-auto">
           {(data?.referrals||[]).slice(0,50).map((r:any)=> (
@@ -910,7 +910,7 @@ export const ReferAdminView: FC = () => {
           {(data?.referrals||[]).length===0 && <p className="text-center text-[11px] text-zinc-500 py-6">No referrals yet.</p>}
         </div>
       </div>
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5">
         <h3 className="text-xs font-bold text-white mb-3">Recent Commissions</h3>
         <div className="space-y-1.5 max-h-64 overflow-y-auto">
           {(data?.commissions||[]).slice(0,50).map((c:any)=>(
@@ -1066,7 +1066,7 @@ export const SmtpAdminView: FC = () => {
       </div>
 
       {/* Global config */}
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-4">
         <h3 className="text-xs font-bold text-white flex items-center gap-2"><Sliders className="w-4 h-4 text-amber-400"/> Global SMTP Config + Rate Limit</h3>
         {cfgForm && (
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -1083,7 +1083,7 @@ export const SmtpAdminView: FC = () => {
       </div>
 
       {/* Add account */}
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-4">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-4">
         <h3 className="text-xs font-bold text-white flex items-center gap-2"><Plus className="w-4 h-4 text-emerald-400"/> Add Gmail SMTP Account — unlimited</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div><label className="text-[10px] font-mono text-zinc-500">Gmail email</label><input value={addEmail} onChange={e=> setAddEmail(e.target.value)} placeholder="you@gmail.com" className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-600"/></div>
@@ -1099,7 +1099,7 @@ export const SmtpAdminView: FC = () => {
       </div>
 
       {/* Accounts list */}
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-xs font-bold text-white">SMTP Pool — {accounts.length} accounts</h3>
           <div className="flex items-center gap-2">
@@ -1143,7 +1143,7 @@ export const SmtpAdminView: FC = () => {
       </div>
 
       {/* Monitoring byDay */}
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5">
         <h3 className="text-xs font-bold text-white mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-amber-400"/> Monitoring — Last 7 days</h3>
         {Object.keys(stats.byDay||{}).length===0 ? <p className="text-[11px] text-zinc-500 text-center py-4">No sends yet — test email diye suru koren</p> : (
           <div className="space-y-1.5">
@@ -1259,7 +1259,7 @@ export const AdminAccountsView: FC<{ myEmail: string; myRole: string }> = ({ myE
         </div>
       )}
 
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5">
         <h3 className="text-xs font-bold text-white mb-3">Accounts</h3>
         {loading ? (
           <div className="flex justify-center py-8"><Loader2 className="w-5 h-5 text-zinc-500 animate-spin" /></div>
@@ -1288,9 +1288,9 @@ export const AdminAccountsView: FC<{ myEmail: string; myRole: string }> = ({ myE
       </div>
 
       {myRole === 'SUPERADMIN' && (
-        <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
+        <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-3">
           <h3 className="text-xs font-bold text-white flex items-center gap-2"><Plus className="w-3.5 h-3.5 text-amber-400" /> Create Admin</h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5.5">
             <input value={newEmail} onChange={(e) => setNewEmail(e.target.value)} placeholder="admin email"
               className="rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-white placeholder-zinc-600 focus:border-amber-500 focus:outline-none" />
             <input value={newPass} onChange={(e) => setNewPass(e.target.value)} type="password" placeholder="password (min 6 chars)"
@@ -1310,9 +1310,9 @@ export const AdminAccountsView: FC<{ myEmail: string; myRole: string }> = ({ myE
         </div>
       )}
 
-      <div className="rounded-3xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-3">
+      <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-3">
         <h3 className="text-xs font-bold text-white flex items-center gap-2"><KeyRound className="w-3.5 h-3.5 text-amber-400" /> Change My Admin Password</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5.5">
           <input value={curPass} onChange={(e) => setCurPass(e.target.value)} type="password" placeholder="Current password"
             className="rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-white placeholder-zinc-600 focus:border-amber-500 focus:outline-none" />
           <input value={nextPass} onChange={(e) => setNextPass(e.target.value)} type="password" placeholder="New password (min 6 chars)"

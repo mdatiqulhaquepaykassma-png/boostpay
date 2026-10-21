@@ -4,4 +4,37 @@ html, body, #root {
   min-height: 100%;
   background: #09090b;
   color: #fafafa;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar for admin tables & nav */
+.admin-scroll::-webkit-scrollbar { height: 6px; width: 6px; }
+.admin-scroll::-webkit-scrollbar-track { background: #18181b; border-radius: 999px; }
+.admin-scroll::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 999px; }
+.admin-scroll::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Smooth tab snap */
+.snap-x { scroll-snap-type: x mandatory; }
+.snap-start { scroll-snap-align: start; }
+
+/* Mobile safe area */
+@supports (padding: max(0px)) {
+  .safe-pb { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+}
+
+/* Card hover polish */
+.admin-card { transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s; }
+.admin-card:hover { border-color: rgb(63 63 70); }
+.admin-card:active { transform: scale(0.998); }
+
+/* Focus ring polish */
+*:focus-visible { outline: 2px solid #f59e0b; outline-offset: 2px; border-radius: 6px; }
+
+/* Table polish on mobile - keep readable */
+@media (max-width: 640px) {
+  .admin-table th, .admin-table td { font-size: 11px; padding: 10px 12px; }
 }

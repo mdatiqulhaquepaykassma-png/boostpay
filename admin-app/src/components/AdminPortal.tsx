@@ -865,81 +865,82 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans">
       {/* Real-time audio/video call manager for the Admin Support mailbox */}
       <CallManager currentUser={{ id: 'ADMIN_SUPPORT' }} senderRole="ADMIN" />
-      {/* Top Admin Header */}
-      <header className="sticky top-0 z-40 w-full border-b border-zinc-800 bg-zinc-950/95 backdrop-blur-md px-4 sm:px-8 py-3.5">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-500 text-zinc-950 font-black shadow-md shadow-amber-500/20">
+      {/* Top Admin Header — polished responsive */}
+      <header className="sticky top-0 z-40 w-full border-b border-zinc-800 bg-zinc-950/90 backdrop-blur-xl">
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 px-4 sm:px-6 lg:px-8 py-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-amber-500 text-zinc-950 font-black shadow-md shadow-amber-500/20">
               <ShieldCheck className="w-5 h-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-sm tracking-tight text-white block">
-                  BoostPay Admin Portal
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-bold text-[13px] sm:text-sm tracking-tight text-white">
+                  BoostPay Admin
                 </span>
-                <span className="rounded-full bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-mono text-emerald-400 font-semibold">
+                <span className="hidden sm:inline-flex rounded-full bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-mono text-emerald-400 font-semibold">
                   ROLE_ADMIN
                 </span>
+                <span className="inline-flex sm:hidden rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-bold text-zinc-950">ADMIN</span>
               </div>
-              <span className="text-[10px] text-zinc-400 font-mono">
-                Authoritative Session • {adminSession.email}
+              <span className="block truncate text-[10px] sm:text-[11px] text-zinc-400 font-mono">
+                {adminSession.email}
               </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5">
-            {/* Live Refresh */}
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <button
               onClick={() => refreshData(true)}
               disabled={isRefreshing}
-              className="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-700 active:scale-95 transition cursor-pointer"
+              className="flex h-9 w-9 sm:w-auto items-center justify-center sm:gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 sm:px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-800 active:scale-95 transition cursor-pointer"
               title="Refresh database state"
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-amber-400' : 'text-zinc-400'}`} />
+              <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${isRefreshing ? 'animate-spin text-amber-400' : 'text-zinc-400'}`} />
               <span className="hidden sm:inline">Refresh</span>
             </button>
 
-            {/* Backup DB */}
             <button
               onClick={handleDownloadBackup}
-              className="hidden sm:flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-700 active:scale-95 transition cursor-pointer"
+              className="hidden lg:flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-800 active:scale-95 transition cursor-pointer"
               title="Download JSON Database Backup"
             >
               <Download className="w-3.5 h-3.5 text-zinc-400" />
               <span>Backup</span>
             </button>
 
-            {/* Back to User View */}
             {onBack && (
               <button
                 onClick={onBack}
-                className="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:text-white hover:border-zinc-700 active:scale-95 transition cursor-pointer"
+                className="flex h-9 w-9 sm:w-auto items-center justify-center sm:gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 sm:px-3 py-1.5 text-xs text-zinc-300 hover:text-white hover:border-zinc-700 active:scale-95 transition cursor-pointer"
                 title="View user wallet"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">User Wallet</span>
+                <span className="hidden sm:inline">Wallet</span>
               </button>
             )}
 
-            {/* Sign Out */}
             <button
               onClick={handleAdminLogout}
-              className="flex items-center gap-1.5 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 hover:bg-red-500/20 active:scale-95 transition cursor-pointer"
+              className="flex h-9 w-9 sm:w-auto items-center justify-center sm:gap-1.5 rounded-xl border border-red-500/30 bg-red-500/10 px-2.5 sm:px-3 py-1.5 text-xs font-semibold text-red-400 hover:bg-red-500/20 active:scale-95 transition cursor-pointer"
               title="Sign Out of Admin Console"
             >
               <LogOut className="w-3.5 h-3.5" />
-              <span>Sign Out</span>
+              <span className="hidden sm:inline">Sign Out</span>
             </button>
           </div>
         </div>
       </header>
 
-      {/* Admin Navigation Tabs */}
-      <div className="border-b border-zinc-800/80 bg-zinc-900/50 px-4 sm:px-8">
-        <div className="max-w-7xl mx-auto flex items-center gap-1 sm:gap-2 overflow-x-auto py-2">
+      {/* Admin Navigation Tabs — polished scrollable pills with snap + fade */}
+      <div className="sticky top-[61px] z-30 border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-md">
+        <div className="relative max-w-7xl mx-auto">
+          <div className="pointer-events-none absolute left-0 top-0 bottom-0 w-6 bg-gradient-to-r from-zinc-950 to-transparent z-10 hidden sm:block" />
+          <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-6 bg-gradient-to-l from-zinc-950 to-transparent z-10 hidden sm:block" />
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar snap-x px-4 sm:px-6 lg:px-8 py-2.5">
+
           <button
             onClick={() => setActiveTab('OVERVIEW')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'OVERVIEW'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -951,7 +952,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('ANALYTICS')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'ANALYTICS'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -963,7 +964,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('USERS')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'USERS'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -975,7 +976,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('AUDIT')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'AUDIT'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -987,7 +988,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('TRANSACTIONS')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'TRANSACTIONS'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -999,7 +1000,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('FRAUD')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'FRAUD'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -1011,7 +1012,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('REFER')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'REFER'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -1023,7 +1024,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('SMTP')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'SMTP'
                 ? 'bg-sky-500 text-white font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -1035,7 +1036,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('SETTINGS')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'SETTINGS'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -1047,7 +1048,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('BROADCAST')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'BROADCAST'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -1062,7 +1063,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
               setActiveTab('DATABASE');
               runStorageProbe();
             }}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'DATABASE'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -1074,7 +1075,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('ENGINE')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'ENGINE'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -1086,7 +1087,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('SUPPORT')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'SUPPORT'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -1098,7 +1099,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
           <button
             onClick={() => setActiveTab('ADMINS')}
-            className={`flex items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold transition cursor-pointer shrink-0 ${
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'ADMINS'
                 ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
                 : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
@@ -1108,10 +1109,12 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             <span>Admin Roles</span>
           </button>
         </div>
+        </div>
       </div>
 
-      {/* Main Admin Content Body */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-8 space-y-6">
+      {/* Main Admin Content Body — polished spacing + max-width */}
+      <style>{` .admin-tab-active { background: #f59e0b; color: #09090b; font-weight: 700; box-shadow: 0 4px 12px rgba(245,158,11,0.25); } `}</style>
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6 safe-pb">
         {activeTab === 'ANALYTICS' && <AnalyticsDashboard />}
         {activeTab === 'BROADCAST' && <BroadcastView />}
         {activeTab === 'FRAUD' && <FraudView />}
@@ -1129,8 +1132,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {/* ======================================================== */}
         {activeTab === 'OVERVIEW' && (
           <div className="space-y-6">
-            {/* Top Stat Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {/* Top Stat Cards — polished responsive: 1 col mobile → 2 tablet → 4 desktop */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
               <div className="rounded-2xl border border-zinc-800 bg-zinc-900/90 p-4">
                 <div className="flex items-center justify-between text-zinc-400 text-xs mb-2">
                   <span>Total System Liquidity</span>
@@ -1340,9 +1343,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             </div>
 
             {/* Users Table */}
-            <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs font-mono">
+            <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
+              <div className="overflow-x-auto admin-scroll">
+                <table className="w-full min-w-[680px] text-left text-xs font-mono admin-table">
                   <thead>
                     <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
                       <th className="px-4 py-3 font-semibold">User ID</th>
@@ -1791,9 +1794,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             </div>
 
             {/* Audit Logs Table */}
-            <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs font-mono">
+            <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
+              <div className="overflow-x-auto admin-scroll">
+                <table className="w-full min-w-[680px] text-left text-xs font-mono admin-table">
                   <thead>
                     <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
                       <th className="px-4 py-3 font-semibold">Timestamp</th>
@@ -1896,9 +1899,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             </div>
 
             {/* Transactions Table */}
-            <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs font-mono">
+            <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
+              <div className="overflow-x-auto admin-scroll">
+                <table className="w-full min-w-[680px] text-left text-xs font-mono admin-table">
                   <thead>
                     <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
                       <th className="px-4 py-3 font-semibold">Reference ID</th>
@@ -2526,8 +2529,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
       {/* Quick Balance Deposit / Credit Modal */}
       {quickCreditModalUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-md animate-in fade-in duration-200">
-          <div className="w-full max-w-md rounded-3xl border border-emerald-500/30 bg-zinc-900 shadow-2xl p-6 space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-zinc-950/80 backdrop-blur-md animate-in fade-in duration-200 overflow-y-auto">
+          <div className="w-full max-w-md max-h-[92vh] overflow-y-auto rounded-2xl sm:rounded-3xl border border-emerald-500/30 bg-zinc-900 shadow-2xl p-5 sm:p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
               <div className="flex items-center gap-2.5">
                 <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/20 text-emerald-400">
@@ -2683,8 +2686,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
       {/* Freeze / Unfreeze Confirmation Modal */}
       {freezeModalUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/80 backdrop-blur-md animate-in fade-in duration-200">
-          <div className="w-full max-w-md rounded-3xl border border-cyan-500/40 bg-zinc-900 shadow-2xl p-6 space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-zinc-950/80 backdrop-blur-md animate-in fade-in duration-200 overflow-y-auto">
+          <div className="w-full max-w-md max-h-[92vh] overflow-y-auto rounded-2xl sm:rounded-3xl border border-cyan-500/40 bg-zinc-900 shadow-2xl p-5 sm:p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
               <div className="flex items-center gap-2.5">
                 <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-500/20 text-cyan-300">
