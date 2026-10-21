@@ -85,7 +85,7 @@ const MobileBottomNav: FC<{ activeTab: string; setActiveTab: (t: any) => void; u
     { id: 'USERS', label: 'Users', icon: Users, badge: usersCount },
     { id: 'TRANSACTIONS', label: 'Ledger', icon: ArrowRightLeft, badge: txCount },
     { id: 'SUPPORT', label: 'Support', icon: MessageSquare },
-    { id: 'MORE', label: 'More', icon: Sliders },
+    { id: 'MORE', label: 'Others', icon: Sliders },
   ];
   const [showMore, setShowMore] = useState(false);
   const moreTabs = [
@@ -103,7 +103,7 @@ const MobileBottomNav: FC<{ activeTab: string; setActiveTab: (t: any) => void; u
   return (
     <>
       <div className="lg:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-zinc-700 bg-zinc-950 mobile-bottom-nav shadow-[0_-8px_24px_rgba(0,0,0,0.5)]">
-        <div className="flex items-center justify-around px-1 py-1.5">
+        <div className="flex items-center justify-between px-0.5 py-1.5 gap-0.5 overflow-hidden">
           {items.map(it => {
             const Icon = it.icon;
             const isActive = activeTab === it.id || (it.id === 'MORE' && moreTabs.some(m => m.id === activeTab));
@@ -112,13 +112,13 @@ const MobileBottomNav: FC<{ activeTab: string; setActiveTab: (t: any) => void; u
               <button
                 key={it.id}
                 onClick={() => isMore ? setShowMore(true) : setActiveTab(it.id)}
-                className={`relative flex flex-col items-center gap-1 rounded-xl px-2.5 py-1 min-w-[62px] transition ${isActive ? 'text-amber-400' : 'text-zinc-300 hover:text-white'}`}
+                className={`relative flex-1 min-w-0 flex flex-col items-center gap-1 rounded-xl px-1 py-1 transition ${isActive ? 'text-amber-400' : 'text-zinc-300 hover:text-white'}`}
               >
                 {isActive && <span className="absolute -top-1.5 left-1/2 -translate-x-1/2 h-1 w-7 rounded-full bg-amber-500" />}
                 <span className={`flex h-7 w-7 items-center justify-center rounded-xl ${isActive ? 'bg-amber-500 text-zinc-950 shadow-md shadow-amber-500/20' : 'bg-zinc-800 text-zinc-200 border border-zinc-700'}`}>
                   <Icon className="w-4 h-4" />
                 </span>
-                <span className={`text-[10px] font-bold tracking-wide leading-none ${isActive ? 'text-amber-400' : 'text-zinc-200'}`}>{it.label}</span>
+                <span className={`text-[9px] sm:text-[10px] font-bold tracking-wide leading-none truncate w-full text-center ${isActive ? 'text-amber-400' : 'text-zinc-200'}`}>{it.label}</span>
                 {it.badge !== undefined && it.badge > 0 && <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 rounded-full bg-amber-500 px-1 text-[9px] font-bold text-zinc-950 flex items-center justify-center">{it.badge > 99 ? '99+' : it.badge}</span>}
               </button>
             );
