@@ -1893,7 +1893,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       ))}
                     </div>
                   </div>
-                  <div className="flex-1 overflow-y-auto overscroll-contain p-4 space-y-3 touch-pan-y" style={{ WebkitOverflowScrolling: 'touch' } as any}>
+                  <div className="flex-1 overflow-y-auto overscroll-contain p-4 pb-8 space-y-3 touch-pan-y" style={{ WebkitOverflowScrolling: 'touch' } as any}>
                     {mobileUserTab==='INFO' && (
                       <div className="space-y-3">
                         <div className="grid grid-cols-2 gap-2">
@@ -2801,8 +2801,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
       )}
       </main>
 
-      {/* Mobile Bottom Nav — Android easy one-hand */}
-      {adminSession?.isLoggedIn && (
+      {/* Mobile Bottom Nav — Android easy one-hand (hidden when user sheet/modal open to not cover buttons) */}
+      {adminSession?.isLoggedIn && !selectedUser && !quickCreditModalUser && !freezeModalUser && (
         <MobileBottomNav activeTab={activeTab} setActiveTab={(t) => { setActiveTab(t); window.scrollTo({ top: 0, behavior: 'smooth' }); }} usersCount={users.length} txCount={transactions.length} />
       )}
 
