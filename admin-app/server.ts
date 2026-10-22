@@ -34,6 +34,18 @@ app.use('/api', async (req, res) => {
       outHeaders[key] = v;
     });
     res.status(resp.status).set(outHeaders);
+    // Server-Sent Events (chat live feed, admin notifications) never end, so
+    // buffering the body made the proxy hang and answer 502. Stream those
+    // responses straight through instead.
+    const ctype = String(resp.headers.get('content-type') || '');
+    if (ctype.includes('text/event-stream') && resp.body) {
+      res.flushHeaders?.();
+      // @ts-ignore - Readable.fromWeb is available in Node 18+
+      const { Readable } = await import('stream');
+      // @ts-ignore
+      Readable.fromWeb(resp.body as any).pipe(res);
+      return;
+    }
     const buf = Buffer.from(await resp.arrayBuffer());
     res.end(buf);
   } catch (err: any) {
