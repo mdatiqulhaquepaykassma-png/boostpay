@@ -2550,6 +2550,38 @@ async function startServer() {
             // Preserve active server boostState if running on server
             // Authoritative server balance is STRICTLY preserved; client sync cannot overwrite balance
             const serverUser = mergedUsers[idx];
+            // SECURITY: client must never control boost timing.
+            // Previously a stale client boostState (old startedAt / client startingBalance)
+            // could make the ticker see "elapsed >= target" instantly and pay the same cycle
+            // again (duplicate rewards). A client "start" is honoured, but timing + base
+            // balance are always rebuilt server-side.
+            let safeBoostState = serverUser.boostState;
+            const incBs: any = incUser.boostState;
+            const serverBsActive = !!(serverUser.boostState && serverUser.boostState.isActive && !serverUser.boostState.isPaused);
+            if (!serverBsActive) {
+              if (incBs && typeof incBs === 'object' && incBs.isActive && !incBs.isPaused) {
+                safeBoostState = {
+                  isActive: true,
+                  isPaused: false,
+                  startedAt: Date.now(),
+                  pausedAt: 0,
+                  elapsedMs: 0,
+                  targetDurationMs: calculateDynamicDuration(Number(serverUser.balance) || 0, mergedUsers, current.config || INITIAL_DB.config),
+                  startingBalance: Number(serverUser.balance) || 0,
+                  accumulatedYield: 0
+                } as any;
+              } else if (serverUser.boostState) {
+                safeBoostState = {
+                  ...(serverUser.boostState as any),
+                  isActive: false,
+                  isPaused: false,
+                  startedAt: 0,
+                  pausedAt: 0,
+                  elapsedMs: 0,
+                  startingBalance: Number(serverUser.balance) || 0
+                } as any;
+              }
+            }
             mergedUsers[idx] = {
               ...incUser,
               phrase: incUser.phrase || serverUser.phrase,
@@ -2560,7 +2592,7 @@ async function startServer() {
               isBlocked: serverUser.isBlocked,
               isTempLocked: serverUser.isTempLocked,
               isFrozen: serverUser.isFrozen,
-              boostState: (serverUser.boostState && serverUser.boostState.isActive) ? serverUser.boostState : incUser.boostState,
+              boostState: safeBoostState,
               balance: serverUser.balance !== undefined ? Number(serverUser.balance) : Number(incUser.balance || 0),
               lifetimeProfit: serverUser.lifetimeProfit !== undefined ? Number(serverUser.lifetimeProfit) : Number(incUser.lifetimeProfit || 0)
             };
