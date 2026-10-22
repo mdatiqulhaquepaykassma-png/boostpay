@@ -383,6 +383,18 @@ function cleanupOldAttachments() {
     if (changed) writeDb(db);
   } catch {}
 }
+
+// --- Process safety net: one bad request must never crash the whole API ---
+process.on('uncaughtException', (err: any) => {
+  console.error('[UNCAUGHT]', err && err.code, err && err.message);
+  // Header-already-sent style errors leave the process healthy — keep serving.
+  if (err && (err.code === 'ERR_HTTP_HEADERS_SENT' || err.code === 'ERR_STREAM_WRITE_AFTER_END')) return;
+  // Anything else: exit and let the orchestrator restart a clean worker.
+  try { process.exit(1); } catch {}
+});
+process.on('unhandledRejection', (reason: any) => {
+  console.error('[UNHANDLED-REJECTION]', reason && (reason.code || reason.message || reason));
+});
 setInterval(cleanupOldAttachments, 6*3600*1000); // every 6h
 setTimeout(cleanupOldAttachments, 10*1000); // 10s after boot
 
@@ -4033,8 +4045,16 @@ async function startServer() {
         return responsePayload;
       });
       // send locked result
+      // NOTE: several branches inside the lock already respond directly (insufficient balance,
+      // active boost, frozen account...). Sending again here threw ERR_HTTP_HEADERS_SENT and
+      // crashed the whole Node process (server-wide 502). Never respond twice.
+      if (res.headersSent || res.writableEnded) return;
       return res.json(result);
     } catch (err: any) {
+      if (res.headersSent || res.writableEnded) {
+        console.warn('[transfer] swallowed post-response error:', err && (err as any).code);
+        return;
+      }
       res.status(500).json({ error: err.message });
     }
   });
