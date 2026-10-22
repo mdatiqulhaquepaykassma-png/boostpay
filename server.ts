@@ -2325,7 +2325,9 @@ async function startServer() {
       );
 
       if (!user) {
-        return res.status(404).json({ error: 'No account found with this email. Please create an account.' });
+        // SECURITY: never reveal whether an email is registered (account enumeration).
+        // Same generic message + status as a wrong password.
+        return res.status(400).json({ error: 'Invalid email or password.' });
       }
 
       // ---- FIX #1 & #2: login spam + device fingerprint — no false freeze on same device wrong pass or re-login ----
