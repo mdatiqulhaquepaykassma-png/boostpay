@@ -3515,7 +3515,12 @@ async function startServer() {
       }
       if (Array.isArray(addMembers) && addMembers.length) {
         const ids = addMembers.map((x: any) => String(x).trim()).filter(Boolean).slice(0, 50);
-        for (const id of ids) if (!conv.participants.includes(id)) conv.participants.push(id);
+        // Only real accounts may join: unknown / deleted ids used to be pushed
+        // straight into participants and left ghost members inside the group.
+        for (const id of ids) {
+          if (!db.users.some((u: any) => String(u.id) === id)) continue;
+          if (!conv.participants.includes(id)) conv.participants.push(id);
+        }
       }
       if (Array.isArray(removeMembers) && removeMembers.length) {
         if (!isCreator && conv.type === 'group') {
