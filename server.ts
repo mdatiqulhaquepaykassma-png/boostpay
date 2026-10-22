@@ -2327,7 +2327,7 @@ async function startServer() {
       if (!user) {
         // SECURITY: never reveal whether an email is registered (account enumeration).
         // Same generic message + status as a wrong password.
-        return res.status(400).json({ error: 'Invalid email or password.' });
+        return res.status(401).json({ error: 'Invalid email or password.' });
       }
 
       // ---- FIX #1 & #2: login spam + device fingerprint — no false freeze on same device wrong pass or re-login ----
@@ -2377,7 +2377,7 @@ async function startServer() {
             }
           }
         } catch {}
-        return res.status(401).json({ error: 'Incorrect password for this account. Please try again.' });
+        return res.status(401).json({ error: 'Invalid email or password.' });
       } else {
         // clear failures on success
         try {
