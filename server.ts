@@ -1981,16 +1981,17 @@ async function startServer() {
   // already answered inside a lock) throws ERR_HTTP_HEADERS_SENT and used to crash the
   // ENTIRE Node process (server-wide 502). First response wins; later ones are ignored.
   app.use((req: any, res: any, next: any) => {
-    const origJson = res.json.bind(res);
+    // Only res.send is wrapped: Express' res.json() delegates to res.send(), so this single
+    // chokepoint catches every second response without breaking normal json responses.
     const origSend = res.send.bind(res);
     let answered = false;
-    res.json = (body: any) => {
-      if (answered || res.headersSent) { try { console.warn(`[double-response blocked] ${req.method} ${req.path}`); } catch {} return res; }
-      answered = true; return origJson(body);
-    };
     res.send = (body: any) => {
-      if (answered || res.headersSent) { try { console.warn(`[double-response blocked] ${req.method} ${req.path}`); } catch {} return res; }
-      answered = true; return origSend(body);
+      if (answered || res.headersSent) {
+        try { console.warn(`[double-response blocked] ${req.method} ${req.path}`); } catch {}
+        return res;
+      }
+      answered = true;
+      return origSend(body);
     };
     next();
   });
