@@ -7,6 +7,7 @@ import { Pool } from 'pg';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import nodemailer from 'nodemailer';
+import QRCode from 'qrcode';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -4530,14 +4531,45 @@ async function startServer() {
     }
   } catch {}
   function saveMfaSecrets(){ try { const mfaFile = path.join(DATA_DIR, '.admin-mfa.json'); const obj:any={}; for(const [k,v] of adminMfaSecrets.entries()) obj[k]=v; fs.writeFileSync(mfaFile, JSON.stringify(obj,null,2),'utf-8'); } catch{} }
-  function generateMfaSecret(): string { return crypto.randomBytes(20).toString('base64url'); }
+  // RFC 4648 base32 (A-Z, 2-7) — the ONLY alphabet authenticator apps accept.
+  // The old implementation used base64url, whose '-' and '_' characters made
+  // Google Authenticator reject the key ("value has illegal characters").
+  const B32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  function toBase32(buf: Buffer): string {
+    let bits = 0, value = 0, out = '';
+    for (const byte of buf) {
+      value = (value << 8) | byte; bits += 8;
+      while (bits >= 5) { out += B32_ALPHABET[(value >>> (bits - 5)) & 31]; bits -= 5; }
+    }
+    if (bits > 0) out += B32_ALPHABET[(value << (5 - bits)) & 31];
+    return out;
+  }
+  function fromBase32(str: string): Buffer | null {
+    const clean = String(str || '').toUpperCase().replace(/=+$/, '').replace(/\s+/g, '');
+    if (!/^[A-Z2-7]+$/.test(clean)) return null;
+    let bits = 0, value = 0;
+    const out: number[] = [];
+    for (const ch of clean) {
+      value = (value << 5) | B32_ALPHABET.indexOf(ch); bits += 5;
+      if (bits >= 8) { out.push((value >>> (bits - 8)) & 0xff); bits -= 8; }
+    }
+    return Buffer.from(out);
+  }
+  /** Key bytes for TOTP: base32 (new) with base64url fallback for legacy secrets. */
+  function mfaKeyBytes(secret: string): Buffer {
+    const b32 = fromBase32(secret);
+    if (b32 && b32.length) return b32;
+    try { return Buffer.from(String(secret || ''), 'base64url'); } catch { return Buffer.alloc(0); }
+  }
+  function isLegacyMfaSecret(secret: string): boolean { return !fromBase32(secret); }
+  function generateMfaSecret(): string { return toBase32(crypto.randomBytes(20)); }
   function totpForSecret(secret:string, window=0): string {
     // Simple TOTP: HMAC-SHA1(secret, floor(Date.now()/30000)+window) -> 6 digits (RFC 6238 lite)
     // NOTE: use the top-level ESM crypto import — `require` does not exist in this bundle
     // (it threw ReferenceError and made MFA setup return 500, blocking every sensitive admin action).
     const counter = Math.floor(Date.now()/30000)+window;
     const buf = Buffer.alloc(8); buf.writeBigUInt64BE(BigInt(counter),0);
-    const h = crypto.createHmac('sha1', Buffer.from(secret,'base64url')).update(buf).digest();
+    const h = crypto.createHmac('sha1', mfaKeyBytes(secret)).update(buf).digest();
     const offset = h[h.length-1] & 0x0f;
     const code = (h.readUInt32BE(offset) & 0x7fffffff) % 1000000;
     return String(code).padStart(6,'0');
@@ -4549,7 +4581,7 @@ async function startServer() {
     for (const w of [-1,0,1]) if (totpForSecret(secret,w)===c) return true;
     return false;
   }
-  app.post('/api/admin/mfa/setup', requireAdmin, requireSuperAdmin, (req:any,res)=>{
+  app.post('/api/admin/mfa/setup', requireAdmin, requireSuperAdmin, async (req:any,res)=>{
     const email = String(req.authAdmin||'').toLowerCase();
     const secret = generateMfaSecret();
     adminMfaSecrets.set(email, secret);
@@ -4559,7 +4591,10 @@ async function startServer() {
     const otpauth = `otpauth://totp/BoostPay:${email}?secret=${secret}&issuer=BoostPay&algorithm=SHA1&digits=6&period=30`;
     // Also store in DB for persistence
     const db:any=readDb(); const adm=(db.admins||[]).find((a:any)=> a.email===email); if(adm){ adm.mfaSecret=secret; writeDb(db); }
-    res.json({ success:true, secret, otpauth, codeSample: totpForSecret(secret) });
+    // QR image (SVG) so the phone camera can add the account directly — no typing
+    let qrSvg = '';
+    try { qrSvg = await QRCode.toString(otpauth, { type: 'svg', margin: 1, width: 240, errorCorrectionLevel: 'M' }); } catch { /* key line still works */ }
+    res.json({ success:true, secret, otpauth, qrSvg, codeSample: totpForSecret(secret) });
   });
   app.post('/api/admin/mfa/verify', requireAdmin, (req:any,res)=>{
     const email = String(req.authAdmin||'').toLowerCase();
@@ -4577,7 +4612,7 @@ async function startServer() {
     try {
       const email = String(req.authAdmin||'').toLowerCase();
       const secret = adminMfaSecrets.get(email) || (readDb().admins||[]).find((a:any)=> a.email===email)?.mfaSecret;
-      res.json({ success:true, email, enabled: !!secret });
+      res.json({ success:true, email, enabled: !!secret, legacy: !!secret && isLegacyMfaSecret(String(secret)) });
     } catch (err:any) { res.status(500).json({ error: err.message }); }
   });
 

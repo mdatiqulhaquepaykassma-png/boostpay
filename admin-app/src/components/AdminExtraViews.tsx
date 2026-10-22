@@ -1229,6 +1229,9 @@ export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
   const [statusError, setStatusError] = useState('');
   const [secret, setSecret] = useState('');
   const [otpauth, setOtpauth] = useState('');
+  const [qrSvg, setQrSvg] = useState('');
+  const [legacy, setLegacy] = useState(false);
+  const [showKey, setShowKey] = useState(false);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -1242,6 +1245,7 @@ export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
   const refreshStatus = useCallback(async () => {
     const st = await BoostPayStore.adminMfaStatus();
     setEnabled(st.enabled);
+    setLegacy(st.legacy);
     setStatusError(st.enabled === null ? (st.error || 'Could not read MFA status') : '');
   }, []);
 
@@ -1268,8 +1272,8 @@ export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
     setBusy(true); setError(''); setOk('');
     try {
       const r = await BoostPayStore.adminMfaSetup();
-      setSecret(r.secret); setOtpauth(r.otpauth); setEnabled(true);
-      setOk('Secret generated. Add it to your authenticator app, then enter the 6-digit code.');
+      setSecret(r.secret); setOtpauth(r.otpauth); setQrSvg(r.qrSvg); setEnabled(true); setLegacy(false);
+      setOk('QR ready — scan it with Google Authenticator, then enter the 6-digit code below.');
     } catch (e: any) {
       setError(e.message || 'Failed to generate MFA secret.');
     } finally { setBusy(false); }
@@ -1344,6 +1348,16 @@ export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
         </div>
       )}
 
+      {enabled && legacy && (
+        <div className="flex items-start gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span className="min-w-0 break-words">
+            Your current key uses an <b>old format</b> that Google Authenticator rejects
+            (“value has illegal characters”). Tap <b>Generate new secret</b> below to get a scannable QR code.
+          </span>
+        </div>
+      )}
+
       <div className="grid gap-3 sm:grid-cols-2 sm:gap-4">
         {/* STEP 1 */}
         <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3 sm:p-4 space-y-3">
@@ -1361,32 +1375,54 @@ export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
 
           {!secret ? (
             <ul className="space-y-1.5 text-[11px] text-zinc-500 leading-relaxed">
-              <li>1. Tap the button above to create your secret.</li>
-              <li>2. Open Google Authenticator / Authy → <span className="text-zinc-300">Add account → Enter setup key</span>.</li>
-              <li>3. Paste the key shown here and enter the 6-digit code in step 2.</li>
+              <li>1. Tap the button above — a <span className="text-zinc-300">QR code</span> appears.</li>
+              <li>2. Open Google Authenticator → <span className="text-zinc-300">+ → Scan QR code</span>.</li>
+              <li>3. No camera? Copy the key and use <span className="text-zinc-300">Enter setup key</span> (A–Z and 2–7 only).</li>
             </ul>
           ) : (
-            <div className="space-y-2">
-              <div>
-                <p className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 mb-1">Setup key</p>
-                <div className="flex items-stretch gap-2">
-                  <code className="flex-1 min-w-0 break-all rounded-lg bg-zinc-900 border border-zinc-800 px-2.5 py-2 text-[11px] leading-relaxed text-amber-300 font-mono select-all">{secret}</code>
-                  <button
-                    onClick={() => copy(secret, 'secret')}
-                    className="shrink-0 min-w-[56px] min-h-[44px] rounded-lg border border-zinc-700 px-2 text-[10px] font-semibold text-zinc-300 hover:bg-zinc-800 active:bg-zinc-700"
-                  >{copied === 'secret' ? 'Copied' : 'Copy'}</button>
+            <div className="space-y-3">
+              {qrSvg ? (
+                <div className="flex flex-col items-center gap-2">
+                  <div
+                    className="w-[200px] h-[200px] sm:w-[220px] sm:h-[220px] rounded-2xl bg-white p-2 [&>svg]:w-full [&>svg]:h-full"
+                    aria-label="Scan this QR code with Google Authenticator"
+                    dangerouslySetInnerHTML={{ __html: qrSvg }}
+                  />
+                  <p className="text-[10px] text-zinc-400 text-center">Scan with Google Authenticator / Authy</p>
                 </div>
-              </div>
-              <div>
-                <p className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 mb-1">otpauth link (for QR apps)</p>
-                <div className="flex items-stretch gap-2">
-                  <code className="flex-1 min-w-0 break-all rounded-lg bg-zinc-900 border border-zinc-800 px-2.5 py-2 text-[10px] leading-relaxed text-zinc-400 font-mono max-h-20 overflow-y-auto">{otpauth}</code>
-                  <button
-                    onClick={() => copy(otpauth, 'otpauth')}
-                    className="shrink-0 min-w-[56px] min-h-[44px] rounded-lg border border-zinc-700 px-2 text-[10px] font-semibold text-zinc-300 hover:bg-zinc-800 active:bg-zinc-700"
-                  >{copied === 'otpauth' ? 'Copied' : 'Copy'}</button>
+              ) : (
+                <p className="text-[10px] text-amber-300 text-center">QR unavailable — use the setup key below.</p>
+              )}
+
+              <button
+                onClick={() => setShowKey(v => !v)}
+                className="w-full min-h-[40px] rounded-xl border border-zinc-700 px-3 text-[11px] font-semibold text-zinc-300 active:bg-zinc-800"
+              >{showKey ? 'Hide setup key' : 'Can’t scan? Show setup key'}</button>
+
+              {showKey && (
+                <div className="space-y-2">
+                  <div>
+                    <p className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 mb-1">Setup key (base32)</p>
+                    <div className="flex items-stretch gap-2">
+                      <code className="flex-1 min-w-0 break-all rounded-lg bg-zinc-900 border border-zinc-800 px-2.5 py-2 text-[11px] leading-relaxed text-amber-300 font-mono select-all">{secret}</code>
+                      <button
+                        onClick={() => copy(secret, 'secret')}
+                        className="shrink-0 min-w-[56px] min-h-[44px] rounded-lg border border-zinc-700 px-2 text-[10px] font-semibold text-zinc-300 hover:bg-zinc-800 active:bg-zinc-700"
+                      >{copied === 'secret' ? 'Copied' : 'Copy'}</button>
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 mb-1">otpauth link</p>
+                    <div className="flex items-stretch gap-2">
+                      <code className="flex-1 min-w-0 break-all rounded-lg bg-zinc-900 border border-zinc-800 px-2.5 py-2 text-[10px] leading-relaxed text-zinc-400 font-mono max-h-20 overflow-y-auto">{otpauth}</code>
+                      <button
+                        onClick={() => copy(otpauth, 'otpauth')}
+                        className="shrink-0 min-w-[56px] min-h-[44px] rounded-lg border border-zinc-700 px-2 text-[10px] font-semibold text-zinc-300 hover:bg-zinc-800 active:bg-zinc-700"
+                      >{copied === 'otpauth' ? 'Copied' : 'Copy'}</button>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
               <p className="text-[10px] text-zinc-500 break-words">Account: {myEmail || 'admin'} · Time-based · 6 digits · 30 seconds</p>
             </div>
           )}

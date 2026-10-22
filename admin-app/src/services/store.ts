@@ -922,23 +922,28 @@ export class BoostPayStore {
    * must not claim "not set up" in that case, it used to mislead admins into
    * rotating a working secret.
    */
-  static async adminMfaStatus(): Promise<{ enabled: boolean | null; email: string; error?: string }> {
+  static async adminMfaStatus(): Promise<{ enabled: boolean | null; email: string; legacy: boolean; error?: string }> {
     try {
       const res = await fetch('/api/admin/mfa/status', { headers: this.adminAuthHeaders() });
       const data = await res.json().catch(() => ({}));
-      if (res.ok) return { enabled: !!data.enabled, email: String(data.email || '') };
-      return { enabled: null, email: '', error: data.error || `Status check failed (${res.status})` };
+      if (res.ok) return { enabled: !!data.enabled, email: String(data.email || ''), legacy: !!data.legacy };
+      return { enabled: null, email: '', legacy: false, error: data.error || `Status check failed (${res.status})` };
     } catch (e: any) {
-      return { enabled: null, email: '', error: String(e?.message || 'Network error') };
+      return { enabled: null, email: '', legacy: false, error: String(e?.message || 'Network error') };
     }
   }
 
   /** Generates a fresh secret for the logged-in admin (invalidates the previous one). */
-  static async adminMfaSetup(): Promise<{ secret: string; otpauth: string; codeSample: string }> {
+  static async adminMfaSetup(): Promise<{ secret: string; otpauth: string; qrSvg: string; codeSample: string }> {
     const res = await fetch('/api/admin/mfa/setup', { method: 'POST', headers: this.adminAuthHeaders() });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || `MFA setup failed (${res.status})`);
-    return { secret: String(data.secret || ''), otpauth: String(data.otpauth || ''), codeSample: String(data.codeSample || '') };
+    return {
+      secret: String(data.secret || ''),
+      otpauth: String(data.otpauth || ''),
+      qrSvg: String(data.qrSvg || ''),
+      codeSample: String(data.codeSample || '')
+    };
   }
 
   /** Verifies a 6-digit authenticator code and unlocks sensitive actions for 5 minutes. */
