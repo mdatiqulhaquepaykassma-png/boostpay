@@ -2293,45 +2293,47 @@ async function startServer() {
   });
 
   // 6. Direct Server-Side Boost Endpoints (authoritative state!)
-  app.post('/api/boost/start', (req: any, res) => {
+  // Boost locks + idempotency (fix double-click / timeout retry / refresh-mid-pay)
+  const boostLocks = new Map<string, Promise<void>>();
+  async function withBoostLock(userId: string, fn: ()=>Promise<any>|any){
+    const key = String(userId);
+    const prev = boostLocks.get(key) || Promise.resolve();
+    let rel!: ()=>void; const cur = new Promise<void>(r=> rel=r);
+    boostLocks.set(key, prev.then(()=>cur));
+    try { await prev; return await fn(); } finally { rel(); if(boostLocks.get(key)===cur) boostLocks.delete(key); }
+  }
+  const boostIdempotency = new Map<string,{at:number, resp:any}>();
+  function boostIdemKey(uid:string, body:any){ const h=String(body?.idempotencyKey||body?.boostKey||'').trim(); if(h) return `boost:${uid}:${h}`; return `boost:${uid}:${Math.floor(Date.now()/15000)}`; } // 15s bucket
+  app.post('/api/boost/start', async (req: any, res) => {
+    const uid = String(req.body?.userId||'');
+    if (String(uid) !== String(req.authUserId)) return res.status(403).json({ error: 'You can only manage your own boost.' });
+    const ik = boostIdemKey(uid, req.body);
+    const dup = boostIdempotency.get(ik); if(dup && Date.now()-dup.at < 15000) return res.json({...dup.resp, duplicate:true});
     try {
-      const { userId } = req.body;
-      if (String(userId) !== String(req.authUserId)) {
-        return res.status(403).json({ error: 'You can only manage your own boost.' });
-      }
-      const db = readDb();
-      const user = db.users.find((u: any) => u.id === userId);
-      if (!user) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      if (user.isFrozen) {
-        return res.status(403).json({ error: 'Your account is frozen. Boosting is disabled — contact support.' });
-      }
-      if (user.isBlocked) {
-        return res.status(403).json({ error: 'Your account is suspended.' });
-      }
-      if (Number(user.balance) < 0.1) {
-        return res.status(400).json({ error: 'Minimum 0.1 balance required to start boosting' });
-      }
-
-      const targetDuration = calculateDynamicDuration(user.balance, db.users, db.config);
-      user.boostState = {
-        isActive: true,
-        isPaused: false,
-        startedAt: Date.now(),
-        pausedAt: 0,
-        elapsedMs: 0,
-        targetDurationMs: targetDuration,
-        startingBalance: user.balance,
-        accumulatedYield: 0
-      };
-
-      writeDb(db);
-      res.json({ success: true, user: publicUser(user) });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
+      const result = await withBoostLock(uid, async ()=>{
+        const db = readDb();
+        const user = db.users.find((u: any) => u.id === uid);
+        if (!user) return { status:404, body:{ error: 'User not found' } };
+        if (user.isFrozen) return { status:403, body:{ error: 'Your account is frozen. Boosting is disabled — contact support.' } };
+        if (user.isBlocked) return { status:403, body:{ error: 'Your account is suspended.' } };
+        if (Number(user.balance) < 0.1) return { status:400, body:{ error: 'Minimum 0.1 balance required to start boosting' } };
+        // FIX: prevent double-start race — if already active, return existing instead of resetting
+        if (user.boostState?.isActive && !user.boostState?.isPaused) {
+          return { status:200, body:{ success:true, user: publicUser(user), alreadyActive:true } };
+        }
+        const targetDuration = calculateDynamicDuration(user.balance, db.users, db.config);
+        user.boostState = {
+          isActive: true, isPaused: false, startedAt: Date.now(), pausedAt: 0, elapsedMs: 0,
+          targetDurationMs: targetDuration, startingBalance: user.balance, accumulatedYield: 0
+        };
+        writeDb(db);
+        return { status:200, body:{ success:true, user: publicUser(user) } };
+      });
+      if(result.status!==200) return res.status(result.status).json(result.body);
+      boostIdempotency.set(ik,{at:Date.now(), resp: result.body});
+      if(boostIdempotency.size>1000){ const s=[...boostIdempotency.entries()].sort((a,b)=>a[1].at-b[1].at); for(let i=0;i<200;i++) boostIdempotency.delete(s[i][0]); }
+      return res.json(result.body);
+    } catch (err: any) { return res.status(500).json({ error: err.message }); }
   });
 
   app.post('/api/boost/pause', (req: any, res) => {
