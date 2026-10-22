@@ -829,7 +829,9 @@ let writeCount = 0;
 // burned 30-47 GB/day. Postgres is the source of truth when connected, so the
 // file is now only a debounced crash-recovery cache.
 // ---------------------------------------------------------------------------
-const FILE_FLUSH_MS = Number(process.env.DB_FILE_FLUSH_MS || 60000);      // 60s debounce
+// Postgres is the source of truth (2s), so the local JSON cache can be lazy:
+// one 2.4 MB rewrite every 5 min instead of every minute.
+const FILE_FLUSH_MS = Number(process.env.DB_FILE_FLUSH_MS || 5 * 60 * 1000); // 5 min debounce
 const BACKUP_INTERVAL_MS = Number(process.env.DB_BACKUP_INTERVAL_MS || 30 * 60 * 1000); // 30 min
 const BACKUP_KEEP = Number(process.env.DB_BACKUP_KEEP || 24);
 const PG_FLUSH_MS = Number(process.env.DB_PG_FLUSH_MS || 2000);           // 2s debounce
