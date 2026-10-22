@@ -821,13 +821,31 @@ function readDb() {
 const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 let writeCount = 0;
 
+// ---------------------------------------------------------------------------
+// Disk-write budget (VPS I/O).
+// The old code wrote the whole 2.4 MB JSON document on EVERY mutation, made a
+// full snapshot backup every 10 writes and pushed the same document to
+// PostgreSQL each time: one small change cost ~5 MB of disk I/O and the app
+// burned 30-47 GB/day. Postgres is the source of truth when connected, so the
+// file is now only a debounced crash-recovery cache.
+// ---------------------------------------------------------------------------
+const FILE_FLUSH_MS = Number(process.env.DB_FILE_FLUSH_MS || 60000);      // 60s debounce
+const BACKUP_INTERVAL_MS = Number(process.env.DB_BACKUP_INTERVAL_MS || 30 * 60 * 1000); // 30 min
+const BACKUP_KEEP = Number(process.env.DB_BACKUP_KEEP || 24);
+const PG_FLUSH_MS = Number(process.env.DB_PG_FLUSH_MS || 2000);           // 2s debounce
+const LASTSEEN_FLUSH_MS = 5 * 60 * 1000;                                  // persist lastSeen every 5 min
+let pendingFilePayload: string | null = null;
+let fileFlushTimer: any = null;
+let lastBackupAt = 0;
+let lastSeenFlushAt = 0;
+
 function rotateBackups() {
   try {
     if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const files = fs.readdirSync(BACKUP_DIR).filter((f) => f.startsWith('boostpay_db.')).sort();
-    // keep at most 40 snapshots
-    while (files.length >= 40) {
+    // keep at most BACKUP_KEEP snapshots (24 = 12h at the 30-min cadence)
+    while (files.length >= BACKUP_KEEP) {
       const oldest = files.shift();
       if (oldest) {
         try { fs.unlinkSync(path.join(BACKUP_DIR, oldest)); } catch { /* ignore */ }
@@ -854,24 +872,48 @@ function writeDb(data: any) {
       if (!Array.isArray(data.auditLogs)) data.auditLogs = Array.isArray(pgDoc.auditLogs) ? pgDoc.auditLogs : [];
     }
 
-    const tempFile = `${DB_FILE}.tmp`;
     const payload = JSON.stringify(data, null, 2);
-    fs.writeFileSync(tempFile, payload, 'utf-8');
-    fs.renameSync(tempFile, DB_FILE);
-
-    // Rolling safety backup (snapshot every 10 writes)
     writeCount++;
-    if (writeCount % 10 === 0) {
-      const backupFile = rotateBackups();
-      if (backupFile) {
-        fs.writeFileSync(backupFile, payload, 'utf-8');
-      }
-    }
 
-    // Persist to PostgreSQL (debounced) when connected
+    const writeFileNow = () => {
+      const tempFile = `${DB_FILE}.tmp`;
+      fs.writeFileSync(tempFile, payload, 'utf-8');
+      fs.renameSync(tempFile, DB_FILE);
+    };
+
     if (pgPool) {
+      // Postgres holds the state: keep the local file as a debounced cache only.
+      pendingFilePayload = payload;
+      if (!fileFlushTimer) {
+        fileFlushTimer = setTimeout(() => {
+          fileFlushTimer = null;
+          const body = pendingFilePayload;
+          pendingFilePayload = null;
+          if (!body) return;
+          try {
+            const tempFile = `${DB_FILE}.tmp`;
+            fs.writeFileSync(tempFile, body, 'utf-8');
+            fs.renameSync(tempFile, DB_FILE);
+          } catch (err) {
+            console.error('Error flushing db file cache:', err);
+          }
+        }, FILE_FLUSH_MS);
+        if (typeof fileFlushTimer.unref === 'function') fileFlushTimer.unref();
+      }
       pgDoc = data;
       schedulePgPersist(data);
+    } else {
+      // No Postgres: the file IS the database, write it synchronously.
+      writeFileNow();
+    }
+
+    // Rolling safety snapshot — time based (was every 10 writes)
+    if (Date.now() - lastBackupAt >= BACKUP_INTERVAL_MS) {
+      lastBackupAt = Date.now();
+      const backupFile = rotateBackups();
+      if (backupFile) {
+        try { fs.writeFileSync(backupFile, payload, 'utf-8'); } catch { /* disk full etc. */ }
+      }
     }
   } catch (err) {
     console.error('Error writing db file:', err);
@@ -968,6 +1010,11 @@ async function initPostgres(): Promise<void> {
     pgStatus.connected = false;
     pgStatus.lastError = String(err?.message || err);
     console.error('PostgreSQL connection FAILED — falling back to JSON file storage:', pgStatus.lastError);
+    // Drop the pool: with it alive, writeDb() would debounce the file cache while
+    // the Postgres write fails, i.e. mutations could be lost on restart.
+    try { await pgPool?.end?.(); } catch { /* ignore */ }
+    pgPool = null;
+    pgPending = null;
   }
 }
 
@@ -994,7 +1041,7 @@ function schedulePgPersist(data: any) {
       pgStatus.lastError = String(err?.message || err);
       console.error('PostgreSQL persist error:', pgStatus.lastError);
     }
-  }, 400);
+  }, PG_FLUSH_MS);
 }
 
 /** Real database latency probe (SELECT 1). */
@@ -1342,7 +1389,12 @@ function requireUser(req: any, res: any, next: any) {
     const u = (db.users || []).find((x: any) => String(x.id) === String(payload.sub));
     if (!u) return res.status(401).json({ error: 'This account no longer exists. Please sign in again.' });
     (u as any).lastSeen = Date.now();
-    if (Math.random() < 0.15) writeDb(db);
+    // Persist presence at most every 5 minutes (was a random 15% of EVERY
+    // request, which meant dashboard polling rewrote the whole DB constantly).
+    if (Date.now() - lastSeenFlushAt > LASTSEEN_FLUSH_MS) {
+      lastSeenFlushAt = Date.now();
+      writeDb(db);
+    }
   }
   req.authUserId = payload.sub;
   req.authSid = payload.sid;
@@ -6625,6 +6677,41 @@ async function startServer() {
   }
 
   await initPostgres();
+
+  // Deploy/restart safety: flush the debounced file cache and the last
+  // PostgreSQL write before the container is stopped, so the I/O batching
+  // above can never lose the final state.
+  let shuttingDown = false;
+  const flushPendingState = async () => {
+    try {
+      if (fileFlushTimer) { clearTimeout(fileFlushTimer); fileFlushTimer = null; }
+      if (pendingFilePayload) {
+        const tempFile = `${DB_FILE}.tmp`;
+        fs.writeFileSync(tempFile, pendingFilePayload, 'utf-8');
+        fs.renameSync(tempFile, DB_FILE);
+        pendingFilePayload = null;
+      }
+    } catch (err) { console.error('shutdown file flush failed:', err); }
+    try {
+      if (pgPool && (pgPending || pgDoc)) {
+        const doc = pgPending || pgDoc;
+        pgPending = null;
+        await pgPool.query(
+          `INSERT INTO app_state (id, data, updated_at) VALUES (1, $1, now())
+           ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+          [JSON.stringify(doc)]
+        );
+      }
+    } catch (err) { console.error('shutdown pg flush failed:', err); }
+  };
+  const shutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[shutdown] ${signal} received — flushing state`);
+    flushPendingState().finally(() => setTimeout(() => process.exit(0), 50));
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`BoostPay Server listening on port ${PORT} [Version: ${SERVER_VERSION}]`);
