@@ -1656,6 +1656,33 @@ setInterval(() => {
             try { broadcastUserUpdate(db, user.id); } catch {}
             continue;
           }
+          // === CYCLE-ID DEDUP GUARD (fix double reward) ===
+          // A single cycle (identified by boostState.startedAt) must pay exactly once.
+          // Time-window guards miss duplicates when the tick gap exceeds the window (e.g. 82s),
+          // so we compare the persisted boostStartAt of existing REWARD tx with the current cycle.
+          const cycleStartKey = Number(user.boostState.startedAt || 0);
+          if (cycleStartKey > 0) {
+            const alreadyPaid = (db.transactions || []).slice(0, 5000).some(
+              (t:any) => t.type === 'REWARD' && String(t.userId) === String(user.id) && Number(t.boostStartAt) === cycleStartKey
+            );
+            if (alreadyPaid) {
+              console.warn(`[TICKER] Cycle ${cycleStartKey} already paid for user ${user.id} — blocking duplicate reward`);
+              const dupNextDuration = calculateDynamicDuration(user.balance, db.users, config);
+              user.boostState = {
+                isActive: false,
+                isPaused: false,
+                startedAt: 0,
+                pausedAt: 0,
+                elapsedMs: 0,
+                targetDurationMs: dupNextDuration,
+                startingBalance: user.balance,
+                accumulatedYield: 0
+              } as any;
+              updated = true;
+              try { broadcastUserUpdate(db, user.id); } catch {}
+              continue;
+            }
+          }
           // Cycle completed on server!
           const startingBal = Number(user.boostState.startingBalance ?? user.balance);
           // High-precision numerically stable compounding yield calculation (avoids floating point loss for 0.000001 rates)
