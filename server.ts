@@ -1305,9 +1305,18 @@ function requireUser(req: any, res: any, next: any) {
   if (payload.sid && revokedSessions.has(payload.sid)) {
     return res.status(401).json({ error: 'This session was signed out. Please sign in again.' });
   }
+  // A token is only valid while its account still exists: an admin deleting a
+  // user must immediately kill that user's API access (previously the JWT kept
+  // working for chat/leaderboard/etc. and could even post as a ghost account).
+  {
+    const db: any = readDb();
+    const u = (db.users || []).find((x: any) => String(x.id) === String(payload.sub));
+    if (!u) return res.status(401).json({ error: 'This account no longer exists. Please sign in again.' });
+    (u as any).lastSeen = Date.now();
+    if (Math.random() < 0.15) writeDb(db);
+  }
   req.authUserId = payload.sub;
   req.authSid = payload.sid;
-  try { const db:any = readDb(); const u=(db.users||[]).find((x:any)=>String(x.id)===String(payload.sub)); if (u) { (u as any).lastSeen = Date.now(); if (Math.random() < 0.15) writeDb(db); } } catch {}
   try {
     const db = readDb();
     // Durable revocation: a signed-out session stays dead across restarts.
@@ -1366,7 +1375,12 @@ function requireUserOrAdmin(req: any, res: any, next: any) {
   if (!payload || (payload.role !== 'USER' && payload.role !== 'ADMIN')) {
     return res.status(401).json({ error: 'Authentication required. Please sign in.' });
   }
-  if (payload.role === 'USER') req.authUserId = payload.sub;
+  if (payload.role === 'USER') {
+    req.authUserId = payload.sub;
+    let exists = false;
+    try { const db: any = readDb(); exists = (db.users || []).some((x: any) => String(x.id) === String(payload.sub)); } catch { exists = true; }
+    if (!exists) return res.status(401).json({ error: 'This account no longer exists. Please sign in again.' });
+  }
   if (payload.role === 'ADMIN') req.authAdmin = payload.sub;
   next();
 }
@@ -4891,11 +4905,42 @@ async function startServer() {
         return res.status(404).json({ error: 'User not found' });
       }
 
+      const deleted: string[] = [];
       db.users.splice(idx, 1);
+      deleted.push('user');
       // Remove associated transactions
-      db.transactions = db.transactions.filter((t: any) => t.userId !== userId);
+      db.transactions = (db.transactions || []).filter((t: any) => String(t.userId) !== String(userId) && String(t.senderId || '') !== String(userId) && String(t.recipientId || '') !== String(userId));
+      deleted.push('transactions');
+      // Cascade: a deleted account must not leave ghost data behind (the old
+      // version left notifications, sessions, messages and dead 1:1 chats).
+      const before = (arr: any[]) => (arr || []).length;
+      db.sessions = (db.sessions || []).filter((s: any) => String(s.userId) !== String(userId));
+      db.notifications = (db.notifications || []).filter((n: any) => String(n.userId) !== String(userId));
+      db.referrals = (db.referrals || []).filter((r: any) => String(r.referrerId) !== String(userId) && String(r.referredId || r.userId || '') !== String(userId));
+      db.referCommissions = (db.referCommissions || []).filter((c: any) => String(c.referrerId) !== String(userId) && String(c.referredId || c.userId || '') !== String(userId));
+      db.antifraudLogs = (db.antifraudLogs || []).filter((l: any) => String(l.userId) !== String(userId));
+      deleted.push('sessions/notifications/referrals');
+      // chat blocks pointing at (or owned by) the deleted user
+      for (const u of db.users as any[]) {
+        if (Array.isArray((u as any).blockedUsers)) (u as any).blockedUsers = (u as any).blockedUsers.filter((b: any) => String(b) !== String(userId));
+      }
+      // conversations: drop 1:1 chats with the deleted user, remove them from groups
+      const deadConvs = new Set<string>();
+      db.conversations = (db.conversations || []).filter((c: any) => {
+        const parts: string[] = (c.participants || []).map((p: any) => String(p));
+        if (!parts.includes(String(userId))) return true;
+        if (c.type === 'group') { c.participants = parts.filter((p: string) => p !== String(userId)); return true; }
+        deadConvs.add(String(c.id));
+        return false; // 1:1 conversation with a deleted account is unusable -> remove
+      });
+      // messages authored by the user (and messages inside dead 1:1 chats)
+      db.messages = (db.messages || []).filter((m: any) =>
+        String(m.senderId) !== String(userId) && !deadConvs.has(String(m.conversationId || '')));
+      if (db.callSessions) db.callSessions = (db.callSessions || []).filter((c: any) => !deadConvs.has(String(c.conversationId || '')));
+      deleted.push('conversations/messages');
+      recordAuditLog(db, 'ADMIN_USER_DELETE', String(req.authAdmin), `Deleted User #${userId} and all related records`);
       writeDb(db);
-      res.json({ success: true, deletedUserId: userId });
+      res.json({ success: true, deletedUserId: userId, cascaded: deleted });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
