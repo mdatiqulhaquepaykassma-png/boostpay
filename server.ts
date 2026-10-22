@@ -2583,7 +2583,10 @@ async function startServer() {
     }
     res.json({
       user: publicUser(user),
-      boostState: user.boostState,
+      // live (not the last persisted checkpoint): while a cycle runs the stored
+      // accumulatedYield is still 0, so clients polling this endpoint saw no
+      // earnings at all until the cycle finished.
+      boostState: liveBoostState(user),
       balance: user.balance,
       lifetimeProfit: user.lifetimeProfit
     });
