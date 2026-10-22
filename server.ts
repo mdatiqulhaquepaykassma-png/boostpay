@@ -1629,7 +1629,32 @@ setInterval(() => {
       }
       if (user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
         if (!user.boostState.startedAt) {
-          user.boostState.startedAt = now - (user.boostState.elapsedMs || 0);
+          const savedElapsed = Number(user.boostState.elapsedMs || 0);
+          if (savedElapsed <= 0) {
+            // GHOST CYCLE GUARD: isActive with no start time and no progress means the
+            // state came from a stale client sync, not from a real start. Auto-healing it with
+            // startedAt=now made several such users start in the SAME millisecond, so their
+            // cycles finished together and dumped all their referral commissions at once.
+            // Never auto-start: cancel the cycle and let the user start again explicitly.
+            user.boostState = {
+              isActive: false,
+              isPaused: false,
+              startedAt: 0,
+              pausedAt: 0,
+              elapsedMs: 0,
+              targetDurationMs: calculateDynamicDuration(user.balance, db.users, config),
+              startingBalance: user.balance,
+              accumulatedYield: 0
+            } as any;
+            updated = true;
+            try { broadcastUserUpdate(db, user.id); } catch {}
+            try {
+              pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: user.id, type: 'SYSTEM_ALERT', title: 'BOOSTPAY-ALERTS', message: 'Your boosting cycle was reset because its start time was invalid. Please start boosting again from the app.', timestamp: now, isRead: false } as any);
+            } catch {}
+            console.warn(`[TICKER] cancelled ghost cycle for user ${user.id} (isActive with no startedAt/elapsedMs)`);
+            continue;
+          }
+          user.boostState.startedAt = now - savedElapsed;
         }
 
         const elapsed = now - user.boostState.startedAt;
