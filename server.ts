@@ -2790,8 +2790,17 @@ async function startServer() {
         const vd = String(req.body.voiceData);
         if (vd.length > 3*1024*1024) return res.status(413).json({ error: 'Voice note too large (max 3MB).' });
       }
-      const { senderId, senderRole, recipientId, text, voiceData, voiceDurationMs, photoData, replyTo, forwardedFrom, fileData, fileName, fileSize, contactId, poll, stickerEmoji } = req.body;
+      // Permission model (user request): USER cannot send voice/photo/file directly — must request via text, only ADMIN can send media/calls
+      const isUserSender = !!(req as any).authUserId && !(req as any).authAdmin;
       const rawKind = String((req.body && req.body.kind) || '');
+      const hasVoicePayload = !!req.body.voiceData || rawKind === 'voice';
+      const hasPhotoPayload = !!req.body.photoData || rawKind === 'photo';
+      const hasFilePayload = !!req.body.fileData || rawKind === 'file';
+      if (isUserSender && (hasVoicePayload || hasPhotoPayload || hasFilePayload)) {
+        return res.status(403).json({ error: 'Attachments & voice messages are admin-only. You can request via text — e.g. “Please send me the file” or “Requesting voice call” — and an admin will respond with media/call if approved.' });
+      }
+
+      const { senderId, senderRole, recipientId, text, voiceData, voiceDurationMs, photoData, replyTo, forwardedFrom, fileData, fileName, fileSize, contactId, poll, stickerEmoji } = req.body;
       const isVoice = rawKind === 'voice';
       const isPhoto = rawKind === 'photo';
       const isFile = rawKind === 'file';
@@ -3113,9 +3122,14 @@ async function startServer() {
     } catch(e:any){ res.status(500).json({error:e.message}); }
   });
 
-  // WebRTC call signaling — ephemeral events forwarded over the SSE stream
+  // WebRTC call signaling — admin-only direct calls; users may only request via text
   app.post('/api/chat/call-signal', (req: any, res) => {
     try {
+      // Only ADMIN may initiate direct voice/video calls — USER must send a text request instead
+      const isUserCaller = !!(req as any).authUserId && !(req as any).authAdmin;
+      if (isUserCaller) {
+        return res.status(403).json({ error: 'Direct voice/video calls are admin-only. Send a text like “Requesting voice call” and an admin will call you if approved.' });
+      }
       const { targetId, signal } = req.body || {};
       const cleanTarget = String(targetId || '').trim();
       if (!cleanTarget || !signal || typeof signal !== 'object') {
