@@ -371,7 +371,7 @@ function cleanupOldAttachments() {
     try {
       const files = fs.readdirSync(UPLOAD_DIR);
       const refs = new Set<string>();
-      for (const m of (db.messages||[])) if ((m as any).fileId) refs.add((m as any).fileId); if ((m as any).photoFileId) refs.add((m as any).photoFileId); if ((m as any).voiceFileId) refs.add((m as any).voiceFileId);
+      for (const m of (db.messages||[])) { if ((m as any).fileId) refs.add((m as any).fileId); if ((m as any).photoFileId) refs.add((m as any).photoFileId); if ((m as any).voiceFileId) refs.add((m as any).voiceFileId); }
       for (const f of files) {
         const fid = f.split('.')[0];
         if (!refs.has(fid)) {
@@ -1054,7 +1054,7 @@ function getApiSecret(): string {
 }
 const API_SECRET = getApiSecret();
 
-const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (was 30d — harden token theft window)
 
 function issueToken(sub: string, role: 'USER' | 'ADMIN', sid?: string, adminRole?: string): string {
   const payload: any = { sub: String(sub), role, exp: Date.now() + TOKEN_TTL_MS };
@@ -1160,6 +1160,18 @@ function touchSession(db: any, sid?: string) {
   const sess = sessionSnapshot(db).find((x: SessionRecord) => x.id === sid && !x.revoked);
   if (sess) sess.lastSeenAt = Date.now();
 }
+// Session hygiene: expire idle sessions after 7d and prune revoked >30d (prevents DB bloat + stolen token reuse)
+const SESSION_IDLE_MS = 7 * 24 * 3600 * 1000;
+const SESSION_PRUNE_MS = 30 * 24 * 3600 * 1000;
+setInterval(()=>{ try { const db=readDb(); const now=Date.now(); let changed=false;
+  const before=(db.sessions||[]).length;
+  db.sessions = (db.sessions||[]).filter((s:any)=> {
+    if (s.revoked && s.lastSeenAt && now - s.lastSeenAt > SESSION_PRUNE_MS) { changed=true; return false; }
+    if (!s.revoked && s.lastSeenAt && now - s.lastSeenAt > SESSION_IDLE_MS) { s.revoked=true; revokedSessions.add(s.id); changed=true; return true; }
+    return true;
+  });
+  if (changed || before!==db.sessions.length) writeDb(db);
+} catch {} }, 3600*1000);
 
 // ---------------------------------------------------------------------------
 // Realtime event push (reuses the authenticated SSE connections)
@@ -1272,6 +1284,10 @@ function requireUser(req: any, res: any, next: any) {
       revokedSessions.add(payload.sid);
       return res.status(401).json({ error: 'This session was signed out. Please sign in again.' });
     }
+    if (rec && rec.lastSeenAt && Date.now() - rec.lastSeenAt > 7*24*3600*1000) {
+      rec.revoked = true; if (payload.sid) revokedSessions.add(payload.sid); writeDb(db);
+      return res.status(401).json({ error: 'Session expired due to 7-day inactivity. Please sign in again.' });
+    }
     touchSession(db, payload.sid);
   } catch { /* non-fatal */ }
   next();
@@ -1295,6 +1311,12 @@ function requireAdmin(req: any, res: any, next: any) {
       revokedSessions.add(payload.sid);
       return res.status(401).json({ error: 'This admin session was signed out.' });
     }
+    if (rec && rec.lastSeenAt && Date.now() - rec.lastSeenAt > 7*24*3600*1000) {
+      rec.revoked = true; if (payload.sid) revokedSessions.add(payload.sid); writeDb(db);
+      return res.status(401).json({ error: 'Admin session expired (7-day inactivity). Please sign in again.' });
+    }
+    // Refresh lastSeen for active admin
+    if (payload.sid) { const r2 = sessionSnapshot(db).find((x: SessionRecord)=> x.id===payload.sid); if (r2) r2.lastSeenAt = Date.now(); }
   } catch { /* non-fatal */ }
   next();
 }
@@ -1791,7 +1813,7 @@ async function startServer() {
       res.setHeader('Vary','Origin');
       res.setHeader('Access-Control-Allow-Credentials','true');
       res.setHeader('Access-Control-Allow-Methods','GET,POST,PUT,DELETE,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization, X-Boostpay-Token, X-Device-Fingerprint');
+      res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization, X-Boostpay-Token, X-Device-Fingerprint, X-MFA-Code, X-MFA-Token');
     }
     if (req.method==='OPTIONS') return res.sendStatus(204);
     next();
@@ -4340,8 +4362,9 @@ async function startServer() {
       if (verifyMfaCode(secret, mfaCode)) return next();
       return res.status(401).json({ error: 'MFA required. Provide X-MFA-Code header (TOTP 6-digit).' });
     }
-    // If no MFA set up, allow but warn (enforce setup later)
-    return next();
+    // Hardened: MFA mandatory for sensitive ops — if no secret, block and require setup
+    // Allows /mfa/setup and /mfa/verify themselves (they don't use requireMfa), but all guarded routes now require MFA
+    return res.status(428).json({ error: 'MFA setup required. This admin action needs TOTP — call POST /api/admin/mfa/setup first, then verify with your authenticator app.', mfaRequired: true, setupEndpoint: '/api/admin/mfa/setup' });
   }
 
   // Pending admin adjustments requiring second approval if >$1000
