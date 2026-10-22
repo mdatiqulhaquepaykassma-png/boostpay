@@ -1611,14 +1611,14 @@ export class BoostPayStore {
 
   // --- Sessions / anti-phishing / QR / groups / leaderboard / banner APIs ---
 
-  static async fetchLeaderboard(): Promise<{ users: any[]; me: any | null; total: number }> {
+  static async fetchLeaderboard(): Promise<{ users: any[]; me: any | null }> {
     try {
       const res = await fetch('/api/leaderboard', { headers: this.authHeaders() });
       if (res.ok) return await res.json();
     } catch (e) {
       console.warn('fetchLeaderboard error:', e);
     }
-    return { users: [], me: null, total: 0 };
+    return { users: [], me: null };
   }
 
   static async getSessions(): Promise<SessionDevice[]> {

@@ -1977,6 +1977,24 @@ async function startServer() {
     next();
   });
 
+  // --- Double-response guard: a second res.json()/send() (e.g. after an error branch
+  // already answered inside a lock) throws ERR_HTTP_HEADERS_SENT and used to crash the
+  // ENTIRE Node process (server-wide 502). First response wins; later ones are ignored.
+  app.use((req: any, res: any, next: any) => {
+    const origJson = res.json.bind(res);
+    const origSend = res.send.bind(res);
+    let answered = false;
+    res.json = (body: any) => {
+      if (answered || res.headersSent) { try { console.warn(`[double-response blocked] ${req.method} ${req.path}`); } catch {} return res; }
+      answered = true; return origJson(body);
+    };
+    res.send = (body: any) => {
+      if (answered || res.headersSent) { try { console.warn(`[double-response blocked] ${req.method} ${req.path}`); } catch {} return res; }
+      answered = true; return origSend(body);
+    };
+    next();
+  });
+
   // Brute-force protection on credential endpoints — tightened + progressive IP block
   app.use('/api/users/login', rateLimit(10)); // 10/min (was 15)
   app.use('/api/users/register', rateLimit(8)); // 8/min (was 10) — prevent mass fake accounts
@@ -5765,10 +5783,11 @@ async function startServer() {
       }))
       .sort((a: any, b: any) => b.balance - a.balance || b.lifetimeProfit - a.lifetimeProfit);
     const meIdx = rows.findIndex((r: any) => r.id === me);
+    // Owner requirement: participant count is never exposed anywhere (UI or API).
+    // Only the sliding window of ranked rows + the caller's own row are returned.
     res.json({
       users: rows.slice(0, 200),
-      me: meIdx >= 0 ? { ...rows[meIdx], rank: meIdx + 1 } : null,
-      total: rows.length
+      me: meIdx >= 0 ? { ...rows[meIdx], rank: meIdx + 1 } : null
     });
   });
   // Detailed per-user referral + cycle info for leaderboard modal
