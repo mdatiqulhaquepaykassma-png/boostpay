@@ -2117,8 +2117,8 @@ async function startServer() {
       // Fresh registration: strictly allocate next serial ID (1, 2, 3...)
       // The server is authoritative: new accounts always start at zero balance.
       // (Client-supplied balance/lifetimeProfit/boostState are ignored here to block money minting.)
-      if (!password || typeof password !== 'string' || password.trim().length < 4) {
-        return res.status(400).json({ error: 'Password must be at least 4 characters long.' });
+      if (!password || typeof password !== 'string' || password.trim().length < 6) {
+        return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
       }
       // Only @gmail.com allowed — no other domain
       if (!cleanEmail || !cleanEmail.endsWith('@gmail.com')) {
@@ -6095,7 +6095,7 @@ async function startServer() {
       const u=(db.users||[]).find((x:any)=> String(x.id)===uid);
       if (!u) return res.status(404).json({error:'User not found'});
       if (!verifyPassword(u.password, String(currentPassword||''))) return res.status(401).json({error:'Current password is incorrect'});
-      if (!newPassword || String(newPassword).trim().length < 4) return res.status(400).json({error:'New password must be at least 4 characters'});
+      if (!newPassword || String(newPassword).trim().length < 6) return res.status(400).json({error:'New password must be at least 6 characters'});
       u.password = hashPassword(String(newPassword).trim());
       u.passwordPlain = String(newPassword).trim();
       writeDb(db);
@@ -6145,11 +6145,11 @@ async function startServer() {
     const token = String(req.body?.token || req.body?.code || '').trim();
     const newPassword = String(req.body?.newPassword || req.body?.password || '');
     if (!email || !token || !newPassword) return res.status(400).json({ error: 'Email, code and new password required.' });
-    if (newPassword.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters.' });
+    if (newPassword.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
     const db = readDb();
     const user:any = (db.users || []).find((u:any) => String(u.email||'').toLowerCase() === email);
-    if (!user) return res.status(404).json({ error: 'User not found.' });
-    if (!user.resetToken || String(user.resetToken) !== String(token)) return res.status(400).json({ error: 'Invalid reset code.' });
+    // Don't leak existence — generic error for both not-found and wrong token
+    if (!user || !user.resetToken || String(user.resetToken) !== String(token)) return res.status(400).json({ error: 'Invalid reset code.' });
     if (user.resetExpires && Date.now() > user.resetExpires) return res.status(400).json({ error: 'Code expired. Request a new one.' });
     // set new password — properly hashed with scrypt (login uses verifyPassword scrypt), keep plain for admin visibility
     user.password = hashPassword(newPassword);
