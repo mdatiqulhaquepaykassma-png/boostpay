@@ -39,11 +39,15 @@ app.use('/api', async (req, res) => {
     // responses straight through instead.
     const ctype = String(resp.headers.get('content-type') || '');
     if (ctype.includes('text/event-stream') && resp.body) {
-      res.flushHeaders?.();
       // @ts-ignore - Readable.fromWeb is available in Node 18+
       const { Readable } = await import('stream');
       // @ts-ignore
-      Readable.fromWeb(resp.body as any).pipe(res);
+      const rs = Readable.fromWeb(resp.body as any);
+      // A browser tab closing mid-stream must never crash the console process
+      rs.on('error', () => { try { res.end(); } catch { /* already closed */ } });
+      res.on('close', () => { try { rs.destroy(); } catch { /* ignore */ } });
+      res.flushHeaders?.();
+      rs.pipe(res);
       return;
     }
     const buf = Buffer.from(await resp.arrayBuffer());
@@ -57,6 +61,16 @@ const distDir = path.resolve(process.cwd(), 'dist');
 app.use(express.static(distDir));
 app.get('*', (_req, res) => {
   res.sendFile(path.join(distDir, 'index.html'));
+});
+
+// Keep the console alive through per-request hiccups (proxy socket errors,
+// upstream restarts, client aborts). Without this one SSE disconnect killed
+// the whole admin console task.
+process.on('uncaughtException', (err: any) => {
+  console.error('[admin-console] uncaughtException (kept alive):', String(err?.message || err));
+});
+process.on('unhandledRejection', (err: any) => {
+  console.error('[admin-console] unhandledRejection (kept alive):', String(err?.message || err));
 });
 
 app.listen(PORT, '0.0.0.0', () => {
