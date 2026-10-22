@@ -2484,8 +2484,8 @@ async function startServer() {
     });
   });
 
-  // 7. General sync endpoint
-  app.post('/api/sync', (req, res) => {
+  // 7. General sync endpoint — rate limited to prevent DB write spam (DoS)
+  app.post('/api/sync', rateLimit(30), (req, res) => {
     try {
       const incoming = req.body;
       const current = readDb();
@@ -2534,6 +2534,7 @@ async function startServer() {
         if (t && t.id !== undefined) txMap.set(String(t.id), t);
       }
       if (Array.isArray(incoming.transactions)) {
+        if (incoming.transactions.length > 5000) return res.status(413).json({ error: 'Sync payload too large (transactions cap 5000).' });
         for (const t of incoming.transactions) {
           if (t && t.id !== undefined) {
             // Block server-only types from client push
@@ -2593,6 +2594,7 @@ async function startServer() {
         if (n && n.id !== undefined) notifMap.set(String(n.id), n);
       }
       if (Array.isArray(incoming.notifications)) {
+        if (incoming.notifications.length > 5000) return res.status(413).json({ error: 'Sync payload too large (notifications cap 5000).' });
         for (const n of incoming.notifications) {
           if (!n || n.id === undefined) continue;
           // Block server-only notif types from client push (prevents re-adding deleted dup notifs)
