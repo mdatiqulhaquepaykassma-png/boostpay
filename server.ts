@@ -950,6 +950,7 @@ async function initPostgres(): Promise<void> {
     const res = await pgPool.query('SELECT data FROM app_state WHERE id = 1');
     if (res.rows.length && res.rows[0].data) {
       pgDoc = res.rows[0].data;
+      adoptPersistedApiSecret(pgDoc);
       // refresh the local file cache
       try { fs.writeFileSync(DB_FILE, JSON.stringify(pgDoc, null, 2), 'utf-8'); } catch { /* ignore */ }
       console.log(`State loaded from PostgreSQL (${(pgDoc.users || []).length} users, ${(pgDoc.transactions || []).length} transactions)`);
@@ -957,6 +958,7 @@ async function initPostgres(): Promise<void> {
       // First run with a fresh database: migrate the local file (or seed) into Postgres
       const seed = readDb();
       pgDoc = seed;
+      adoptPersistedApiSecret(seed);
       await pgPool.query('INSERT INTO app_state (id, data, updated_at) VALUES (1, $1, now())', [JSON.stringify(seed)]);
       pgStatus.lastPersistAt = Date.now();
       console.log(`State migrated into PostgreSQL (${(seed.users || []).length} users)`);
@@ -1064,7 +1066,29 @@ function getApiSecret(): string {
     return crypto.randomBytes(32).toString('hex');
   }
 }
-const API_SECRET = getApiSecret();
+// Deploy-safe signing secret: the container filesystem is ephemeral, so the file
+// fallback produced a NEW secret on every redeploy and silently logged every user
+// and admin out. The secret of record now lives inside the database document
+// (state.secrets.apiSecret) and the old one stays accepted for a grace period.
+let API_SECRET = getApiSecret();
+const ACCEPTED_SECRETS: Set<string> = new Set([API_SECRET]);
+
+/** Adopt the secret stored in the DB (or publish the current one) after load. */
+function adoptPersistedApiSecret(doc: any): void {
+  try {
+    if (!doc) return;
+    if (!doc.secrets || typeof doc.secrets !== 'object') doc.secrets = {};
+    const stored = String(doc.secrets.apiSecret || '').trim();
+    if (!stored) {
+      doc.secrets.apiSecret = API_SECRET;      // first run after this fix
+      return;
+    }
+    ACCEPTED_SECRETS.add(API_SECRET);          // keep sessions signed with the file secret valid
+    ACCEPTED_SECRETS.add(stored);
+    API_SECRET = stored;
+    try { fs.writeFileSync(SECRET_FILE, stored, { encoding: 'utf-8', mode: 0o600 }); } catch { /* ignore */ }
+  } catch { /* never block startup on this */ }
+}
 
 const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (was 30d — harden token theft window)
 
@@ -1084,10 +1108,14 @@ function verifyToken(token: unknown): { sub: string; role: string; exp: number; 
     if (dot <= 0) return null;
     const body = raw.slice(0, dot);
     const sig = raw.slice(dot + 1);
-    const expected = crypto.createHmac('sha256', API_SECRET).update(body).digest('base64url');
     const a = Buffer.from(sig);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    let sigOk = false;
+    for (const secret of ACCEPTED_SECRETS) {
+      const expected = crypto.createHmac('sha256', secret).update(body).digest('base64url');
+      const b = Buffer.from(expected);
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) { sigOk = true; break; }
+    }
+    if (!sigOk) return null;
     const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf-8'));
     if (!payload || !payload.sub || !payload.role || !payload.exp) return null;
     if (Number(payload.exp) < Date.now()) return null;
