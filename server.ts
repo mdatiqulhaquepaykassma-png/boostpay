@@ -1867,12 +1867,37 @@ async function startServer() {
     next();
   });
 
-  // Brute-force protection on credential endpoints
-  app.use('/api/users/login', rateLimit(15));
-  app.use('/api/users/register', rateLimit(10));
-  app.use('/api/admin/login', rateLimit(6)); // stricter for admin brute force
+  // Brute-force protection on credential endpoints — tightened + progressive IP block
+  app.use('/api/users/login', rateLimit(10)); // 10/min (was 15)
+  app.use('/api/users/register', rateLimit(8)); // 8/min (was 10) — prevent mass fake accounts
+  app.use('/api/admin/login', rateLimit(5)); // 5/min (was 6) + below progressive block
   app.use('/api/chat/send', rateLimit(60));
   app.use('/api/chat/call-signal', rateLimit(40));
+  // Progressive fail block: after 8 failed logins in 10m, IP blocked 30m (fix: credential stuffing)
+  const failedLogins = new Map<string,{count:number, firstAt:number, blockedUntil?:number}>();
+  app.use('/api/users/login', (req:any,res:any,next:any)=>{
+    const ip=clientIp(req); const rec=failedLogins.get(ip);
+    if(rec?.blockedUntil && rec.blockedUntil>Date.now()){
+      const sec=Math.ceil((rec.blockedUntil-Date.now())/1000);
+      res.setHeader('Retry-After', String(sec));
+      return res.status(429).json({error:`Too many failed logins — try again in ${Math.ceil(sec/60)}m`});
+    }
+    // hook response to count fails on 401/400
+    const origJson=res.json.bind(res);
+    res.json=(body:any)=>{
+      if(body?.error && /invalid|credentials|password/i.test(String(body.error))){
+        const now=Date.now(); let r=failedLogins.get(ip);
+        if(!r || now - r.firstAt > 10*60*1000) r={count:0, firstAt:now};
+        r.count++; if(r.count>=8) r.blockedUntil=now+30*60*1000;
+        failedLogins.set(ip,r);
+      } else if(body?.success || body?.token){
+        failedLogins.delete(ip); // success resets
+      }
+      return origJson(body);
+    };
+    next();
+  });
+  setInterval(()=>{ const now=Date.now(); for(const [k,v] of failedLogins.entries()) if(v.blockedUntil && v.blockedUntil<now-3600000) failedLogins.delete(k); else if(now - v.firstAt > 24*3600000) failedLogins.delete(k); }, 60000);
 
   // --- Authentication guards -------------------------------------------------
   // Admin API: every route except /api/admin/login requires a valid admin token
