@@ -1143,9 +1143,29 @@ function createSession(db: any, userId: string, role: 'USER' | 'ADMIN', ip: stri
     createdAt: Date.now(),
     lastSeenAt: Date.now()
   };
+  // CONCURRENCY CAP 1/device: 2nd login auto-logs-out 1st device — revoke all other active sessions for same user+role
+  try {
+    const all = sessionSnapshot(db);
+    for (const s of all) {
+      if (String(s.userId)===String(userId) && s.role===role && !s.revoked && s.id!==sess.id) {
+        s.revoked = true;
+        revokedSessions.add(s.id);
+      }
+    }
+  } catch {}
   sessionSnapshot(db).unshift(sess);
   if (db.sessions.length > 2000) db.sessions.length = 2000;
   return sess;
+}
+// Enforce 1-device cap on future logins without needing to restart: also revoke orphaned sessions right after creation
+function enforceSingleSession(db:any, userId:string, role:'USER'|'ADMIN', keepSid:string){
+  try {
+    for(const s of sessionSnapshot(db)){
+      if(String(s.userId)===String(userId) && s.role===role && !s.revoked && s.id!==keepSid){
+        s.revoked=true; revokedSessions.add(s.id);
+      }
+    }
+  } catch {}
 }
 function revokeSession(db: any, sessionId: string): boolean {
   const list = sessionSnapshot(db);
