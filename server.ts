@@ -4480,10 +4480,11 @@ async function startServer() {
     }
   } catch {}
   function saveMfaSecrets(){ try { const mfaFile = path.join(DATA_DIR, '.admin-mfa.json'); const obj:any={}; for(const [k,v] of adminMfaSecrets.entries()) obj[k]=v; fs.writeFileSync(mfaFile, JSON.stringify(obj,null,2),'utf-8'); } catch{} }
-  function generateMfaSecret(): string { return require('crypto').randomBytes(20).toString('base64url'); }
+  function generateMfaSecret(): string { return crypto.randomBytes(20).toString('base64url'); }
   function totpForSecret(secret:string, window=0): string {
     // Simple TOTP: HMAC-SHA1(secret, floor(Date.now()/30000)+window) -> 6 digits (RFC 6238 lite)
-    const crypto = require('crypto');
+    // NOTE: use the top-level ESM crypto import — `require` does not exist in this bundle
+    // (it threw ReferenceError and made MFA setup return 500, blocking every sensitive admin action).
     const counter = Math.floor(Date.now()/30000)+window;
     const buf = Buffer.alloc(8); buf.writeBigUInt64BE(BigInt(counter),0);
     const h = crypto.createHmac('sha1', Buffer.from(secret,'base64url')).update(buf).digest();
@@ -5181,7 +5182,7 @@ async function startServer() {
     const neg = (db.users||[]).filter((u:any)=> Number(u.balance)<0).length;
     if (neg) alerts.push({ type:'NEGATIVE_BALANCE', count: neg });
     // Backups
-    const lastBackup = (()=>{ try{ const fs=require('fs'); const path=require('path'); const dir=path.join(DATA_DIR,'backups'); if(!fs.existsSync(dir)) return null; const files=fs.readdirSync(dir).filter((f:string)=> f.startsWith('boostpay_db.')); if(!files.length) return null; files.sort(); const stat=fs.statSync(path.join(dir, files[files.length-1])); return stat.mtimeMs; } catch{ return null; }})();
+    const lastBackup = (()=>{ try{ const dir=path.join(DATA_DIR,'backups'); if(!fs.existsSync(dir)) return null; const files=fs.readdirSync(dir).filter((f:string)=> f.startsWith('boostpay_db.')); if(!files.length) return null; files.sort(); const stat=fs.statSync(path.join(dir, files[files.length-1])); return stat.mtimeMs; } catch{ return null; }})();
     if (!lastBackup || now - lastBackup > 24*3600000) alerts.push({ type:'BACKUP_STALE', lastBackup });
     res.json({ alerts, timestamp: now });
   });
