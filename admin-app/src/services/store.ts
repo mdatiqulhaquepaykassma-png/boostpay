@@ -916,13 +916,21 @@ export class BoostPayStore {
     try { localStorage.removeItem(STORAGE_ADMIN_MFA); } catch { /* ignore */ }
   }
 
-  static async adminMfaStatus(): Promise<{ enabled: boolean; email: string }> {
+  /**
+   * MFA status of the signed-in admin.
+   * `enabled === null` means the check failed (expired session / network) — the UI
+   * must not claim "not set up" in that case, it used to mislead admins into
+   * rotating a working secret.
+   */
+  static async adminMfaStatus(): Promise<{ enabled: boolean | null; email: string; error?: string }> {
     try {
       const res = await fetch('/api/admin/mfa/status', { headers: this.adminAuthHeaders() });
       const data = await res.json().catch(() => ({}));
       if (res.ok) return { enabled: !!data.enabled, email: String(data.email || '') };
-    } catch { /* ignore */ }
-    return { enabled: false, email: '' };
+      return { enabled: null, email: '', error: data.error || `Status check failed (${res.status})` };
+    } catch (e: any) {
+      return { enabled: null, email: '', error: String(e?.message || 'Network error') };
+    }
   }
 
   /** Generates a fresh secret for the logged-in admin (invalidates the previous one). */

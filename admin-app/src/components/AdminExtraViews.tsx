@@ -1226,6 +1226,7 @@ export const SmtpAdminView: FC = () => {
  */
 export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [statusError, setStatusError] = useState('');
   const [secret, setSecret] = useState('');
   const [otpauth, setOtpauth] = useState('');
   const [code, setCode] = useState('');
@@ -1238,12 +1239,13 @@ export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
   );
   const [now, setNow] = useState(Date.now());
 
-  useEffect(() => {
-    (async () => {
-      const st = await BoostPayStore.adminMfaStatus();
-      setEnabled(st.enabled);
-    })();
+  const refreshStatus = useCallback(async () => {
+    const st = await BoostPayStore.adminMfaStatus();
+    setEnabled(st.enabled);
+    setStatusError(st.enabled === null ? (st.error || 'Could not read MFA status') : '');
   }, []);
+
+  useEffect(() => { refreshStatus(); }, [refreshStatus]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -1294,9 +1296,11 @@ export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
     if (digits.length === 6 && /[0-9]/.test(raw.slice(-1))) verify(digits); // auto-submit
   };
 
-  const statusPill = unlocked
-    ? `UNLOCKED ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}`
-    : enabled ? 'LOCKED' : 'NOT SET UP';
+  const statusPill = enabled === null
+    ? 'STATUS UNKNOWN'
+    : unlocked
+      ? `UNLOCKED ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}`
+      : enabled ? 'LOCKED' : 'NOT SET UP';
 
   return (
     <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-4">
@@ -1312,11 +1316,22 @@ export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
           </p>
         </div>
         <span className={`shrink-0 text-[10px] font-mono px-2.5 py-1 rounded-lg border ${
-          unlocked ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                   : enabled ? 'border-zinc-700 bg-zinc-800 text-zinc-300'
-                             : 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+          enabled === null ? 'border-zinc-700 bg-zinc-800 text-zinc-400'
+          : unlocked ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                     : enabled ? 'border-zinc-700 bg-zinc-800 text-zinc-300'
+                               : 'border-amber-500/40 bg-amber-500/10 text-amber-300'
         }`}>{statusPill}</span>
       </div>
+
+      {enabled === null && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+          <span className="min-w-0 break-words">{statusError || 'Could not read MFA status.'}</span>
+          <button
+            onClick={() => { setError(''); refreshStatus(); }}
+            className="shrink-0 min-h-[36px] rounded-lg border border-amber-500/40 px-3 text-[11px] font-semibold text-amber-200 active:bg-amber-500/20"
+          >Re-check</button>
+        </div>
+      )}
 
       {error && (
         <div className="flex items-start gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
