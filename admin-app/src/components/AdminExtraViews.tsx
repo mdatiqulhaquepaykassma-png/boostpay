@@ -33,7 +33,7 @@ import {
   Settings2,
   Zap
 } from 'lucide-react';
-import { BoostPayStore } from '../services/store';
+import { BoostPayStore, copyToClipboard } from '../services/store';
 
 /* ==========================================================================
    Simple dependency-free SVG charts
@@ -1210,6 +1210,154 @@ export const SmtpAdminView: FC = () => {
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+};
+
+
+/**
+ * Admin MFA (2FA) card — TOTP setup + 5-minute unlock.
+ * Without this the console cannot perform ANY sensitive action: the backend
+ * answers 428 "MFA setup required" for treasury adjust, user delete, freeze,
+ * backup restore and DB Studio writes until a TOTP secret exists.
+ */
+export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [secret, setSecret] = useState('');
+  const [otpauth, setOtpauth] = useState('');
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [ok, setOk] = useState('');
+  const [unlockedUntil, setUnlockedUntil] = useState<number>(
+    () => (BoostPayStore.getMfaSession() || { expiresAt: 0 }).expiresAt
+  );
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    (async () => {
+      const st = await BoostPayStore.adminMfaStatus();
+      setEnabled(st.enabled);
+    })();
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const secondsLeft = Math.max(0, Math.floor((unlockedUntil - now) / 1000));
+  const unlocked = secondsLeft > 0;
+
+  const generate = async () => {
+    setBusy(true); setError(''); setOk('');
+    try {
+      const r = await BoostPayStore.adminMfaSetup();
+      setSecret(r.secret); setOtpauth(r.otpauth); setEnabled(true);
+      setOk('New secret generated. Add it to your authenticator app, then enter the 6-digit code below.');
+    } catch (e: any) {
+      setError(e.message || 'Failed to generate MFA secret.');
+    } finally { setBusy(false); }
+  };
+
+  const verify = async () => {
+    setBusy(true); setError(''); setOk('');
+    try {
+      const r = await BoostPayStore.adminMfaVerify(code.trim());
+      if (!r.ok) { setError(r.error || 'Invalid code.'); return; }
+      setUnlockedUntil(Date.now() + r.validFor * 1000);
+      setCode('');
+      setOk(`MFA unlocked. Sensitive actions work for the next ${Math.round(r.validFor / 60)} minutes.`);
+    } catch (e: any) {
+      setError(e.message || 'Failed to verify MFA code.');
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-xs font-bold text-white flex items-center gap-2">
+            <KeyRound className="w-4 h-4 text-amber-400" /> Two-Factor Authentication (MFA)
+          </h3>
+          <p className="text-[11px] text-zinc-400 mt-1">
+            Treasury adjust, user delete, freeze and backup restore require a 6-digit code.
+            {enabled === false && <span className="text-amber-400 font-semibold"> MFA is not set up yet — those actions are blocked.</span>}
+          </p>
+        </div>
+        <span className={`shrink-0 text-[10px] font-mono px-2 py-1 rounded-lg border ${
+          unlocked ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                   : enabled ? 'border-zinc-700 bg-zinc-800 text-zinc-300'
+                             : 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+        }`}>
+          {unlocked ? `UNLOCKED ${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}` : enabled ? 'LOCKED' : 'NOT SET UP'}
+        </span>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" /> {error}
+        </div>
+      )}
+      {ok && (
+        <div className="flex items-center gap-2 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300">
+          <Check className="w-3.5 h-3.5 shrink-0" /> {ok}
+        </div>
+      )}
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3 space-y-2">
+          <p className="text-[10px] uppercase tracking-wider font-mono text-zinc-500">Step 1 — Get a secret</p>
+          <button
+            onClick={generate}
+            disabled={busy}
+            className="w-full rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-zinc-950 text-xs font-bold py-2.5"
+          >
+            {busy ? 'Working…' : enabled ? 'Generate new secret (replaces old)' : 'Generate MFA secret'}
+          </button>
+          {secret && (
+            <div className="space-y-2 pt-1">
+              <p className="text-[10px] text-zinc-400">Authenticator → <span className="text-zinc-200">Add account → Enter setup key</span></p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 break-all rounded-lg bg-zinc-900 border border-zinc-800 px-2 py-1.5 text-[11px] text-amber-300 font-mono">{secret}</code>
+                <button
+                  onClick={() => copyToClipboard(secret)}
+                  className="rounded-lg border border-zinc-700 px-2 py-1.5 text-[10px] text-zinc-300 hover:bg-zinc-800"
+                >Copy</button>
+              </div>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 truncate rounded-lg bg-zinc-900 border border-zinc-800 px-2 py-1.5 text-[10px] text-zinc-400 font-mono">{otpauth}</code>
+                <button
+                  onClick={() => copyToClipboard(otpauth)}
+                  className="rounded-lg border border-zinc-700 px-2 py-1.5 text-[10px] text-zinc-300 hover:bg-zinc-800"
+                >Copy</button>
+              </div>
+              <p className="text-[10px] text-zinc-500">Account: {myEmail || 'admin'} · Type: Time-based · 6 digits · 30 seconds</p>
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3 space-y-2">
+          <p className="text-[10px] uppercase tracking-wider font-mono text-zinc-500">Step 2 — Enter the 6-digit code</p>
+          <input
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))}
+            inputMode="numeric"
+            placeholder="123456"
+            className="w-full rounded-xl bg-zinc-900 border border-zinc-800 px-3 py-2.5 text-center text-lg tracking-[0.4em] font-mono text-white focus:outline-none focus:border-amber-500"
+          />
+          <button
+            onClick={verify}
+            disabled={busy || code.length !== 6}
+            className="w-full rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-zinc-950 text-xs font-bold py-2.5"
+          >
+            Unlock sensitive actions (5 min)
+          </button>
+          <p className="text-[10px] text-zinc-500">
+            Lost your phone? MFA secret must be cleared on the server (DB → admins → mfaSecret) — no self-service reset, by design.
+          </p>
+        </div>
       </div>
     </div>
   );

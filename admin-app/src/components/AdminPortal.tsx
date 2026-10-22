@@ -45,7 +45,7 @@ import {
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { CallManager, startCallTo } from './CallOverlay';
-import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, DatabaseBrowser, ReferAdminView, AdminSystemSettingsView, SmtpAdminView } from './AdminExtraViews';
+import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, AdminMfaView, DatabaseBrowser, ReferAdminView, AdminSystemSettingsView, SmtpAdminView } from './AdminExtraViews';
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
 
@@ -1280,10 +1280,13 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {activeTab === 'SMTP' && <SmtpAdminView />}
         {activeTab === 'SETTINGS' && <AdminSystemSettingsView />}
         {activeTab === 'ADMINS' && (
-          <AdminAccountsView
-            myEmail={(adminSession && adminSession.email) || ''}
-            myRole={(adminSession && adminSession.role) || 'SUPERADMIN'}
-          />
+          <div className="space-y-5">
+            <AdminMfaView myEmail={(adminSession && adminSession.email) || ''} />
+            <AdminAccountsView
+              myEmail={(adminSession && adminSession.email) || ''}
+              myRole={(adminSession && adminSession.role) || 'SUPERADMIN'}
+            />
+          </div>
         )}
         {/* ======================================================== */}
         {/* TAB 1: OVERVIEW & SYSTEM HEALTH                          */}

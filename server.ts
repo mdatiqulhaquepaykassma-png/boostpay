@@ -4544,6 +4544,15 @@ async function startServer() {
     const mfaToken = crypto.createHmac('sha256', API_SECRET).update(email+':'+String(Math.floor(Date.now()/300000))).digest('hex').slice(0,16);
     res.json({ success:true, mfaToken, validFor: 300 });
   });
+  // MFA status for the admin console UI (never returns the secret itself)
+  app.get('/api/admin/mfa/status', requireAdmin, (req:any,res)=>{
+    try {
+      const email = String(req.authAdmin||'').toLowerCase();
+      const secret = adminMfaSecrets.get(email) || (readDb().admins||[]).find((a:any)=> a.email===email)?.mfaSecret;
+      res.json({ success:true, email, enabled: !!secret });
+    } catch (err:any) { res.status(500).json({ error: err.message }); }
+  });
+
   function requireMfa(req:any,res:any,next:any){
     const mfaCode = String(req.headers['x-mfa-code']|| req.body?.mfaCode || req.query?.mfaCode || '').trim();
     const mfaToken = String(req.headers['x-mfa-token']|| req.body?.mfaToken || '').trim();

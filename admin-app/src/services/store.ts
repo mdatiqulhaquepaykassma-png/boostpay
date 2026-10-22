@@ -5,6 +5,7 @@ const STORAGE_USERS = 'boostpay_users_v4';
 const STORAGE_CURRENT_USER = 'boostpay_current_user_v4';
 const STORAGE_CURRENT_USER_ID = 'boostpay_current_user_id_v4';
 const STORAGE_ADMIN_SESSION = 'boostpay_admin_session_v4';
+const STORAGE_ADMIN_MFA = 'boostpay_admin_mfa_v1';
 const STORAGE_AUTH_TOKEN = 'boostpay_auth_token_v1';
 const STORAGE_TRANSACTIONS = 'boostpay_transactions_v4';
 const STORAGE_CONVERSATIONS = 'boostpay_conversations_v4';
@@ -880,7 +881,70 @@ export class BoostPayStore {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const sess = this.getAdminSession();
     if (sess && sess.token) headers['Authorization'] = `Bearer ${sess.token}`;
+    // Sensitive admin actions (treasury adjust, delete, freeze, backup restore,
+    // DB Studio writes) need MFA. The console unlocks for 5 minutes with a TOTP
+    // code and every admin request then carries the short-lived MFA token.
+    const mfa = this.getMfaSession();
+    if (mfa) {
+      headers['X-MFA-Code'] = mfa.code;
+      headers['X-MFA-Token'] = mfa.token;
+    }
     return headers;
+  }
+
+  // ---- Admin MFA (TOTP) -------------------------------------------------
+  static getMfaSession(): { code: string; token: string; expiresAt: number } | null {
+    try {
+      const raw = localStorage.getItem(STORAGE_ADMIN_MFA);
+      if (!raw) return null;
+      const j = JSON.parse(raw);
+      if (!j || !j.token || !j.expiresAt) return null;
+      if (Date.now() > Number(j.expiresAt)) { localStorage.removeItem(STORAGE_ADMIN_MFA); return null; }
+      return { code: String(j.code || ''), token: String(j.token), expiresAt: Number(j.expiresAt) };
+    } catch { return null; }
+  }
+
+  static setMfaSession(code: string, token: string, validForSec = 300): void {
+    try {
+      // refresh ~20s early so a request never lands with an expired token
+      const expiresAt = Date.now() + Math.max(30, validForSec - 20) * 1000;
+      localStorage.setItem(STORAGE_ADMIN_MFA, JSON.stringify({ code, token, expiresAt }));
+    } catch { /* ignore quota errors */ }
+  }
+
+  static clearMfaSession(): void {
+    try { localStorage.removeItem(STORAGE_ADMIN_MFA); } catch { /* ignore */ }
+  }
+
+  static async adminMfaStatus(): Promise<{ enabled: boolean; email: string }> {
+    try {
+      const res = await fetch('/api/admin/mfa/status', { headers: this.adminAuthHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) return { enabled: !!data.enabled, email: String(data.email || '') };
+    } catch { /* ignore */ }
+    return { enabled: false, email: '' };
+  }
+
+  /** Generates a fresh secret for the logged-in admin (invalidates the previous one). */
+  static async adminMfaSetup(): Promise<{ secret: string; otpauth: string; codeSample: string }> {
+    const res = await fetch('/api/admin/mfa/setup', { method: 'POST', headers: this.adminAuthHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `MFA setup failed (${res.status})`);
+    return { secret: String(data.secret || ''), otpauth: String(data.otpauth || ''), codeSample: String(data.codeSample || '') };
+  }
+
+  /** Verifies a 6-digit authenticator code and unlocks sensitive actions for 5 minutes. */
+  static async adminMfaVerify(code: string): Promise<{ ok: boolean; validFor: number; error?: string }> {
+    const res = await fetch('/api/admin/mfa/verify', {
+      method: 'POST',
+      headers: this.adminAuthHeaders(),
+      body: JSON.stringify({ code })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, validFor: 0, error: data.error || `MFA verify failed (${res.status})` };
+    const validFor = Number(data.validFor || 300);
+    this.setMfaSession(code, String(data.mfaToken || ''), validFor);
+    return { ok: true, validFor };
   }
 
   /** The server strips credentials from responses — keep any local secrets. */
