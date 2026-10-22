@@ -1805,6 +1805,10 @@ async function startServer() {
       'https://boostpay.72-60-42-18.sslip.io',
       'https://boostpay-admin.72-60-42-18.sslip.io',
       'https://boostpay-studio.72-60-42-18.sslip.io',
+      'https://boostpay.binanceusdtpay.io',
+      'https://admin.boostpay.binanceusdtpay.io',
+      'https://studio.boostpay.binanceusdtpay.io',
+      'https://boostpay-studio.binanceusdtpay.io',
       'http://localhost:3000','http://localhost:5173','http://localhost:5174','http://localhost:3001'
     ];
     const origin = String(req.headers.origin||'');
@@ -2383,69 +2387,81 @@ async function startServer() {
     } catch (err: any) { return res.status(500).json({ error: err.message }); }
   });
 
-  app.post('/api/boost/pause', (req: any, res) => {
+  app.post('/api/boost/pause', async (req: any, res) => {
     try {
       const { userId } = req.body;
       if (String(userId) !== String(req.authUserId)) {
         return res.status(403).json({ error: 'You can only manage your own boost.' });
       }
-      const db = readDb();
-      const user = db.users.find((u: any) => u.id === userId);
-      if (!user || !user.boostState) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      // Freeze progress at the pause instant so pause never resets compounding.
-      const pbs = user.boostState;
-      if (pbs.startedAt > 0 && !pbs.isPaused) {
-        const cfg = db.config || INITIAL_DB.config;
-        const mRate = cfg.minuteRatePercent !== undefined
-          ? cfg.minuteRatePercent
-          : (cfg.hourlyRatePercent ? cfg.hourlyRatePercent / 60 : 0.001605);
-        const rPerMs = (mRate / 100) / 60000;
-        const pElapsed = Math.min(Date.now() - pbs.startedAt, pbs.targetDurationMs || Number.MAX_SAFE_INTEGER);
-        pbs.elapsedMs = pElapsed;
-        const pStart = Number(pbs.startingBalance ?? user.balance) || 0;
-        pbs.accumulatedYield = rPerMs > 0
-          ? (pElapsed * rPerMs < 1e-5
-              ? pStart * pElapsed * rPerMs
-              : pStart * Math.expm1(pElapsed * Math.log1p(rPerMs)))
-          : 0;
-      }
-      user.boostState.isPaused = true;
-      user.boostState.pausedAt = Date.now();
-      writeDb(db);
-      broadcastUserUpdate(db, user.id);
-      res.json({ success: true, user: publicUser(user) });
+      const result = await withBoostLock(String(userId), async ()=>{
+        const db = readDb();
+        const user = db.users.find((u: any) => u.id === userId);
+        if (!user || !user.boostState) {
+          return { status:404, body:{ error: 'User not found' } };
+        }
+        if (user.boostState.isPaused) {
+          return { status:200, body:{ success:true, user: publicUser(user), alreadyPaused:true } };
+        }
+        // Freeze progress at the pause instant so pause never resets compounding.
+        const pbs = user.boostState;
+        if (pbs.startedAt > 0 && !pbs.isPaused) {
+          const cfg = db.config || INITIAL_DB.config;
+          const mRate = cfg.minuteRatePercent !== undefined
+            ? cfg.minuteRatePercent
+            : (cfg.hourlyRatePercent ? cfg.hourlyRatePercent / 60 : 0.001605);
+          const rPerMs = (mRate / 100) / 60000;
+          const pElapsed = Math.min(Date.now() - pbs.startedAt, pbs.targetDurationMs || Number.MAX_SAFE_INTEGER);
+          pbs.elapsedMs = pElapsed;
+          const pStart = Number(pbs.startingBalance ?? user.balance) || 0;
+          pbs.accumulatedYield = rPerMs > 0
+            ? (pElapsed * rPerMs < 1e-5
+                ? pStart * pElapsed * rPerMs
+                : pStart * Math.expm1(pElapsed * Math.log1p(rPerMs)))
+            : 0;
+        }
+        user.boostState.isPaused = true;
+        user.boostState.pausedAt = Date.now();
+        writeDb(db);
+        broadcastUserUpdate(db, user.id);
+        return { status:200, body:{ success: true, user: publicUser(user) } };
+      });
+      if (result.status!==200) return res.status(result.status).json(result.body);
+      return res.json(result.body);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  app.post('/api/boost/resume', (req: any, res) => {
+  app.post('/api/boost/resume', async (req: any, res) => {
     try {
       const { userId } = req.body;
       if (String(userId) !== String(req.authUserId)) {
         return res.status(403).json({ error: 'You can only manage your own boost.' });
       }
-      const db = readDb();
-      const user = db.users.find((u: any) => u.id === userId);
-      if (!user || !user.boostState) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      if (user.isFrozen) {
-        return res.status(403).json({ error: 'Your account is frozen. Boosting is disabled — contact support.' });
-      }
-      if (user.isBlocked) {
-        return res.status(403).json({ error: 'Your account is suspended.' });
-      }
-      user.boostState.isPaused = false;
-      user.boostState.startedAt = Date.now() - (user.boostState.elapsedMs || 0);
-      user.boostState.pausedAt = 0;
-      writeDb(db);
-      broadcastUserUpdate(db, user.id);
-      res.json({ success: true, user: publicUser(user) });
+      const result = await withBoostLock(String(userId), async ()=>{
+        const db = readDb();
+        const user = db.users.find((u: any) => u.id === userId);
+        if (!user || !user.boostState) {
+          return { status:404, body:{ error: 'User not found' } };
+        }
+        if (user.isFrozen) {
+          return { status:403, body:{ error: 'Your account is frozen. Boosting is disabled — contact support.' } };
+        }
+        if (user.isBlocked) {
+          return { status:403, body:{ error: 'Your account is suspended.' } };
+        }
+        if (!user.boostState.isPaused) {
+          return { status:200, body:{ success:true, user: publicUser(user), alreadyResumed:true } };
+        }
+        user.boostState.isPaused = false;
+        user.boostState.startedAt = Date.now() - (user.boostState.elapsedMs || 0);
+        user.boostState.pausedAt = 0;
+        writeDb(db);
+        broadcastUserUpdate(db, user.id);
+        return { status:200, body:{ success: true, user: publicUser(user) } };
+      });
+      if (result.status!==200) return res.status(result.status).json(result.body);
+      return res.json(result.body);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
