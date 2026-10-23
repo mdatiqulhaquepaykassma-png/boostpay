@@ -84,9 +84,25 @@ const fileToDataUrl = (file: Blob): Promise<string> =>
   });
 
 /* ── voice recorder hook ────────────────────────────────────────────────── */
+
+/** Turn a getUserMedia failure into something a shop-floor agent can act on. */
+export function micErrorMessage(err: any): string {
+  const name = String(err?.name || '');
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    return 'Microphone is blocked for this app. In Chrome tap the lock/ⓘ next to the address → Permissions → Microphone → Allow, reload, then try again. You can also send an audio file instead.';
+  }
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'No microphone was found on this device. You can send an audio file instead.';
+  if (name === 'NotReadableError' || name === 'TrackStartError') return 'The microphone is busy — a call or another app is using it. Close that app and try again.';
+  if (name === 'OverconstrainedError') return 'The microphone could not be started. Try again, or send an audio file instead.';
+  if (name === 'TimeoutError') return 'The microphone did not respond. Check the Chrome permission for this site and try again.';
+  return String(err?.message || 'Could not start the microphone.');
+}
+
 export function useVoiceRecorder(onDone: (dataUrl: string, durationMs: number) => void, onError: (msg: string) => void) {
   const [recording, setRecording] = useState(false);
+  const [requesting, setRequesting] = useState(false);
   const [seconds, setSeconds] = useState(0);
+  const [errorMsg, setErrorMsg] = useState('');
   const recRef = useRef<MediaRecorder | null>(null);
   const chunks = useRef<Blob[]>([]);
   const startedAt = useRef(0);
@@ -97,65 +113,111 @@ export function useVoiceRecorder(onDone: (dataUrl: string, durationMs: number) =
     if (timer.current !== null) { window.clearInterval(timer.current); timer.current = null; }
   };
 
+  const fail = (msg: string) => { setErrorMsg(msg); onError(msg); };
+  const reset = () => setErrorMsg('');
+
   const start = useCallback(async () => {
-    try {
-      if (!(window as any).MediaRecorder || !navigator.mediaDevices?.getUserMedia) {
-        onError('Voice messages are not supported on this browser.');
-        return;
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // AAC in an MP4 container plays on every phone (iOS + Android). WebM/Opus
-      // is a Chrome-only format: an agent recording on Android used to send a
-      // note an iPhone user could not play at all. Prefer MP4, fall back to WebM.
-      const types = [
-        'audio/mp4;codecs=mp4a.40.2', 'audio/mp4',
-        'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'
-      ];
-      const mime = types.find((t) => (window as any).MediaRecorder.isTypeSupported?.(t)) || '';
-      // 32 kbps mono is plenty for speech and keeps a 2-minute note ~480 KB.
-      // Some Safari/WebView builds reject the options object, so degrade twice.
-      let rec: MediaRecorder;
-      try {
-        rec = new MediaRecorder(stream, {
-          ...(mime ? { mimeType: mime } : {}),
-          audioBitsPerSecond: 32000
-        } as MediaRecorderOptions);
-      } catch {
-        try { rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
-        catch { rec = new MediaRecorder(stream); }
-      }
-      recRef.current = rec;
-      chunks.current = [];
-      cancelled.current = false;
-      startedAt.current = Date.now();
-      rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.current.push(e.data); };
-      rec.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        stopTimer();
-        setRecording(false);
-        setSeconds(0);
-        if (cancelled.current) return;
-        const ms = Date.now() - startedAt.current;
-        if (ms < 500) { onError('Hold a little longer to record a voice message.'); return; }
-        const blob = new Blob(chunks.current, { type: rec.mimeType || 'audio/webm' });
-        if (!blob.size) { onError('Nothing was recorded. Check the microphone permission and try again.'); return; }
-        if (blob.size > MAX_VOICE_BYTES) { onError('Voice message is too long. Keep it under 2 minutes.'); return; }
-        try { onDone(await fileToDataUrl(blob), Math.min(ms, MAX_VOICE_MS)); }
-        catch { onError('Could not prepare the voice message.'); }
-      };
-      rec.start();
-      setRecording(true);
-      setSeconds(0);
-      timer.current = window.setInterval(() => {
-        const s = Math.floor((Date.now() - startedAt.current) / 1000);
-        setSeconds(s);
-        if (Date.now() - startedAt.current >= MAX_VOICE_MS) {
-          try { rec.stop(); } catch { /* ignore */ }
-        }
-      }, 250);
-    } catch (err: any) {
-      onError(err?.message || 'Microphone permission is required for voice messages.');
+    setErrorMsg('');
+    if (!(window as any).MediaRecorder || !navigator.mediaDevices?.getUserMedia) {
+      fail('This browser cannot record voice. Update Chrome, or send an audio file instead.');
+      return;
     }
+    if (window.isSecureContext === false) {
+      fail('Voice recording needs an https page. Open the app in Chrome and try again.');
+      return;
+    }
+    // Ask for the permission explicitly first: in an installed app Chrome never
+    // shows the prompt again, so a previously blocked mic looked like a dead button.
+    let permState = '';
+    try {
+      const perm: any = await (navigator as any).permissions?.query?.({ name: 'microphone' });
+      permState = String(perm?.state || '');
+    } catch { /* Permissions API not available for microphone — ignore */ }
+    if (permState === 'denied') {
+      fail(micErrorMessage({ name: 'NotAllowedError' }));
+      return;
+    }
+
+    setRequesting(true);
+    let stream: MediaStream;
+    try {
+      const timeout = new Promise<never>((_, reject) =>
+        window.setTimeout(() => reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' })), 15000));
+      stream = await Promise.race([
+        navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }),
+        timeout
+      ]);
+    } catch (err: any) {
+      setRequesting(false);
+      fail(micErrorMessage(err));
+      return;
+    }
+    setRequesting(false);
+    if (!stream || !stream.getAudioTracks().length) {
+      fail('No microphone track was available. You can send an audio file instead.');
+      return;
+    }
+
+    // AAC in an MP4 container plays on every phone (iOS + Android). WebM/Opus is
+    // Chrome-only, so prefer MP4 and fall back to WebM.
+    const types = [
+      'audio/mp4;codecs=mp4a.40.2', 'audio/mp4',
+      'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'
+    ];
+    const mime = types.find((t) => (window as any).MediaRecorder.isTypeSupported?.(t)) || '';
+    // 32 kbps mono is plenty for speech and keeps a 2-minute note ~480 KB.
+    // Some Safari/WebView builds reject the options object, so degrade twice.
+    let rec: MediaRecorder | null = null;
+    try {
+      rec = new MediaRecorder(stream, {
+        ...(mime ? { mimeType: mime } : {}),
+        audioBitsPerSecond: 32000
+      } as MediaRecorderOptions);
+    } catch {
+      try { rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
+      catch {
+        try { rec = new MediaRecorder(stream); } catch { rec = null; }
+      }
+    }
+    if (!rec) {
+      try { stream.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
+      fail('This browser cannot record audio. You can send an audio file instead.');
+      return;
+    }
+    recRef.current = rec;
+    chunks.current = [];
+    cancelled.current = false;
+    startedAt.current = Date.now();
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.current.push(e.data); };
+    rec.onstop = async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      stopTimer();
+      setRecording(false);
+      setSeconds(0);
+      if (cancelled.current) return;
+      const ms = Date.now() - startedAt.current;
+      if (ms < 500) { fail('Hold a little longer to record a voice message.'); return; }
+      const blob = new Blob(chunks.current, { type: rec!.mimeType || 'audio/webm' });
+      if (!blob.size) { fail('Nothing was recorded. Check the microphone permission and try again.'); return; }
+      if (blob.size > MAX_VOICE_BYTES) { fail('Voice message is too long. Keep it under 2 minutes.'); return; }
+      try { onDone(await fileToDataUrl(blob), Math.min(ms, MAX_VOICE_MS)); }
+      catch { fail('Could not prepare the voice message.'); }
+    };
+    try { rec.start(); } catch (err: any) {
+      try { stream.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
+      fail(micErrorMessage(err));
+      return;
+    }
+    setRecording(true);
+    setSeconds(0);
+    timer.current = window.setInterval(() => {
+      const s = Math.floor((Date.now() - startedAt.current) / 1000);
+      setSeconds(s);
+      if (Date.now() - startedAt.current >= MAX_VOICE_MS) {
+        try { rec!.stop(); } catch { /* ignore */ }
+      }
+    }, 250);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onDone, onError]);
 
   const stop = useCallback(() => { try { recRef.current?.stop(); } catch { /* ignore */ } }, []);
@@ -166,7 +228,7 @@ export function useVoiceRecorder(onDone: (dataUrl: string, durationMs: number) =
   }, []);
 
   useEffect(() => () => { cancelled.current = true; stopTimer(); try { recRef.current?.stop(); } catch { /* ignore */ } }, []);
-  return { recording, seconds, start, stop, cancel };
+  return { recording, requesting, seconds, errorMsg, start, stop, cancel, reset };
 }
 
 /* ── message bubble ─────────────────────────────────────────────────────── */
@@ -246,6 +308,7 @@ export const ChatComposer: React.FC<{
   const [reply, setReply] = useState<{ id: string; text: string; sender?: string } | null>(null);
   const [sending, setSending] = useState(false);
   const photoRef = useRef<HTMLInputElement | null>(null);
+  const audioRef = useRef<HTMLInputElement | null>(null);
   const lastTyping = useRef(0);
 
   // expose reply setter to the message list through a custom event on the wrapper
@@ -280,6 +343,19 @@ export const ChatComposer: React.FC<{
     } finally { setSending(false); }
   };
 
+  // Fallback when the mic is blocked/unavailable on the device: pick an audio
+  // file and send it as a normal voice note (still voice-only, per owner rule).
+  const onPickAudio = async (file: File | null | undefined) => {
+    if (!file) return;
+    const isAudio = /^audio\//i.test(file.type) || /\.(m4a|mp3|ogg|opus|wav|webm|aac|3gp|amr)$/i.test(file.name);
+    if (!isAudio) { fail('Choose an audio file (m4a, mp3, ogg, wav).'); return; }
+    if (file.size > MAX_VOICE_BYTES) { fail('That audio file is too large. Keep it under 3 MB (about 2 minutes).'); return; }
+    try {
+      await submit({ kind: 'voice', voice: await fileToDataUrl(file), voiceDurationMs: 0 });
+      recorder.reset();
+    } catch { fail('Could not read that audio file.'); }
+  };
+
   const onPickPhoto = async (file: File | null | undefined) => {
     if (!file) return;
     if (!/^image\//i.test(file.type)) { fail('Only photos can be sent.'); return; }
@@ -309,6 +385,24 @@ export const ChatComposer: React.FC<{
         </div>
       ) : null}
 
+      {recorder.requesting ? (
+        <div className="mb-2 flex items-center gap-2 rounded-2xl border border-zinc-700 bg-zinc-900 px-3 py-2">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+          <span className="flex-1 text-[11px] font-bold text-zinc-200">Waiting for the microphone… tap “Allow”.</span>
+        </div>
+      ) : null}
+
+      {!recorder.recording && recorder.errorMsg ? (
+        <div className="mb-2 rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2">
+          <p className="text-[10.5px] font-semibold leading-relaxed text-red-200">{recorder.errorMsg}</p>
+          <div className="mt-1.5 flex gap-2">
+            <button type="button" onClick={() => { recorder.reset(); void recorder.start(); }} className="rounded-lg bg-red-500 px-2.5 py-1 text-[10px] font-black text-white">Try again</button>
+            <button type="button" onClick={() => audioRef.current?.click()} className="rounded-lg border border-red-500/40 px-2.5 py-1 text-[10px] font-bold text-red-200">Send an audio file</button>
+            <button type="button" onClick={() => recorder.reset()} className="ml-auto rounded-lg border border-zinc-700 px-2 py-1 text-[10px] font-bold text-zinc-400">Dismiss</button>
+          </div>
+        </div>
+      ) : null}
+
       {recorder.recording ? (
         <div className="flex items-center gap-2 rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2">
           <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
@@ -327,6 +421,13 @@ export const ChatComposer: React.FC<{
             accept="image/*"
             className="hidden"
             onChange={(e) => { void onPickPhoto(e.target.files && e.target.files[0]); e.target.value = ''; }}
+          />
+          <input
+            ref={audioRef}
+            type="file"
+            accept="audio/*"
+            className="hidden"
+            onChange={(e) => { void onPickAudio(e.target.files && e.target.files[0]); e.target.value = ''; }}
           />
           <button type="button" onClick={() => photoRef.current?.click()} title="Send a photo" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-zinc-400">
             <ImageIcon className="h-4 w-4" />
