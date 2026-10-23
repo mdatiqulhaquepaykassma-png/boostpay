@@ -8,7 +8,7 @@ import {
 const TOKEN_KEY = 'bpm_token_v1';
 const MGR_KEY = 'bpm_manager_v1';
 
-type Mgmt = { id: string; name: string; email: string; isActive: boolean };
+type Mgmt = { id: string; name: string; email: string; balance: number; isActive: boolean };
 type AgentRow = {
   id: string; name: string; email: string; balance: number; commissionLifetime: number;
   sentTotal: number; receivedTotal: number; isActive: boolean; createdAt: number; passwordPlain?: string;
@@ -22,6 +22,7 @@ type Stats = {
   volumeOut: number; totalAgentBalance: number; agents: number; management: number;
 };
 type LedgerRow = { id: string; at: number; type: string; amount: number; fee: number; commission: number; balanceAfter: number; agentId: string; userId?: string; note?: string };
+type WalletRow = { id: string; at: number; type: string; amount: number; balanceAfter: number; agentId?: string; note?: string };
 
 const money = (n: number) => (Number.isFinite(Number(n)) ? Number(n) : 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const timeAgo = (ts: number) => {
@@ -118,8 +119,8 @@ const Login: React.FC<{ onDone: (m: Mgmt) => void; toast: (t: any) => void }> = 
 
 /* ── agent detail sheet ─────────────────────────────────────────────────── */
 const AgentSheet: React.FC<{
-  agent: AgentRow; onClose: () => void; onChanged: () => void; toast: (t: any) => void;
-}> = ({ agent, onClose, onChanged, toast }) => {
+  agent: AgentRow; mgmtBalance: number; onClose: () => void; onChanged: () => void; toast: (t: any) => void;
+}> = ({ agent, mgmtBalance, onClose, onChanged, toast }) => {
   const [mode, setMode] = useState<'CREDIT' | 'DEBIT'>('CREDIT');
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
@@ -130,6 +131,8 @@ const AgentSheet: React.FC<{
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setError('');
     if (!/^\d+(\.\d{1,2})?$/.test(amount.trim())) { setError('Enter an amount with at most 2 decimals.'); return; }
+    if (mode === 'CREDIT' && Number(amount) > mgmtBalance) { setError(`Your management balance is only $${money(mgmtBalance)}. Ask the admin to top up first.`); return; }
+    if (mode === 'DEBIT' && Number(amount) > agent.balance) { setError(`Agent balance is only $${money(agent.balance)}.`); return; }
     setBusy(true);
     try {
       const path = mode === 'CREDIT' ? `/api/management/agents/${agent.id}/credit` : `/api/management/agents/${agent.id}/debit`;
@@ -164,7 +167,11 @@ const AgentSheet: React.FC<{
           <div className="rounded-xl bg-zinc-950/70 px-2 py-2"><div className="text-zinc-500">Commission</div><div className="font-black text-emerald-300">${money(agent.commissionLifetime)}</div></div>
           <div className="rounded-xl bg-zinc-950/70 px-2 py-2"><div className="text-zinc-500">Status</div><div className={`font-black ${agent.isActive ? 'text-emerald-400' : 'text-red-400'}`}>{agent.isActive ? 'Active' : 'Disabled'}</div></div>
         </div>
-        <div className="mt-3 flex gap-2">
+        <div className="mt-3 flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-[10px]">
+          <span className="text-zinc-500">Your management wallet</span>
+          <span className="font-black text-cyan-300">${money(mgmtBalance)}</span>
+        </div>
+        <div className="mt-2 flex gap-2">
           <button onClick={() => setMode('CREDIT')} className={`flex h-9 flex-1 items-center justify-center gap-1.5 rounded-xl text-[11px] font-bold ${mode === 'CREDIT' ? 'bg-cyan-500 text-zinc-950' : 'border border-zinc-800 bg-zinc-950 text-zinc-300'}`}><ArrowDownLeft className="h-3.5 w-3.5" /> Fund agent</button>
           <button onClick={() => setMode('DEBIT')} className={`flex h-9 flex-1 items-center justify-center gap-1.5 rounded-xl text-[11px] font-bold ${mode === 'DEBIT' ? 'bg-amber-500 text-zinc-950' : 'border border-zinc-800 bg-zinc-950 text-zinc-300'}`}><ArrowUpRight className="h-3.5 w-3.5" /> Collect</button>
         </div>
@@ -192,16 +199,20 @@ const AgentSheet: React.FC<{
 };
 
 /* ── create agent ───────────────────────────────────────────────────────── */
-const CreateAgentSheet: React.FC<{ onClose: () => void; onCreated: (a: AgentRow) => void; toast: (t: any) => void }> = ({ onClose, onCreated, toast }) => {
+const CreateAgentSheet: React.FC<{ mgmtBalance: number; onClose: () => void; onCreated: (a: AgentRow) => void; toast: (t: any) => void }> = ({ mgmtBalance, onClose, onCreated, toast }) => {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [opening, setOpening] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setError(''); setBusy(true);
     try {
-      const res = await api<{ agent: AgentRow }>('/api/management/agents', { method: 'POST', body: { name: name.trim(), email: email.trim(), password } });
+      const res = await api<{ agent: AgentRow }>('/api/management/agents', {
+        method: 'POST',
+        body: { name: name.trim(), email: email.trim(), password, ...(opening.trim() ? { openingBalance: opening.trim() } : {}) }
+      });
       toast({ type: 'ok', text: `Agent ${res.agent.id} created` });
       onCreated(res.agent);
       onClose();
@@ -220,12 +231,16 @@ const CreateAgentSheet: React.FC<{ onClose: () => void; onCreated: (a: AgentRow)
           <input className={inputCls} placeholder="Agent name (e.g. Dhaka Point)" value={name} onChange={(e) => setName(e.target.value)} />
           <input className={inputCls} type="email" placeholder="Agent email" value={email} onChange={(e) => setEmail(e.target.value)} required />
           <input className={inputCls} type="text" placeholder="Password (min 6 characters)" value={password} onChange={(e) => setPassword(e.target.value)} required />
+          <input className={inputCls} inputMode="decimal" placeholder={`Opening balance from your wallet (max $${money(mgmtBalance)}) — optional`} value={opening} onChange={(e) => setOpening(e.target.value)} />
           {error ? <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
           <button type="submit" disabled={busy} className="flex h-11 w-full items-center justify-center gap-2 rounded-2xl bg-cyan-500 text-xs font-black text-zinc-950 disabled:opacity-60">
             <Plus className="h-3.5 w-3.5" /> {busy ? 'Creating…' : 'Create agent'}
           </button>
         </form>
-        <p className="mt-2 text-center text-[9px] text-zinc-600">Agent accounts can sign in at the BoostPay Agent app only.</p>
+        <p className="mt-2 text-center text-[9px] leading-relaxed text-zinc-600">
+          This agent belongs to your management network. Any opening balance is deducted from your wallet (${money(mgmtBalance)} available).
+          Agent accounts can sign in at the BoostPay Agent app only.
+        </p>
       </div>
     </div>
   );
@@ -243,6 +258,8 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>({ enabled: true, feePercentOnUserSend: 2, commissionPercentOnReceive: 1, commissionPercentOnSend: 1, minUserSend: 1, maxUserSend: 100000, allowAgentBoost: false });
   const [stats, setStats] = useState<Stats | null>(null);
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
+  const [wallet, setWallet] = useState<WalletRow[]>([]);
+  const [balance, setBalance] = useState(0);
   const [tab, setTab] = useState<Tab>('HOME');
   const [selected, setSelected] = useState<AgentRow | null>(null);
   const [creating, setCreating] = useState(false);
@@ -260,7 +277,9 @@ export default function App() {
       ]);
       setAgents(a.agents || []); setSettings(a.settings || settings); setStats(a.stats || null);
       if (me.management) { setMgr(me.management); localStorage.setItem(MGR_KEY, JSON.stringify(me.management)); }
+      setBalance(Number(me.balance ?? a.balance ?? me.management?.balance ?? 0));
       setLedger(l.ledger || []);
+      setWallet(l.wallet || []);
     } catch { /* 401 handled in api() */ }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -330,11 +349,16 @@ export default function App() {
           {tab === 'HOME' && (
             <div className="space-y-3">
               <div className="rounded-3xl border border-cyan-500/30 bg-gradient-to-br from-cyan-500/20 via-zinc-900 to-zinc-950 p-5">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-cyan-300/90">Agent float (all agents)</div>
-                <div className="mt-1 text-3xl font-black text-white">${money(stats?.totalAgentBalance || 0)}</div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-cyan-300/90">My management wallet</div>
+                <div className="mt-1 text-3xl font-black text-white">${money(balance)}</div>
+                <div className="mt-1 text-[9px] font-semibold text-zinc-400">Funded by the admin · you distribute this to your own agents</div>
                 <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] font-semibold">
                   <div className="rounded-xl bg-zinc-950/60 px-2.5 py-2"><div className="text-zinc-500">Fees collected</div><div className="text-white">${money(stats?.feesCollected || 0)}</div></div>
                   <div className="rounded-xl bg-zinc-950/60 px-2.5 py-2"><div className="text-zinc-500">Commissions paid</div><div className="text-white">${money(stats?.commissionsPaid || 0)}</div></div>
+                </div>
+                <div className="mt-2 flex items-center justify-between rounded-xl bg-zinc-950/60 px-2.5 py-2 text-[10px] font-semibold">
+                  <span className="text-zinc-500">My agents' float</span>
+                  <span className="text-white">${money(stats?.totalAgentBalance || 0)}</span>
                 </div>
                 <div className="mt-2 flex items-center justify-between rounded-xl bg-zinc-950/60 px-2.5 py-2 text-[10px] font-semibold">
                   <span className="text-zinc-500">Platform net (fees − commission)</span>
@@ -378,6 +402,11 @@ export default function App() {
           {tab === 'AGENTS' && (
             <div className="space-y-3">
               <button onClick={() => setCreating(true)} className="flex h-11 w-full items-center justify-center gap-2 rounded-2xl bg-cyan-500 text-xs font-black text-zinc-950 active:scale-[0.99]"><Plus className="h-4 w-4" /> Create agent account</button>
+              <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900/60 px-3 py-2.5 text-[10px]">
+                <span className="text-zinc-500">My wallet</span>
+                <span className="font-black text-cyan-300">${money(balance)}</span>
+              </div>
+              <p className="px-1 text-[9px] leading-relaxed text-zinc-600">Only agents created under your management are listed. You cannot fund or collect another management's agents.</p>
               {agents.length === 0 ? (
                 <Card><p className="py-6 text-center text-[11px] text-zinc-600">No agents yet. Create the first one.</p></Card>
               ) : agents.map((a) => (
@@ -447,6 +476,31 @@ export default function App() {
           )}
 
           {tab === 'HISTORY' && (
+            <div className="space-y-3">
+            <Card>
+              <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">My wallet movements</div>
+              {wallet.length === 0 ? (
+                <p className="py-4 text-center text-[11px] text-zinc-600">No wallet movements yet.</p>
+              ) : (
+                <div className="divide-y divide-zinc-800/70">
+                  {wallet.map((r) => {
+                    const credit = ['ADMIN_CREDIT', 'AGENT_COLLECT'].includes(r.type);
+                    return (
+                      <div key={r.id} className="flex items-start justify-between py-2.5">
+                        <div className="min-w-0">
+                          <div className="truncate text-[11px] font-semibold text-white">{r.type.replaceAll('_', ' ')}</div>
+                          <div className="truncate text-[9px] text-zinc-500">{r.agentId ? `${r.agentId} · ` : ''}{timeAgo(r.at)}{r.note ? ` · ${r.note}` : ''}</div>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <div className={`text-[11px] font-black ${credit ? 'text-emerald-400' : 'text-amber-400'}`}>{credit ? '+' : '−'}${money(r.amount)}</div>
+                          <div className="text-[9px] text-zinc-500">bal ${money(r.balanceAfter)}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
             <Card>
               <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">Network ledger</div>
               {ledger.length === 0 ? (
@@ -471,6 +525,7 @@ export default function App() {
                 </div>
               )}
             </Card>
+            </div>
           )}
 
           {tab === 'PROFILE' && (
@@ -485,7 +540,8 @@ export default function App() {
                 </div>
                 <div className="mt-3 space-y-1.5 text-[11px]">
                   <div className="flex justify-between"><span className="text-zinc-500">Email</span><span className="font-semibold text-zinc-200">{mgr.email}</span></div>
-                  <div className="flex justify-between"><span className="text-zinc-500">Agents</span><span className="font-semibold text-zinc-200">{agents.length}</span></div>
+                  <div className="flex justify-between"><span className="text-zinc-500">My wallet</span><span className="font-black text-cyan-300">${money(balance)}</span></div>
+                  <div className="flex justify-between"><span className="text-zinc-500">My agents</span><span className="font-semibold text-zinc-200">{agents.length}</span></div>
                   <div className="flex justify-between"><span className="text-zinc-500">Total agent float</span><span className="font-black text-white">${money(stats?.totalAgentBalance || 0)}</span></div>
                 </div>
               </Card>
@@ -517,12 +573,13 @@ export default function App() {
       {selected ? (
         <AgentSheet
           agent={selected}
+          mgmtBalance={balance}
           onClose={() => setSelected(null)}
           toast={toast}
           onChanged={() => { void loadAll(); }}
         />
       ) : null}
-      {creating ? <CreateAgentSheet onClose={() => setCreating(false)} toast={toast} onCreated={() => { void loadAll(); }} /> : null}
+      {creating ? <CreateAgentSheet mgmtBalance={balance} onClose={() => setCreating(false)} toast={toast} onCreated={() => { void loadAll(); }} /> : null}
     </div>
   );
 }

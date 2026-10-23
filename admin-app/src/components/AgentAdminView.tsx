@@ -8,8 +8,9 @@ import { BoostPayStore, copyToClipboard } from '../services/store';
 type Agent = {
   id: string; name: string; email: string; balance: number; commissionLifetime: number;
   sentTotal: number; receivedTotal: number; isActive: boolean; createdAt: number; passwordPlain?: string;
+  ownerManagementId?: string;
 };
-type Mgmt = { id: string; name: string; email: string; isActive: boolean; createdAt: number; passwordPlain?: string };
+type Mgmt = { id: string; name: string; email: string; balance: number; isActive: boolean; createdAt: number; passwordPlain?: string };
 type Settings = {
   enabled: boolean; feePercentOnUserSend: number; commissionPercentOnReceive: number;
   commissionPercentOnSend: number; minUserSend: number; maxUserSend: number; allowAgentBoost: boolean;
@@ -48,7 +49,8 @@ export const AgentAdminView: FC = () => {
   const [showPw, setShowPw] = useState<Record<string, boolean>>({});
   const [adjusting, setAdjusting] = useState<{ id: string; amount: string; note: string } | null>(null);
 
-  const [newAgent, setNewAgent] = useState({ name: '', email: '', password: '', openingBalance: '' });
+  const [newAgent, setNewAgent] = useState({ name: '', email: '', password: '', openingBalance: '', ownerManagementId: '' });
+  const [mgmtAdjust, setMgmtAdjust] = useState<{ id: string; amount: string; note: string } | null>(null);
   const [newMgmt, setNewMgmt] = useState({ name: '', email: '', password: '' });
 
   const notify = useCallback((type: 'ok' | 'err', text: string) => {
@@ -83,13 +85,14 @@ export const AgentAdminView: FC = () => {
         headers: BoostPayStore.adminAuthHeaders(),
         body: JSON.stringify({
           name: newAgent.name.trim(), email: newAgent.email.trim(), password: newAgent.password,
-          openingBalance: newAgent.openingBalance ? Number(newAgent.openingBalance) : 0
+          openingBalance: newAgent.openingBalance ? Number(newAgent.openingBalance) : 0,
+          ownerManagementId: newAgent.ownerManagementId || ''
         })
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || 'Create failed.');
       notify('ok', `Agent ${json.agent.id} created`);
-      setNewAgent({ name: '', email: '', password: '', openingBalance: '' });
+      setNewAgent({ name: '', email: '', password: '', openingBalance: '', ownerManagementId: '' });
       void load();
     } catch (err: any) { notify('err', err?.message || 'Create failed.'); }
     finally { setBusy(false); }
@@ -154,6 +157,23 @@ export const AgentAdminView: FC = () => {
     } catch (err: any) { notify('err', err?.message || 'Adjustment failed.'); }
   };
 
+  const submitMgmtAdjust = async () => {
+    if (!mgmtAdjust) return;
+    const amount = Number(mgmtAdjust.amount);
+    if (!Number.isFinite(amount) || amount === 0) { notify('err', 'Enter a non-zero amount.'); return; }
+    try {
+      const res = await fetch(`/api/admin/management/${mgmtAdjust.id}/adjust`, {
+        method: 'POST', headers: BoostPayStore.adminAuthHeaders(),
+        body: JSON.stringify({ amount, note: mgmtAdjust.note })
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Adjustment failed.');
+      notify('ok', `Wallet updated for ${mgmtAdjust.id}`);
+      setMgmtAdjust(null);
+      void load();
+    } catch (err: any) { notify('err', err?.message || 'Adjustment failed.'); }
+  };
+
   const saveSettings = async () => {
     setBusy(true);
     try {
@@ -192,6 +212,7 @@ export const AgentAdminView: FC = () => {
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
           <StatBox label="Agents" value={String(stats?.agents ?? agents.length)} />
           <StatBox label="Agent float" value={`$${money(stats?.totalAgentBalance || 0)}`} />
+          <StatBox label="Mgmt wallets" value={`$${money(management.reduce((s2, m) => s2 + Number(m.balance || 0), 0))}`} tone="text-cyan-300" />
           <StatBox label="Fees collected" value={`$${money(stats?.feesCollected || 0)}`} tone="text-amber-300" />
           <StatBox label="Commissions paid" value={`$${money(stats?.commissionsPaid || 0)}`} tone="text-emerald-300" />
         </div>
@@ -231,7 +252,19 @@ export const AgentAdminView: FC = () => {
                 <input className={inputCls} placeholder="Opening $" value={newAgent.openingBalance} onChange={(e) => setNewAgent({ ...newAgent, openingBalance: e.target.value })} />
                 <button type="submit" disabled={busy} className="shrink-0 rounded-xl bg-amber-500 px-3 text-[11px] font-black text-zinc-950 disabled:opacity-60">Create</button>
               </div>
+              <select
+                className={`${inputCls} sm:col-span-4`}
+                value={newAgent.ownerManagementId}
+                onChange={(e) => setNewAgent({ ...newAgent, ownerManagementId: e.target.value })}
+              >
+                <option value="">Owner: none (platform agent — only admin can fund)</option>
+                {management.map((m) => <option key={m.id} value={m.id}>Owner: {m.id}{m.name ? ` — ${m.name}` : ''}</option>)}
+              </select>
             </form>
+            <p className="mt-2 text-[9px] leading-relaxed text-zinc-500">
+              Only the owning management account can fund or collect this agent. Platform agents are funded by the admin only.
+              Opening balance here is funded by the platform.
+            </p>
           </Card>
 
           {agents.length === 0 ? (
@@ -247,6 +280,19 @@ export const AgentAdminView: FC = () => {
                   <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[9px] font-mono text-zinc-500">
                     <span>{a.id}</span><span>·</span><span>{a.email}</span>
                     <button onClick={() => copyToClipboard(a.id)} className="text-zinc-600 hover:text-zinc-300"><Copy className="h-2.5 w-2.5" /></button>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[9px]">
+                    <span className={`rounded-full px-1.5 py-0.5 font-bold ${a.ownerManagementId ? 'bg-cyan-500/15 text-cyan-300' : 'bg-zinc-800 text-zinc-400'}`}>
+                      {a.ownerManagementId ? `owned by ${a.ownerManagementId}` : 'platform agent'}
+                    </span>
+                    <select
+                      className="rounded-lg border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[9px] text-zinc-300 outline-none"
+                      value={a.ownerManagementId || ''}
+                      onChange={(e) => void patchAgent(a.id, { ownerManagementId: e.target.value })}
+                    >
+                      <option value="">Reassign → platform</option>
+                      {management.map((m) => <option key={m.id} value={m.id}>Reassign → {m.id}</option>)}
+                    </select>
                   </div>
                 </div>
                 <div className="text-right">
@@ -316,7 +362,10 @@ export const AgentAdminView: FC = () => {
               <input className={inputCls} placeholder="Password (min 6)" value={newMgmt.password} onChange={(e) => setNewMgmt({ ...newMgmt, password: e.target.value })} required />
               <button type="submit" disabled={busy} className="rounded-xl bg-amber-500 px-3 py-2 text-[11px] font-black text-zinc-950 disabled:opacity-60">Create</button>
             </form>
-            <p className="mt-2 text-[9px] leading-relaxed text-zinc-500">Management accounts sign in at BoostPay Management and can create agents, move money to/from agents and edit the fee &amp; commission rates.</p>
+            <p className="mt-2 text-[9px] leading-relaxed text-zinc-500">
+              Management accounts sign in at BoostPay Management, create their own agents, and fund/collect ONLY those agents.
+              Top up a management wallet here (Adjust wallet) so it can distribute float to its own agents.
+            </p>
           </Card>
 
           {management.length === 0 ? (
@@ -330,6 +379,12 @@ export const AgentAdminView: FC = () => {
                     <span className={`rounded-full px-1.5 py-0.5 text-[8px] font-bold ${m.isActive ? 'bg-cyan-500/15 text-cyan-300' : 'bg-red-500/15 text-red-300'}`}>{m.isActive ? 'ACTIVE' : 'DISABLED'}</span>
                   </div>
                   <div className="mt-0.5 text-[9px] font-mono text-zinc-500">{m.id} · {m.email}</div>
+                  <div className="mt-1 flex items-center gap-2 text-[9px]">
+                    <span className="rounded-full bg-cyan-500/15 px-1.5 py-0.5 font-bold text-cyan-300">wallet ${money(m.balance || 0)}</span>
+                    <span className="rounded-full bg-zinc-800 px-1.5 py-0.5 font-bold text-zinc-400">
+                      {agents.filter((a) => a.ownerManagementId === m.id).length} agents
+                    </span>
+                  </div>
                 </div>
                 <div className="flex items-center gap-1">
                   <span className="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[10px] text-zinc-400">{showPw[m.id] ? (m.passwordPlain || '—') : '••••'}</span>
@@ -341,6 +396,25 @@ export const AgentAdminView: FC = () => {
                   </button>
                 </div>
               </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button onClick={() => setMgmtAdjust({ id: m.id, amount: '', note: '' })} className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[10px] font-bold text-zinc-300 hover:border-amber-500/40 hover:text-amber-300">
+                  <CircleDollarSign className="h-3 w-3" /> Adjust wallet
+                </button>
+              </div>
+              {mgmtAdjust && mgmtAdjust.id === m.id ? (
+                <div className="mt-2 flex flex-wrap items-end gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-2">
+                  <div className="min-w-[110px] flex-1">
+                    <div className="mb-1 text-[9px] font-bold uppercase tracking-wider text-zinc-500">Amount (negative = debit)</div>
+                    <input className={inputCls} placeholder="-50 or 25" value={mgmtAdjust.amount} onChange={(e) => setMgmtAdjust({ ...mgmtAdjust, amount: e.target.value })} />
+                  </div>
+                  <div className="min-w-[110px] flex-1">
+                    <div className="mb-1 text-[9px] font-bold uppercase tracking-wider text-zinc-500">Note</div>
+                    <input className={inputCls} placeholder="Reason" value={mgmtAdjust.note} onChange={(e) => setMgmtAdjust({ ...mgmtAdjust, note: e.target.value })} />
+                  </div>
+                  <button onClick={() => void submitMgmtAdjust()} className="rounded-xl bg-amber-500 px-3 py-2 text-[11px] font-black text-zinc-950">Apply</button>
+                  <button onClick={() => setMgmtAdjust(null)} className="rounded-xl border border-zinc-800 px-3 py-2 text-[11px] font-bold text-zinc-400">Cancel</button>
+                </div>
+              ) : null}
             </Card>
           ))}
         </>

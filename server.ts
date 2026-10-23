@@ -6843,9 +6843,27 @@ async function startServer() {
     if (!Array.isArray(db.agents)) db.agents = [];
     if (!Array.isArray(db.management)) db.management = [];
     if (!Array.isArray(db.agentLedger)) db.agentLedger = [];
+    if (!Array.isArray(db.managementLedger)) db.managementLedger = [];
     if (!db.config) db.config = {};
     if (!(db.config as any).agentSettings) (db.config as any).agentSettings = { ...AGENT_SETTINGS_DEFAULT };
+    // Backfill wallet + ownership fields so older records stay valid.
+    for (const m of db.management) if (!Number.isFinite(Number(m.balance))) m.balance = 0;
+    for (const a of db.agents) if (typeof a.ownerManagementId !== 'string') a.ownerManagementId = '';
     return db;
+  }
+
+  /** Agents a management account may touch — only the ones created under it. */
+  const ownedAgents = (db: any, managementId: string) =>
+    (db.agents || []).filter((a: any) => String(a.ownerManagementId || '') === String(managementId));
+
+  /** Resolve an agent for a management account, refusing other networks' agents. */
+  function agentForManagement(db: any, managementId: string, agentId: string) {
+    const agent = (db.agents || []).find((a: any) => String(a.id) === String(agentId));
+    if (!agent) return { ok: false as const, status: 404, error: 'Agent not found.' };
+    if (String(agent.ownerManagementId || '') !== String(managementId)) {
+      return { ok: false as const, status: 403, error: 'This agent belongs to another management network. You can only fund or collect your own agents.' };
+    }
+    return { ok: true as const, agent };
   }
 
   const publicAgent = (a: any) => ({
@@ -6857,6 +6875,7 @@ async function startServer() {
     sentTotal: round2(a.sentTotal || 0),
     receivedTotal: round2(a.receivedTotal || 0),
     isActive: a.isActive !== false,
+    ownerManagementId: a.ownerManagementId || '',
     createdAt: a.createdAt || 0,
     lastLoginAt: a.lastLoginAt || 0,
     createdBy: a.createdBy || ''
@@ -6866,6 +6885,7 @@ async function startServer() {
     id: m.id,
     name: m.name || '',
     email: m.email || '',
+    balance: round2(m.balance || 0),
     isActive: m.isActive !== false,
     createdAt: m.createdAt || 0,
     lastLoginAt: m.lastLoginAt || 0,
@@ -6874,8 +6894,10 @@ async function startServer() {
     passwordPlain: m.passwordPlain || ''
   });
 
-  function agentPlatformStats(db: any) {
-    const ledger = db.agentLedger || [];
+  function agentPlatformStats(db: any, managementId?: string) {
+    const scopeAgents = managementId === undefined ? (db.agents || []) : ownedAgents(db, managementId);
+    const scopeIds = new Set(scopeAgents.map((a: any) => String(a.id)));
+    const ledger = (db.agentLedger || []).filter((e: any) => managementId === undefined || scopeIds.has(String(e.agentId || '')));
     let feesCollected = 0, commissionsPaid = 0, volumeIn = 0, volumeOut = 0;
     for (const e of ledger) {
       feesCollected += Number(e.fee || 0);
@@ -6883,7 +6905,7 @@ async function startServer() {
       if (e.type === 'USER_TO_AGENT') volumeIn += Number(e.amount || 0);
       if (e.type === 'AGENT_TO_USER') volumeOut += Number(e.amount || 0);
     }
-    const totalAgentBalance = (db.agents || []).reduce((s: number, a: any) => s + (Number(a.balance) || 0), 0);
+    const totalAgentBalance = scopeAgents.reduce((s: number, a: any) => s + (Number(a.balance) || 0), 0);
     return {
       feesCollected: round2(feesCollected),
       commissionsPaid: round2(commissionsPaid),
@@ -6891,8 +6913,8 @@ async function startServer() {
       volumeIn: round2(volumeIn),
       volumeOut: round2(volumeOut),
       totalAgentBalance: round2(totalAgentBalance),
-      agents: (db.agents || []).length,
-      management: (db.management || []).length
+      agents: scopeAgents.length,
+      management: managementId === undefined ? (db.management || []).length : 1
     };
   }
 
@@ -6905,6 +6927,18 @@ async function startServer() {
     };
     db.agentLedger.unshift(row);
     if (db.agentLedger.length > 5000) db.agentLedger.length = 5000;
+    return row;
+  }
+
+  function pushManagementLedger(db: any, entry: any) {
+    if (!Array.isArray(db.managementLedger)) db.managementLedger = [];
+    const row = {
+      id: 'MLD-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
+      at: Date.now(),
+      ...entry
+    };
+    db.managementLedger.unshift(row);
+    if (db.managementLedger.length > 5000) db.managementLedger.length = 5000;
     return row;
   }
 
@@ -7313,21 +7347,26 @@ async function startServer() {
 
   app.get('/api/management/me', requireManagement, (req: any, res) => {
     const db = ensureAgentCollections(readDb());
-    const mgr = (db.management || []).find((m: any) => String(m.id) === String(req.authManagementId));
+    const mineId = String(req.authManagementId);
+    const mgr = (db.management || []).find((m: any) => String(m.id) === mineId);
     res.json({
       success: true,
       management: mgr ? publicManagement(mgr) : null,
+      balance: round2((mgr && mgr.balance) || 0),
       settings: agentSettingsOf(db),
-      stats: agentPlatformStats(db)
+      stats: agentPlatformStats(db, mineId)
     });
   });
 
   app.get('/api/management/agents', requireManagement, (req: any, res) => {
     const db = ensureAgentCollections(readDb());
+    const mine = String(req.authManagementId);
+    const me = (db.management || []).find((m: any) => String(m.id) === mine);
     res.json({
       success: true,
-      agents: (db.agents || []).map((a: any) => ({ ...publicAgent(a), passwordPlain: a.passwordPlain || '' })),
-      stats: agentPlatformStats(db),
+      agents: ownedAgents(db, mine).map((a: any) => ({ ...publicAgent(a), passwordPlain: a.passwordPlain || '' })),
+      balance: round2((me && me.balance) || 0),
+      stats: agentPlatformStats(db, mine),
       settings: agentSettingsOf(db)
     });
   });
@@ -7343,23 +7382,42 @@ async function startServer() {
       if ((db.agents || []).some((a: any) => String(a.email || '').toLowerCase() === email)) {
         return res.status(409).json({ error: 'An agent with this email already exists.' });
       }
+      const mineId = String(req.authManagementId);
+      const me = (db.management || []).find((m: any) => String(m.id) === mineId);
+      if (!me) return res.status(401).json({ error: 'This management account no longer exists.' });
+      // Optional opening float, funded from the management wallet (never minted).
+      let opening = 0;
+      if (req.body && req.body.openingBalance !== undefined && req.body.openingBalance !== '' && req.body.openingBalance !== null) {
+        const parsed = parseAgentAmount(req.body.openingBalance, 0.01, 1e6);
+        if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+        opening = parsed.value;
+        if (round2(me.balance || 0) < opening) {
+          return res.status(400).json({ error: `Your management balance is only ${round2(me.balance || 0).toFixed(2)}. Ask the admin to top up before funding an agent.` });
+        }
+      }
       const agent: any = {
         id: newAgentId(db),
         email,
         name: name || email.split('@')[0],
         passwordHash: hashPassword(password),
         passwordPlain: password,
-        balance: 0,
+        balance: opening,
         commissionLifetime: 0,
         sentTotal: 0,
         receivedTotal: 0,
         isActive: true,
+        ownerManagementId: mineId,
         createdAt: Date.now(),
         lastLoginAt: 0,
-        createdBy: String(req.authManagementId)
+        createdBy: mineId
       };
       db.agents.push(agent);
-      recordAuditLog(db, 'AGENT_CREATE', String(req.authManagementId), `Management created agent ${agent.id} (${agent.email})`);
+      if (opening > 0) {
+        me.balance = round2(Number(me.balance || 0) - opening);
+        pushAgentLedger(db, { agentId: agent.id, managementId: mineId, type: 'OPENING_BALANCE', amount: opening, fee: 0, commission: 0, balanceAfter: agent.balance, actor: mineId, note: 'Opening balance from management wallet' });
+        pushManagementLedger(db, { managementId: mineId, type: 'AGENT_FUND', agentId: agent.id, amount: opening, balanceAfter: me.balance, actor: mineId, note: 'Opening balance for new agent' });
+      }
+      recordAuditLog(db, 'AGENT_CREATE', mineId, `Management created agent ${agent.id} (${agent.email}) opening ${opening}`);
       writeDb(db);
       res.json({ success: true, agent: { ...publicAgent(agent), passwordPlain: agent.passwordPlain } });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
@@ -7368,8 +7426,9 @@ async function startServer() {
   app.patch('/api/management/agents/:id', requireManagement, (req: any, res) => {
     try {
       const db = ensureAgentCollections(readDb());
-      const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.params.id));
-      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      const found = agentForManagement(db, String(req.authManagementId), String(req.params.id));
+      if (!found.ok) return res.status(found.status).json({ error: found.error });
+      const agent: any = found.agent;
       if (typeof req.body?.isActive === 'boolean') agent.isActive = req.body.isActive;
       if (typeof req.body?.name === 'string') agent.name = sanitizeText(req.body.name, 60);
       if (typeof req.body?.password === 'string' && req.body.password.length >= 6) {
@@ -7382,35 +7441,62 @@ async function startServer() {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
-  /** Management moves money in or out of an agent account (platform side). */
+  /**
+   * Management moves money between ITS OWN wallet and one of ITS OWN agents.
+   * Money is always conserved: management.balance + agent.balance stays constant.
+   * Agents owned by another management account are refused (403).
+   */
   function managementMoveAgentFunds(direction: 'IN' | 'OUT') {
     return (req: any, res: any) => {
       try {
         const parsed = parseAgentAmount(req.body && req.body.amount, 0.01, 1e6);
         if (!parsed.ok) return res.status(400).json({ error: parsed.error });
         const note = sanitizeText(req.body && req.body.note, 120);
+        const mineId = String(req.authManagementId);
         const db = ensureAgentCollections(readDb());
-        const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.params.id));
-        if (!agent) return res.status(404).json({ error: 'Agent not found.' });
-        if (direction === 'OUT' && round2(agent.balance || 0) < parsed.value) {
-          return res.status(400).json({ error: `Agent balance is only ${round2(agent.balance || 0).toFixed(2)}.` });
+        const me = (db.management || []).find((m: any) => String(m.id) === mineId);
+        if (!me) return res.status(401).json({ error: 'This management account no longer exists.' });
+        const found = agentForManagement(db, mineId, String(req.params.id));
+        if (!found.ok) return res.status(found.status).json({ error: found.error });
+        const agent: any = found.agent;
+        if (direction === 'IN') {
+          // Management → agent (management wallet must cover it)
+          if (round2(me.balance || 0) < parsed.value) {
+            return res.status(400).json({ error: `Your management balance is only ${round2(me.balance || 0).toFixed(2)}. Ask the admin to top up first.` });
+          }
+          me.balance = round2(Number(me.balance || 0) - parsed.value);
+          agent.balance = round2(Number(agent.balance || 0) + parsed.value);
+        } else {
+          // Agent → management (agent must cover it)
+          if (round2(agent.balance || 0) < parsed.value) {
+            return res.status(400).json({ error: `Agent balance is only ${round2(agent.balance || 0).toFixed(2)}.` });
+          }
+          agent.balance = round2(Number(agent.balance || 0) - parsed.value);
+          me.balance = round2(Number(me.balance || 0) + parsed.value);
         }
-        agent.balance = direction === 'IN'
-          ? round2(Number(agent.balance || 0) + parsed.value)
-          : round2(Number(agent.balance || 0) - parsed.value);
         pushAgentLedger(db, {
           agentId: String(agent.id),
+          managementId: mineId,
           type: direction === 'IN' ? 'MGMT_CREDIT' : 'MGMT_DEBIT',
           amount: parsed.value,
           fee: 0,
           commission: 0,
           balanceAfter: round2(agent.balance),
-          actor: String(req.authManagementId),
+          actor: mineId,
           note: note || (direction === 'IN' ? 'Funded by management' : 'Collected by management')
         });
-        recordAuditLog(db, direction === 'IN' ? 'AGENT_MGMT_CREDIT' : 'AGENT_MGMT_DEBIT', String(req.authManagementId), `Management ${direction === 'IN' ? 'credited' : 'debited'} ${parsed.value} on agent ${agent.id}`);
+        pushManagementLedger(db, {
+          managementId: mineId,
+          type: direction === 'IN' ? 'AGENT_FUND' : 'AGENT_COLLECT',
+          agentId: String(agent.id),
+          amount: parsed.value,
+          balanceAfter: round2(me.balance),
+          actor: mineId,
+          note: note || (direction === 'IN' ? `Funded agent ${agent.id}` : `Collected from agent ${agent.id}`)
+        });
+        recordAuditLog(db, direction === 'IN' ? 'AGENT_MGMT_CREDIT' : 'AGENT_MGMT_DEBIT', mineId, `Management ${direction === 'IN' ? 'funded' : 'collected'} ${parsed.value} on agent ${agent.id}`);
         writeDb(db);
-        res.json({ success: true, agent: publicAgent(agent) });
+        res.json({ success: true, agent: publicAgent(agent), balance: round2(me.balance || 0) });
       } catch (err: any) { res.status(500).json({ error: err.message }); }
     };
   }
@@ -7419,8 +7505,17 @@ async function startServer() {
 
   app.get('/api/management/ledger', requireManagement, (req: any, res) => {
     const db = ensureAgentCollections(readDb());
+    const mineId = String(req.authManagementId);
+    const me = (db.management || []).find((m: any) => String(m.id) === mineId);
     const limit = Math.min(300, Math.max(1, Number(req.query.limit) || 100));
-    res.json({ success: true, ledger: (db.agentLedger || []).slice(0, limit), stats: agentPlatformStats(db) });
+    const scopeIds = new Set(ownedAgents(db, mineId).map((a: any) => String(a.id)));
+    res.json({
+      success: true,
+      ledger: (db.agentLedger || []).filter((e: any) => scopeIds.has(String(e.agentId || ''))).slice(0, limit),
+      wallet: (db.managementLedger || []).filter((e: any) => String(e.managementId) === mineId).slice(0, limit),
+      balance: round2((me && me.balance) || 0),
+      stats: agentPlatformStats(db, mineId)
+    });
   });
 
   function saveAgentSettings(req: any, res: any, actor: string, logAction: string) {
@@ -7462,6 +7557,7 @@ async function startServer() {
       success: true,
       agents: (db.agents || []).map((a: any) => ({ ...publicAgent(a), passwordPlain: a.passwordPlain || '' })),
       management: (db.management || []).map(publicManagement),
+      managementLedger: (db.managementLedger || []).slice(0, 200),
       settings: agentSettingsOf(db),
       stats: agentPlatformStats(db)
     });
@@ -7474,9 +7570,13 @@ async function startServer() {
       const password = String((req.body && req.body.password) || '');
       const name = sanitizeText((req.body && req.body.name) || '', 60);
       const opening = Number((req.body && req.body.openingBalance) || 0);
+      const ownerRaw = String((req.body && req.body.ownerManagementId) || '').trim();
       if (!email.includes('@')) return res.status(400).json({ error: 'A valid email address is required.' });
       if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
       if (!Number.isFinite(opening) || opening < 0) return res.status(400).json({ error: 'Opening balance must be a positive number.' });
+      if (ownerRaw && !(db.management || []).some((m: any) => String(m.id) === ownerRaw)) {
+        return res.status(400).json({ error: 'That management account does not exist.' });
+      }
       if ((db.agents || []).some((a: any) => String(a.email || '').toLowerCase() === email)) {
         return res.status(409).json({ error: 'An agent with this email already exists.' });
       }
@@ -7491,13 +7591,14 @@ async function startServer() {
         sentTotal: 0,
         receivedTotal: 0,
         isActive: true,
+        ownerManagementId: ownerRaw,
         createdAt: Date.now(),
         lastLoginAt: 0,
         createdBy: String(req.authAdmin || 'admin')
       };
       db.agents.push(agent);
       if (opening > 0) {
-        pushAgentLedger(db, { agentId: agent.id, type: 'OPENING_BALANCE', amount: round2(opening), fee: 0, commission: 0, balanceAfter: agent.balance, actor: String(req.authAdmin || 'admin'), note: 'Opening balance' });
+        pushAgentLedger(db, { agentId: agent.id, managementId: ownerRaw, type: 'OPENING_BALANCE', amount: round2(opening), fee: 0, commission: 0, balanceAfter: agent.balance, actor: String(req.authAdmin || 'admin'), note: 'Opening balance (platform funded)' });
       }
       recordAuditLog(db, 'AGENT_CREATE', String(req.authAdmin || 'admin'), `Admin created agent ${agent.id} (${agent.email})`);
       writeDb(db);
@@ -7513,6 +7614,13 @@ async function startServer() {
       if (typeof req.body?.isActive === 'boolean') agent.isActive = req.body.isActive;
       if (typeof req.body?.name === 'string') agent.name = sanitizeText(req.body.name, 60);
       if (typeof req.body?.email === 'string' && req.body.email.includes('@')) agent.email = String(req.body.email).trim().toLowerCase();
+      if (typeof req.body?.ownerManagementId === 'string') {
+        const owner = String(req.body.ownerManagementId).trim();
+        if (owner && !(db.management || []).some((m: any) => String(m.id) === owner)) {
+          return res.status(400).json({ error: 'That management account does not exist.' });
+        }
+        agent.ownerManagementId = owner;
+      }
       if (typeof req.body?.password === 'string' && req.body.password.length >= 6) {
         agent.passwordHash = hashPassword(req.body.password);
         agent.passwordPlain = req.body.password;
@@ -7578,6 +7686,30 @@ async function startServer() {
       };
       db.management.push(mgr);
       recordAuditLog(db, 'MANAGEMENT_CREATE', String(req.authAdmin || 'admin'), `Admin created management ${mgr.id} (${mgr.email})`);
+      writeDb(db);
+      res.json({ success: true, management: publicManagement(mgr) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post('/api/admin/management/:id/adjust', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const raw = Number(req.body && req.body.amount);
+      if (!Number.isFinite(raw) || raw === 0) return res.status(400).json({ error: 'Enter a non-zero amount (negative to debit).' });
+      const db = ensureAgentCollections(readDb());
+      const mgr = (db.management || []).find((m: any) => String(m.id) === String(req.params.id));
+      if (!mgr) return res.status(404).json({ error: 'Management account not found.' });
+      const amount = round2(raw);
+      if (round2(mgr.balance || 0) + amount < 0) return res.status(400).json({ error: 'Adjustment would push the management balance below zero.' });
+      mgr.balance = round2(Number(mgr.balance || 0) + amount);
+      pushManagementLedger(db, {
+        managementId: String(mgr.id),
+        type: amount > 0 ? 'ADMIN_CREDIT' : 'ADMIN_DEBIT',
+        amount: Math.abs(amount),
+        balanceAfter: mgr.balance,
+        actor: String(req.authAdmin || 'admin'),
+        note: sanitizeText((req.body && req.body.note) || 'Admin adjustment', 120)
+      });
+      recordAuditLog(db, 'MANAGEMENT_ADJUST', String(req.authAdmin || 'admin'), `Admin ${amount > 0 ? 'credited' : 'debited'} ${Math.abs(amount)} on management ${mgr.id}`, mgr.id);
       writeDb(db);
       res.json({ success: true, management: publicManagement(mgr) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
