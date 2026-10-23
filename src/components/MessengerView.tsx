@@ -566,8 +566,10 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
 
   useEffect(() => {
     // Pull the server-side counters once (covers messages older than the local cache)
-    void BoostPayStore.fetchUnreadSummary().then((s) => {
-      if (s && s.conversations) setUnreadCounts(prev => ({ ...s.conversations, ...prev }));
+    void BoostPayStore.fetchUnreadSummary().then(() => {
+      // Recompute from the merged server snapshot (never let a stale local
+      // estimate override the authoritative counters).
+      setUnreadCounts(BoostPayStore.getUnreadCounts(currentUser.id));
     });
   }, [currentUser.id]);
 

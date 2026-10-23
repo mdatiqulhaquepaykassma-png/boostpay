@@ -532,17 +532,40 @@ export class BoostPayStore {
     const uid = String(userId || '');
     const out: Record<string, number> = {};
     if (!uid) return out;
+    // A recent server snapshot wins over the local estimate: a stale localStorage
+    // cache (from before the unread feature shipped) has no lastRead checkpoints
+    // and would otherwise resurrect the whole message history as "unread".
+    let cachedAt = 0;
+    let cachedConvs: Record<string, number> = {};
+    try {
+      const raw = localStorage.getItem(STORAGE_UNREAD);
+      const j = raw ? JSON.parse(raw) : null;
+      if (j) { cachedAt = Number(j.at || 0); cachedConvs = j.conversations || {}; }
+    } catch { /* ignore */ }
+    const hasServer = cachedAt > 0 && (Date.now() - cachedAt) < 5 * 60 * 1000;
     const convs = this.getConversations();
     const msgs = this.getMessages();
     for (const c of convs) {
       if (!Array.isArray(c.participants) || !c.participants.map(String).includes(uid)) continue;
-      const since = Number(((c as any).lastRead || {})[uid] || 0);
       let n = 0;
-      for (const m of msgs) {
-        if (m.conversationId !== c.id) continue;
-        if (String(m.senderId) === uid) continue;
-        if ((m as any).deleted) continue;
-        if (Number(m.timestamp || 0) > since) n++;
+      if (hasServer) {
+        // Server count covers everything up to `cachedAt`; only messages that
+        // arrived after that snapshot are added locally (instant badge).
+        n = Number(cachedConvs[c.id] || 0);
+        for (const m of msgs) {
+          if (m.conversationId !== c.id) continue;
+          if (String(m.senderId) === uid) continue;
+          if ((m as any).deleted) continue;
+          if (Number(m.timestamp || 0) > cachedAt) n++;
+        }
+      } else {
+        const since = Number(((c as any).lastRead || {})[uid] || 0);
+        for (const m of msgs) {
+          if (m.conversationId !== c.id) continue;
+          if (String(m.senderId) === uid) continue;
+          if ((m as any).deleted) continue;
+          if (Number(m.timestamp || 0) > since) n++;
+        }
       }
       if (n > 0) out[c.id] = n;
     }
