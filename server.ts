@@ -1123,6 +1123,30 @@ function getApiSecret(): string {
 let API_SECRET = getApiSecret();
 const ACCEPTED_SECRETS: Set<string> = new Set([API_SECRET]);
 
+/** One-time baseline for the Telegram-style unread feature.
+ *  Without it every participant of a conversation that already existed would
+ *  open the app to a phantom flood of "unread" history (lastRead was empty, so
+ *  every old message counted). Existing conversations therefore start read;
+ *  only messages that arrive from now on raise a badge. Runs exactly once per
+ *  database (guarded by doc.unreadBaselineAt). */
+function ensureUnreadBaseline(doc: any): boolean {
+  if (!doc || typeof doc !== 'object') return false;
+  if (doc.unreadBaselineAt) return false;
+  try {
+    for (const c of (doc.conversations || [])) {
+      if (!c || !Array.isArray(c.participants)) continue;
+      if (!c.lastRead || typeof c.lastRead !== 'object') c.lastRead = {};
+      const seen = Number(c.lastMessageAt || c.timestamp || 0) || Date.now();
+      for (const p of c.participants) {
+        const key = String(p);
+        if (!(key in c.lastRead)) c.lastRead[key] = seen;
+      }
+    }
+  } catch { /* never block startup on this */ }
+  doc.unreadBaselineAt = Date.now();
+  return true;
+}
+
 /** Adopt the secret stored in the DB (or publish the current one) after load. */
 function adoptPersistedApiSecret(doc: any): void {
   try {
@@ -6743,6 +6767,16 @@ async function startServer() {
   }
 
   await initPostgres();
+
+  // Seed the unread checkpoints once so shipping the feature does not mark the
+  // entire message history of every existing chat as unread.
+  try {
+    const baselineDb: any = readDb();
+    if (ensureUnreadBaseline(baselineDb)) {
+      writeDb(baselineDb);
+      console.log('[chat] unread baseline initialised (existing conversations start read)');
+    }
+  } catch (err) { console.error('[chat] unread baseline failed:', err); }
 
   // Deploy/restart safety: flush the debounced file cache and the last
   // PostgreSQL write before the container is stopped, so the I/O batching
