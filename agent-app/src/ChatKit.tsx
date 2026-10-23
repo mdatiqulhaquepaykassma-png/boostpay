@@ -104,15 +104,26 @@ export function useVoiceRecorder(onDone: (dataUrl: string, durationMs: number) =
         return;
       }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+      // AAC in an MP4 container plays on every phone (iOS + Android). WebM/Opus
+      // is a Chrome-only format: an agent recording on Android used to send a
+      // note an iPhone user could not play at all. Prefer MP4, fall back to WebM.
+      const types = [
+        'audio/mp4;codecs=mp4a.40.2', 'audio/mp4',
+        'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'
+      ];
       const mime = types.find((t) => (window as any).MediaRecorder.isTypeSupported?.(t)) || '';
-      // 32 kbps mono is plenty for speech and keeps a 2-minute note ~480 KB,
-      // well inside the server's chat upload limit (the default 128 kbps produced
-      // notes the API rejected as too large).
-      const rec = new MediaRecorder(stream, {
-        ...(mime ? { mimeType: mime } : {}),
-        audioBitsPerSecond: 32000
-      } as MediaRecorderOptions);
+      // 32 kbps mono is plenty for speech and keeps a 2-minute note ~480 KB.
+      // Some Safari/WebView builds reject the options object, so degrade twice.
+      let rec: MediaRecorder;
+      try {
+        rec = new MediaRecorder(stream, {
+          ...(mime ? { mimeType: mime } : {}),
+          audioBitsPerSecond: 32000
+        } as MediaRecorderOptions);
+      } catch {
+        try { rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
+        catch { rec = new MediaRecorder(stream); }
+      }
       recRef.current = rec;
       chunks.current = [];
       cancelled.current = false;
@@ -173,6 +184,7 @@ export const ChatBubble: React.FC<{
   accent: ChatAccent;
   peerRead: boolean;
 }> = ({ msg, mine, accent, peerRead }) => {
+  const [audioFailed, setAudioFailed] = useState(false);
   const mineCls = ACCENT_STYLES[accent].bubble;
   const timeCls = ACCENT_STYLES[accent].time;
   return (
@@ -190,9 +202,23 @@ export const ChatBubble: React.FC<{
           </a>
         ) : null}
         {msg.kind === 'voice' && msg.voiceUrl ? (
-          <div className="flex items-center gap-2">
-            <audio src={msg.voiceUrl} controls preload="none" className="h-9 max-w-[190px]" />
-            {msg.voiceDurationMs ? <span className="text-[9px] opacity-70">{Math.round((msg.voiceDurationMs || 0) / 1000)}s</span> : null}
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2">
+              <audio
+                src={msg.voiceUrl}
+                controls
+                preload="metadata"
+                playsInline
+                className="h-9 max-w-[190px]"
+                onError={() => setAudioFailed(true)}
+              />
+              {msg.voiceDurationMs ? <span className="text-[9px] opacity-70">{Math.round((msg.voiceDurationMs || 0) / 1000)}s</span> : null}
+            </div>
+            {audioFailed ? (
+              <a href={msg.voiceUrl} target="_blank" rel="noreferrer" className="text-[9px] font-bold underline opacity-80">
+                Player not supported here — open the voice note
+              </a>
+            ) : null}
           </div>
         ) : null}
         {msg.text ? <div className="whitespace-pre-wrap break-words">{msg.text}</div> : null}

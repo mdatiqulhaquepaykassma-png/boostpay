@@ -3711,6 +3711,31 @@ async function startServer() {
       res.setHeader('Content-Type', mimeMap[ext]||'application/octet-stream');
       res.setHeader('Cache-Control','public, max-age=86400');
       res.setHeader('Content-Disposition', `inline; filename="${fid}${ext}"`);
+      // Range support is mandatory for <audio>/<video> on iOS Safari: without
+      // 206 + Accept-Ranges the player silently refuses to play a voice note
+      // (it looked like "agent sent it but the user never got it").
+      res.setHeader('Accept-Ranges', 'bytes');
+      const total = fs.statSync(fpath).size;
+      const range = String(req.headers.range || '');
+      const m2 = range.match(/^bytes=(\d*)-(\d*)$/);
+      if (m2 && (m2[1] || m2[2])) {
+        let start = m2[1] ? parseInt(m2[1], 10) : 0;
+        let end = m2[2] ? parseInt(m2[2], 10) : total - 1;
+        if (!m2[1] && m2[2]) { start = Math.max(0, total - parseInt(m2[2], 10)); end = total - 1; }
+        if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= total) {
+          res.setHeader('Content-Range', `bytes */${total}`);
+          return res.status(416).end();
+        }
+        end = Math.min(end, total - 1);
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+        res.setHeader('Content-Length', String(end - start + 1));
+        if (req.method === 'HEAD') return res.end();
+        fs.createReadStream(fpath, { start, end }).pipe(res);
+        return;
+      }
+      res.setHeader('Content-Length', String(total));
+      if (req.method === 'HEAD') return res.end();
       fs.createReadStream(fpath).pipe(res);
     } catch(e:any){ res.status(500).json({error:e.message}); }
   });
