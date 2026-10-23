@@ -95,10 +95,15 @@ export default function App() {
     };
     recompute();
     const unsubChat = BoostPayStore.subscribeToChat(() => recompute());
+    // an agent reply also lands in the chat list now, so refresh the badge at once
+    const onAgentChat = () => {
+      if (currentUser?.id) void BoostPayStore.fetchUnreadSummary().then(recompute);
+    };
+    window.addEventListener('boostpay:agent-chat', onAgentChat as EventListener);
     const t = window.setInterval(() => {
       if (currentUser?.id) void BoostPayStore.fetchUnreadSummary().then(recompute);
     }, 45000);
-    return () => { unsubChat(); window.clearInterval(t); };
+    return () => { unsubChat(); window.removeEventListener('boostpay:agent-chat', onAgentChat as EventListener); window.clearInterval(t); };
   }, [activeTab, currentUser?.id]);
 
   // Connect user to real-time chat SSE stream
@@ -505,7 +510,6 @@ export default function App() {
                   onOpenSendMoney={() => setIsSendMoneyOpen(true)}
                   onOpenQR={() => setIsQROpen(true)}
                   onOpenAgentPay={() => { setAgentPayView('PAY'); setIsAgentPayOpen(true); }}
-                  onOpenAgentChat={() => { setAgentPayView('CHAT'); setIsAgentPayOpen(true); }}
                   onOpenSecurity={() => setIsSecurityOpen(true)}
                   onOpenSettings={() => setIsSettingsOpen(true)}
                   onOpenInbox={() => {

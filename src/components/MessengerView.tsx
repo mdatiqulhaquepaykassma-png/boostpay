@@ -1,6 +1,8 @@
-import React, { FC, useState, useEffect, memo, useRef } from 'react';
+import React, { FC, useState, useEffect, useCallback, memo, useRef } from 'react';
 import {
   MessageSquare,
+  Store,
+  BadgeCheck,
   Search,
   Send,
   ShieldAlert,
@@ -18,6 +20,7 @@ import {
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { startCallTo } from './CallOverlay';
+import { AgentMessageSheet } from './AgentMessageSheet';
 import { User, Conversation, Message } from '../types';
 
 /** In-chat voice note player */
@@ -483,7 +486,11 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     }
   };
   const [infoMsg, setInfoMsg] = useState<Message | null>(null);
-  const [msgFilter, setMsgFilter] = useState<'all'|'p2p'|'support'|'groups'>('all');
+  const [msgFilter, setMsgFilter] = useState<'all'|'p2p'|'agent'|'groups'|'support'>('all');
+  // Agent threads live in the SAME chat list (owner request 2026-10-23): All / P2P /
+  // Agent / Group / Support tabs, agents always shown as "Agent" with their ID.
+  const [agentThreads, setAgentThreads] = useState<Array<{ agentId: string; lastText: string; lastAt: number; unread: number; lastSender?: string; isActive?: boolean }>>([]);
+  const [openAgentId, setOpenAgentId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Public group discovery + join requests + invite links
@@ -605,7 +612,30 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     }
   }, [messages, activeConv?.id, currentUser.id]);
 
-  const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0);
+  /* ── agent threads (same list as p2p / group / support) ─────────────── */
+  const loadAgentThreads = useCallback(async () => {
+    try {
+      const res = await fetch('/api/user/agent-inbox', { headers: BoostPayStore.authHeaders() });
+      if (!res.ok) return;
+      const json = await res.json().catch(() => null);
+      setAgentThreads(Array.isArray(json?.threads) ? json.threads : []);
+    } catch { /* offline — keep the last copy */ }
+  }, []);
+
+  useEffect(() => {
+    void loadAgentThreads();
+    const iv = window.setInterval(() => { void loadAgentThreads(); }, 20000);
+    const onLive = () => { void loadAgentThreads(); };
+    window.addEventListener('boostpay:agent-chat', onLive as EventListener);
+    return () => {
+      window.clearInterval(iv);
+      window.removeEventListener('boostpay:agent-chat', onLive as EventListener);
+    };
+  }, [loadAgentThreads]);
+
+  const agentUnread = agentThreads.reduce((n, t) => n + (Number(t.unread) > 0 ? Number(t.unread) : 0), 0);
+
+  const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0) + agentUnread;
 
   // Keep activeConv synchronized with latest conversation state
   useEffect(() => {
@@ -696,6 +726,25 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     if (msgFilter==='groups') return c.type==='group';
     return true;
   });
+
+  // Everything the list shows, merged and sorted by recency:
+  //   conversations (p2p / group / support) + agent threads when the tab allows.
+  const showAgentRows = msgFilter === 'all' || msgFilter === 'agent';
+  const visibleAgentThreads = showAgentRows
+    ? agentThreads.filter((t) => {
+        if (unreadOnly && !(Number(t.unread) > 0)) return false;
+        const term = searchTerm.trim().toLowerCase();
+        if (!term) return true;
+        return `${t.agentId} ${t.lastText || ''} Agent`.toLowerCase().includes(term);
+      })
+    : [];
+  const listItems: Array<
+    | { kind: 'conv'; at: number; conv: Conversation }
+    | { kind: 'agent'; at: number; thread: (typeof agentThreads)[number] }
+  > = [
+    ...(msgFilter === 'agent' ? [] : filteredConversations.map((c) => ({ kind: 'conv' as const, at: Number(c.lastMessageAt || c.timestamp || 0), conv: c }))),
+    ...visibleAgentThreads.map((t) => ({ kind: 'agent' as const, at: Number(t.lastAt || 0), thread: t }))
+  ].sort((a, b) => b.at - a.at);
 
   const getOtherParticipant = (conv: Conversation): string => {
     if (conv.type === 'group') return conv.id;
@@ -1786,11 +1835,21 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             <Users className="w-3.5 h-3.5"/> Nearby Users
           </button>
 
-          {/* P2P vs Support tabs */}
-          <div className="shrink-0 flex gap-1.5 mb-3 bg-zinc-900 border border-zinc-800 rounded-2xl p-1">
-            {(['all','p2p','support','groups'] as const).map(tab=>(
-              <button key={tab} onClick={()=>setMsgFilter(tab)} className={`flex-1 rounded-xl py-1.5 text-[11px] font-bold capitalize transition cursor-pointer ${msgFilter===tab ? 'bg-amber-500 text-zinc-950 shadow' : 'text-zinc-400 hover:text-zinc-200'}`}>{tab==='p2p'?'P2P': tab.charAt(0).toUpperCase()+tab.slice(1)}</button>
-            ))}
+          {/* Chat sections: All · P2P · Agent · Group · Support (agents sit between
+              p2p and support, as requested) */}
+          <div className="shrink-0 flex gap-1 mb-3 bg-zinc-900 border border-zinc-800 rounded-2xl p-1">
+            {(['all','p2p','agent','groups','support'] as const).map(tab=>{
+              const label = tab === 'p2p' ? 'P2P' : tab === 'groups' ? 'Group' : tab.charAt(0).toUpperCase() + tab.slice(1);
+              const count = tab === 'agent' ? agentUnread : 0;
+              return (
+                <button key={tab} onClick={()=>setMsgFilter(tab)} className={`relative flex-1 rounded-xl py-1.5 text-[11px] font-bold transition cursor-pointer ${msgFilter===tab ? 'bg-amber-500 text-zinc-950 shadow' : 'text-zinc-400 hover:text-zinc-200'}`}>
+                  {label}
+                  {count > 0 && (
+                    <span className={`absolute -top-1 right-0.5 min-w-[14px] rounded-full px-1 text-[8.5px] font-black ${msgFilter===tab ? 'bg-zinc-950 text-amber-400' : 'bg-emerald-500 text-zinc-950'}`}>{count > 9 ? '9+' : count}</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
           {/* Telegram-style unread filter */}
           <div className="shrink-0 flex items-center gap-2 mb-3">
@@ -1822,7 +1881,57 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
           </div>
           {/* Scrollable Conversations list */}
           <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-2 pb-4">
-            {filteredConversations.map((conv) => {
+            {listItems.map((item) => {
+              /* ── Agent thread row: shown AS an agent (badge + Agent ID) ── */
+              if (item.kind === 'agent') {
+                const t = item.thread;
+                const unread = Number(t.unread) || 0;
+                return (
+                  <button
+                    key={`agent-${t.agentId}`}
+                    onClick={() => setOpenAgentId(t.agentId)}
+                    className={`w-full flex items-center justify-between rounded-2xl border p-3 transition-all text-left cursor-pointer shadow-sm ${
+                      unread > 0
+                        ? 'border-sky-500/40 bg-sky-500/[0.08] hover:bg-sky-500/15'
+                        : 'border-zinc-800 bg-zinc-900/80 hover:border-zinc-700 hover:bg-zinc-900'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0 pr-2">
+                      <div className="relative shrink-0">
+                        <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-sky-500 to-blue-600 flex items-center justify-center text-white shadow-md shadow-sky-500/20">
+                          <Store className="w-4 h-4 text-white" />
+                        </div>
+                        <span className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-zinc-950 ${t.isActive === false ? 'bg-zinc-600' : 'bg-emerald-500'}`} />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-xs font-mono truncate ${unread > 0 ? 'font-black text-white' : 'font-bold text-zinc-100'}`}>
+                            Agent {t.agentId}
+                          </span>
+                          <span className="shrink-0 rounded-md border border-sky-500/40 bg-sky-500/15 px-1 py-[1px] text-[8px] font-black uppercase tracking-wider text-sky-300">
+                            Agent
+                          </span>
+                          <BadgeCheck className="w-3 h-3 shrink-0 text-sky-400" />
+                        </div>
+                        <p className={`text-[11px] truncate max-w-[190px] sm:max-w-xs mt-0.5 ${unread > 0 ? 'text-zinc-200 font-semibold' : 'text-zinc-400'}`}>
+                          {t.lastSender === 'USER' ? 'You: ' : ''}{t.lastText || 'Start a conversation'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-end gap-1.5 shrink-0 self-start mt-0.5">
+                      <span className={`text-[10px] font-mono ${unread > 0 ? 'text-sky-400 font-bold' : 'text-zinc-500'}`}>
+                        {t.lastAt ? new Date(t.lastAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                      </span>
+                      {unread > 0 && (
+                        <span className="min-w-[22px] h-[22px] px-1.5 rounded-full text-[11px] font-black flex items-center justify-center shadow bg-sky-500 text-zinc-950">
+                          {unread > 99 ? '99+' : unread}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              }
+              const conv = item.conv;
               const other = getOtherParticipant(conv);
               const isSupport = other === 'ADMIN_SUPPORT';
               const gradient = getAvatarGradient(other);
@@ -1933,12 +2042,27 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               </div>
             )}
 
-            {filteredConversations.length === 0 && (
+            {listItems.length === 0 && (
               <div className="py-10 text-center text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-2xl">
-                No conversations yet.
+                {msgFilter === 'agent'
+                  ? 'No agent chats yet. Open “Pay an Agent” on the wallet, pick an agent and tap Message.'
+                  : searchTerm.trim() || unreadOnly
+                    ? 'Nothing matches this filter.'
+                    : 'No conversations yet.'}
               </div>
             )}
           </div>
+
+          {/* Agent conversation opened from the chat list (same sheet as Pay an Agent) */}
+          <AgentMessageSheet
+            isOpen={!!openAgentId}
+            agentId={openAgentId || ''}
+            onClose={() => {
+              setOpenAgentId(null);
+              void loadAgentThreads();
+              void BoostPayStore.fetchUnreadSummary();
+            }}
+          />
 
           {/* New Chat / New Group Modal */}
           {isNewChatOpen && (

@@ -489,12 +489,13 @@ export class BoostPayStore {
   }
 
   /** Cache the authoritative unread map and notify the UI. */
-  static applyUnreadSummary(summary: { total?: number; conversations?: Record<string, number> } | null): void {
+  static applyUnreadSummary(summary: { total?: number; conversations?: Record<string, number>; agent?: number } | null): void {
     if (!summary) return;
     try {
       localStorage.setItem(STORAGE_UNREAD, JSON.stringify({
         total: Number(summary.total || 0),
         conversations: summary.conversations || {},
+        agent: Number(summary.agent || 0),
         at: Date.now()
       }));
     } catch { /* ignore */ }
@@ -502,25 +503,36 @@ export class BoostPayStore {
   }
 
   /** Server-authoritative unread counts (per conversation + total). */
-  static async fetchUnreadSummary(): Promise<{ total: number; conversations: Record<string, number> }> {
+  static async fetchUnreadSummary(): Promise<{ total: number; conversations: Record<string, number>; agent?: number }> {
+    let out: { total: number; conversations: Record<string, number>; agent?: number } = { total: 0, conversations: {} };
     try {
       const res = await fetch('/api/chat/unread', { headers: this.authHeaders() });
       if (res.ok) {
         const data = await res.json();
-        const out = { total: Number(data.total || 0), conversations: data.conversations || {} };
-        this.applyUnreadSummary(out);
-        return out;
+        out = { total: Number(data.total || 0), conversations: data.conversations || {} };
       }
     } catch { /* offline */ }
-    return { total: 0, conversations: {} };
+    // Agent threads now live inside the chat list, so their unread messages are
+    // part of the Chat tab badge too.
+    try {
+      const ar = await fetch('/api/user/agent-inbox', { headers: this.authHeaders() });
+      if (ar.ok) {
+        const aj = await ar.json();
+        const agentTotal = Number(aj?.unread || 0);
+        out.agent = agentTotal;
+        out.total = Number(out.total || 0) + agentTotal;
+      }
+    } catch { /* offline */ }
+    this.applyUnreadSummary(out);
+    return out;
   }
 
-  static getCachedUnread(): { total: number; conversations: Record<string, number> } {
+  static getCachedUnread(): { total: number; conversations: Record<string, number>; agent?: number } {
     try {
       const raw = localStorage.getItem(STORAGE_UNREAD);
       if (!raw) return { total: 0, conversations: {} };
       const j = JSON.parse(raw);
-      return { total: Number(j.total || 0), conversations: j.conversations || {} };
+      return { total: Number(j.total || 0), conversations: j.conversations || {}, agent: Number(j.agent || 0) };
     } catch { return { total: 0, conversations: {} }; }
   }
 
