@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownLeft, ArrowUpRight, BadgeCheck, Banknote, Check, ChevronRight, CircleDollarSign,
-  Copy, History, Home, LogOut, Lock, MessageSquare, Send, Sparkles, User, UserRound, Wallet, X, Zap
+  Copy, History, Home, KeyRound, LogOut, Lock, MessageSquare, Receipt, Search, Send, Sparkles,
+  Ticket, User, UserRound, Wallet, X, Zap
 } from 'lucide-react';
+import { ChatComposer, ChatList, chatDay, ChatMessageLike, ChatSendPayload } from './ChatKit';
 
 /* ── API client ─────────────────────────────────────────────────────────── */
 const TOKEN_KEY = 'bpa_token_v1';
@@ -17,8 +19,8 @@ type Settings = {
   commissionPercentOnSend: number; minUserSend: number; maxUserSend: number;
 };
 type ChatRow = { userId: string; lastText: string; lastAt: number; unread: number; lastSender?: string };
-type ChatMsg = { id: string; agentId: string; userId: string; senderRole: 'USER' | 'AGENT'; text: string; at: number };
-type MgmtMsg = { id: string; managementId: string; agentId: string; senderRole: 'MANAGEMENT' | 'AGENT'; text: string; at: number };
+type ChatMsg = ChatMessageLike & { agentId?: string; userId?: string };
+type MgmtMsg = ChatMessageLike & { managementId?: string; agentId?: string };
 type LedgerRow = {
   id: string; at: number; type: string; amount: number; fee: number; commission: number;
   balanceAfter: number; userId?: string; note?: string; actor?: string;
@@ -89,19 +91,38 @@ const Toast: React.FC<{ toast: { type: 'ok' | 'err'; text: string } | null; onCl
   );
 };
 
-/* ── login ──────────────────────────────────────────────────────────────── */
+/* ── login (same Gmail rule as the user app) ────────────────────────────── */
+const gmailLocal = (v: string) => {
+  let s = String(v || '').trim().toLowerCase().replace(/\s+/g, '');
+  let prev = '';
+  while (prev !== s) {
+    prev = s;
+    s = s.replace(/@gmail\.com$/, '').replace(/\.gmail\.com$/, '').replace(/gmail\.com$/, '')
+         .replace(/@gmailcom$/, '').replace(/\.gmailcom$/, '').replace(/gmailcom$/, '');
+  }
+  return s.split('@')[0].replace(/[@.]+$/g, '').replace(/[^a-z0-9._]/g, '');
+};
+
 const LoginScreen: React.FC<{ onDone: (agent: Agent) => void; toast: (t: { type: 'ok' | 'err'; text: string }) => void }> = ({ onDone, toast }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [mode, setMode] = useState<'LOGIN' | 'FORGOT' | 'RESET'>('LOGIN');
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetCode, setResetCode] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [info, setInfo] = useState('');
+  const [showPw, setShowPw] = useState(false);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
+    setError(''); setInfo('');
+    const local = gmailLocal(email);
+    if (!local) { setError('Enter your Gmail username (example: agentname → agentname@gmail.com)'); return; }
     setBusy(true);
     try {
-      const res = await api<{ token: string; agent: Agent }>('/api/agent/login', { method: 'POST', body: { email: email.trim(), password } });
+      const res = await api<{ token: string; agent: Agent }>('/api/agent/login', { method: 'POST', body: { email: local, password } });
       localStorage.setItem(TOKEN_KEY, res.token);
       localStorage.setItem(AGENT_KEY, JSON.stringify(res.agent));
       toast({ type: 'ok', text: `Welcome back, ${res.agent.name || res.agent.id}` });
@@ -111,6 +132,38 @@ const LoginScreen: React.FC<{ onDone: (agent: Agent) => void; toast: (t: { type:
     } finally {
       setBusy(false);
     }
+  };
+
+  const requestCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(''); setInfo('');
+    const local = gmailLocal(resetEmail);
+    if (!local) { setError('Enter your Gmail username (example: agentname)'); return; }
+    setBusy(true);
+    try {
+      const res: any = await api('/api/agent/forgot-password', { method: 'POST', body: { email: local } });
+      setInfo(res?.message || `Reset code sent to ${local}@gmail.com`);
+      setMode('RESET');
+    } catch (err: any) {
+      setError(err?.message || 'Could not send the reset code.');
+    } finally { setBusy(false); }
+  };
+
+  const submitReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(''); setInfo('');
+    const local = gmailLocal(resetEmail);
+    if (!resetCode.trim()) { setError('Enter the 6-digit code from your Gmail.'); return; }
+    if (newPassword.length < 6) { setError('New password must be at least 6 characters.'); return; }
+    setBusy(true);
+    try {
+      await api('/api/agent/reset-password', { method: 'POST', body: { email: local, code: resetCode.trim(), newPassword } });
+      toast({ type: 'ok', text: 'Password updated — please sign in.' });
+      setEmail(local); setPassword(''); setMode('LOGIN'); setResetCode(''); setNewPassword('');
+      setInfo('Password updated. Sign in with your new password.');
+    } catch (err: any) {
+      setError(err?.message || 'Reset failed.');
+    } finally { setBusy(false); }
   };
 
   return (
@@ -123,19 +176,63 @@ const LoginScreen: React.FC<{ onDone: (agent: Agent) => void; toast: (t: { type:
           <h1 className="mt-4 text-xl font-black tracking-tight text-white">BoostPay Agent</h1>
           <p className="mt-1 text-[11px] font-medium text-zinc-500">Agent console — mobile only</p>
         </div>
-        <form onSubmit={submit} className="space-y-3">
-          <Field label="Agent email">
-            <input className={inputCls} type="email" autoComplete="email" placeholder="agent@boostpay.online" value={email} onChange={(e) => setEmail(e.target.value)} required />
-          </Field>
-          <Field label="Password">
-            <input className={inputCls} type="password" autoComplete="current-password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} required />
-          </Field>
-          {error ? <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
-          <button type="submit" disabled={busy} className="mt-2 flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-amber-500 text-sm font-black text-zinc-950 transition active:scale-[0.99] disabled:opacity-60">
-            {busy ? 'Signing in…' : 'Sign in'}
-            {!busy && <ChevronRight className="h-4 w-4" />}
-          </button>
-        </form>
+
+        {mode === 'LOGIN' ? (
+          <form onSubmit={submit} className="space-y-3">
+            <Field label="Gmail username" hint="Only @gmail.com — type the part before @ (example: agentname)">
+              <div className="flex items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 focus-within:border-amber-500/70">
+                <input
+                  className="min-w-0 flex-1 bg-transparent py-3 text-sm text-white placeholder-zinc-600 outline-none"
+                  autoComplete="username" placeholder="agentname" value={email}
+                  onChange={(e) => setEmail(gmailLocal(e.target.value))} required
+                />
+                <span className="shrink-0 text-[12px] font-semibold text-zinc-500">@gmail.com</span>
+              </div>
+            </Field>
+            <Field label="Password">
+              <div className="flex items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 focus-within:border-amber-500/70">
+                <input
+                  className="min-w-0 flex-1 bg-transparent py-3 text-sm text-white placeholder-zinc-600 outline-none"
+                  type={showPw ? 'text' : 'password'} autoComplete="current-password" placeholder="••••••••"
+                  value={password} onChange={(e) => setPassword(e.target.value)} required
+                />
+                <button type="button" onClick={() => setShowPw((v) => !v)} className="shrink-0 text-[10px] font-bold text-zinc-500">{showPw ? 'HIDE' : 'SHOW'}</button>
+              </div>
+            </Field>
+            {error ? <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
+            {info ? <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[11px] font-semibold text-emerald-200">{info}</div> : null}
+            <button type="submit" disabled={busy} className="mt-2 flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-amber-500 text-sm font-black text-zinc-950 transition active:scale-[0.99] disabled:opacity-60">
+              {busy ? 'Signing in…' : 'Sign in'}
+              {!busy && <ChevronRight className="h-4 w-4" />}
+            </button>
+            <button type="button" onClick={() => { setMode('FORGOT'); setResetEmail(email); setError(''); setInfo(''); }} className="w-full text-center text-[11px] font-bold text-amber-400/90">Forgot password?</button>
+          </form>
+        ) : mode === 'FORGOT' ? (
+          <form onSubmit={requestCode} className="space-y-3">
+            <Field label="Gmail username" hint="We email a 6-digit reset code to your Gmail.">
+              <div className="flex items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 focus-within:border-amber-500/70">
+                <input className="min-w-0 flex-1 bg-transparent py-3 text-sm text-white placeholder-zinc-600 outline-none" placeholder="agentname" value={resetEmail} onChange={(e) => setResetEmail(gmailLocal(e.target.value))} required />
+                <span className="shrink-0 text-[12px] font-semibold text-zinc-500">@gmail.com</span>
+              </div>
+            </Field>
+            {error ? <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
+            <button type="submit" disabled={busy} className="flex h-12 w-full items-center justify-center rounded-2xl bg-amber-500 text-sm font-black text-zinc-950 disabled:opacity-60">{busy ? 'Sending…' : 'Send reset code'}</button>
+            <button type="button" onClick={() => { setMode('LOGIN'); setError(''); }} className="w-full text-center text-[11px] font-bold text-zinc-400">Back to sign in</button>
+          </form>
+        ) : (
+          <form onSubmit={submitReset} className="space-y-3">
+            <Field label="6-digit code" hint={`Sent to ${gmailLocal(resetEmail)}@gmail.com — check inbox/spam.`}>
+              <input className={inputCls} inputMode="numeric" maxLength={6} placeholder="123456" value={resetCode} onChange={(e) => setResetCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} required />
+            </Field>
+            <Field label="New password">
+              <input className={inputCls} type="password" placeholder="At least 6 characters" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required />
+            </Field>
+            {error ? <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
+            <button type="submit" disabled={busy} className="flex h-12 w-full items-center justify-center rounded-2xl bg-amber-500 text-sm font-black text-zinc-950 disabled:opacity-60">{busy ? 'Updating…' : 'Set new password'}</button>
+            <button type="button" onClick={() => { setMode('FORGOT'); setError(''); }} className="w-full text-center text-[11px] font-bold text-zinc-400">Resend code</button>
+          </form>
+        )}
+
         <p className="mt-6 text-center text-[10px] leading-relaxed text-zinc-600">
           Agent accounts are created by BoostPay Management.<br />Only the latest device stays signed in.
         </p>
@@ -304,10 +401,59 @@ const SendScreen: React.FC<{
 };
 
 /* ── receive ────────────────────────────────────────────────────────────── */
-const ReceiveScreen: React.FC<{ agent: Agent; settings: Settings; onCopy: (v: string) => void; history: LedgerRow[] }> = ({ agent, settings, onCopy, history }) => {
+const ReceiveScreen: React.FC<{
+  agent: Agent; settings: Settings; onCopy: (v: string) => void; history: LedgerRow[];
+  toast: (t: { type: 'ok' | 'err'; text: string }) => void; onRedeemed: () => void;
+}> = ({ agent, settings, onCopy, history, toast, onRedeemed }) => {
   const incoming = history.filter((h) => h.type === 'USER_TO_AGENT');
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [done, setDone] = useState<{ amount: number; commission: number; userId: string } | null>(null);
+
+  const redeem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr(''); setDone(null);
+    const clean = code.trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (clean.length !== 4) { setErr('Enter the 4-character code from the user (example: h68d).'); return; }
+    setBusy(true);
+    try {
+      const res = await api<any>('/api/agent/redeem', { method: 'POST', body: { code: clean } });
+      setDone({ amount: Number(res.amount) || 0, commission: Number(res.commission) || 0, userId: String(res.userId || '') });
+      setCode('');
+      toast({ type: 'ok', text: `Received $${money(res.amount)} from User #${res.userId}` });
+      onRedeemed();
+    } catch (e2: any) {
+      setErr(e2?.message || 'Could not claim this code.');
+    } finally { setBusy(false); }
+  };
+
   return (
     <div className="space-y-3">
+      <Card className="border-amber-500/30 bg-amber-500/[0.06]">
+        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-amber-300"><Ticket className="h-3.5 w-3.5" /> Claim a user payment</div>
+        <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
+          The user pays you in their app and gets a <b className="text-white">4-character code</b> (letters + digits, e.g. h68d).
+          Enter it here — the money lands in your balance only after you claim it. Codes expire in 30 minutes and the user can cancel any time.
+        </p>
+        <form onSubmit={redeem} className="mt-3 flex items-center gap-2">
+          <input
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 4).toLowerCase())}
+            placeholder="h68d"
+            className="min-w-0 flex-1 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-center font-mono text-lg font-black tracking-[0.35em] text-white placeholder-zinc-700 outline-none focus:border-amber-500/60"
+          />
+          <button type="submit" disabled={busy || code.length !== 4} className="flex h-12 shrink-0 items-center justify-center rounded-2xl bg-amber-500 px-4 text-xs font-black text-zinc-950 disabled:opacity-40">
+            {busy ? '…' : 'Receive'}
+          </button>
+        </form>
+        {err ? <div className="mt-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[10.5px] font-semibold text-red-200">{err}</div> : null}
+        {done ? (
+          <div className="mt-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[10.5px] font-semibold text-emerald-200">
+            Received ${money(done.amount)} from User #{done.userId}{done.commission > 0 ? ` (+$${money(done.commission)} commission)` : ''} — new balance ${money(agent.balance)}.
+          </div>
+        ) : null}
+      </Card>
       <Card className="border-emerald-500/25 bg-emerald-500/[0.06] text-center">
         <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/20"><ArrowDownLeft className="h-6 w-6 text-emerald-400" /></div>
         <div className="mt-2 text-sm font-black text-white">Receive from users</div>
@@ -362,20 +508,58 @@ const ChatsScreen: React.FC<{
 }> = ({ chats, loading, toast, onRead, managementId, managementUnread = 0, onManagementRead }) => {
   const [openUser, setOpenUser] = useState<string | null>(null);
   const [view, setView] = useState<'LIST' | 'MANAGEMENT'>('LIST');
+  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [peerTyping, setPeerTyping] = useState(false);
+  const [threadErr, setThreadErr] = useState('');
+  const listRef = useRef<HTMLDivElement | null>(null);
+
   const [mgmtMsgs, setMgmtMsgs] = useState<MgmtMsg[]>([]);
-  const [mgmtText, setMgmtText] = useState('');
-  const [mgmtBusy, setMgmtBusy] = useState(false);
+  const [mgmtTyping, setMgmtTyping] = useState(false);
   const [mgmtErr, setMgmtErr] = useState('');
   const [mgmtId, setMgmtId] = useState(managementId || '');
   const [mgmtLoading, setMgmtLoading] = useState(false);
   const mgmtListRef = useRef<HTMLDivElement | null>(null);
 
+  /* ── agent ↔ user ───────────────────────────────────────────────────── */
+  const loadThread = useCallback(async (userId: string, quiet = false) => {
+    try {
+      const res = await api<any>(`/api/agent/chat?userId=${encodeURIComponent(userId)}`);
+      setMessages(res.messages || []);
+      setPeerTyping(!!res.peerTyping);
+      setThreadErr('');
+      onRead();
+    } catch (err: any) { if (!quiet) setThreadErr(err?.message || 'Could not open the conversation.'); }
+  }, [onRead]);
+
+  useEffect(() => {
+    if (!openUser) return;
+    setMessages([]); setThreadErr('');
+    void loadThread(openUser);
+    const iv = window.setInterval(() => { void loadThread(openUser, true); }, 6000);
+    return () => window.clearInterval(iv);
+  }, [openUser, loadThread]);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length, openUser]);
+
+  const sendUser = async (payload: ChatSendPayload) => {
+    if (!openUser) return;
+    setThreadErr('');
+    const res = await api<any>('/api/agent/message-user', { method: 'POST', body: { userId: openUser, ...payload } });
+    setMessages((prev) => [...prev, res.message]);
+  };
+  const typingToUser = () => { if (openUser) void api('/api/agent/typing', { method: 'POST', body: { userId: openUser } }).catch(() => {}); };
+
+  /* ── agent ↔ management ─────────────────────────────────────────────── */
   const loadManagement = useCallback(async (quiet = false) => {
     if (!quiet) setMgmtLoading(true);
     try {
       const res = await api<any>('/api/agent/management-thread');
       setMgmtMsgs(res.messages || []);
       setMgmtId(res.managementId || '');
+      setMgmtTyping(!!res.peerTyping);
       setMgmtErr(res.note || '');
       if (onManagementRead) onManagementRead();
     } catch (err: any) { if (!quiet) setMgmtErr(err?.message || 'Could not load the management thread.'); }
@@ -385,7 +569,7 @@ const ChatsScreen: React.FC<{
   useEffect(() => {
     if (view !== 'MANAGEMENT') return;
     void loadManagement();
-    const iv = window.setInterval(() => { void loadManagement(true); }, 8000);
+    const iv = window.setInterval(() => { void loadManagement(true); }, 6000);
     return () => window.clearInterval(iv);
   }, [view, loadManagement]);
 
@@ -394,64 +578,12 @@ const ChatsScreen: React.FC<{
     if (el) el.scrollTop = el.scrollHeight;
   }, [mgmtMsgs.length, view]);
 
-  const sendManagement = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!mgmtText.trim()) return;
-    setMgmtBusy(true); setMgmtErr('');
-    try {
-      const res = await api<any>('/api/agent/message-management', { method: 'POST', body: { text: mgmtText.trim() } });
-      setMgmtMsgs((prev) => [...prev, res.message]);
-      setMgmtText('');
-      toast({ type: 'ok', text: 'Message sent to management' });
-    } catch (err: any) { setMgmtErr(err?.message || 'Message could not be sent.'); }
-    finally { setMgmtBusy(false); }
+  const sendManagement = async (payload: ChatSendPayload) => {
+    setMgmtErr('');
+    const res = await api<any>('/api/agent/message-management', { method: 'POST', body: payload });
+    setMgmtMsgs((prev) => [...prev, res.message]);
   };
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [text, setText] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [threadErr, setThreadErr] = useState('');
-  const listRef = useRef<HTMLDivElement | null>(null);
-
-  const openThread = useCallback(async (userId: string) => {
-    setOpenUser(userId); setMessages([]); setThreadErr('');
-    try {
-      const res = await api<any>(`/api/agent/chat?userId=${encodeURIComponent(userId)}`);
-      setMessages(res.messages || []);
-      onRead();
-    } catch (err: any) { setThreadErr(err?.message || 'Could not open the conversation.'); }
-  }, [onRead]);
-
-  const refreshThread = useCallback(async (userId: string) => {
-    try {
-      const res = await api<any>(`/api/agent/chat?userId=${encodeURIComponent(userId)}`);
-      setMessages(res.messages || []);
-      onRead();
-    } catch { /* ignore */ }
-  }, [onRead]);
-
-  useEffect(() => {
-    if (!openUser) return;
-    const iv = window.setInterval(() => { void refreshThread(openUser); }, 8000);
-    return () => window.clearInterval(iv);
-  }, [openUser, refreshThread]);
-
-  useEffect(() => {
-    const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, openUser]);
-
-  const send = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!openUser || !text.trim()) return;
-    setBusy(true); setThreadErr('');
-    try {
-      const res = await api<any>('/api/agent/message-user', { method: 'POST', body: { userId: openUser, text: text.trim() } });
-      setMessages((prev) => [...prev, res.message]);
-      setText('');
-      toast({ type: 'ok', text: 'Reply sent' });
-    } catch (err: any) { setThreadErr(err?.message || 'Reply could not be sent.'); }
-    finally { setBusy(false); }
-  };
+  const typingToManagement = () => { void api('/api/agent/typing-management', { method: 'POST', body: {} }).catch(() => {}); };
 
   if (view === 'MANAGEMENT') {
     return (
@@ -467,40 +599,29 @@ const ChatsScreen: React.FC<{
           <CircleDollarSign className="h-4 w-4 text-zinc-600" />
         </div>
 
-        <div ref={mgmtListRef} className="flex-1 space-y-2 overflow-y-auto overscroll-contain rounded-2xl border border-zinc-800 bg-zinc-950/40 p-2.5" style={{ maxHeight: '52vh', minHeight: '220px' }}>
-          {mgmtLoading ? (
-            <p className="py-8 text-center text-[11px] text-zinc-600">Loading…</p>
-          ) : mgmtMsgs.length === 0 ? (
-            <div className="py-8 text-center">
-              <p className="text-[11px] font-semibold text-zinc-300">No messages yet</p>
-              <p className="mt-1 px-6 text-[10px] leading-relaxed text-zinc-600">Ask your management about float, limits or a collection. Only your management account sees this thread.</p>
-            </div>
-          ) : mgmtMsgs.map((m) => {
-            const mine = m.senderRole === 'AGENT';
-            return (
-              <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[82%] rounded-2xl border px-3 py-2 text-[12px] leading-relaxed ${mine ? 'border-amber-500/25 bg-amber-500/15 text-amber-50' : 'border-zinc-700/70 bg-zinc-800 text-zinc-100'}`}>
-                  <div className="whitespace-pre-wrap break-words">{m.text}</div>
-                  <div className={`mt-1 text-right text-[8px] ${mine ? 'text-amber-200/60' : 'text-zinc-500'}`}>{dayTime(m.at)}</div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {mgmtErr ? <div className="mt-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10.5px] font-semibold text-amber-200">{mgmtErr}</div> : null}
-
-        <form onSubmit={sendManagement} className="mt-2 flex items-end gap-2">
-          <input
-            value={mgmtText}
-            onChange={(e) => setMgmtText(e.target.value.slice(0, 1000))}
-            placeholder="Message your management…"
-            className="min-w-0 flex-1 rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-[12px] text-white placeholder-zinc-600 outline-none focus:border-amber-500/60"
+        <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/40">
+          <ChatList
+            messages={mgmtMsgs}
+            myRole="AGENT"
+            accent="amber"
+            peerReadKey="readByManagement"
+            loading={mgmtLoading}
+            emptyTitle="No messages yet"
+            emptyHint="Ask your management about float, limits or a collection. Only your management account sees this thread."
+            className="p-2.5"
+            listRef={mgmtListRef}
+            style={{ maxHeight: '52vh', minHeight: '220px' } as any}
           />
-          <button type="submit" disabled={mgmtBusy || !mgmtText.trim()} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-500 text-zinc-950 disabled:opacity-40">
-            <Send className="h-4 w-4" />
-          </button>
-        </form>
+          {mgmtTyping ? <div className="px-3 pb-1 text-[9px] font-semibold text-zinc-500">Management is typing…</div> : null}
+          {mgmtErr ? <div className="mx-3 mb-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10.5px] font-semibold text-amber-200">{mgmtErr}</div> : null}
+          <ChatComposer
+            accent="amber"
+            placeholder="Message your management…"
+            onSend={sendManagement}
+            onTyping={typingToManagement}
+            onError={(m) => setMgmtErr(m)}
+          />
+        </div>
       </div>
     );
   }
@@ -513,41 +634,33 @@ const ChatsScreen: React.FC<{
             <button onClick={() => { setOpenUser(null); onRead(); }} className="rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 text-zinc-400"><ChevronRight className="h-3.5 w-3.5 rotate-180" /></button>
             <div>
               <div className="text-[11px] font-black text-white">User #{openUser}</div>
-              <div className="text-[9px] text-zinc-500">Only this user sees the reply</div>
+              <div className="text-[9px] text-zinc-500">{peerTyping ? 'typing…' : 'Only this user sees the reply'}</div>
             </div>
           </div>
           <UserRound className="h-4 w-4 text-zinc-600" />
         </div>
 
-        <div ref={listRef} className="flex-1 space-y-2 overflow-y-auto overscroll-contain rounded-2xl border border-zinc-800 bg-zinc-950/40 p-2.5" style={{ maxHeight: '48vh' }}>
-          {messages.length === 0 ? (
-            <p className="py-8 text-center text-[11px] text-zinc-600">Loading conversation…</p>
-          ) : messages.map((m) => {
-            const mine = m.senderRole === 'AGENT';
-            return (
-              <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[82%] rounded-2xl border px-3 py-2 text-[12px] leading-relaxed ${mine ? 'border-amber-500/25 bg-amber-500/15 text-amber-50' : 'border-zinc-700/70 bg-zinc-800 text-zinc-100'}`}>
-                  <div className="whitespace-pre-wrap break-words">{m.text}</div>
-                  <div className={`mt-1 text-right text-[8px] ${mine ? 'text-amber-200/60' : 'text-zinc-500'}`}>{dayTime(m.at)}</div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {threadErr ? <div className="mt-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{threadErr}</div> : null}
-
-        <form onSubmit={send} className="mt-2 flex items-end gap-2">
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value.slice(0, 1000))}
-            placeholder="Reply to this user…"
-            className="min-w-0 flex-1 rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-[12px] text-white placeholder-zinc-600 outline-none focus:border-amber-500/60"
+        <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/40">
+          <ChatList
+            messages={messages}
+            myRole="AGENT"
+            accent="amber"
+            peerReadKey="readByUser"
+            emptyTitle="No messages"
+            emptyHint="You can only reply to users who messaged you first."
+            className="p-2.5"
+            listRef={listRef}
+            style={{ maxHeight: '48vh', minHeight: '200px' } as any}
           />
-          <button type="submit" disabled={busy || !text.trim()} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-500 text-zinc-950 disabled:opacity-40">
-            <Send className="h-4 w-4" />
-          </button>
-        </form>
+          {threadErr ? <div className="mx-3 mb-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{threadErr}</div> : null}
+          <ChatComposer
+            accent="amber"
+            placeholder="Reply to this user…"
+            onSend={sendUser}
+            onTyping={typingToUser}
+            onError={(m) => setThreadErr(m)}
+          />
+        </div>
       </div>
     );
   }
@@ -581,7 +694,7 @@ const ChatsScreen: React.FC<{
         ) : (
           <div className="divide-y divide-zinc-800/70">
             {chats.map((c) => (
-              <button key={c.userId} onClick={() => void openThread(c.userId)} className="flex w-full items-center gap-2.5 py-2.5 text-left">
+              <button key={c.userId} onClick={() => void setOpenUser(c.userId)} className="flex w-full items-center gap-2.5 py-2.5 text-left">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-zinc-800 text-[11px] font-black text-zinc-300"><UserRound className="h-4 w-4" /></div>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[11px] font-bold text-white">User #{c.userId}</div>
@@ -612,70 +725,167 @@ const labelFor = (t: string) => ({
   OPENING_BALANCE: 'Opening balance'
 } as Record<string, string>)[t] || t;
 
-const HistoryScreen: React.FC<{ rows: LedgerRow[]; loading: boolean }> = ({ rows, loading }) => (
-  <div className="space-y-3">
-    <Card>
-      <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">Transaction history</div>
-      {loading ? (
-        <p className="py-6 text-center text-[11px] text-zinc-600">Loading…</p>
-      ) : rows.length === 0 ? (
-        <p className="py-6 text-center text-[11px] text-zinc-600">No transactions yet.</p>
-      ) : (
-        <div className="divide-y divide-zinc-800/70">
-          {rows.map((r) => {
-            const credit = ['USER_TO_AGENT', 'MGMT_CREDIT', 'ADMIN_CREDIT', 'OPENING_BALANCE'].includes(r.type);
-            return (
-              <div key={r.id} className="flex items-start justify-between gap-2 py-2.5">
-                <div className="flex min-w-0 items-start gap-2">
-                  <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl ${credit ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'}`}>
-                    {credit ? <ArrowDownLeft className="h-3.5 w-3.5" /> : <ArrowUpRight className="h-3.5 w-3.5" />}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="truncate text-[11px] font-semibold text-white">{labelFor(r.type)}</div>
-                    <div className="truncate text-[9px] text-zinc-500">{r.userId ? `User #${r.userId} · ` : ''}{timeAgo(r.at)}</div>
-                    {r.fee > 0 ? <div className="text-[9px] text-zinc-600">User fee ${money(r.fee)}</div> : null}
-                  </div>
-                </div>
-                <div className="shrink-0 text-right">
-                  <div className={`text-[11px] font-black ${credit ? 'text-emerald-400' : 'text-amber-400'}`}>{credit ? '+' : '-'}${money(r.amount)}</div>
-                  <div className="text-[9px] text-zinc-500">bal ${money(r.balanceAfter)}</div>
-                  {r.commission > 0 ? <div className="text-[9px] font-semibold text-emerald-400/90">+{money(r.commission)} comm.</div> : null}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </Card>
-  </div>
-);
+const HistoryScreen: React.FC<{ rows: LedgerRow[]; loading: boolean }> = ({ rows, loading }) => {
+  const [open, setOpen] = useState<LedgerRow | null>(null);
+  const [q, setQ] = useState('');
+  const creditOf = (t: string) => ['USER_TO_AGENT', 'MGMT_CREDIT', 'ADMIN_CREDIT', 'OPENING_BALANCE'].includes(t);
+  const list = q.trim()
+    ? rows.filter((r) => `${r.type} ${r.userId || ''} ${r.note || ''} ${r.id}`.toLowerCase().includes(q.trim().toLowerCase()))
+    : rows;
 
-/* ── profile ────────────────────────────────────────────────────────────── */
-const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () => void }> = ({ agent, settings, onLogout }) => (
-  <div className="space-y-3">
-    <Card>
-      <div className="flex items-center gap-3">
-        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/15 text-lg font-black text-amber-400">{(agent.name || agent.id).slice(0, 1).toUpperCase()}</div>
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5 truncate text-sm font-black text-white">{agent.name || agent.id} <BadgeCheck className="h-3.5 w-3.5 text-emerald-400" /></div>
-          <div className="truncate text-[11px] text-zinc-500">Agent · {agent.id}</div>
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Transaction history</div>
+          <span className="text-[9px] text-zinc-600">{rows.length} rows</span>
         </div>
-      </div>
-      <div className="mt-3 space-y-1.5 text-[11px]">
-        <div className="flex justify-between"><span className="text-zinc-500">Email</span><span className="font-semibold text-zinc-200">{agent.email}</span></div>
-        <div className="flex justify-between"><span className="text-zinc-500">Balance</span><span className="font-black text-white">${money(agent.balance)}</span></div>
-        <div className="flex justify-between"><span className="text-zinc-500">Lifetime commission</span><span className="font-black text-emerald-400">${money(agent.commissionLifetime)}</span></div>
-        <div className="flex justify-between"><span className="text-zinc-500">User fee (paid by user)</span><span className="font-semibold text-zinc-200">{settings.feePercentOnUserSend}%</span></div>
-        <div className="flex justify-between"><span className="text-zinc-500">Commission on receive</span><span className="font-semibold text-zinc-200">{settings.commissionPercentOnReceive}%</span></div>
-        <div className="flex justify-between"><span className="text-zinc-500">Commission on send</span><span className="font-semibold text-zinc-200">{settings.commissionPercentOnSend}%</span></div>
-      </div>
-    </Card>
-    <button onClick={onLogout} className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 text-sm font-bold text-red-300 active:scale-[0.99]">
-      <LogOut className="h-4 w-4" /> Sign out
-    </button>
-    <p className="pb-2 text-center text-[9px] leading-relaxed text-zinc-600">BoostPay Agent · mobile only · only the latest signed-in device stays active</p>
-  </div>
-);
+        <div className="mb-2 flex items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 px-3 py-2">
+          <Search className="h-3.5 w-3.5 text-zinc-500" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search type, User #, note or TX id" className="min-w-0 flex-1 bg-transparent text-[11px] text-white placeholder-zinc-600 outline-none" />
+        </div>
+        {loading ? (
+          <p className="py-6 text-center text-[11px] text-zinc-600">Loading…</p>
+        ) : list.length === 0 ? (
+          <p className="py-6 text-center text-[11px] text-zinc-600">No transactions yet.</p>
+        ) : (
+          <div className="divide-y divide-zinc-800/70">
+            {list.map((r) => {
+              const credit = creditOf(r.type);
+              return (
+                <button key={r.id} onClick={() => setOpen(r)} className="flex w-full items-start justify-between gap-2 py-2.5 text-left active:bg-zinc-800/30">
+                  <div className="flex min-w-0 items-start gap-2">
+                    <div className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-xl ${credit ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'}`}>
+                      {credit ? <ArrowDownLeft className="h-3.5 w-3.5" /> : <ArrowUpRight className="h-3.5 w-3.5" />}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="truncate text-[11px] font-semibold text-white">{labelFor(r.type)}</div>
+                      <div className="truncate text-[9px] text-zinc-500">{r.userId ? `User #${r.userId} · ` : ''}{timeAgo(r.at)}</div>
+                      {r.fee > 0 ? <div className="text-[9px] text-zinc-600">User fee ${money(r.fee)}</div> : null}
+                    </div>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <div className={`text-[11px] font-black ${credit ? 'text-emerald-400' : 'text-amber-400'}`}>{credit ? '+' : '-'}${money(r.amount)}</div>
+                    <div className="text-[9px] text-zinc-500">bal ${money(r.balanceAfter)}</div>
+                    {r.commission > 0 ? <div className="text-[9px] font-semibold text-emerald-400/90">+{money(r.commission)} comm.</div> : null}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
+      {open ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm" onClick={() => setOpen(null)}>
+          <div className="w-full max-w-[430px] rounded-t-3xl border border-zinc-800 bg-zinc-900 p-4 pb-6" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-start justify-between">
+              <div>
+                <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><Receipt className="h-3.5 w-3.5" /> Transaction details</div>
+                <div className="mt-1 text-sm font-black text-white">{labelFor(open.type)}</div>
+              </div>
+              <button onClick={() => setOpen(null)} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 text-zinc-400"><X className="h-4 w-4" /></button>
+            </div>
+
+            <div className="mb-3 rounded-2xl border border-zinc-800 bg-zinc-950/70 p-3 text-center">
+              <div className={`text-2xl font-black ${creditOf(open.type) ? 'text-emerald-400' : 'text-amber-400'}`}>{creditOf(open.type) ? '+' : '-'}${money(open.amount)}</div>
+              <div className="mt-0.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-500">{creditOf(open.type) ? 'Credited' : 'Debited'}</div>
+            </div>
+
+            <div className="space-y-1.5 text-[11px]">
+              {[
+                ['Status', 'Completed'],
+                ['Date', new Date(open.at).toLocaleString()],
+                ['Reference', open.id],
+                ['Type code', open.type],
+                ['User', open.userId ? `User #${open.userId}` : '—'],
+                ['Actor', open.actor ? String(open.actor) : '—'],
+                ['Amount', `$${money(open.amount)}`],
+                ['User fee', `$${money(open.fee || 0)}`],
+                ['Agent commission', `$${money(open.commission || 0)}`],
+                ['Balance after', `$${money(open.balanceAfter)}`],
+                ['Note', open.note || '—']
+              ].map(([k, v]) => (
+                <div key={String(k)} className="flex items-start justify-between gap-3 border-b border-zinc-800/60 pb-1.5 last:border-0">
+                  <span className="shrink-0 text-zinc-500">{k}</span>
+                  <span className="break-all text-right font-semibold text-zinc-200">{String(v)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+/* ── profile + password change ──────────────────────────────────────────── */
+const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () => void; toast: (t: { type: 'ok' | 'err'; text: string }) => void }> = ({ agent, settings, onLogout, toast }) => {
+  const [openPw, setOpenPw] = useState(false);
+  const [cur, setCur] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  const changePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr('');
+    if (next.length < 6) { setErr('New password must be at least 6 characters.'); return; }
+    if (next !== confirm) { setErr('The two new passwords do not match.'); return; }
+    setBusy(true);
+    try {
+      await api('/api/agent/change-password', { method: 'POST', body: { currentPassword: cur, newPassword: next } });
+      toast({ type: 'ok', text: 'Password updated' });
+      setOpenPw(false); setCur(''); setNext(''); setConfirm('');
+    } catch (e2: any) { setErr(e2?.message || 'Could not change the password.'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="flex items-center gap-3">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/15 text-lg font-black text-amber-400">{(agent.name || agent.id).slice(0, 1).toUpperCase()}</div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 truncate text-sm font-black text-white">{agent.name || agent.id} <BadgeCheck className="h-3.5 w-3.5 text-emerald-400" /></div>
+            <div className="truncate text-[11px] text-zinc-500">Agent · {agent.id}</div>
+          </div>
+        </div>
+        <div className="mt-3 space-y-1.5 text-[11px]">
+          <div className="flex justify-between"><span className="text-zinc-500">Email</span><span className="font-semibold text-zinc-200">{agent.email}</span></div>
+          <div className="flex justify-between"><span className="text-zinc-500">Balance</span><span className="font-black text-white">${money(agent.balance)}</span></div>
+          <div className="flex justify-between"><span className="text-zinc-500">Lifetime commission</span><span className="font-black text-emerald-400">${money(agent.commissionLifetime)}</span></div>
+          <div className="flex justify-between"><span className="text-zinc-500">User fee (paid by user)</span><span className="font-semibold text-zinc-200">{settings.feePercentOnUserSend}%</span></div>
+          <div className="flex justify-between"><span className="text-zinc-500">Commission on receive</span><span className="font-semibold text-zinc-200">{settings.commissionPercentOnReceive}%</span></div>
+          <div className="flex justify-between"><span className="text-zinc-500">Commission on send</span><span className="font-semibold text-zinc-200">{settings.commissionPercentOnSend}%</span></div>
+        </div>
+      </Card>
+
+      <Card>
+        <button onClick={() => { setOpenPw((v) => !v); setErr(''); }} className="flex w-full items-center justify-between">
+          <span className="flex items-center gap-2 text-[11px] font-bold text-white"><KeyRound className="h-4 w-4 text-amber-400" /> Change password</span>
+          <ChevronRight className={`h-4 w-4 text-zinc-500 transition ${openPw ? 'rotate-90' : ''}`} />
+        </button>
+        {openPw ? (
+          <form onSubmit={changePassword} className="mt-3 space-y-2">
+            <input className={inputCls} type="password" placeholder="Current password" value={cur} onChange={(e) => setCur(e.target.value)} required />
+            <input className={inputCls} type="password" placeholder="New password (min 6)" value={next} onChange={(e) => setNext(e.target.value)} required />
+            <input className={inputCls} type="password" placeholder="Confirm new password" value={confirm} onChange={(e) => setConfirm(e.target.value)} required />
+            {err ? <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[10.5px] font-semibold text-red-200">{err}</div> : null}
+            <button type="submit" disabled={busy} className="flex h-11 w-full items-center justify-center rounded-2xl bg-amber-500 text-xs font-black text-zinc-950 disabled:opacity-60">{busy ? 'Saving…' : 'Update password'}</button>
+            <p className="text-center text-[9px] leading-relaxed text-zinc-600">Forgot the current password? Sign out and use “Forgot password?” with your Gmail.</p>
+          </form>
+        ) : null}
+      </Card>
+
+      <button onClick={onLogout} className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 text-sm font-bold text-red-300 active:scale-[0.99]">
+        <LogOut className="h-4 w-4" /> Sign out
+      </button>
+      <p className="pb-2 text-center text-[9px] leading-relaxed text-zinc-600">BoostPay Agent · mobile only · only the latest signed-in device stays active</p>
+    </div>
+  );
+};
 
 /* ── app shell ──────────────────────────────────────────────────────────── */
 type Tab = 'HOME' | 'SEND' | 'RECEIVE' | 'CHATS' | 'HISTORY' | 'PROFILE';
@@ -810,7 +1020,7 @@ export default function App() {
               onSent={(a) => { setAgent(a); void loadHistory(); void refresh(); }}
             />
           )}
-          {tab === 'RECEIVE' && <ReceiveScreen agent={agent} settings={settings} onCopy={copy} history={history} />}
+          {tab === 'RECEIVE' && <ReceiveScreen agent={agent} settings={settings} onCopy={copy} history={history} toast={toast} onRedeemed={() => { void refresh(); void loadHistory(); }} />}
           {tab === 'CHATS' && (
             <ChatsScreen
               chats={chats}
@@ -823,7 +1033,7 @@ export default function App() {
             />
           )}
           {tab === 'HISTORY' && <HistoryScreen rows={history} loading={loadingHistory} />}
-          {tab === 'PROFILE' && <ProfileScreen agent={agent} settings={settings} onLogout={logout} />}
+          {tab === 'PROFILE' && <ProfileScreen agent={agent} settings={settings} onLogout={logout} toast={toast} />}
         </main>
 
         <nav className="safe-pb fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[430px] border-t border-zinc-800 bg-zinc-950/97 backdrop-blur">

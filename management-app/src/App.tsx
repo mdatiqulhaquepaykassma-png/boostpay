@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDownLeft, ArrowUpRight, Building2, Check, ChevronRight, CircleDollarSign, Coins,
-  Copy, History, Home, Landmark, LogOut, MessageSquare, Plus, Save, Send, Settings2, ShieldCheck, User, Users, X
+  Copy, History, Home, KeyRound, Landmark, LogOut, MessageSquare, Plus, Receipt, Search, Send, ShieldCheck, User, Users, X
 } from 'lucide-react';
+import { ChatComposer, ChatList, ChatMessageLike, ChatSendPayload } from './ChatKit';
 
 /* ── API client ─────────────────────────────────────────────────────────── */
 const TOKEN_KEY = 'bpm_token_v1';
@@ -23,7 +24,7 @@ type Stats = {
 };
 type LedgerRow = { id: string; at: number; type: string; amount: number; fee: number; commission: number; balanceAfter: number; agentId: string; userId?: string; note?: string };
 type WalletRow = { id: string; at: number; type: string; amount: number; balanceAfter: number; agentId?: string; note?: string };
-type MsgRow = { id: string; managementId: string; agentId: string; senderRole: 'MANAGEMENT' | 'AGENT'; text: string; at: number };
+type MsgRow = ChatMessageLike & { managementId?: string; agentId?: string };
 type MsgThread = { agentId: string; lastText: string; lastAt: number; unread: number; lastSender: string };
 
 const money = (n: number) => (Number.isFinite(Number(n)) ? Number(n) : 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -81,22 +82,72 @@ const Toast: React.FC<{ toast: { type: 'ok' | 'err'; text: string } | null; onCl
   );
 };
 
-/* ── login ──────────────────────────────────────────────────────────────── */
+/* ── login (same Gmail rule as the user app) ────────────────────────────── */
+const gmailLocalMg = (v: string) => {
+  let s = String(v || '').trim().toLowerCase().replace(/\s+/g, '');
+  let prev = '';
+  while (prev !== s) {
+    prev = s;
+    s = s.replace(/@gmail\.com$/, '').replace(/\.gmail\.com$/, '').replace(/gmail\.com$/, '')
+         .replace(/@gmailcom$/, '').replace(/\.gmailcom$/, '').replace(/gmailcom$/, '');
+  }
+  return s.split('@')[0].replace(/[@.]+$/g, '').replace(/[^a-z0-9._]/g, '');
+};
+
 const Login: React.FC<{ onDone: (m: Mgmt) => void; toast: (t: any) => void }> = ({ onDone, toast }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [mode, setMode] = useState<'LOGIN' | 'FORGOT' | 'RESET'>('LOGIN');
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetCode, setResetCode] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [info, setInfo] = useState('');
+  const [showPw, setShowPw] = useState(false);
+
   const submit = async (e: React.FormEvent) => {
-    e.preventDefault(); setError(''); setBusy(true);
+    e.preventDefault(); setError(''); setInfo('');
+    const local = gmailLocalMg(email);
+    if (!local) { setError('Enter your Gmail username (example: mgrname → mgrname@gmail.com)'); return; }
+    setBusy(true);
     try {
-      const res = await api<{ token: string; management: Mgmt }>('/api/management/login', { method: 'POST', body: { email: email.trim(), password } });
+      const res = await api<{ token: string; management: Mgmt }>('/api/management/login', { method: 'POST', body: { email: local, password } });
       localStorage.setItem(TOKEN_KEY, res.token);
       localStorage.setItem(MGR_KEY, JSON.stringify(res.management));
       toast({ type: 'ok', text: `Welcome, ${res.management.name || res.management.id}` });
       onDone(res.management);
     } catch (err: any) { setError(err?.message || 'Sign in failed.'); } finally { setBusy(false); }
   };
+
+  const requestCode = async (e: React.FormEvent) => {
+    e.preventDefault(); setError(''); setInfo('');
+    const local = gmailLocalMg(resetEmail);
+    if (!local) { setError('Enter your Gmail username (example: mgrname)'); return; }
+    setBusy(true);
+    try {
+      const res: any = await api('/api/management/forgot-password', { method: 'POST', body: { email: local } });
+      setInfo(res?.message || `Reset code sent to ${local}@gmail.com`);
+      setMode('RESET');
+    } catch (err: any) { setError(err?.message || 'Could not send the reset code.'); }
+    finally { setBusy(false); }
+  };
+
+  const submitReset = async (e: React.FormEvent) => {
+    e.preventDefault(); setError(''); setInfo('');
+    const local = gmailLocalMg(resetEmail);
+    if (!resetCode.trim()) { setError('Enter the 6-digit code from your Gmail.'); return; }
+    if (newPassword.length < 6) { setError('New password must be at least 6 characters.'); return; }
+    setBusy(true);
+    try {
+      await api('/api/management/reset-password', { method: 'POST', body: { email: local, code: resetCode.trim(), newPassword } });
+      toast({ type: 'ok', text: 'Password updated — please sign in.' });
+      setEmail(local); setPassword(''); setMode('LOGIN'); setResetCode(''); setNewPassword('');
+      setInfo('Password updated. Sign in with your new password.');
+    } catch (err: any) { setError(err?.message || 'Reset failed.'); }
+    finally { setBusy(false); }
+  };
+
   return (
     <div className="flex min-h-screen flex-col justify-center px-5">
       <div className="mx-auto w-full max-w-[430px]">
@@ -105,14 +156,54 @@ const Login: React.FC<{ onDone: (m: Mgmt) => void; toast: (t: any) => void }> = 
           <h1 className="mt-4 text-xl font-black tracking-tight text-white">BoostPay Management</h1>
           <p className="mt-1 text-[11px] font-medium text-zinc-500">Agent network control — mobile only</p>
         </div>
-        <form onSubmit={submit} className="space-y-3">
-          <Field label="Management email"><input className={inputCls} type="email" autoComplete="email" placeholder="management@boostpay.online" value={email} onChange={(e) => setEmail(e.target.value)} required /></Field>
-          <Field label="Password"><input className={inputCls} type="password" autoComplete="current-password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} required /></Field>
-          {error ? <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
-          <button type="submit" disabled={busy} className="mt-2 flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-cyan-500 text-sm font-black text-zinc-950 active:scale-[0.99] disabled:opacity-60">
-            {busy ? 'Signing in…' : 'Sign in'} {!busy && <ChevronRight className="h-4 w-4" />}
-          </button>
-        </form>
+
+        {mode === 'LOGIN' ? (
+          <form onSubmit={submit} className="space-y-3">
+            <Field label="Gmail username" hint="Only @gmail.com — type the part before @ (example: mgrname)">
+              <div className="flex items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 focus-within:border-cyan-500/70">
+                <input className="min-w-0 flex-1 bg-transparent py-3 text-sm text-white placeholder-zinc-600 outline-none" autoComplete="username" placeholder="mgrname" value={email} onChange={(e) => setEmail(gmailLocalMg(e.target.value))} required />
+                <span className="shrink-0 text-[12px] font-semibold text-zinc-500">@gmail.com</span>
+              </div>
+            </Field>
+            <Field label="Password">
+              <div className="flex items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 focus-within:border-cyan-500/70">
+                <input className="min-w-0 flex-1 bg-transparent py-3 text-sm text-white placeholder-zinc-600 outline-none" type={showPw ? 'text' : 'password'} autoComplete="current-password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} required />
+                <button type="button" onClick={() => setShowPw((v) => !v)} className="shrink-0 text-[10px] font-bold text-zinc-500">{showPw ? 'HIDE' : 'SHOW'}</button>
+              </div>
+            </Field>
+            {error ? <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
+            {info ? <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[11px] font-semibold text-emerald-200">{info}</div> : null}
+            <button type="submit" disabled={busy} className="mt-2 flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-cyan-500 text-sm font-black text-zinc-950 active:scale-[0.99] disabled:opacity-60">
+              {busy ? 'Signing in…' : 'Sign in'} {!busy && <ChevronRight className="h-4 w-4" />}
+            </button>
+            <button type="button" onClick={() => { setMode('FORGOT'); setResetEmail(email); setError(''); setInfo(''); }} className="w-full text-center text-[11px] font-bold text-cyan-400/90">Forgot password?</button>
+          </form>
+        ) : mode === 'FORGOT' ? (
+          <form onSubmit={requestCode} className="space-y-3">
+            <Field label="Gmail username" hint="We email a 6-digit reset code to your Gmail.">
+              <div className="flex items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 focus-within:border-cyan-500/70">
+                <input className="min-w-0 flex-1 bg-transparent py-3 text-sm text-white placeholder-zinc-600 outline-none" placeholder="mgrname" value={resetEmail} onChange={(e) => setResetEmail(gmailLocalMg(e.target.value))} required />
+                <span className="shrink-0 text-[12px] font-semibold text-zinc-500">@gmail.com</span>
+              </div>
+            </Field>
+            {error ? <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
+            <button type="submit" disabled={busy} className="flex h-12 w-full items-center justify-center rounded-2xl bg-cyan-500 text-sm font-black text-zinc-950 disabled:opacity-60">{busy ? 'Sending…' : 'Send reset code'}</button>
+            <button type="button" onClick={() => { setMode('LOGIN'); setError(''); }} className="w-full text-center text-[11px] font-bold text-zinc-400">Back to sign in</button>
+          </form>
+        ) : (
+          <form onSubmit={submitReset} className="space-y-3">
+            <Field label="6-digit code" hint={`Sent to ${gmailLocalMg(resetEmail)}@gmail.com — check inbox/spam.`}>
+              <input className={inputCls} inputMode="numeric" maxLength={6} placeholder="123456" value={resetCode} onChange={(e) => setResetCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} required />
+            </Field>
+            <Field label="New password">
+              <input className={inputCls} type="password" placeholder="At least 6 characters" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required />
+            </Field>
+            {error ? <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
+            <button type="submit" disabled={busy} className="flex h-12 w-full items-center justify-center rounded-2xl bg-cyan-500 text-sm font-black text-zinc-950 disabled:opacity-60">{busy ? 'Updating…' : 'Set new password'}</button>
+            <button type="button" onClick={() => { setMode('FORGOT'); setError(''); }} className="w-full text-center text-[11px] font-bold text-zinc-400">Resend code</button>
+          </form>
+        )}
+
         <p className="mt-6 text-center text-[10px] leading-relaxed text-zinc-600">Management accounts are created from the BoostPay admin console.</p>
       </div>
     </div>
@@ -251,8 +342,7 @@ const CreateAgentSheet: React.FC<{ mgmtBalance: number; onClose: () => void; onC
 /* ── agent chat (management ↔ its own agents) ───────────────────────────── */
 const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => void; toast: (t: any) => void }> = ({ agent, onClose, onRead, toast }) => {
   const [msgs, setMsgs] = useState<MsgRow[]>([]);
-  const [text, setText] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [peerTyping, setPeerTyping] = useState(false);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -260,8 +350,9 @@ const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
     try {
-      const res = await api<{ messages: MsgRow[] }>(`/api/management/agents/${agent.id}/messages`);
+      const res = await api<{ messages: MsgRow[]; peerTyping?: boolean }>(`/api/management/agents/${agent.id}/messages`);
       setMsgs(res.messages || []);
+      setPeerTyping(!!res.peerTyping);
       setErr('');
       onRead();
     } catch (e: any) { if (!quiet) setErr(e?.message || 'Could not load the conversation.'); }
@@ -270,7 +361,7 @@ const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => 
 
   useEffect(() => {
     void load();
-    const iv = window.setInterval(() => { void load(true); }, 8000);
+    const iv = window.setInterval(() => { void load(true); }, 6000);
     return () => window.clearInterval(iv);
   }, [load]);
 
@@ -279,72 +370,53 @@ const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => 
     if (el) el.scrollTop = el.scrollHeight;
   }, [msgs.length]);
 
-  const send = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!text.trim()) return;
-    setBusy(true); setErr('');
-    try {
-      const res = await api<{ message: MsgRow }>(`/api/management/agents/${agent.id}/messages`, { method: 'POST', body: { text: text.trim() } });
-      setMsgs((prev) => [...prev, res.message]);
-      setText('');
-    } catch (e2: any) { setErr(e2?.message || 'Message could not be sent.'); }
-    finally { setBusy(false); }
+  const send = async (payload: ChatSendPayload) => {
+    setErr('');
+    const res = await api<{ message: MsgRow }>(`/api/management/agents/${agent.id}/messages`, { method: 'POST', body: payload });
+    setMsgs((prev) => [...prev, res.message]);
   };
+  const typing = () => { void api(`/api/management/agents/${agent.id}/typing`, { method: 'POST', body: {} }).catch(() => {}); };
 
   return (
     <div className="fixed inset-0 z-40 flex flex-col justify-end">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative mx-auto flex h-[80vh] w-full max-w-[430px] flex-col rounded-t-3xl border border-zinc-800 bg-zinc-900">
+      <div className="relative mx-auto flex h-[82vh] w-full max-w-[430px] flex-col rounded-t-3xl border border-zinc-800 bg-zinc-900">
         <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
           <div className="min-w-0">
             <div className="truncate text-sm font-black text-white">{agent.name || agent.id}</div>
-            <div className="font-mono text-[9px] text-zinc-500">{agent.id}</div>
+            <div className="font-mono text-[9px] text-zinc-500">{agent.id}{peerTyping ? ' · typing…' : ''}</div>
           </div>
           <button onClick={onClose} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 text-zinc-400"><X className="h-4 w-4" /></button>
         </div>
 
-        <div ref={listRef} className="flex-1 space-y-2 overflow-y-auto overscroll-contain px-3 py-3">
-          {loading ? (
-            <p className="py-8 text-center text-[11px] text-zinc-500">Loading…</p>
-          ) : msgs.length === 0 ? (
-            <div className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4 text-center">
-              <MessageSquare className="mx-auto h-5 w-5 text-zinc-600" />
-              <p className="mt-2 text-[11px] font-semibold text-zinc-300">No messages yet</p>
-              <p className="mt-1 text-[10px] leading-relaxed text-zinc-500">Send instructions, float notices or a collection request. Only this agent sees this thread.</p>
-            </div>
-          ) : msgs.map((m) => {
-            const mine = m.senderRole === 'MANAGEMENT';
-            return (
-              <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[82%] rounded-2xl border px-3 py-2 text-[12px] leading-relaxed ${mine ? 'border-cyan-500/25 bg-cyan-500/15 text-cyan-50' : 'border-zinc-700/70 bg-zinc-800 text-zinc-100'}`}>
-                  <div className="whitespace-pre-wrap break-words">{m.text}</div>
-                  <div className={`mt-1 text-right text-[8px] ${mine ? 'text-cyan-200/60' : 'text-zinc-500'}`}>{timeAgo(m.at)}</div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        <ChatList
+          messages={msgs}
+          myRole="MANAGEMENT"
+          accent="cyan"
+          peerReadKey="readByAgent"
+          loading={loading}
+          emptyTitle="No messages yet"
+          emptyHint="Send instructions, float notices or a collection request. Only this agent sees this thread."
+          className="flex-1 px-3 py-3"
+          listRef={listRef}
+        />
 
         {err ? <div className="mx-3 mb-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{err}</div> : null}
 
-        <form onSubmit={send} className="flex items-end gap-2 border-t border-zinc-800 bg-zinc-950/80 px-3 py-2.5">
-          <input
-            value={text}
-            onChange={(e) => setText(e.target.value.slice(0, 1000))}
-            placeholder="Message this agent…"
-            className="min-w-0 flex-1 rounded-2xl border border-zinc-800 bg-zinc-900 px-3.5 py-2.5 text-[12px] text-white placeholder-zinc-600 outline-none focus:border-cyan-500/60"
-          />
-          <button type="submit" disabled={busy || !text.trim()} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-cyan-500 text-zinc-950 disabled:opacity-40">
-            <Send className="h-4 w-4" />
-          </button>
-        </form>
+        <ChatComposer
+          accent="cyan"
+          placeholder="Message this agent…"
+          onSend={send}
+          onTyping={typing}
+          onError={(m) => setErr(m)}
+        />
       </div>
     </div>
   );
 };
 
 /* ── app ────────────────────────────────────────────────────────────────── */
-type Tab = 'HOME' | 'AGENTS' | 'MESSAGES' | 'CONFIG' | 'HISTORY' | 'PROFILE';
+type Tab = 'HOME' | 'AGENTS' | 'MESSAGES' | 'HISTORY' | 'PROFILE';
 
 export default function App() {
   const [mgr, setMgr] = useState<Mgmt | null>(() => {
@@ -362,6 +434,13 @@ export default function App() {
   const [balance, setBalance] = useState(0);
   const [tab, setTab] = useState<Tab>('HOME');
   const [selected, setSelected] = useState<AgentRow | null>(null);
+  const [txDetail, setTxDetail] = useState<any | null>(null);
+  const [pwOpen, setPwOpen] = useState(false);
+  const [curPw, setCurPw] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [confPw, setConfPw] = useState('');
+  const [pwBusy, setPwBusy] = useState(false);
+  const [pwErr, setPwErr] = useState('');
   const [creating, setCreating] = useState(false);
   const [busyCfg, setBusyCfg] = useState(false);
   const [toastState, setToastState] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
@@ -429,7 +508,6 @@ export default function App() {
     { id: 'HOME', label: 'Home', icon: Home },
     { id: 'AGENTS', label: 'Agents', icon: Users },
     { id: 'MESSAGES', label: 'Chats', icon: MessageSquare },
-    { id: 'CONFIG', label: 'Config', icon: Settings2 },
     { id: 'HISTORY', label: 'History', icon: History },
     { id: 'PROFILE', label: 'Profile', icon: User }
   ];
@@ -498,7 +576,7 @@ export default function App() {
                   <div className="flex justify-between"><span className="text-zinc-500">Agent commission on send</span><span className="font-bold text-emerald-300">{settings.commissionPercentOnSend}%</span></div>
                   <div className="flex justify-between"><span className="text-zinc-500">Agent boost</span><span className="font-bold text-zinc-400">Users only</span></div>
                 </div>
-                <button onClick={() => setTab('CONFIG')} className="mt-2 flex h-9 w-full items-center justify-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-950 text-[11px] font-bold text-zinc-300"><Settings2 className="h-3.5 w-3.5" /> Edit configuration</button>
+                
               </Card>
             </div>
           )}
@@ -565,56 +643,6 @@ export default function App() {
             </div>
           )}
 
-          {tab === 'CONFIG' && (
-            <div className="space-y-3">
-              <Card>
-                <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><Settings2 className="h-3 w-3" /> Agent network configuration</div>
-                <div className="mt-3 space-y-3">
-                  <Field label="User → Agent fee (%)" hint="Charged to the USER on top of the amount they send.">
-                    <input className={inputCls} inputMode="decimal" type="number" step="0.01" value={settings.feePercentOnUserSend} onChange={(e) => setSettings({ ...settings, feePercentOnUserSend: Number(e.target.value) })} />
-                  </Field>
-                  <Field label="Agent commission on receive (%)" hint="Credited to the agent by the platform.">
-                    <input className={inputCls} inputMode="decimal" type="number" step="0.01" value={settings.commissionPercentOnReceive} onChange={(e) => setSettings({ ...settings, commissionPercentOnReceive: Number(e.target.value) })} />
-                  </Field>
-                  <Field label="Agent commission on send (%)" hint="Credited to the agent by the platform.">
-                    <input className={inputCls} inputMode="decimal" type="number" step="0.01" value={settings.commissionPercentOnSend} onChange={(e) => setSettings({ ...settings, commissionPercentOnSend: Number(e.target.value) })} />
-                  </Field>
-                  <div className="grid grid-cols-2 gap-2">
-                    <Field label="Min user payment"><input className={inputCls} inputMode="decimal" type="number" value={settings.minUserSend} onChange={(e) => setSettings({ ...settings, minUserSend: Number(e.target.value) })} /></Field>
-                    <Field label="Max user payment"><input className={inputCls} inputMode="decimal" type="number" value={settings.maxUserSend} onChange={(e) => setSettings({ ...settings, maxUserSend: Number(e.target.value) })} /></Field>
-                  </div>
-                  <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 px-3 py-2.5">
-                    <div>
-                      <div className="text-[11px] font-bold text-white">Agent payments enabled</div>
-                      <div className="text-[9px] text-zinc-500">Off = no new user → agent payments</div>
-                    </div>
-                    <button onClick={() => setSettings({ ...settings, enabled: !settings.enabled })} className={`h-7 w-12 rounded-full transition ${settings.enabled ? 'bg-emerald-500' : 'bg-zinc-700'}`}>
-                      <span className={`block h-5 w-5 translate-y-[-0.5px] rounded-full bg-white transition ${settings.enabled ? 'translate-x-6' : 'translate-x-1'}`} />
-                    </button>
-                  </div>
-                  <div className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 px-3 py-2.5">
-                    <div>
-                      <div className="text-[11px] font-bold text-white">Agent boost</div>
-                      <div className="text-[9px] text-zinc-500">Owner rule: only user accounts can boost</div>
-                    </div>
-                    <span className="rounded-full border border-zinc-700 px-2 py-1 text-[9px] font-bold text-zinc-400">Users only</span>
-                  </div>
-                  <button onClick={() => void saveConfig({})} disabled={busyCfg} className="flex h-11 w-full items-center justify-center gap-2 rounded-2xl bg-cyan-500 text-xs font-black text-zinc-950 disabled:opacity-60">
-                    <Save className="h-4 w-4" /> {busyCfg ? 'Saving…' : 'Save configuration'}
-                  </button>
-                </div>
-              </Card>
-              <Card>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">How it works</div>
-                <ul className="mt-2 space-y-1.5 text-[10px] leading-relaxed text-zinc-400">
-                  <li>• User pays an agent: user is debited amount + fee; agent receives the full amount plus receive commission.</li>
-                  <li>• Agent pays a user: agent is debited the amount; the user receives the full amount; agent earns send commission.</li>
-                  <li>• Lifetime commission = total of all commission credits on the agent account.</li>
-                </ul>
-              </Card>
-            </div>
-          )}
-
           {tab === 'HISTORY' && (
             <div className="space-y-3">
             <Card>
@@ -626,7 +654,7 @@ export default function App() {
                   {wallet.map((r) => {
                     const credit = ['ADMIN_CREDIT', 'AGENT_COLLECT'].includes(r.type);
                     return (
-                      <div key={r.id} className="flex items-start justify-between py-2.5">
+                      <button key={r.id} onClick={() => setTxDetail({ ...r, _kind: 'WALLET' })} className="flex w-full items-start justify-between py-2.5 text-left active:bg-zinc-800/30">
                         <div className="min-w-0">
                           <div className="truncate text-[11px] font-semibold text-white">{r.type.replaceAll('_', ' ')}</div>
                           <div className="truncate text-[9px] text-zinc-500">{r.agentId ? `${r.agentId} · ` : ''}{timeAgo(r.at)}{r.note ? ` · ${r.note}` : ''}</div>
@@ -635,7 +663,7 @@ export default function App() {
                           <div className={`text-[11px] font-black ${credit ? 'text-emerald-400' : 'text-amber-400'}`}>{credit ? '+' : '−'}${money(r.amount)}</div>
                           <div className="text-[9px] text-zinc-500">bal ${money(r.balanceAfter)}</div>
                         </div>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
@@ -650,7 +678,7 @@ export default function App() {
                   {ledger.map((r) => {
                     const credit = ['USER_TO_AGENT', 'MGMT_CREDIT', 'ADMIN_CREDIT', 'OPENING_BALANCE'].includes(r.type);
                     return (
-                      <div key={r.id} className="flex items-start justify-between py-2.5">
+                      <button key={r.id} onClick={() => setTxDetail({ ...r, _kind: 'NETWORK' })} className="flex w-full items-start justify-between py-2.5 text-left active:bg-zinc-800/30">
                         <div className="min-w-0">
                           <div className="truncate text-[11px] font-semibold text-white">{r.type.replaceAll('_', ' ')}</div>
                           <div className="truncate text-[9px] text-zinc-500">{r.agentId}{r.userId ? ` · user #${r.userId}` : ''} · {timeAgo(r.at)}</div>
@@ -659,7 +687,7 @@ export default function App() {
                           <div className={`text-[11px] font-black ${credit ? 'text-emerald-400' : 'text-amber-400'}`}>${money(r.amount)}</div>
                           {r.fee > 0 ? <div className="text-[9px] text-zinc-500">fee {money(r.fee)}</div> : null}
                         </div>
-                      </div>
+                      </button>
                     );
                   })}
                 </div>
@@ -684,6 +712,36 @@ export default function App() {
                   <div className="flex justify-between"><span className="text-zinc-500">My agents</span><span className="font-semibold text-zinc-200">{agents.length}</span></div>
                   <div className="flex justify-between"><span className="text-zinc-500">Total agent float</span><span className="font-black text-white">${money(stats?.totalAgentBalance || 0)}</span></div>
                 </div>
+              </Card>
+              <Card>
+                <button onClick={() => { setPwOpen((v) => !v); setPwErr(''); }} className="flex w-full items-center justify-between">
+                  <span className="flex items-center gap-2 text-[11px] font-bold text-white"><KeyRound className="h-4 w-4 text-cyan-400" /> Change password</span>
+                  <ChevronRight className={`h-4 w-4 text-zinc-500 transition ${pwOpen ? 'rotate-90' : ''}`} />
+                </button>
+                {pwOpen ? (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault(); setPwErr('');
+                      if (newPw.length < 6) { setPwErr('New password must be at least 6 characters.'); return; }
+                      if (newPw !== confPw) { setPwErr('The two new passwords do not match.'); return; }
+                      setPwBusy(true);
+                      try {
+                        await api('/api/management/change-password', { method: 'POST', body: { currentPassword: curPw, newPassword: newPw } });
+                        toast({ type: 'ok', text: 'Password updated' });
+                        setPwOpen(false); setCurPw(''); setNewPw(''); setConfPw('');
+                      } catch (e2: any) { setPwErr(e2?.message || 'Could not change the password.'); }
+                      finally { setPwBusy(false); }
+                    }}
+                    className="mt-3 space-y-2"
+                  >
+                    <input className={inputCls} type="password" placeholder="Current password" value={curPw} onChange={(e) => setCurPw(e.target.value)} required />
+                    <input className={inputCls} type="password" placeholder="New password (min 6)" value={newPw} onChange={(e) => setNewPw(e.target.value)} required />
+                    <input className={inputCls} type="password" placeholder="Confirm new password" value={confPw} onChange={(e) => setConfPw(e.target.value)} required />
+                    {pwErr ? <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[10.5px] font-semibold text-red-200">{pwErr}</div> : null}
+                    <button type="submit" disabled={pwBusy} className="flex h-11 w-full items-center justify-center rounded-2xl bg-cyan-500 text-xs font-black text-zinc-950 disabled:opacity-60">{pwBusy ? 'Saving…' : 'Update password'}</button>
+                    <p className="text-center text-[9px] leading-relaxed text-zinc-600">Forgot the current password? Sign out and use “Forgot password?” with your Gmail.</p>
+                  </form>
+                ) : null}
               </Card>
               <button onClick={() => void copy(mgr.id)} className="flex h-11 w-full items-center justify-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-900 text-[11px] font-bold text-zinc-300"><Copy className="h-3.5 w-3.5" /> Copy my management ID</button>
               <button onClick={logout} className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl border border-red-500/30 bg-red-500/10 text-sm font-bold text-red-300">
@@ -723,6 +781,41 @@ export default function App() {
         />
       ) : null}
       {chatAgent ? <ChatSheet agent={chatAgent} onClose={() => setChatAgent(null)} onRead={() => { void loadAll(); }} toast={toast} /> : null}
+      {txDetail ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm" onClick={() => setTxDetail(null)}>
+          <div className="w-full max-w-[430px] rounded-t-3xl border border-zinc-800 bg-zinc-900 p-4 pb-6" onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-start justify-between">
+              <div>
+                <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><Receipt className="h-3.5 w-3.5" /> Transaction details</div>
+                <div className="mt-1 text-sm font-black text-white">{String(txDetail.type || '').replaceAll('_', ' ')}</div>
+              </div>
+              <button onClick={() => setTxDetail(null)} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 text-zinc-400"><X className="h-4 w-4" /></button>
+            </div>
+            <div className="mb-3 rounded-2xl border border-zinc-800 bg-zinc-950/70 p-3 text-center">
+              <div className="text-2xl font-black text-white">${money(txDetail.amount)}</div>
+              <div className="mt-0.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-500">{txDetail._kind === 'WALLET' ? 'My wallet movement' : 'Network movement'}</div>
+            </div>
+            <div className="space-y-1.5 text-[11px]">
+              {[
+                ['Date', new Date(txDetail.at).toLocaleString()],
+                ['Reference', txDetail.id],
+                ['Agent', txDetail.agentId || '—'],
+                ['User', txDetail.userId ? `User #${txDetail.userId}` : '—'],
+                ['Amount', `$${money(txDetail.amount)}`],
+                ['Fee (paid by user)', `$${money(txDetail.fee || 0)}`],
+                ['Agent commission', `$${money(txDetail.commission || 0)}`],
+                ['Balance after', `$${money(txDetail.balanceAfter)}`],
+                ['Note', txDetail.note || '—']
+              ].map(([k, v]) => (
+                <div key={String(k)} className="flex items-start justify-between gap-3 border-b border-zinc-800/60 pb-1.5 last:border-0">
+                  <span className="shrink-0 text-zinc-500">{k}</span>
+                  <span className="break-all text-right font-semibold text-zinc-200">{String(v)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
       {creating ? <CreateAgentSheet mgmtBalance={balance} onClose={() => setCreating(false)} toast={toast} onCreated={() => { void loadAll(); }} /> : null}
     </div>
   );

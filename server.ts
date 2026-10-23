@@ -181,6 +181,15 @@ async function sendMail(to: string, subject: string, html: string, text?: string
   console.warn(`[SMTP] all pools failed for ${to}: ${lastErr}`);
   return { ok:false, error:lastErr };
 }
+function makeResetCode(): string {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+async function sendPasswordResetMail(kind: 'AGENT' | 'MANAGEMENT', id: string, email: string, code: string) {
+  const label = kind === 'AGENT' ? 'Agent' : 'Management';
+  const html = emailWrap(`${label} Password Reset Code`, `<p style="margin:0 0 10px">Hi <b>${label} ${id}</b>,</p><p style="margin:0 0 12px">Your BoostPay ${label.toLowerCase()} password reset code:</p><div style="text-align:center;margin:14px 0"><span style="display:inline-block;background:#09090b;border:1px solid #27272a;padding:12px 22px;border-radius:12px;font-family:monospace;font-size:22px;font-weight:800;letter-spacing:5px;color:#fbbf24">${code}</span></div><p style="margin:0;font-size:12px;color:#a1a1aa">Valid for 15 minutes. If you did not request this, ignore this email.</p>`);
+  try { return await sendMail(email, `BoostPay — ${label} Password Reset Code`, html); }
+  catch (e: any) { return { ok: false, error: e?.message || 'send failed' }; }
+}
 function emailWrap(title: string, bodyHtml: string): string {
   return `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#09090b;font-family:Inter,system-ui,Arial,sans-serif">
 <div style="max-width:480px;margin:24px auto;background:#18181b;border:1px solid #27272a;border-radius:16px;overflow:hidden">
@@ -306,6 +315,69 @@ function signAttachmentId(fileId: string): string {
 function attachmentUrl(fileId: string): string {
   return `/api/chat/file/${fileId}?t=${signAttachmentId(fileId)}`;
 }
+/* ── Chat content (shared by user↔agent and management↔agent threads) ──────
+ * Owner rule (2026-10-23): the agent and management chats get the SAME
+ * capabilities as the user chat — text, photos, voice notes, replies and read
+ * receipts. File documents, polls, contact cards and stickers stay out. */
+type ChatContent = {
+  ok: true; kind: 'text' | 'photo' | 'voice'; text: string;
+  photoFileId?: string; photoUrl?: string;
+  voiceFileId?: string; voiceUrl?: string; voiceDurationMs?: number;
+} | { ok: false; error: string };
+
+function chatContentFromBody(body: any, maxLen = 500): ChatContent {
+  const rawKind = String(body?.kind || '').toLowerCase();
+  const photo = typeof body?.photo === 'string' ? body.photo : (typeof body?.photoData === 'string' ? body.photoData : '');
+  const voice = typeof body?.voice === 'string' ? body.voice : (typeof body?.voiceData === 'string' ? body.voiceData : '');
+  const kind: 'text' | 'photo' | 'voice' = (rawKind === 'photo' || (!rawKind && photo)) ? 'photo'
+    : (rawKind === 'voice' || (!rawKind && voice)) ? 'voice' : 'text';
+  const text = sanitizeText(body?.text || '', maxLen).trim();
+  if (kind === 'photo') {
+    if (!photo) return { ok: false, error: 'Photo data is missing.' };
+    const mime = (String(photo).match(/^data:([^;]+);base64,/) || [])[1] || '';
+    if (!/^image\//i.test(mime)) return { ok: false, error: 'Only photos can be sent in chat.' };
+    const saved = saveAttachmentToDisk(photo, 'chatphoto');
+    if (!saved) return { ok: false, error: 'Photo could not be saved (max 6 MB).' };
+    return { ok: true, kind, text, photoFileId: saved.fileId, photoUrl: saved.url };
+  }
+  if (kind === 'voice') {
+    if (!voice) return { ok: false, error: 'Voice data is missing.' };
+    const mime = (String(voice).match(/^data:([^;]+);base64,/) || [])[1] || '';
+    if (!/^audio\//i.test(mime)) return { ok: false, error: 'Only voice notes can be sent.' };
+    const dur = Math.max(0, Math.min(120000, Number(body?.voiceDurationMs) || 0));
+    if (dur > 120000) return { ok: false, error: 'Voice message too long (max 2 minutes).' };
+    const saved = saveAttachmentToDisk(voice, 'chatvoice');
+    if (!saved) return { ok: false, error: 'Voice note could not be saved (max 6 MB).' };
+    return { ok: true, kind, text, voiceFileId: saved.fileId, voiceUrl: saved.url, voiceDurationMs: dur };
+  }
+  if (!text) return { ok: false, error: 'Message cannot be empty.' };
+  return { ok: true, kind: 'text', text };
+}
+
+function chatReplyPatch(list: any[], replyToId: any) {
+  const id = String(replyToId || '').trim();
+  if (!id) return null;
+  const src = (list || []).find((m: any) => String(m.id) === id);
+  if (!src) return null;
+  const preview = src.kind === 'photo' ? 'Photo' : src.kind === 'voice' ? 'Voice message' : String(src.text || '').slice(0, 120);
+  return { replyToId: String(src.id), replyToText: preview, replyToSender: String(src.senderRole || '') };
+}
+function chatPreviewOf(m: any): string {
+  if (m.kind === 'photo') return 'Photo';
+  if (m.kind === 'voice') return 'Voice message';
+  return String(m.text || '');
+}
+
+/* Typing indicators (in-memory, 6 s TTL) — one key per thread. */
+const chatTyping = new Map<string, { role: string; at: number }>();
+function markChatTyping(key: string, role: string) { chatTyping.set(key, { role, at: Date.now() }); }
+function isPeerTyping(key: string, myRole: string): boolean {
+  const t = chatTyping.get(key);
+  if (!t) return false;
+  if (Date.now() - t.at > 6000) { chatTyping.delete(key); return false; }
+  return String(t.role) !== String(myRole);
+}
+
 /** Re-sign media links that were stored before signed URLs existed. */
 function ensureSignedMediaUrls(doc: any): boolean {
   let changed = false;
@@ -1601,6 +1673,48 @@ function escapeHtml(s: string): string {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 /** Sanitize chat/inbox text — strip dangerous protocols + trim + length cap */
+/**
+ * Owner rule (2026-10-23): agent and management accounts follow the SAME Gmail
+ * rule as the user app — only @gmail.com addresses, and the login form takes the
+ * local part only ("abir567" -> abir567@gmail.com).
+ */
+function gmailLocalPart(raw: any): string {
+  let s = String(raw == null ? '' : raw).trim().toLowerCase().replace(/\s+/g, '');
+  // strip a Gmail domain typed (possibly twice) by mistake
+  let prev = '';
+  while (prev !== s) {
+    prev = s;
+    s = s.replace(/@gmail\.com$/, '').replace(/\.gmail\.com$/, '').replace(/gmail\.com$/, '');
+    s = s.replace(/@gmailcom$/, '').replace(/\.gmailcom$/, '').replace(/gmailcom$/, '');
+  }
+  s = s.split('@')[0].replace(/[@.]+$/g, '');
+  // keep only legal gmail local characters
+  s = s.replace(/[^a-z0-9._]/g, '');
+  return s;
+}
+function toGmailEmail(raw: any): string {
+  const local = gmailLocalPart(raw);
+  return local ? `${local}@gmail.com` : '';
+}
+/** For account creation: an explicit non-gmail domain is rejected, a bare
+ *  username is expanded — never silently rewrites someone else's domain. */
+function resolveGmailAccountEmail(raw: any): { ok: boolean; email: string; error?: string } {
+  const src = String(raw == null ? '' : raw).trim();
+  if (src.includes('@')) {
+    const lower = src.toLowerCase();
+    if (!/^[a-z0-9._]+@gmail\.com$/.test(lower)) {
+      return { ok: false, email: '', error: 'Only @gmail.com email addresses are allowed (example: name@gmail.com).' };
+    }
+    return { ok: true, email: lower };
+  }
+  const email = toGmailEmail(src);
+  if (!email || !isGmailEmail(email)) return { ok: false, email: '', error: 'Enter a Gmail username (example: name -> name@gmail.com).' };
+  return { ok: true, email };
+}
+function isGmailEmail(raw: any): boolean {
+  const e = String(raw || '').trim().toLowerCase();
+  return /^[a-z0-9._]+@gmail\.com$/.test(e);
+}
 function sanitizeText(input: any, maxLen=2000): string {
   let t = String(input||'').trim();
   t = t.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g,''); // strip control chars
@@ -6863,6 +6977,73 @@ async function startServer() {
     return db;
   }
 
+  /* ── User → agent payouts with a 4-character claim code (owner rule 2026-10-23) ──
+   * The user pays: the amount + fee leaves the user's wallet immediately and the
+   * agent receives NOTHING until it types the code the user got (e.g. "h68d").
+   * Codes are single-use, valid 30 minutes; when they expire — or when the user
+   * cancels — the full amount + fee is refunded to the user automatically. */
+  const PAYOUT_TTL_MS = 30 * 60 * 1000;
+  const PAYOUT_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'; // no 0/o/1/l/i look-alikes
+  function ensureAgentPayouts(db: any) {
+    if (!Array.isArray(db.agentPayouts)) db.agentPayouts = [];
+    return db.agentPayouts;
+  }
+  function makeClaimCode(db: any): string {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      let code = '';
+      for (let i = 0; i < 4; i++) code += PAYOUT_ALPHABET[Math.floor(Math.random() * PAYOUT_ALPHABET.length)];
+      if (!/[0-9]/.test(code) || !/[a-z]/.test(code)) continue;          // must mix letters + digits
+      const clash = ensureAgentPayouts(db).some((p: any) => p.status === 'PENDING' && String(p.code) === code);
+      if (!clash) return code;
+    }
+    return 'a' + Math.random().toString(36).slice(2, 5);
+  }
+  /** Expire stale codes and give the money back to the user (idempotent). */
+  function expireAgentPayouts(db: any): boolean {
+    let changed = false;
+    const now = Date.now();
+    for (const p of ensureAgentPayouts(db)) {
+      if (p.status !== 'PENDING' || Number(p.expiresAt) > now) continue;
+      const user = (db.users || []).find((u: any) => String(u.id) === String(p.userId));
+      if (user) {
+        user.balance = round2(Number(user.balance || 0) + Number(p.amount) + Number(p.fee || 0));
+        if (user.boostState) { try { user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config); } catch { /* ignore */ } }
+        const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+        if (!Array.isArray(db.transactions)) db.transactions = [];
+        db.transactions.unshift({
+          id: txId, userId: String(user.id), type: 'AGENT_PAYOUT_REFUND',
+          amount: round2(Number(p.amount) + Number(p.fee || 0)), timestamp: now,
+          notes: `Agent claim code ${String(p.code).toUpperCase()} expired — amount refunded`,
+          balanceAfter: round2(user.balance), payoutId: p.id, agentId: p.agentId
+        } as any);
+        try {
+          pushNotification(db, {
+            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(user.id),
+            type: 'AGENT_PAYOUT_REFUND', title: 'BOOSTPAY-ALERTS',
+            message: `REFUND: Agent ${p.agentId} did not claim your payment in time, so $${round2(Number(p.amount) + Number(p.fee || 0)).toFixed(2)} was returned to your wallet. Ref: ${txId}`,
+            amount: round2(Number(p.amount) + Number(p.fee || 0)), referenceId: txId, timestamp: now, isRead: false, metadata: { payoutId: p.id }
+          } as any);
+        } catch { /* ignore */ }
+        try { broadcastUserUpdate(db, String(user.id)); } catch { /* ignore */ }
+      }
+      p.status = 'EXPIRED'; p.closedAt = now; changed = true;
+    }
+    return changed;
+  }
+  /** In-memory brute-force guard for claim codes (per agent). */
+  const redeemAttempts = new Map<string, { count: number; resetAt: number }>();
+  function noteRedeemAttempt(agentId: string, success: boolean) {
+    if (success) { redeemAttempts.delete(agentId); return; }
+    const now = Date.now();
+    const cur = redeemAttempts.get(agentId);
+    if (!cur || cur.resetAt < now) { redeemAttempts.set(agentId, { count: 1, resetAt: now + 15 * 60 * 1000 }); return; }
+    cur.count += 1;
+  }
+  function redeemBlocked(agentId: string): boolean {
+    const cur = redeemAttempts.get(agentId);
+    return !!cur && cur.resetAt > Date.now() && cur.count >= 10;
+  }
+
   /** Agents a management account may touch — only the ones created under it. */
   const ownedAgents = (db: any, managementId: string) =>
     (db.agents || []).filter((a: any) => String(a.ownerManagementId || '') === String(managementId));
@@ -7018,11 +7199,13 @@ async function startServer() {
   // ── Auth: agent app ────────────────────────────────────────────────────────
   app.post('/api/agent/login', rateLimit(10), (req: any, res) => {
     try {
-      const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+      const rawEmail = (req.body && req.body.email) || '';
+      const email = String(rawEmail).includes('@') ? toGmailEmail(rawEmail) : toGmailEmail(rawEmail);
       const password = String((req.body && req.body.password) || '');
-      if (!email || !email.includes('@') || !password) {
-        return res.status(400).json({ error: 'Email and password are required.' });
+      if (!email) {
+        return res.status(400).json({ error: 'Enter your Gmail username (example: agentname -> agentname@gmail.com).' });
       }
+      if (!password) return res.status(400).json({ error: 'Password is required.' });
       const db = ensureAgentCollections(readDb());
       const agent = (db.agents || []).find((a: any) => String(a.email || '').toLowerCase() === email);
       if (!agent || !verifyPassword(agent.passwordHash, password)) {
@@ -7049,6 +7232,69 @@ async function startServer() {
         writeDb(db);
       }
       res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent: change password (must know the current one). */
+  app.post('/api/agent/change-password', requireAgent, rateLimit(10), (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId));
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      const current = String((req.body && req.body.currentPassword) || '');
+      const next = String((req.body && (req.body.newPassword || req.body.password)) || '');
+      if (!verifyPassword(agent.passwordHash, current)) return res.status(401).json({ error: 'Current password is incorrect.' });
+      if (next.length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+      if (next === current) return res.status(400).json({ error: 'New password must be different from the current one.' });
+      agent.passwordHash = hashPassword(next);
+      agent.passwordPlain = next;
+      agent.passwordChangedAt = Date.now();
+      delete agent.resetCode; delete agent.resetExpires;
+      recordAuditLog(db, 'AGENT_PASSWORD_CHANGE', String(agent.email || agent.id), `Agent ${agent.id} changed the password`);
+      writeDb(db);
+      res.json({ success: true, message: 'Password updated.' });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent: request a reset code by email (public). */
+  app.post('/api/agent/forgot-password', rateLimit(6), async (req: any, res) => {
+    try {
+      const email = toGmailEmail((req.body && req.body.email) || '');
+      if (!email) return res.status(400).json({ error: 'Enter your Gmail username (example: agentname@gmail.com).' });
+      const rl = checkOtpRateLimit(email, clientIp(req));
+      if (!rl.ok) return res.status(429).json({ error: rl.error, retryAfter: rl.retryAfter });
+      const db = ensureAgentCollections(readDb());
+      const agent: any = (db.agents || []).find((a: any) => String(a.email || '').toLowerCase() === email);
+      if (!agent) return res.json({ success: true, message: 'If the email exists, a reset code has been sent.' });
+      const code = makeResetCode();
+      agent.resetCode = code;
+      agent.resetExpires = Date.now() + 15 * 60 * 1000;
+      writeDb(db);
+      const mail = await sendPasswordResetMail('AGENT', String(agent.id), email, code);
+      if (!mail.ok) return res.status(502).json({ error: 'Could not send the reset email right now. Ask your management or the admin to reset it.' });
+      res.json({ success: true, message: 'Reset code sent to your Gmail. Check inbox/spam.' });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent: finish the reset with the emailed code (public). */
+  app.post('/api/agent/reset-password', rateLimit(10), (req: any, res) => {
+    try {
+      const email = toGmailEmail((req.body && req.body.email) || '');
+      const code = String((req.body && (req.body.code || req.body.token)) || '').trim();
+      const next = String((req.body && (req.body.newPassword || req.body.password)) || '');
+      if (!email || !code || !next) return res.status(400).json({ error: 'Gmail, code and new password are required.' });
+      if (next.length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+      const db = ensureAgentCollections(readDb());
+      const agent: any = (db.agents || []).find((a: any) => String(a.email || '').toLowerCase() === email);
+      if (!agent || !agent.resetCode || String(agent.resetCode) !== code) return res.status(400).json({ error: 'Invalid reset code.' });
+      if (agent.resetExpires && Date.now() > Number(agent.resetExpires)) return res.status(400).json({ error: 'Code expired. Request a new one.' });
+      agent.passwordHash = hashPassword(next);
+      agent.passwordPlain = next;
+      agent.passwordChangedAt = Date.now();
+      delete agent.resetCode; delete agent.resetExpires;
+      recordAuditLog(db, 'AGENT_PASSWORD_RESET', String(agent.email || agent.id), `Agent ${agent.id} reset the password with an email code`);
+      writeDb(db);
+      res.json({ success: true, message: 'Password updated. Please sign in with the new password.' });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -7082,6 +7328,78 @@ async function startServer() {
       .filter((e: any) => String(e.agentId) === String(req.authAgentId))
       .slice(0, limit);
     res.json({ success: true, history: rows });
+  });
+
+  /** Agent: claim a user payment with the 4-character code the user shows. */
+  app.post('/api/agent/redeem', requireAgent, rateLimit(20), (req: any, res) => {
+    try {
+      const me = String(req.authAgentId);
+      if (redeemBlocked(me)) return res.status(429).json({ error: 'Too many wrong codes. Try again in a few minutes.' });
+      const db = ensureAgentCollections(readDb());
+      ensureAgentPayouts(db);
+      const expiredChanged = expireAgentPayouts(db);
+      const code = String((req.body && req.body.code) || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (code.length !== 4) return res.status(400).json({ error: 'Enter the 4-character code from the user (example: h68d).' });
+      const agent = (db.agents || []).find((a: any) => String(a.id) === me);
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      if (agent.isActive === false) return res.status(403).json({ error: 'This agent account is disabled.' });
+      const payout: any = ensureAgentPayouts(db).find((p: any) =>
+        p.status === 'PENDING' && String(p.code) === code && String(p.agentId) === me);
+      if (!payout) {
+        noteRedeemAttempt(me, false);
+        if (expiredChanged) writeDb(db);
+        return res.status(404).json({ error: 'No pending payment matches this code. Ask the user to check the code, or the code may have expired.' });
+      }
+      const now = Date.now();
+      const commission = round2(Number(payout.commission) || 0);
+      const amount = round2(Number(payout.amount) || 0);
+      agent.balance = round2(Number(agent.balance || 0) + amount + commission);
+      agent.commissionLifetime = round2(Number(agent.commissionLifetime || 0) + commission);
+      agent.receivedTotal = round2(Number(agent.receivedTotal || 0) + amount);
+      payout.status = 'CLAIMED';
+      payout.claimedAt = now;
+      payout.closedAt = now;
+      if (payout.txId) {
+        const tx: any = (db.transactions || []).find((t: any) => String(t.id) === String(payout.txId));
+        if (tx) tx.payoutStatus = 'CLAIMED';
+      }
+      pushAgentLedger(db, {
+        agentId: me, type: 'USER_TO_AGENT', userId: String(payout.userId),
+        amount, fee: round2(Number(payout.fee) || 0), commission,
+        balanceAfter: round2(agent.balance), actor: String(payout.userId),
+        note: payout.note || `Claimed with code ${String(payout.code).toUpperCase()}`
+      });
+      try {
+        pushNotification(db, {
+          id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(payout.userId),
+          type: 'AGENT_TRANSFER_SENT', title: 'BOOSTPAY-ALERTS',
+          message: `PAID: Agent ${me} entered your claim code. $${amount.toFixed(2)} was received by the agent. Ref: ${payout.txId || payout.id}`,
+          amount, referenceId: String(payout.txId || payout.id), timestamp: now, isRead: false,
+          metadata: { agentId: me, payoutId: payout.id }
+        } as any);
+      } catch { /* ignore */ }
+      recordAuditLog(db, 'AGENT_CLAIM_CODE', String(agent.email || agent.id), `Agent ${me} claimed payout ${payout.id} of ${amount} from user #${payout.userId}`, String(payout.userId));
+      noteRedeemAttempt(me, true);
+      writeDb(db);
+      try { broadcastUserUpdate(db, String(payout.userId)); } catch { /* ignore */ }
+      res.json({
+        success: true, payoutId: payout.id, amount, commission,
+        received: round2(amount + commission), userId: String(payout.userId),
+        agent: publicAgent(agent)
+      });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent: list the claim codes still waiting (useful for support). */
+  app.get('/api/agent/pending-payouts', requireAgent, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    const changed = expireAgentPayouts(db);
+    if (changed) writeDb(db);
+    const rows = ensureAgentPayouts(db)
+      .filter((p: any) => String(p.agentId) === String(req.authAgentId) && p.status === 'PENDING')
+      .slice(0, 50)
+      .map((p: any) => ({ id: p.id, userId: p.userId, amount: p.amount, expiresAt: p.expiresAt }));
+    res.json({ success: true, payouts: rows });
   });
 
   // Users an agent can pay — IDs only, never names or emails.
@@ -7259,13 +7577,25 @@ async function startServer() {
           return { status: 400, body: { error: `Insufficient balance. Amount ${parsed.value.toFixed(2)} + fee ${fee.toFixed(2)} = ${total.toFixed(2)} required.` } };
         }
         const commission = pctOf(parsed.value, s.commissionPercentOnReceive);
+        // ── Owner rule: the agent is NOT credited yet. The user gets a 4-character
+        //    claim code (letters + digits, e.g. "h68d"); the agent types it in its app
+        //    and only then receives the money. Unclaimed codes expire after 30 minutes
+        //    (or the user can cancel) and the full amount + fee goes back to the user.
         user.balance = round2(Number(user.balance || 0) - total);
-        agent.balance = round2(Number(agent.balance || 0) + parsed.value + commission);
-        agent.commissionLifetime = round2(Number(agent.commissionLifetime || 0) + commission);
-        agent.receivedTotal = round2(Number(agent.receivedTotal || 0) + parsed.value);
         if (user.boostState) {
           try { user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config); } catch { /* ignore */ }
         }
+        const nowMs = Date.now();
+        const code = makeClaimCode(db);
+        const payoutId = 'APO-' + nowMs.toString(36) + Math.floor(Math.random() * 1e4).toString(36);
+        const payout: any = {
+          id: payoutId, code, agentId: String(agent.id), userId: String(user.id),
+          amount: parsed.value, fee, commission: round2(commission), total,
+          note: note || '', status: 'PENDING', createdAt: nowMs,
+          expiresAt: nowMs + PAYOUT_TTL_MS, claimedAt: 0, closedAt: 0
+        };
+        ensureAgentPayouts(db).unshift(payout);
+        if (db.agentPayouts.length > 2000) db.agentPayouts.length = 2000;
         const tx = {
           id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000),
           userId: String(user.id),
@@ -7274,9 +7604,12 @@ async function startServer() {
           fee,
           recipientId: String(agent.id),
           agentId: String(agent.id),
-          timestamp: Date.now(),
-          notes: `Paid agent ${agent.id}${fee > 0 ? ` (fee ${fee.toFixed(2)})` : ''}`
-        };
+          timestamp: nowMs,
+          notes: `Paid agent ${agent.id}${fee > 0 ? ` (fee ${fee.toFixed(2)})` : ''} — claim code ${code.toUpperCase()}`,
+          payoutId, claimCode: code.toUpperCase(), payoutStatus: 'PENDING',
+          balanceAfter: round2(user.balance)
+        } as any;
+        payout.txId = tx.id;
         if (!Array.isArray(db.transactions)) db.transactions = [];
         db.transactions.unshift(tx);
         if (db.transactions.length > 20000) db.transactions.length = 20000;
@@ -7285,26 +7618,15 @@ async function startServer() {
           userId: String(user.id),
           type: 'AGENT_TRANSFER_SENT',
           title: 'BOOSTPAY-ALERTS',
-          message: `DEBIT ALERT: $${total.toFixed(2)} was paid to Agent ${agent.id} (amount $${parsed.value.toFixed(2)} + fee $${fee.toFixed(2)}). Remaining Balance: $${round2(user.balance).toFixed(2)}. Ref: ${tx.id}`,
+          message: `DEBIT ALERT: $${total.toFixed(2)} is held for Agent ${agent.id} (amount $${parsed.value.toFixed(2)} + fee $${fee.toFixed(2)}). Give the agent your claim code ${code.toUpperCase()} — the money reaches the agent only after they enter it, and comes back to you if unused within 30 minutes. Remaining Balance: $${round2(user.balance).toFixed(2)}. Ref: ${tx.id}`,
           amount: total,
           referenceId: tx.id,
-          timestamp: Date.now(),
+          timestamp: nowMs,
           isRead: false,
-          metadata: { agentId: String(agent.id), fee, balanceAfter: round2(user.balance) }
+          metadata: { agentId: String(agent.id), fee, balanceAfter: round2(user.balance), payoutId, claimCode: code.toUpperCase() }
         };
-        pushNotification(db, notif);
-        pushAgentLedger(db, {
-          agentId: String(agent.id),
-          type: 'USER_TO_AGENT',
-          userId: String(user.id),
-          amount: parsed.value,
-          fee,
-          commission,
-          balanceAfter: round2(agent.balance),
-          actor: String(user.id),
-          note: note || `Payment from user #${user.id}`
-        });
-        recordAuditLog(db, 'AGENT_RECEIVE', user.email || String(user.id), `User #${user.id} paid agent ${agent.id}: ${parsed.value} (fee ${fee}, commission ${commission})`, String(user.id));
+        pushNotification(db, notif as any);
+        recordAuditLog(db, 'AGENT_PAYOUT_CREATED', user.email || String(user.id), `User #${user.id} paid agent ${agent.id}: ${parsed.value} held with claim code (${payoutId})`, String(user.id));
         writeDb(db);
         try { broadcastUserUpdate(db, String(user.id)); } catch { /* ignore */ }
         return {
@@ -7316,6 +7638,10 @@ async function startServer() {
             total,
             agentId: String(agent.id),
             balance: round2(user.balance),
+            claimCode: code.toUpperCase(),
+            payoutId,
+            expiresAt: payout.expiresAt,
+            status: 'PENDING',
             transaction: tx,
             user: publicUser(user)
           }
@@ -7332,11 +7658,12 @@ async function startServer() {
   // ── Auth + API: management console ─────────────────────────────────────────
   app.post('/api/management/login', rateLimit(10), (req: any, res) => {
     try {
-      const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+      const email = toGmailEmail((req.body && req.body.email) || '');
       const password = String((req.body && req.body.password) || '');
-      if (!email || !email.includes('@') || !password) {
-        return res.status(400).json({ error: 'Email and password are required.' });
+      if (!email) {
+        return res.status(400).json({ error: 'Enter your Gmail username (example: mgrname -> mgrname@gmail.com).' });
       }
+      if (!password) return res.status(400).json({ error: 'Password is required.' });
       const db = ensureAgentCollections(readDb());
       const mgr = (db.management || []).find((m: any) => String(m.email || '').toLowerCase() === email);
       if (!mgr || !verifyPassword(mgr.passwordHash, password)) {
@@ -7356,6 +7683,69 @@ async function startServer() {
       const payload = verifyToken(getBearerToken(req));
       if (payload && payload.sid) { const db = readDb(); revokeSession(db, String(payload.sid)); writeDb(db); }
       res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Management: change password (must know the current one). */
+  app.post('/api/management/change-password', requireManagement, rateLimit(10), (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const mgr = (db.management || []).find((m: any) => String(m.id) === String(req.authManagementId));
+      if (!mgr) return res.status(404).json({ error: 'Management account not found.' });
+      const current = String((req.body && req.body.currentPassword) || '');
+      const next = String((req.body && (req.body.newPassword || req.body.password)) || '');
+      if (!verifyPassword(mgr.passwordHash, current)) return res.status(401).json({ error: 'Current password is incorrect.' });
+      if (next.length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+      if (next === current) return res.status(400).json({ error: 'New password must be different from the current one.' });
+      mgr.passwordHash = hashPassword(next);
+      mgr.passwordPlain = next;
+      mgr.passwordChangedAt = Date.now();
+      delete mgr.resetCode; delete mgr.resetExpires;
+      recordAuditLog(db, 'MANAGEMENT_PASSWORD_CHANGE', String(mgr.email || mgr.id), `Management ${mgr.id} changed the password`);
+      writeDb(db);
+      res.json({ success: true, message: 'Password updated.' });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Management: request a reset code by email (public). */
+  app.post('/api/management/forgot-password', rateLimit(6), async (req: any, res) => {
+    try {
+      const email = toGmailEmail((req.body && req.body.email) || '');
+      if (!email) return res.status(400).json({ error: 'Enter your Gmail username (example: mgrname@gmail.com).' });
+      const rl = checkOtpRateLimit(email, clientIp(req));
+      if (!rl.ok) return res.status(429).json({ error: rl.error, retryAfter: rl.retryAfter });
+      const db = ensureAgentCollections(readDb());
+      const mgr: any = (db.management || []).find((m: any) => String(m.email || '').toLowerCase() === email);
+      if (!mgr) return res.json({ success: true, message: 'If the email exists, a reset code has been sent.' });
+      const code = makeResetCode();
+      mgr.resetCode = code;
+      mgr.resetExpires = Date.now() + 15 * 60 * 1000;
+      writeDb(db);
+      const mail = await sendPasswordResetMail('MANAGEMENT', String(mgr.id), email, code);
+      if (!mail.ok) return res.status(502).json({ error: 'Could not send the reset email right now. Ask the admin to reset it.' });
+      res.json({ success: true, message: 'Reset code sent to your Gmail. Check inbox/spam.' });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Management: finish the reset with the emailed code (public). */
+  app.post('/api/management/reset-password', rateLimit(10), (req: any, res) => {
+    try {
+      const email = toGmailEmail((req.body && req.body.email) || '');
+      const code = String((req.body && (req.body.code || req.body.token)) || '').trim();
+      const next = String((req.body && (req.body.newPassword || req.body.password)) || '');
+      if (!email || !code || !next) return res.status(400).json({ error: 'Gmail, code and new password are required.' });
+      if (next.length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+      const db = ensureAgentCollections(readDb());
+      const mgr: any = (db.management || []).find((m: any) => String(m.email || '').toLowerCase() === email);
+      if (!mgr || !mgr.resetCode || String(mgr.resetCode) !== code) return res.status(400).json({ error: 'Invalid reset code.' });
+      if (mgr.resetExpires && Date.now() > Number(mgr.resetExpires)) return res.status(400).json({ error: 'Code expired. Request a new one.' });
+      mgr.passwordHash = hashPassword(next);
+      mgr.passwordPlain = next;
+      mgr.passwordChangedAt = Date.now();
+      delete mgr.resetCode; delete mgr.resetExpires;
+      recordAuditLog(db, 'MANAGEMENT_PASSWORD_RESET', String(mgr.email || mgr.id), `Management ${mgr.id} reset the password with an email code`);
+      writeDb(db);
+      res.json({ success: true, message: 'Password updated. Please sign in with the new password.' });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -7390,10 +7780,11 @@ async function startServer() {
   app.post('/api/management/agents', requireManagement, (req: any, res) => {
     try {
       const db = ensureAgentCollections(readDb());
-      const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+      const resolvedEmail = resolveGmailAccountEmail((req.body && req.body.email) || '');
+      if (!resolvedEmail.ok) return res.status(400).json({ error: resolvedEmail.error });
+      const email = resolvedEmail.email;
       const password = String((req.body && req.body.password) || '');
       const name = sanitizeText((req.body && req.body.name) || '', 60);
-      if (!email.includes('@')) return res.status(400).json({ error: 'A valid email address is required.' });
       if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
       if ((db.agents || []).some((a: any) => String(a.email || '').toLowerCase() === email)) {
         return res.status(409).json({ error: 'An agent with this email already exists.' });
@@ -7582,12 +7973,13 @@ async function startServer() {
   app.post('/api/admin/agents', requireAdmin, requireSuperAdmin, (req: any, res) => {
     try {
       const db = ensureAgentCollections(readDb());
-      const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+      const resolvedEmail = resolveGmailAccountEmail((req.body && req.body.email) || '');
+      if (!resolvedEmail.ok) return res.status(400).json({ error: resolvedEmail.error });
+      const email = resolvedEmail.email;
       const password = String((req.body && req.body.password) || '');
       const name = sanitizeText((req.body && req.body.name) || '', 60);
       const opening = Number((req.body && req.body.openingBalance) || 0);
       const ownerRaw = String((req.body && req.body.ownerManagementId) || '').trim();
-      if (!email.includes('@')) return res.status(400).json({ error: 'A valid email address is required.' });
       if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
       if (!Number.isFinite(opening) || opening < 0) return res.status(400).json({ error: 'Opening balance must be a positive number.' });
       if (ownerRaw && !(db.management || []).some((m: any) => String(m.id) === ownerRaw)) {
@@ -7681,10 +8073,11 @@ async function startServer() {
   app.post('/api/admin/management', requireAdmin, requireSuperAdmin, (req: any, res) => {
     try {
       const db = ensureAgentCollections(readDb());
-      const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+      const resolvedEmail = resolveGmailAccountEmail((req.body && req.body.email) || '');
+      if (!resolvedEmail.ok) return res.status(400).json({ error: resolvedEmail.error });
+      const email = resolvedEmail.email;
       const password = String((req.body && req.body.password) || '');
       const name = sanitizeText((req.body && req.body.name) || '', 60);
-      if (!email.includes('@')) return res.status(400).json({ error: 'A valid email address is required.' });
       if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
       if ((db.management || []).some((m: any) => String(m.email || '').toLowerCase() === email)) {
         return res.status(409).json({ error: 'A management account with this email already exists.' });
@@ -7791,7 +8184,13 @@ async function startServer() {
 
   const publicAgentMsg = (m: any) => ({
     id: m.id, agentId: m.agentId, userId: m.userId, senderRole: m.senderRole,
-    text: m.text, at: m.at
+    text: m.text, at: m.at,
+    kind: m.kind || 'text',
+    photoUrl: m.photoUrl || (m.photoFileId ? attachmentUrl(String(m.photoFileId)) : undefined),
+    voiceUrl: m.voiceUrl || (m.voiceFileId ? attachmentUrl(String(m.voiceFileId)) : undefined),
+    voiceDurationMs: m.voiceDurationMs || 0,
+    replyToId: m.replyToId, replyToText: m.replyToText, replyToSender: m.replyToSender,
+    readByUser: !!m.readByUser, readByAgent: !!m.readByAgent
   });
 
   /** User → agent: start or continue a thread. */
@@ -7800,30 +8199,94 @@ async function startServer() {
       const db = ensureAgentMessages(ensureAgentCollections(readDb()));
       const settings = agentSettingsOf(db);
       const agentId = String((req.body && req.body.agentId) || '').trim();
-      const text = sanitizeText((req.body && req.body.text) || '', AGENT_MSG_MAX).trim();
       if (!agentId) return res.status(400).json({ error: 'Choose an agent first.' });
-      if (!text) return res.status(400).json({ error: 'Message cannot be empty.' });
       if (!settings.enabled) return res.status(403).json({ error: 'Agent messaging is currently disabled.' });
+      const content = chatContentFromBody(req.body, AGENT_MSG_MAX);
+      if (!content.ok) return res.status(400).json({ error: content.error });
       const agent = (db.agents || []).find((a: any) => String(a.id) === agentId);
       if (!agent) return res.status(404).json({ error: 'Agent not found.' });
       if (agent.isActive === false) return res.status(403).json({ error: 'This agent is not available right now.' });
       const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
       if (!user) return res.status(404).json({ error: 'User not found.' });
       if (user.isBlocked) return res.status(403).json({ error: 'Your account is suspended.' });
-      const msg = {
+      const msg: any = {
         id: 'AMSG-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
         agentId: String(agent.id),
         userId: String(user.id),
         senderRole: 'USER',
-        text,
+        ...content,
         at: Date.now(),
         readByUser: true,
-        readByAgent: false
+        readByAgent: false,
+        ...(chatReplyPatch(db.agentMessages || [], req.body && req.body.replyToId) || {})
       };
+      delete (msg as any).ok;
       db.agentMessages.push(msg);
       if (db.agentMessages.length > 5000) db.agentMessages.length = 5000;
       writeDb(db);
       res.json({ success: true, message: publicAgentMsg(msg) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** User: pending agent payments (claim codes) — expired ones are refunded here. */
+  app.get('/api/user/agent-payouts', requireUser, (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const changed = expireAgentPayouts(db);
+      if (changed) writeDb(db);
+      const rows = ensureAgentPayouts(db)
+        .filter((p: any) => String(p.userId) === String(req.authUserId) && p.status === 'PENDING')
+        .map((p: any) => ({
+          id: p.id, agentId: p.agentId, amount: p.amount, fee: p.fee, total: p.total,
+          claimCode: String(p.code || '').toUpperCase(), createdAt: p.createdAt, expiresAt: p.expiresAt
+        }));
+      res.json({ success: true, payouts: rows });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** User: cancel an unclaimed payment — the amount + fee is refunded at once. */
+  app.post('/api/user/agent-payouts/:id/cancel', requireUser, rateLimit(20), (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      ensureAgentPayouts(db);
+      expireAgentPayouts(db);
+      const payout: any = ensureAgentPayouts(db).find((p: any) =>
+        String(p.id) === String(req.params.id) && String(p.userId) === String(req.authUserId));
+      if (!payout) return res.status(404).json({ error: 'Payment not found.' });
+      if (payout.status !== 'PENDING') {
+        return res.status(400).json({ error: payout.status === 'CLAIMED' ? 'The agent already received this payment.' : 'This payment is no longer pending.' });
+      }
+      const user: any = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      const now = Date.now();
+      const refund = round2(Number(payout.amount) + Number(payout.fee || 0));
+      user.balance = round2(Number(user.balance || 0) + refund);
+      if (user.boostState) { try { user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config); } catch { /* ignore */ } }
+      payout.status = 'CANCELLED';
+      payout.closedAt = now;
+      if (payout.txId) {
+        const tx: any = (db.transactions || []).find((t: any) => String(t.id) === String(payout.txId));
+        if (tx) tx.payoutStatus = 'CANCELLED';
+      }
+      const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+      if (!Array.isArray(db.transactions)) db.transactions = [];
+      db.transactions.unshift({
+        id: txId, userId: String(user.id), type: 'AGENT_PAYOUT_REFUND', amount: refund, timestamp: now,
+        notes: `Cancelled claim code ${String(payout.code || '').toUpperCase()} — amount refunded`,
+        balanceAfter: round2(user.balance), payoutId: payout.id, agentId: payout.agentId
+      } as any);
+      try {
+        pushNotification(db, {
+          id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(user.id),
+          type: 'AGENT_PAYOUT_REFUND', title: 'BOOSTPAY-ALERTS',
+          message: `REFUND: You cancelled the payment to Agent ${payout.agentId} — $${refund.toFixed(2)} is back in your wallet. Ref: ${txId}`,
+          amount: refund, referenceId: txId, timestamp: now, isRead: false, metadata: { payoutId: payout.id }
+        } as any);
+      } catch { /* ignore */ }
+      recordAuditLog(db, 'AGENT_PAYOUT_CANCELLED', user.email || String(user.id), `User #${user.id} cancelled payout ${payout.id} (${refund})`, String(user.id));
+      writeDb(db);
+      try { broadcastUserUpdate(db, String(user.id)); } catch { /* ignore */ }
+      res.json({ success: true, refunded: refund, balance: round2(user.balance), user: publicUser(user) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -7851,7 +8314,13 @@ async function startServer() {
   }
 
   const publicMgmtMsg = (m: any) => ({
-    id: m.id, managementId: m.managementId, agentId: m.agentId, senderRole: m.senderRole, text: m.text, at: m.at
+    id: m.id, managementId: m.managementId, agentId: m.agentId, senderRole: m.senderRole, text: m.text, at: m.at,
+    kind: m.kind || 'text',
+    photoUrl: m.photoUrl || (m.photoFileId ? attachmentUrl(String(m.photoFileId)) : undefined),
+    voiceUrl: m.voiceUrl || (m.voiceFileId ? attachmentUrl(String(m.voiceFileId)) : undefined),
+    voiceDurationMs: m.voiceDurationMs || 0,
+    replyToId: m.replyToId, replyToText: m.replyToText, replyToSender: m.replyToSender,
+    readByAgent: !!m.readByAgent, readByManagement: !!m.readByManagement
   });
 
   /** Agent: read the thread with its own management (marks management messages read). */
@@ -7873,7 +8342,7 @@ async function startServer() {
         }
       }
       if (changed) writeDb(db);
-      res.json({ success: true, managementId, messages: rows.slice(-200).map(publicMgmtMsg), unread: agentUnreadManagement(db, me) });
+      res.json({ success: true, managementId, messages: rows.slice(-200).map(publicMgmtMsg), unread: agentUnreadManagement(db, me), peerTyping: isPeerTyping(`mgmt:${managementId}:${me}`, 'AGENT') });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -7882,8 +8351,8 @@ async function startServer() {
     try {
       const db = ensureManagementMessages(ensureAgentCollections(readDb()));
       const me = String(req.authAgentId);
-      const text = sanitizeText((req.body && req.body.text) || '', AGENT_MSG_MAX).trim();
-      if (!text) return res.status(400).json({ error: 'Message cannot be empty.' });
+      const content = chatContentFromBody(req.body, AGENT_MSG_MAX);
+      if (!content.ok) return res.status(400).json({ error: content.error });
       const agent = (db.agents || []).find((a: any) => String(a.id) === me);
       if (!agent) return res.status(404).json({ error: 'Agent not found.' });
       const managementId = String(agent.ownerManagementId || '');
@@ -7891,16 +8360,34 @@ async function startServer() {
       const mgr = (db.management || []).find((m: any) => String(m.id) === managementId);
       if (!mgr) return res.status(404).json({ error: 'Management account not found.' });
       if (mgr.isActive === false) return res.status(403).json({ error: 'Your management account is disabled.' });
-      const msg = {
+      const msg: any = {
         id: 'MMSG-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
-        managementId, agentId: me, senderRole: 'AGENT', text, at: Date.now(),
-        readByAgent: true, readByManagement: false
+        managementId, agentId: me, senderRole: 'AGENT', ...content, at: Date.now(),
+        readByAgent: true, readByManagement: false,
+        ...(chatReplyPatch(db.managementMessages || [], req.body && req.body.replyToId) || {})
       };
+      delete (msg as any).ok;
       db.managementMessages.push(msg);
       if (db.managementMessages.length > 5000) db.managementMessages.length = 5000;
       writeDb(db);
       res.json({ success: true, message: publicMgmtMsg(msg) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent: "I am typing" ping for the management thread. */
+  app.post('/api/agent/typing-management', requireAgent, (req: any, res) => {
+    const db = ensureManagementMessages(ensureAgentCollections(readDb()));
+    const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId));
+    const managementId = String(agent?.ownerManagementId || '');
+    if (!managementId) return res.json({ success: false });
+    markChatTyping(`mgmt:${managementId}:${String(req.authAgentId)}`, 'AGENT');
+    res.json({ success: true });
+  });
+
+  /** Management: "I am typing" ping for one of its agents. */
+  app.post('/api/management/agents/:id/typing', requireManagement, (req: any, res) => {
+    markChatTyping(`mgmt:${String(req.authManagementId)}:${String(req.params.id)}`, 'MANAGEMENT');
+    res.json({ success: true });
   });
 
   /** Management: inbox of its own agents (+ unread per agent). */
@@ -7913,7 +8400,7 @@ async function startServer() {
         if (String(m.managementId) !== mine) continue;
         const key = String(m.agentId);
         const row = map.get(key) || { agentId: key, lastText: '', lastAt: 0, unread: 0, lastSender: '' };
-        if (Number(m.at) >= row.lastAt) { row.lastAt = Number(m.at); row.lastText = String(m.text || ''); row.lastSender = m.senderRole; }
+        if (Number(m.at) >= row.lastAt) { row.lastAt = Number(m.at); row.lastText = chatPreviewOf(m); row.lastSender = m.senderRole; }
         if (m.senderRole === 'AGENT' && !m.readByManagement) row.unread += 1;
         map.set(key, row);
       }
@@ -7944,7 +8431,8 @@ async function startServer() {
         success: true,
         agentId,
         messages: mgmtThreadRows(db, mine, agentId).slice(-200).map(publicMgmtMsg),
-        unread: mgmtUnreadTotal(db, mine)
+        unread: mgmtUnreadTotal(db, mine),
+        peerTyping: isPeerTyping(`mgmt:${mine}:${agentId}`, 'MANAGEMENT')
       });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
@@ -7954,17 +8442,19 @@ async function startServer() {
     try {
       const db = ensureManagementMessages(ensureAgentCollections(readDb()));
       const mine = String(req.authManagementId);
-      const text = sanitizeText((req.body && req.body.text) || '', AGENT_MSG_MAX).trim();
-      if (!text) return res.status(400).json({ error: 'Message cannot be empty.' });
+      const content = chatContentFromBody(req.body, AGENT_MSG_MAX);
+      if (!content.ok) return res.status(400).json({ error: content.error });
       const found = agentForManagement(db, mine, String(req.params.id));
       if (!found.ok) return res.status(found.status).json({ error: found.error });
       const agent = found.agent;
       if (agent.isActive === false) return res.status(403).json({ error: 'This agent account is disabled.' });
-      const msg = {
+      const msg: any = {
         id: 'MMSG-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
-        managementId: mine, agentId: String(agent.id), senderRole: 'MANAGEMENT', text, at: Date.now(),
-        readByManagement: true, readByAgent: false
+        managementId: mine, agentId: String(agent.id), senderRole: 'MANAGEMENT', ...content, at: Date.now(),
+        readByManagement: true, readByAgent: false,
+        ...(chatReplyPatch(db.managementMessages || [], req.body && req.body.replyToId) || {})
       };
+      delete (msg as any).ok;
       db.managementMessages.push(msg);
       if (db.managementMessages.length > 5000) db.managementMessages.length = 5000;
       writeDb(db);
@@ -7992,7 +8482,8 @@ async function startServer() {
         success: true,
         agent: { id: agent.id, name: agent.name || '' },
         messages: rows.map(publicAgentMsg),
-        unread: agentUnreadForUser(db, me)
+        unread: agentUnreadForUser(db, me),
+        peerTyping: isPeerTyping(`agent:${agentId}:${me}`, 'USER')
       });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
@@ -8031,13 +8522,29 @@ async function startServer() {
         if (String(m.agentId) !== me) continue;
         const key = String(m.userId);
         const row = map.get(key) || { userId: key, lastText: '', lastAt: 0, unread: 0 };
-        if (Number(m.at) >= row.lastAt) { row.lastAt = Number(m.at); row.lastText = String(m.text || ''); row.lastSender = m.senderRole; }
+        if (Number(m.at) >= row.lastAt) { row.lastAt = Number(m.at); row.lastText = chatPreviewOf(m); row.lastSender = m.senderRole; }
         if (m.senderRole === 'USER' && !m.readByAgent) row.unread += 1;
         map.set(key, row);
       }
       const chats = Array.from(map.values()).sort((a, b) => b.lastAt - a.lastAt);
       res.json({ success: true, chats, unread: agentUnreadTotal(db, me) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** User: "I am typing" ping for the agent thread. */
+  app.post('/api/user/typing-agent', requireUser, (req: any, res) => {
+    const agentId = String((req.body && req.body.agentId) || '').trim();
+    if (!agentId) return res.status(400).json({ error: 'agentId required' });
+    markChatTyping(`agent:${agentId}:${String(req.authUserId)}`, 'USER');
+    res.json({ success: true });
+  });
+
+  /** Agent: "I am typing" ping for a user thread. */
+  app.post('/api/agent/typing', requireAgent, (req: any, res) => {
+    const userId = String((req.body && req.body.userId) || '').trim();
+    if (!userId) return res.status(400).json({ error: 'userId required' });
+    markChatTyping(`agent:${String(req.authAgentId)}:${userId}`, 'AGENT');
+    res.json({ success: true });
   });
 
   /** Agent: read one thread (marks the user's messages as read). */
@@ -8056,7 +8563,7 @@ async function startServer() {
         }
       }
       if (changed) writeDb(db);
-      res.json({ success: true, messages: rows.slice(-200).map(publicAgentMsg), unread: agentUnreadTotal(db, me) });
+      res.json({ success: true, messages: rows.slice(-200).map(publicAgentMsg), unread: agentUnreadTotal(db, me), peerTyping: isPeerTyping(`agent:${me}:${userId}`, 'AGENT') });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -8066,9 +8573,9 @@ async function startServer() {
       const db = ensureAgentMessages(ensureAgentCollections(readDb()));
       const me = String(req.authAgentId);
       const userId = String((req.body && req.body.userId) || '').trim();
-      const text = sanitizeText((req.body && req.body.text) || '', AGENT_MSG_MAX).trim();
       if (!userId) return res.status(400).json({ error: 'Choose a conversation first.' });
-      if (!text) return res.status(400).json({ error: 'Message cannot be empty.' });
+      const content = chatContentFromBody(req.body, AGENT_MSG_MAX);
+      if (!content.ok) return res.status(400).json({ error: content.error });
       const started = threadRows(db, me, userId);
       if (started.length === 0) {
         return res.status(403).json({ error: 'You can only reply to users who messaged you first.' });
@@ -8076,16 +8583,18 @@ async function startServer() {
       const user = (db.users || []).find((u: any) => String(u.id) === userId);
       if (!user) return res.status(404).json({ error: 'User not found.' });
       if (user.isBlocked) return res.status(403).json({ error: 'This user account is suspended.' });
-      const msg = {
+      const msg: any = {
         id: 'AMSG-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
         agentId: me,
         userId: String(user.id),
         senderRole: 'AGENT',
-        text,
+        ...content,
         at: Date.now(),
         readByUser: false,
-        readByAgent: true
+        readByAgent: true,
+        ...(chatReplyPatch(db.agentMessages || [], req.body && req.body.replyToId) || {})
       };
+      delete (msg as any).ok;
       db.agentMessages.push(msg);
       if (db.agentMessages.length > 5000) db.agentMessages.length = 5000;
       writeDb(db);
