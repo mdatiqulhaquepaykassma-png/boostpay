@@ -1193,7 +1193,7 @@ function adoptPersistedApiSecret(doc: any): void {
 
 const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (was 30d — harden token theft window)
 
-function issueToken(sub: string, role: 'USER' | 'ADMIN', sid?: string, adminRole?: string): string {
+function issueToken(sub: string, role: 'USER' | 'ADMIN' | 'AGENT' | 'MANAGEMENT', sid?: string, adminRole?: string): string {
   const payload: any = { sub: String(sub), role, exp: Date.now() + TOKEN_TTL_MS };
   if (sid) payload.sid = String(sid);
   if (adminRole) payload.adminRole = adminRole;
@@ -1262,7 +1262,7 @@ function getBearerToken(req: any): string | null {
 interface SessionRecord {
   id: string;
   userId: string;
-  role: 'USER' | 'ADMIN';
+  role: 'USER' | 'ADMIN' | 'AGENT' | 'MANAGEMENT';
   ip: string;
   userAgent: string;
   createdAt: number;
@@ -1270,6 +1270,8 @@ interface SessionRecord {
   revoked?: boolean;
 }
 const revokedSessions = new Set<string>();
+// Idempotency for agent money movements (double-tap / retry protection)
+const agentIdempotency = new Map<string, { at: number; resp: any }>();
 function sessionSnapshot(db: any): SessionRecord[] {
   if (!Array.isArray(db.sessions)) db.sessions = [];
   return db.sessions;
@@ -1322,7 +1324,7 @@ function sessionBlockReason(db: any, payload: any): string | null {
   return null;
 }
 
-function createSession(db: any, userId: string, role: 'USER' | 'ADMIN', ip: string, userAgent: string): SessionRecord {
+function createSession(db: any, userId: string, role: 'USER' | 'ADMIN' | 'AGENT' | 'MANAGEMENT', ip: string, userAgent: string): SessionRecord {
   const sess: SessionRecord = {
     id: 'SESS-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
     userId: String(userId),
@@ -6792,6 +6794,821 @@ async function startServer() {
   app.post('/api/chat/spam-check', requireUser, (req:any,res)=>{
     // placeholder for client spam reporting — server already checks in /api/chat/send
     res.json({ok:true});
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BoostPay Agent network + BoostPay Management console
+  //   • agents: separate accounts, own balance, earn commission on send/receive
+  //   • users pay a configured fee when they send money to an agent
+  //   • management: creates agents, moves money to/from agent accounts, sets rates
+  //   • admins: full control (create/disable/adjust) from the admin console
+  // Money rules (owner decision):
+  //   user → agent : user is debited amount + fee, agent is credited the full
+  //                  amount plus the receive commission (paid by the platform)
+  //   agent → user : agent is debited the amount, user is credited the full
+  //                  amount, agent earns the send commission (paid by platform)
+  //   lifetime commission on the agent = sum of all commission credits
+  // ═══════════════════════════════════════════════════════════════════════════
+  const AGENT_SETTINGS_DEFAULT = {
+    enabled: true,
+    feePercentOnUserSend: 2,          // % the USER pays on top when paying an agent
+    commissionPercentOnReceive: 1,    // % the AGENT earns when receiving from a user
+    commissionPercentOnSend: 1,       // % the AGENT earns when sending to a user
+    minUserSend: 1,
+    maxUserSend: 100000,
+    allowAgentBoost: false            // owner rule: only user accounts boost
+  };
+
+  const round2 = (n: number) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+  const pctOf = (amount: number, pct: number) => round2((Number(amount) || 0) * (Number(pct) || 0) / 100);
+
+  function agentSettingsOf(db: any) {
+    const cfg = (db && db.config && (db.config as any).agentSettings) || {};
+    const merged: any = { ...AGENT_SETTINGS_DEFAULT };
+    for (const k of Object.keys(AGENT_SETTINGS_DEFAULT)) {
+      if (cfg[k] === undefined || cfg[k] === null) continue;
+      merged[k] = typeof (AGENT_SETTINGS_DEFAULT as any)[k] === 'boolean' ? Boolean(cfg[k]) : Number(cfg[k]);
+    }
+    // Hard sanity clamps so a bad config can never mint or burn absurd money.
+    const clampPct = (v: number) => Math.min(50, Math.max(0, Number.isFinite(v) ? v : 0));
+    merged.feePercentOnUserSend = clampPct(merged.feePercentOnUserSend);
+    merged.commissionPercentOnReceive = clampPct(merged.commissionPercentOnReceive);
+    merged.commissionPercentOnSend = clampPct(merged.commissionPercentOnSend);
+    merged.minUserSend = Math.max(0.1, Number(merged.minUserSend) || 1);
+    merged.maxUserSend = Math.min(1e6, Math.max(merged.minUserSend, Number(merged.maxUserSend) || 100000));
+    return merged;
+  }
+
+  function ensureAgentCollections(db: any) {
+    if (!Array.isArray(db.agents)) db.agents = [];
+    if (!Array.isArray(db.management)) db.management = [];
+    if (!Array.isArray(db.agentLedger)) db.agentLedger = [];
+    if (!db.config) db.config = {};
+    if (!(db.config as any).agentSettings) (db.config as any).agentSettings = { ...AGENT_SETTINGS_DEFAULT };
+    return db;
+  }
+
+  const publicAgent = (a: any) => ({
+    id: a.id,
+    name: a.name || '',
+    email: a.email || '',
+    balance: round2(a.balance || 0),
+    commissionLifetime: round2(a.commissionLifetime || 0),
+    sentTotal: round2(a.sentTotal || 0),
+    receivedTotal: round2(a.receivedTotal || 0),
+    isActive: a.isActive !== false,
+    createdAt: a.createdAt || 0,
+    lastLoginAt: a.lastLoginAt || 0,
+    createdBy: a.createdBy || ''
+  });
+
+  const publicManagement = (m: any) => ({
+    id: m.id,
+    name: m.name || '',
+    email: m.email || '',
+    isActive: m.isActive !== false,
+    createdAt: m.createdAt || 0,
+    lastLoginAt: m.lastLoginAt || 0,
+    createdBy: m.createdBy || '',
+    // Owner rule for the admin console: passwords are shown explicitly there.
+    passwordPlain: m.passwordPlain || ''
+  });
+
+  function agentPlatformStats(db: any) {
+    const ledger = db.agentLedger || [];
+    let feesCollected = 0, commissionsPaid = 0, volumeIn = 0, volumeOut = 0;
+    for (const e of ledger) {
+      feesCollected += Number(e.fee || 0);
+      commissionsPaid += Number(e.commission || 0);
+      if (e.type === 'USER_TO_AGENT') volumeIn += Number(e.amount || 0);
+      if (e.type === 'AGENT_TO_USER') volumeOut += Number(e.amount || 0);
+    }
+    const totalAgentBalance = (db.agents || []).reduce((s: number, a: any) => s + (Number(a.balance) || 0), 0);
+    return {
+      feesCollected: round2(feesCollected),
+      commissionsPaid: round2(commissionsPaid),
+      platformNet: round2(feesCollected - commissionsPaid),
+      volumeIn: round2(volumeIn),
+      volumeOut: round2(volumeOut),
+      totalAgentBalance: round2(totalAgentBalance),
+      agents: (db.agents || []).length,
+      management: (db.management || []).length
+    };
+  }
+
+  function pushAgentLedger(db: any, entry: any) {
+    if (!Array.isArray(db.agentLedger)) db.agentLedger = [];
+    const row = {
+      id: 'ALD-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
+      at: Date.now(),
+      ...entry
+    };
+    db.agentLedger.unshift(row);
+    if (db.agentLedger.length > 5000) db.agentLedger.length = 5000;
+    return row;
+  }
+
+  /** Server-side money validation shared by every agent flow. */
+  function parseAgentAmount(raw: any, min: number, max: number): { ok: boolean; value: number; error?: string } {
+    const s = String(raw ?? '').trim();
+    if (!/^\d+(\.\d{1,2})?$/.test(s)) return { ok: false, value: 0, error: 'Amount must be a number with at most 2 decimal places.' };
+    const v = Number(s);
+    if (!Number.isFinite(v) || v <= 0) return { ok: false, value: 0, error: 'Enter an amount greater than 0.' };
+    if (v < min) return { ok: false, value: 0, error: `Minimum amount is ${min}.` };
+    if (v > max) return { ok: false, value: 0, error: `Maximum amount is ${max}.` };
+    return { ok: true, value: round2(v) };
+  }
+
+  function newAgentId(db: any) {
+    let n = 1001 + (db.agents || []).length;
+    while ((db.agents || []).some((a: any) => a.id === `AGT-${n}`)) n++;
+    return `AGT-${n}`;
+  }
+  function newManagementId(db: any) {
+    let n = 101 + (db.management || []).length;
+    while ((db.management || []).some((m: any) => m.id === `MGT-${n}`)) n++;
+    return `MGT-${n}`;
+  }
+
+  function requireAgent(req: any, res: any, next: any) {
+    const payload = verifyToken(getBearerToken(req));
+    if (!payload || payload.role !== 'AGENT') {
+      return res.status(401).json({ error: 'Agent sign-in required.' });
+    }
+    let db: any = null;
+    try { db = readDb(); } catch { /* ignore */ }
+    const blocked = sessionBlockReason(db, payload);
+    if (blocked) return res.status(401).json({ error: blocked });
+    const agent = ((db && db.agents) || []).find((a: any) => String(a.id) === String(payload.sub));
+    if (!agent) return res.status(401).json({ error: 'This agent account no longer exists.' });
+    if (agent.isActive === false) return res.status(403).json({ error: 'This agent account is disabled. Contact management.' });
+    req.authAgentId = String(agent.id);
+    req.authSid = payload.sid;
+    try { if (db) touchSession(db, payload.sid); } catch { /* ignore */ }
+    next();
+  }
+
+  function requireManagement(req: any, res: any, next: any) {
+    const payload = verifyToken(getBearerToken(req));
+    if (!payload || payload.role !== 'MANAGEMENT') {
+      return res.status(401).json({ error: 'Management sign-in required.' });
+    }
+    let db: any = null;
+    try { db = readDb(); } catch { /* ignore */ }
+    const blocked = sessionBlockReason(db, payload);
+    if (blocked) return res.status(401).json({ error: blocked });
+    const mgr = ((db && db.management) || []).find((m: any) => String(m.id) === String(payload.sub));
+    if (!mgr) return res.status(401).json({ error: 'This management account no longer exists.' });
+    if (mgr.isActive === false) return res.status(403).json({ error: 'This management account is disabled.' });
+    const current = readDb();
+    ensureAgentCollections(current);
+    const rec = current.management.find((m: any) => String(m.id) === String(payload.sub));
+    if (rec) { rec.lastSeenAt = Date.now(); }
+    req.authManagementId = String(mgr.id);
+    req.authSid = payload.sid;
+    try { touchSession(current, payload.sid); } catch { /* ignore */ }
+    next();
+  }
+
+  // ── Auth: agent app ────────────────────────────────────────────────────────
+  app.post('/api/agent/login', rateLimit(10), (req: any, res) => {
+    try {
+      const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+      const password = String((req.body && req.body.password) || '');
+      if (!email || !email.includes('@') || !password) {
+        return res.status(400).json({ error: 'Email and password are required.' });
+      }
+      const db = ensureAgentCollections(readDb());
+      const agent = (db.agents || []).find((a: any) => String(a.email || '').toLowerCase() === email);
+      if (!agent || !verifyPassword(agent.passwordHash, password)) {
+        return res.status(401).json({ error: 'Invalid agent email or password.' });
+      }
+      if (agent.isActive === false) return res.status(403).json({ error: 'This agent account is disabled. Contact management.' });
+      if (needsRehash(agent.passwordHash)) agent.passwordHash = hashPassword(password);
+      agent.lastLoginAt = Date.now();
+      const sess = createSession(db, String(agent.id), 'AGENT' as any, clientIp(req), String(req.headers['user-agent'] || ''));
+      writeDb(db);
+      try { recordAuditLog(db, 'AGENT_LOGIN', agent.email, `Agent ${agent.id} signed in`); } catch { /* ignore */ }
+      res.json({ success: true, token: issueToken(String(agent.id), 'AGENT' as any, sess.id), sessionId: sess.id, agent: publicAgent(agent) });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/agent/logout', (req: any, res) => {
+    try {
+      const payload = verifyToken(getBearerToken(req));
+      if (payload && payload.sid) {
+        const db = readDb();
+        revokeSession(db, String(payload.sid));
+        writeDb(db);
+      }
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.get('/api/agent/me', requireAgent, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId));
+    if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+    const s = agentSettingsOf(db);
+    res.json({
+      success: true,
+      agent: publicAgent(agent),
+      settings: {
+        feePercentOnUserSend: s.feePercentOnUserSend,
+        commissionPercentOnReceive: s.commissionPercentOnReceive,
+        commissionPercentOnSend: s.commissionPercentOnSend,
+        minUserSend: s.minUserSend,
+        maxUserSend: s.maxUserSend
+      },
+      // Owner rule: only user accounts can boost.
+      flags: { boostEnabled: false, boostReason: 'Boost is available for user accounts only.' },
+      platform: agentPlatformStats(db)
+    });
+  });
+
+  app.get('/api/agent/history', requireAgent, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+    const rows = (db.agentLedger || [])
+      .filter((e: any) => String(e.agentId) === String(req.authAgentId))
+      .slice(0, limit);
+    res.json({ success: true, history: rows });
+  });
+
+  // Users an agent can pay — IDs only, never names or emails.
+  app.get('/api/agent/users', requireAgent, (req: any, res) => {
+    const db = readDb();
+    const q = String(req.query.q || '').trim();
+    let rows = (db.users || []).map((u: any) => ({
+      id: String(u.id),
+      isBlocked: !!u.isBlocked,
+      isFrozen: !!u.isFrozen,
+      allowReceive: !u.isBlocked
+    }));
+    if (q) rows = rows.filter((u: any) => u.id === q || u.id.startsWith(q));
+    res.json({ success: true, users: rows.slice(0, 30) });
+  });
+
+  // Agent → user payout (agent earns the send commission, platform funded)
+  app.post('/api/agent/send', requireAgent, rateLimit(30), async (req: any, res) => {
+    // Duplicate protection uses the client's own key only — a time bucket would
+    // wrongly treat two legitimate payments of the same amount as duplicates.
+    const explicitKey = String((req.body && (req.body.idempotencyKey || req.body.key)) || '').trim();
+    const idemKey = explicitKey ? `AGENT_SEND:${req.authAgentId}:${explicitKey}` : '';
+    const dup = idemKey ? agentIdempotency.get(idemKey) : undefined;
+    if (dup && Date.now() - dup.at < 60000) return res.json({ ...dup.resp, duplicate: true });
+    try {
+      const settings = agentSettingsOf(readDb());
+      const parsed = parseAgentAmount(req.body && req.body.amount, 0.1, settings.maxUserSend);
+      if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+      const userId = String((req.body && req.body.userId) || '').trim();
+      if (!userId) return res.status(400).json({ error: 'Recipient User ID is required.' });
+      const note = sanitizeText(req.body && req.body.note, 120);
+
+      const result = await withTransferLock('AGENT:' + req.authAgentId, () => {
+        const db = ensureAgentCollections(readDb());
+        const s = agentSettingsOf(db);
+        const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId));
+        const user = (db.users || []).find((u: any) => String(u.id) === userId);
+        if (!agent) return { status: 404, body: { error: 'Agent not found.' } };
+        if (!user) return { status: 404, body: { error: `User ID #${userId} was not found.` } };
+        if (user.isBlocked) return { status: 403, body: { error: 'That user account is suspended.' } };
+        if (Number(agent.balance || 0) < parsed.value) {
+          return { status: 400, body: { error: `Insufficient agent balance. Need ${parsed.value.toFixed(2)}, available ${round2(agent.balance || 0).toFixed(2)}.` } };
+        }
+        const commission = pctOf(parsed.value, s.commissionPercentOnSend);
+        agent.balance = round2(Number(agent.balance || 0) - parsed.value + commission);
+        agent.commissionLifetime = round2(Number(agent.commissionLifetime || 0) + commission);
+        agent.sentTotal = round2(Number(agent.sentTotal || 0) + parsed.value);
+        user.balance = round2(Number(user.balance || 0) + parsed.value);
+        if (user.boostState) {
+          try { user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config); } catch { /* ignore */ }
+        }
+        const tx = {
+          id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000),
+          userId: String(user.id),
+          type: 'AGENT_TRANSFER_RECEIVED',
+          amount: parsed.value,
+          senderId: String(agent.id),
+          timestamp: Date.now(),
+          notes: `Received from Agent ${agent.id}`,
+          agentId: String(agent.id)
+        };
+        if (!Array.isArray(db.transactions)) db.transactions = [];
+        db.transactions.unshift(tx);
+        if (db.transactions.length > 20000) db.transactions.length = 20000;
+        const notif = {
+          id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+          userId: String(user.id),
+          type: 'AGENT_TRANSFER_RECEIVED',
+          title: 'BOOSTPAY-ALERTS',
+          message: `CREDIT ALERT: $${parsed.value.toFixed(2)} has been credited to your wallet by Agent ${agent.id}. Available Balance: $${round2(user.balance).toFixed(2)}. Ref: ${tx.id}`,
+          amount: parsed.value,
+          referenceId: tx.id,
+          timestamp: Date.now(),
+          isRead: false,
+          metadata: { agentId: String(agent.id), balanceAfter: round2(user.balance) }
+        };
+        pushNotification(db, notif);
+        pushAgentLedger(db, {
+          agentId: String(agent.id),
+          type: 'AGENT_TO_USER',
+          userId: String(user.id),
+          amount: parsed.value,
+          fee: 0,
+          commission,
+          balanceAfter: round2(agent.balance),
+          actor: String(agent.id),
+          note: note || `Payout to user #${user.id}`
+        });
+        recordAuditLog(db, 'AGENT_SEND', agent.email || agent.id, `Agent ${agent.id} sent ${parsed.value} to user #${user.id} (commission ${commission})`, String(user.id));
+        writeDb(db);
+        try { broadcastUserUpdate(db, String(user.id)); } catch { /* ignore */ }
+        return {
+          status: 200,
+          body: {
+            success: true,
+            amount: parsed.value,
+            commission,
+            agent: publicAgent(agent),
+            user: { id: String(user.id), balance: round2(user.balance) },
+            transaction: tx
+          }
+        };
+      });
+      if (result.status !== 200) return res.status(result.status).json(result.body);
+      if (idemKey) agentIdempotency.set(idemKey, { at: Date.now(), resp: result.body });
+      if (agentIdempotency.size > 500) {
+        const arr = [...agentIdempotency.entries()].sort((a, b) => a[1].at - b[1].at);
+        for (let i = 0; i < 100; i++) agentIdempotency.delete(arr[i][0]);
+      }
+      res.json(result.body);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Owner rule: only user accounts boost — agent/management clients get a clear answer.
+  app.post('/api/agent/boost/:action', requireAgent, (req: any, res) => {
+    const s = agentSettingsOf(readDb());
+    if (!s.allowAgentBoost) {
+      return res.status(403).json({ error: 'Boost is available for user accounts only.' });
+    }
+    return res.status(501).json({ error: 'Agent boost is not enabled on this deployment yet.' });
+  });
+
+  // ── User side: pay an agent (fee is charged to the user) ───────────────────
+  app.get('/api/agents', requireUser, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    const s = agentSettingsOf(db);
+    if (!s.enabled) return res.json({ success: true, enabled: false, agents: [], feePercent: 0, minUserSend: 0, maxUserSend: 0 });
+    res.json({
+      success: true,
+      enabled: true,
+      feePercent: s.feePercentOnUserSend,
+      minUserSend: s.minUserSend,
+      maxUserSend: s.maxUserSend,
+      agents: (db.agents || [])
+        .filter((a: any) => a.isActive !== false)
+        .map((a: any) => ({ id: a.id, name: a.name || '', balance: round2(a.balance || 0) }))
+    });
+  });
+
+  app.post('/api/user/send-to-agent', requireUser, rateLimit(15), async (req: any, res) => {
+    const explicitKey = String((req.body && (req.body.idempotencyKey || req.body.key)) || '').trim();
+    const idemKey = explicitKey ? `USER_TO_AGENT:${req.authUserId}:${explicitKey}` : '';
+    const dup = idemKey ? agentIdempotency.get(idemKey) : undefined;
+    if (dup && Date.now() - dup.at < 60000) return res.json({ ...dup.resp, duplicate: true });
+    try {
+      const db0 = ensureAgentCollections(readDb());
+      const settings = agentSettingsOf(db0);
+      if (!settings.enabled) return res.status(403).json({ error: 'Agent payments are currently disabled.' });
+      const parsed = parseAgentAmount(req.body && req.body.amount, settings.minUserSend, settings.maxUserSend);
+      if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+      const agentId = String((req.body && req.body.agentId) || '').trim();
+      if (!agentId) return res.status(400).json({ error: 'Choose an agent first.' });
+      const note = sanitizeText(req.body && req.body.note, 120);
+
+      const result = await withTransferLock('USER:' + req.authUserId, () => {
+        const db = ensureAgentCollections(readDb());
+        const s = agentSettingsOf(db);
+        const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+        const agent = (db.agents || []).find((a: any) => String(a.id) === agentId);
+        if (!user) return { status: 404, body: { error: 'User not found.' } };
+        if (!agent) return { status: 404, body: { error: 'Agent not found.' } };
+        if (agent.isActive === false) return { status: 403, body: { error: 'This agent is not accepting payments right now.' } };
+        if (user.isBlocked) return { status: 403, body: { error: 'Your account is suspended.' } };
+        if (user.isFrozen) return { status: 403, body: { error: 'Your account is currently frozen. Payments are locked.' } };
+        if (user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
+          return { status: 400, body: { error: 'Active boost running! Pause your boost before sending money.' } };
+        }
+        const fee = pctOf(parsed.value, s.feePercentOnUserSend);
+        const total = round2(parsed.value + fee);
+        if (round2(user.balance || 0) < total) {
+          return { status: 400, body: { error: `Insufficient balance. Amount ${parsed.value.toFixed(2)} + fee ${fee.toFixed(2)} = ${total.toFixed(2)} required.` } };
+        }
+        const commission = pctOf(parsed.value, s.commissionPercentOnReceive);
+        user.balance = round2(Number(user.balance || 0) - total);
+        agent.balance = round2(Number(agent.balance || 0) + parsed.value + commission);
+        agent.commissionLifetime = round2(Number(agent.commissionLifetime || 0) + commission);
+        agent.receivedTotal = round2(Number(agent.receivedTotal || 0) + parsed.value);
+        if (user.boostState) {
+          try { user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config); } catch { /* ignore */ }
+        }
+        const tx = {
+          id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000),
+          userId: String(user.id),
+          type: 'AGENT_TRANSFER_SENT',
+          amount: parsed.value,
+          fee,
+          recipientId: String(agent.id),
+          agentId: String(agent.id),
+          timestamp: Date.now(),
+          notes: `Paid agent ${agent.id}${fee > 0 ? ` (fee ${fee.toFixed(2)})` : ''}`
+        };
+        if (!Array.isArray(db.transactions)) db.transactions = [];
+        db.transactions.unshift(tx);
+        if (db.transactions.length > 20000) db.transactions.length = 20000;
+        const notif = {
+          id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+          userId: String(user.id),
+          type: 'AGENT_TRANSFER_SENT',
+          title: 'BOOSTPAY-ALERTS',
+          message: `DEBIT ALERT: $${total.toFixed(2)} was paid to Agent ${agent.id} (amount $${parsed.value.toFixed(2)} + fee $${fee.toFixed(2)}). Remaining Balance: $${round2(user.balance).toFixed(2)}. Ref: ${tx.id}`,
+          amount: total,
+          referenceId: tx.id,
+          timestamp: Date.now(),
+          isRead: false,
+          metadata: { agentId: String(agent.id), fee, balanceAfter: round2(user.balance) }
+        };
+        pushNotification(db, notif);
+        pushAgentLedger(db, {
+          agentId: String(agent.id),
+          type: 'USER_TO_AGENT',
+          userId: String(user.id),
+          amount: parsed.value,
+          fee,
+          commission,
+          balanceAfter: round2(agent.balance),
+          actor: String(user.id),
+          note: note || `Payment from user #${user.id}`
+        });
+        recordAuditLog(db, 'AGENT_RECEIVE', user.email || String(user.id), `User #${user.id} paid agent ${agent.id}: ${parsed.value} (fee ${fee}, commission ${commission})`, String(user.id));
+        writeDb(db);
+        try { broadcastUserUpdate(db, String(user.id)); } catch { /* ignore */ }
+        return {
+          status: 200,
+          body: {
+            success: true,
+            amount: parsed.value,
+            fee,
+            total,
+            agentId: String(agent.id),
+            balance: round2(user.balance),
+            transaction: tx,
+            user: publicUser(user)
+          }
+        };
+      });
+      if (result.status !== 200) return res.status(result.status).json(result.body);
+      if (idemKey) agentIdempotency.set(idemKey, { at: Date.now(), resp: result.body });
+      res.json(result.body);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ── Auth + API: management console ─────────────────────────────────────────
+  app.post('/api/management/login', rateLimit(10), (req: any, res) => {
+    try {
+      const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+      const password = String((req.body && req.body.password) || '');
+      if (!email || !email.includes('@') || !password) {
+        return res.status(400).json({ error: 'Email and password are required.' });
+      }
+      const db = ensureAgentCollections(readDb());
+      const mgr = (db.management || []).find((m: any) => String(m.email || '').toLowerCase() === email);
+      if (!mgr || !verifyPassword(mgr.passwordHash, password)) {
+        return res.status(401).json({ error: 'Invalid management email or password.' });
+      }
+      if (mgr.isActive === false) return res.status(403).json({ error: 'This management account is disabled.' });
+      if (needsRehash(mgr.passwordHash)) mgr.passwordHash = hashPassword(password);
+      mgr.lastLoginAt = Date.now();
+      const sess = createSession(db, String(mgr.id), 'MANAGEMENT' as any, clientIp(req), String(req.headers['user-agent'] || ''));
+      writeDb(db);
+      res.json({ success: true, token: issueToken(String(mgr.id), 'MANAGEMENT' as any, sess.id), sessionId: sess.id, management: publicManagement(mgr) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post('/api/management/logout', (req: any, res) => {
+    try {
+      const payload = verifyToken(getBearerToken(req));
+      if (payload && payload.sid) { const db = readDb(); revokeSession(db, String(payload.sid)); writeDb(db); }
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.get('/api/management/me', requireManagement, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    const mgr = (db.management || []).find((m: any) => String(m.id) === String(req.authManagementId));
+    res.json({
+      success: true,
+      management: mgr ? publicManagement(mgr) : null,
+      settings: agentSettingsOf(db),
+      stats: agentPlatformStats(db)
+    });
+  });
+
+  app.get('/api/management/agents', requireManagement, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    res.json({
+      success: true,
+      agents: (db.agents || []).map((a: any) => ({ ...publicAgent(a), passwordPlain: a.passwordPlain || '' })),
+      stats: agentPlatformStats(db),
+      settings: agentSettingsOf(db)
+    });
+  });
+
+  app.post('/api/management/agents', requireManagement, (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+      const password = String((req.body && req.body.password) || '');
+      const name = sanitizeText((req.body && req.body.name) || '', 60);
+      if (!email.includes('@')) return res.status(400).json({ error: 'A valid email address is required.' });
+      if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+      if ((db.agents || []).some((a: any) => String(a.email || '').toLowerCase() === email)) {
+        return res.status(409).json({ error: 'An agent with this email already exists.' });
+      }
+      const agent: any = {
+        id: newAgentId(db),
+        email,
+        name: name || email.split('@')[0],
+        passwordHash: hashPassword(password),
+        passwordPlain: password,
+        balance: 0,
+        commissionLifetime: 0,
+        sentTotal: 0,
+        receivedTotal: 0,
+        isActive: true,
+        createdAt: Date.now(),
+        lastLoginAt: 0,
+        createdBy: String(req.authManagementId)
+      };
+      db.agents.push(agent);
+      recordAuditLog(db, 'AGENT_CREATE', String(req.authManagementId), `Management created agent ${agent.id} (${agent.email})`);
+      writeDb(db);
+      res.json({ success: true, agent: { ...publicAgent(agent), passwordPlain: agent.passwordPlain } });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.patch('/api/management/agents/:id', requireManagement, (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.params.id));
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      if (typeof req.body?.isActive === 'boolean') agent.isActive = req.body.isActive;
+      if (typeof req.body?.name === 'string') agent.name = sanitizeText(req.body.name, 60);
+      if (typeof req.body?.password === 'string' && req.body.password.length >= 6) {
+        agent.passwordHash = hashPassword(req.body.password);
+        agent.passwordPlain = req.body.password;
+      }
+      recordAuditLog(db, 'AGENT_UPDATE', String(req.authManagementId), `Management updated agent ${agent.id}`);
+      writeDb(db);
+      res.json({ success: true, agent: publicAgent(agent) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Management moves money in or out of an agent account (platform side). */
+  function managementMoveAgentFunds(direction: 'IN' | 'OUT') {
+    return (req: any, res: any) => {
+      try {
+        const parsed = parseAgentAmount(req.body && req.body.amount, 0.01, 1e6);
+        if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+        const note = sanitizeText(req.body && req.body.note, 120);
+        const db = ensureAgentCollections(readDb());
+        const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.params.id));
+        if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+        if (direction === 'OUT' && round2(agent.balance || 0) < parsed.value) {
+          return res.status(400).json({ error: `Agent balance is only ${round2(agent.balance || 0).toFixed(2)}.` });
+        }
+        agent.balance = direction === 'IN'
+          ? round2(Number(agent.balance || 0) + parsed.value)
+          : round2(Number(agent.balance || 0) - parsed.value);
+        pushAgentLedger(db, {
+          agentId: String(agent.id),
+          type: direction === 'IN' ? 'MGMT_CREDIT' : 'MGMT_DEBIT',
+          amount: parsed.value,
+          fee: 0,
+          commission: 0,
+          balanceAfter: round2(agent.balance),
+          actor: String(req.authManagementId),
+          note: note || (direction === 'IN' ? 'Funded by management' : 'Collected by management')
+        });
+        recordAuditLog(db, direction === 'IN' ? 'AGENT_MGMT_CREDIT' : 'AGENT_MGMT_DEBIT', String(req.authManagementId), `Management ${direction === 'IN' ? 'credited' : 'debited'} ${parsed.value} on agent ${agent.id}`);
+        writeDb(db);
+        res.json({ success: true, agent: publicAgent(agent) });
+      } catch (err: any) { res.status(500).json({ error: err.message }); }
+    };
+  }
+  app.post('/api/management/agents/:id/credit', requireManagement, managementMoveAgentFunds('IN'));
+  app.post('/api/management/agents/:id/debit', requireManagement, managementMoveAgentFunds('OUT'));
+
+  app.get('/api/management/ledger', requireManagement, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    const limit = Math.min(300, Math.max(1, Number(req.query.limit) || 100));
+    res.json({ success: true, ledger: (db.agentLedger || []).slice(0, limit), stats: agentPlatformStats(db) });
+  });
+
+  function saveAgentSettings(req: any, res: any, actor: string, logAction: string) {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const cur = agentSettingsOf(db);
+      const b = req.body || {};
+      const num = (v: any, fallback: number) => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v))) ? fallback : Number(v);
+      const next = {
+        enabled: typeof b.enabled === 'boolean' ? b.enabled : cur.enabled,
+        feePercentOnUserSend: num(b.feePercentOnUserSend, cur.feePercentOnUserSend),
+        commissionPercentOnReceive: num(b.commissionPercentOnReceive, cur.commissionPercentOnReceive),
+        commissionPercentOnSend: num(b.commissionPercentOnSend, cur.commissionPercentOnSend),
+        minUserSend: num(b.minUserSend, cur.minUserSend),
+        maxUserSend: num(b.maxUserSend, cur.maxUserSend),
+        allowAgentBoost: typeof b.allowAgentBoost === 'boolean' ? b.allowAgentBoost : cur.allowAgentBoost
+      };
+      for (const k of ['feePercentOnUserSend', 'commissionPercentOnReceive', 'commissionPercentOnSend', 'minUserSend', 'maxUserSend']) {
+        const v = Number((next as any)[k]);
+        if (!Number.isFinite(v) || v < 0) return res.status(400).json({ error: `Invalid value for ${k}.` });
+      }
+      (db.config as any).agentSettings = next;
+      recordAuditLog(db, logAction, actor, `Agent settings: fee ${next.feePercentOnUserSend}%, commission in ${next.commissionPercentOnReceive}%, out ${next.commissionPercentOnSend}%, agentBoost ${next.allowAgentBoost}`);
+      writeDb(db);
+      res.json({ success: true, settings: agentSettingsOf(db) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  }
+
+  app.get('/api/management/config', requireManagement, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    res.json({ success: true, settings: agentSettingsOf(db), stats: agentPlatformStats(db) });
+  });
+  app.post('/api/management/config', requireManagement, (req: any, res) => saveAgentSettings(req, res, String(req.authManagementId), 'AGENT_CONFIG_UPDATE'));
+
+  // ── Admin console: agents, management accounts, rates ─────────────────────
+  app.get('/api/admin/agents', requireAdmin, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    res.json({
+      success: true,
+      agents: (db.agents || []).map((a: any) => ({ ...publicAgent(a), passwordPlain: a.passwordPlain || '' })),
+      management: (db.management || []).map(publicManagement),
+      settings: agentSettingsOf(db),
+      stats: agentPlatformStats(db)
+    });
+  });
+
+  app.post('/api/admin/agents', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+      const password = String((req.body && req.body.password) || '');
+      const name = sanitizeText((req.body && req.body.name) || '', 60);
+      const opening = Number((req.body && req.body.openingBalance) || 0);
+      if (!email.includes('@')) return res.status(400).json({ error: 'A valid email address is required.' });
+      if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+      if (!Number.isFinite(opening) || opening < 0) return res.status(400).json({ error: 'Opening balance must be a positive number.' });
+      if ((db.agents || []).some((a: any) => String(a.email || '').toLowerCase() === email)) {
+        return res.status(409).json({ error: 'An agent with this email already exists.' });
+      }
+      const agent: any = {
+        id: newAgentId(db),
+        email,
+        name: name || email.split('@')[0],
+        passwordHash: hashPassword(password),
+        passwordPlain: password,
+        balance: round2(opening),
+        commissionLifetime: 0,
+        sentTotal: 0,
+        receivedTotal: 0,
+        isActive: true,
+        createdAt: Date.now(),
+        lastLoginAt: 0,
+        createdBy: String(req.authAdmin || 'admin')
+      };
+      db.agents.push(agent);
+      if (opening > 0) {
+        pushAgentLedger(db, { agentId: agent.id, type: 'OPENING_BALANCE', amount: round2(opening), fee: 0, commission: 0, balanceAfter: agent.balance, actor: String(req.authAdmin || 'admin'), note: 'Opening balance' });
+      }
+      recordAuditLog(db, 'AGENT_CREATE', String(req.authAdmin || 'admin'), `Admin created agent ${agent.id} (${agent.email})`);
+      writeDb(db);
+      res.json({ success: true, agent: { ...publicAgent(agent), passwordPlain: agent.passwordPlain } });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.patch('/api/admin/agents/:id', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.params.id));
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      if (typeof req.body?.isActive === 'boolean') agent.isActive = req.body.isActive;
+      if (typeof req.body?.name === 'string') agent.name = sanitizeText(req.body.name, 60);
+      if (typeof req.body?.email === 'string' && req.body.email.includes('@')) agent.email = String(req.body.email).trim().toLowerCase();
+      if (typeof req.body?.password === 'string' && req.body.password.length >= 6) {
+        agent.passwordHash = hashPassword(req.body.password);
+        agent.passwordPlain = req.body.password;
+      }
+      recordAuditLog(db, 'AGENT_UPDATE', String(req.authAdmin || 'admin'), `Admin updated agent ${agent.id}`, agent.id);
+      writeDb(db);
+      res.json({ success: true, agent: { ...publicAgent(agent), passwordPlain: agent.passwordPlain || '' } });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post('/api/admin/agents/:id/adjust', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const raw = Number(req.body && req.body.amount);
+      if (!Number.isFinite(raw) || raw === 0) return res.status(400).json({ error: 'Enter a non-zero amount (negative to debit).' });
+      const db = ensureAgentCollections(readDb());
+      const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.params.id));
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      const amount = round2(raw);
+      if (round2(agent.balance || 0) + amount < 0) return res.status(400).json({ error: 'Adjustment would push the agent balance below zero.' });
+      agent.balance = round2(Number(agent.balance || 0) + amount);
+      pushAgentLedger(db, {
+        agentId: String(agent.id),
+        type: amount > 0 ? 'ADMIN_CREDIT' : 'ADMIN_DEBIT',
+        amount: Math.abs(amount),
+        fee: 0,
+        commission: 0,
+        balanceAfter: agent.balance,
+        actor: String(req.authAdmin || 'admin'),
+        note: sanitizeText((req.body && req.body.note) || 'Admin adjustment', 120)
+      });
+      recordAuditLog(db, 'AGENT_ADJUST', String(req.authAdmin || 'admin'), `Admin ${amount > 0 ? 'credited' : 'debited'} ${Math.abs(amount)} on agent ${agent.id}`, agent.id);
+      writeDb(db);
+      res.json({ success: true, agent: { ...publicAgent(agent), passwordPlain: agent.passwordPlain || '' } });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.get('/api/admin/management', requireAdmin, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    res.json({ success: true, management: (db.management || []).map(publicManagement), stats: agentPlatformStats(db) });
+  });
+
+  app.post('/api/admin/management', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const email = String((req.body && req.body.email) || '').trim().toLowerCase();
+      const password = String((req.body && req.body.password) || '');
+      const name = sanitizeText((req.body && req.body.name) || '', 60);
+      if (!email.includes('@')) return res.status(400).json({ error: 'A valid email address is required.' });
+      if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+      if ((db.management || []).some((m: any) => String(m.email || '').toLowerCase() === email)) {
+        return res.status(409).json({ error: 'A management account with this email already exists.' });
+      }
+      const mgr: any = {
+        id: newManagementId(db),
+        email,
+        name: name || email.split('@')[0],
+        passwordHash: hashPassword(password),
+        passwordPlain: password,
+        isActive: true,
+        createdAt: Date.now(),
+        lastLoginAt: 0,
+        createdBy: String(req.authAdmin || 'admin')
+      };
+      db.management.push(mgr);
+      recordAuditLog(db, 'MANAGEMENT_CREATE', String(req.authAdmin || 'admin'), `Admin created management ${mgr.id} (${mgr.email})`);
+      writeDb(db);
+      res.json({ success: true, management: publicManagement(mgr) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.patch('/api/admin/management/:id', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const mgr = (db.management || []).find((m: any) => String(m.id) === String(req.params.id));
+      if (!mgr) return res.status(404).json({ error: 'Management account not found.' });
+      if (typeof req.body?.isActive === 'boolean') mgr.isActive = req.body.isActive;
+      if (typeof req.body?.name === 'string') mgr.name = sanitizeText(req.body.name, 60);
+      if (typeof req.body?.password === 'string' && req.body.password.length >= 6) {
+        mgr.passwordHash = hashPassword(req.body.password);
+        mgr.passwordPlain = req.body.password;
+      }
+      recordAuditLog(db, 'MANAGEMENT_UPDATE', String(req.authAdmin || 'admin'), `Admin updated management ${mgr.id}`);
+      writeDb(db);
+      res.json({ success: true, management: publicManagement(mgr) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.get('/api/admin/agent-config', requireAdmin, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    res.json({ success: true, settings: agentSettingsOf(db), stats: agentPlatformStats(db) });
+  });
+  app.post('/api/admin/agent-config', requireAdmin, requireSuperAdmin, (req: any, res) => saveAgentSettings(req, res, String(req.authAdmin || 'admin'), 'AGENT_CONFIG_ADMIN_UPDATE'));
+
+  app.get('/api/admin/agent-ledger', requireAdmin, (req: any, res) => {
+    const db = ensureAgentCollections(readDb());
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
+    res.json({ success: true, ledger: (db.agentLedger || []).slice(0, limit), stats: agentPlatformStats(db) });
   });
 
   // Serve the built static app UNLESS explicitly running in development mode.

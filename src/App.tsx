@@ -18,6 +18,7 @@ import { FloatingToastContainer } from './components/FloatingToast';
 import { PWAInstallHelp } from './components/PWAInstallHelp';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import { P2PTransferModal } from './components/P2PTransferModal';
+import { AgentPayModal } from './components/AgentPayModal';
 import { WalletSkeleton } from './components/WalletSkeleton';
 import { SecurityModal } from './components/SecurityModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -44,6 +45,7 @@ export default function App() {
 
   // Modals state
   const [isSendMoneyOpen, setIsSendMoneyOpen] = useState(false);
+  const [isAgentPayOpen, setIsAgentPayOpen] = useState(false);
 
   // System config state
   const [config, setConfig] = useState<SystemConfig>(BoostPayStore.getConfig());
@@ -501,6 +503,7 @@ export default function App() {
                   onUpdateUser={(updated: User) => setCurrentUser({ ...updated })}
                   onOpenSendMoney={() => setIsSendMoneyOpen(true)}
                   onOpenQR={() => setIsQROpen(true)}
+                  onOpenAgentPay={() => setIsAgentPayOpen(true)}
                   onOpenSecurity={() => setIsSecurityOpen(true)}
                   onOpenSettings={() => setIsSettingsOpen(true)}
                   onOpenInbox={() => {
@@ -628,6 +631,16 @@ export default function App() {
             </div>
           </nav>
         </div>
+      )}
+
+      {/* Pay an Agent (cash in / cash out with a BoostPay agent) */}
+      {currentUser && (
+        <AgentPayModal
+          isOpen={isAgentPayOpen}
+          onClose={() => setIsAgentPayOpen(false)}
+          currentUser={currentUser}
+          onSuccess={(updated) => setCurrentUser({ ...updated })}
+        />
       )}
 
       {/* P2P Transfer Modal */}

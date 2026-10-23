@@ -79,9 +79,9 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
     let inflow = 0;
     let outflow = 0;
     userTransactions.forEach((t) => {
-      if (t.type === 'REWARD' || t.type === 'TRANSFER_RECEIVED' || t.type === 'ADMIN_CREDIT') {
+      if (t.type === 'REWARD' || t.type === 'TRANSFER_RECEIVED' || t.type === 'ADMIN_CREDIT' || t.type === 'AGENT_TRANSFER_RECEIVED') {
         inflow += Number(t.amount) || 0;
-      } else if (t.type === 'TRANSFER_SENT' || t.type === 'ADMIN_DEBIT') {
+      } else if (t.type === 'TRANSFER_SENT' || t.type === 'ADMIN_DEBIT' || t.type === 'AGENT_TRANSFER_SENT') {
         outflow += Number(t.amount) || 0;
       }
     });

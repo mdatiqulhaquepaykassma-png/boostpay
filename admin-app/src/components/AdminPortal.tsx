@@ -35,6 +35,7 @@ import {
   BarChart3,
   Radio,
   Users2,
+  Building2,
   Phone,
   Video,
   Mic,
@@ -44,6 +45,7 @@ import {
   Mail
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
+import { AgentAdminView } from './AgentAdminView';
 import { CallManager, startCallTo } from './CallOverlay';
 import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, AdminMfaView, DatabaseBrowser, ReferAdminView, AdminSystemSettingsView, SmtpAdminView } from './AdminExtraViews';
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
@@ -123,6 +125,7 @@ const MobileBottomNav: FC<{ activeTab: string; setActiveTab: (t: any) => void; u
     { id: 'DATABASE', label: 'Database', icon: Database },
     { id: 'ENGINE', label: 'Engine', icon: Zap },
     { id: 'ADMINS', label: 'Admins', icon: Users2 },
+    { id: 'AGENTS', label: 'Agents', icon: Building2 },
   ];
   return (
     <>
@@ -192,7 +195,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // 2. Admin Portal Views
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'SMTP' | 'SETTINGS' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'SMTP' | 'SETTINGS' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS' | 'AGENTS'>('OVERVIEW');
 
   // 3. Database Storage & Diagnostics State
   const [storageProbe, setStorageProbe] = useState<any>(null);
@@ -1196,6 +1199,18 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           </button>
 
           <button
+            onClick={() => setActiveTab('AGENTS')}
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
+              activeTab === 'AGENTS'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <Building2 className="w-4 h-4" />
+            <span>Agents &amp; Management</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('BROADCAST')}
             className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'BROADCAST'
@@ -1273,6 +1288,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
       {/* Main Admin Content Body — polished spacing + max-width */}
       <style>{` .admin-tab-active { background: #f59e0b; color: #09090b; font-weight: 700; box-shadow: 0 4px 12px rgba(245,158,11,0.25); } `}</style>
       <main className="w-full max-w-7xl mx-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6 safe-pb pb-36 lg:pb-8">
+        {activeTab === 'AGENTS' && <AgentAdminView />}
         {activeTab === 'ANALYTICS' && <AnalyticsDashboard />}
         {activeTab === 'BROADCAST' && <BroadcastView />}
         {activeTab === 'FRAUD' && <FraudView />}

@@ -1,5 +1,5 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
-import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut, Settings
+import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut, Settings, Store
 } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User, BoostState, SystemConfig } from '../types';
@@ -34,6 +34,7 @@ interface BalanceCardProps {
   minuteRatePercent: number;
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
+  onOpenAgentPay?: () => void;
 }
 
 const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
@@ -43,7 +44,8 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   dynamicTargetDurationMs,
   minuteRatePercent,
   onOpenSendMoney,
-  onOpenQR
+  onOpenQR,
+  onOpenAgentPay
 }) => {
   const isRunning = boostState.isActive && !boostState.isPaused;
   const [liveAccrued, setLiveAccrued] = useState(0);
@@ -182,6 +184,21 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
             </button>
           )}
         </div>
+
+        {onOpenAgentPay && (
+          <button
+            onClick={onOpenAgentPay}
+            disabled={isRunning}
+            className={`mt-2 w-full h-10 rounded-2xl text-[11px] font-bold transition flex items-center justify-center gap-2 cursor-pointer border ${
+              isRunning
+                ? 'border-zinc-800 bg-zinc-950 text-zinc-600 cursor-not-allowed'
+                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/15 active:scale-[0.99]'
+            }`}
+          >
+            <Store className="w-3.5 h-3.5" />
+            Pay an Agent
+          </button>
+        )}
       </div>
     </div>
   );
@@ -402,6 +419,7 @@ interface Props {
   onUpdateUser: (user: User) => void;
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
+  onOpenAgentPay?: () => void;
   onOpenSecurity?: () => void;
   onOpenInbox?: () => void;
   onOpenSettings?: () => void;
@@ -415,6 +433,7 @@ export const WalletView: FC<Props> = ({
   onUpdateUser,
   onOpenSendMoney,
   onOpenQR,
+  onOpenAgentPay,
   onOpenSecurity,
   onOpenInbox,
   onOpenSettings,
@@ -528,6 +547,7 @@ export const WalletView: FC<Props> = ({
         minuteRatePercent={config.minuteRatePercent !== undefined ? config.minuteRatePercent : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605)}
         onOpenSendMoney={onOpenSendMoney}
         onOpenQR={onOpenQR}
+        onOpenAgentPay={onOpenAgentPay}
       />
 
       {/* 3. ISOLATED DYNAMIC COMPOUNDING CARD */}

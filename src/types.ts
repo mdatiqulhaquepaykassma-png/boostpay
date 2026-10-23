@@ -31,7 +31,7 @@ export interface User {
 
 export type BoostState = User['boostState'];
 
-export type TransactionType = 'REWARD' | 'TRANSFER_SENT' | 'TRANSFER_RECEIVED' | 'ADMIN_CREDIT' | 'ADMIN_DEBIT' | 'REFERRAL_COMMISSION';
+export type TransactionType = 'REWARD' | 'TRANSFER_SENT' | 'TRANSFER_RECEIVED' | 'ADMIN_CREDIT' | 'ADMIN_DEBIT' | 'REFERRAL_COMMISSION' | 'AGENT_TRANSFER_SENT' | 'AGENT_TRANSFER_RECEIVED';
 
 export interface Transaction {
   id: string;
@@ -41,6 +41,9 @@ export interface Transaction {
   timestamp: number;
   recipientId?: string;
   senderId?: string;
+  /** Agent-network payment: fee charged to the user and the agent involved. */
+  fee?: number;
+  agentId?: string;
   notes?: string;
   conversationId?: string;
   metadata?: Record<string, any>;

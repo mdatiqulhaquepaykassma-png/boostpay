@@ -81,6 +81,22 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
           amountSign: '+',
           amountColor: 'text-amber-400'
         };
+      case 'AGENT_TRANSFER_SENT':
+        return {
+          label: `Agent payment ${tx.recipientId ? `to ${tx.recipientId}` : ''}${(tx as any).fee ? ` (fee ${Number((tx as any).fee).toFixed(2)})` : ''}`.trim(),
+          icon: ArrowUpRight,
+          color: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
+          amountSign: '-',
+          amountColor: 'text-amber-400'
+        };
+      case 'AGENT_TRANSFER_RECEIVED':
+        return {
+          label: `Agent credit ${tx.senderId ? `from ${tx.senderId}` : ''}`.trim(),
+          icon: ArrowDownLeft,
+          color: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
+          amountSign: '+',
+          amountColor: 'text-emerald-400'
+        };
       case 'TRANSFER_SENT':
         return {
           label: `Sent to #${tx.recipientId}`,
