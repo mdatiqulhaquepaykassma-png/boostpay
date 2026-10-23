@@ -14,7 +14,7 @@ import {
   Smile,
   Phone,
   Video
-, Mic, Play, Pause, X, Pin, Reply, Forward, Pencil, Trash2, ImagePlus, Bell, BellOff, Settings, Users2, Info, Volume2, Paperclip, BarChart3, Link2, Globe, Lock, PhoneOff, MicOff, Mic2, Bookmark, UserPlus, Eye
+, Mic, Play, Pause, X, Pin, Reply, Forward, Pencil, Trash2, ImagePlus, Bell, BellOff, Settings, Users2, Info, Volume2, Paperclip, BarChart3, Link2, Globe, Lock, PhoneOff, MicOff, Mic2, Bookmark, UserPlus, Eye, Mail, CheckCheck
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { startCallTo } from './CallOverlay';
@@ -446,6 +446,14 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const [showSettings, setShowSettings] = useState(false);
   const [imageViewer, setImageViewer] = useState<string | null>(null);
 
+  // Telegram-style unread tracking
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [unreadOnly, setUnreadOnly] = useState(false);
+  // checkpoint captured when a thread is opened -> renders the "Unread messages" divider
+  const [unreadDividerAt, setUnreadDividerAt] = useState<number>(0);
+  const [rowMenu, setRowMenu] = useState<{ conv: Conversation; x: number; y: number } | null>(null);
+  const longPressRef = useRef<{ timer: number | null; fired: boolean }>({ timer: null, fired: false });
+
   // Telegram-style extras: stickers, files, polls, contacts, message info
   const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [showPollCreator, setShowPollCreator] = useState(false);
@@ -547,6 +555,61 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     };
   }, [currentUser.id]);
 
+  // ── Unread counters (local instant + server authoritative) ────────────────
+  const refreshUnreadLocal = () => setUnreadCounts(BoostPayStore.getUnreadCounts(currentUser.id));
+
+  useEffect(() => {
+    refreshUnreadLocal();
+    const t = window.setInterval(refreshUnreadLocal, 4000);
+    return () => window.clearInterval(t);
+  }, [currentUser.id, conversations, messages]);
+
+  useEffect(() => {
+    // Pull the server-side counters once (covers messages older than the local cache)
+    void BoostPayStore.fetchUnreadSummary().then((s) => {
+      if (s && s.conversations) setUnreadCounts(prev => ({ ...s.conversations, ...prev }));
+    });
+  }, [currentUser.id]);
+
+  /** Open a thread: remember the old checkpoint (divider) then mark it read. */
+  const openConversation = (conv: Conversation) => {
+    const me = currentUser.id;
+    const since = Number(((conv as any).lastRead || {})[me] || 0);
+    setUnreadDividerAt(since);
+    setActiveConv(conv);
+    const lastIncoming = messages
+      .filter(m => m.conversationId === conv.id && String(m.senderId) !== me && !(m as any).deleted)
+      .reduce((mx, m) => Math.max(mx, Number(m.timestamp) || 0), 0);
+    BoostPayStore.markConversationRead(conv.id, lastIncoming || Date.now());
+    setUnreadCounts(prev => {
+      if (!prev[conv.id]) return prev;
+      const next = { ...prev };
+      delete next[conv.id];
+      return next;
+    });
+  };
+
+  // While a thread is open, anything arriving is immediately "seen"
+  useEffect(() => {
+    if (!activeConv) return;
+    const me = currentUser.id;
+    const lastIncoming = messages
+      .filter(m => m.conversationId === activeConv.id && String(m.senderId) !== me && !(m as any).deleted)
+      .reduce((mx, m) => Math.max(mx, Number(m.timestamp) || 0), 0);
+    const since = Number(((activeConv as any).lastRead || {})[me] || 0);
+    if (lastIncoming > since) {
+      BoostPayStore.markConversationRead(activeConv.id, lastIncoming);
+      setUnreadCounts(prev => {
+        if (!prev[activeConv.id]) return prev;
+        const next = { ...prev };
+        delete next[activeConv.id];
+        return next;
+      });
+    }
+  }, [messages, activeConv?.id, currentUser.id]);
+
+  const totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0);
+
   // Keep activeConv synchronized with latest conversation state
   useEffect(() => {
     if (activeConv) {
@@ -630,6 +693,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const filteredConversations = userConversations.filter(c =>{
     const hay = (c.id.toLowerCase().includes(searchTerm.toLowerCase()) || c.participants.some(p => p.toLowerCase().includes(searchTerm.toLowerCase())));
     if (!hay) return false;
+    if (unreadOnly && !unreadCounts[c.id]) return false;
     if (msgFilter==='p2p') return c.type!=='group' && !c.participants.includes('ADMIN_SUPPORT') && !c.participants.every(p=>p===currentUser.id);
     if (msgFilter==='support') return c.participants.includes('ADMIN_SUPPORT');
     if (msgFilter==='groups') return c.type==='group';
@@ -1503,11 +1567,21 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               );
               const peerId = getOtherParticipant(activeConv);
               const peerLastRead = (activeConv.lastRead && (activeConv.lastRead as any)[peerId]) || 0;
+              const firstUnreadIndex = unreadDividerAt > 0
+                ? convMsgs.findIndex(m => Number(m.timestamp) > unreadDividerAt && String(m.senderId) !== currentUser.id)
+                : -1;
               return convMsgs.map((m, i) => {
                 const prev = convMsgs[i - 1];
                 const showDate = !prev || new Date(prev.timestamp).toDateString() !== new Date(m.timestamp).toDateString();
                 return (
                   <React.Fragment key={m.id}>
+                    {i === firstUnreadIndex && (
+                      <div className="flex items-center gap-2 my-2" aria-label="Unread messages">
+                        <span className="h-px flex-1 bg-emerald-500/40" />
+                        <span className="rounded-full bg-emerald-500/15 border border-emerald-500/40 px-3 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-400">Unread messages</span>
+                        <span className="h-px flex-1 bg-emerald-500/40" />
+                      </div>
+                    )}
                     {showDate && (
                       <div className="flex items-center justify-center my-2">
                         <span className="rounded-full bg-zinc-900/90 border border-zinc-800 px-3 py-0.5 text-[10px] font-mono text-zinc-400">
@@ -1797,18 +1871,62 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               <button key={tab} onClick={()=>setMsgFilter(tab)} className={`flex-1 rounded-xl py-1.5 text-[11px] font-bold capitalize transition cursor-pointer ${msgFilter===tab ? 'bg-amber-500 text-zinc-950 shadow' : 'text-zinc-400 hover:text-zinc-200'}`}>{tab==='p2p'?'P2P': tab.charAt(0).toUpperCase()+tab.slice(1)}</button>
             ))}
           </div>
+          {/* Telegram-style unread filter */}
+          <div className="shrink-0 flex items-center gap-2 mb-3">
+            <button
+              onClick={() => setUnreadOnly(v => !v)}
+              className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-bold transition cursor-pointer min-h-[34px] ${
+                unreadOnly
+                  ? 'bg-emerald-500 border-emerald-400 text-zinc-950'
+                  : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <Mail className="w-3.5 h-3.5" />
+              Unread
+              {totalUnread > 0 && (
+                <span className={`min-w-[18px] rounded-full px-1 text-center text-[10px] font-black ${unreadOnly ? 'bg-zinc-950/25 text-zinc-950' : 'bg-emerald-500 text-zinc-950'}`}>{totalUnread > 99 ? '99+' : totalUnread}</span>
+              )}
+            </button>
+            {totalUnread > 0 && (
+              <button
+                onClick={() => {
+                  userConversations.forEach(c => { if (unreadCounts[c.id]) void BoostPayStore.markConversationRead(c.id); });
+                  setUnreadCounts({});
+                }}
+                className="ml-auto flex items-center gap-1 rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[11px] font-semibold text-zinc-300 transition hover:bg-zinc-800 cursor-pointer min-h-[34px]"
+              >
+                <CheckCheck className="w-3.5 h-3.5 text-emerald-400" /> Mark all read
+              </button>
+            )}
+          </div>
           {/* Scrollable Conversations list */}
           <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-2 pb-4">
             {filteredConversations.map((conv) => {
               const other = getOtherParticipant(conv);
               const isSupport = other === 'ADMIN_SUPPORT';
               const gradient = getAvatarGradient(other);
+              const unread = unreadCounts[conv.id] || 0;
+              const isMuted = (conv.mutedBy || []).includes(currentUser.id);
 
               return (
                 <button
                   key={conv.id}
-                  onClick={() => setActiveConv(conv)}
-                  className="w-full flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900/80 p-3 hover:border-zinc-700 hover:bg-zinc-900 transition-all text-left cursor-pointer shadow-sm"
+                  onClick={() => { if (longPressRef.current.fired) { longPressRef.current.fired = false; return; } openConversation(conv); }}
+                  onContextMenu={(e) => { e.preventDefault(); setRowMenu({ conv, x: 0, y: 0 }); }}
+                  onTouchStart={() => {
+                    longPressRef.current.fired = false;
+                    longPressRef.current.timer = window.setTimeout(() => {
+                      longPressRef.current.fired = true;
+                      setRowMenu({ conv, x: 0, y: 0 });
+                    }, 480);
+                  }}
+                  onTouchEnd={() => { if (longPressRef.current.timer) { window.clearTimeout(longPressRef.current.timer); longPressRef.current.timer = null; } }}
+                  onTouchMove={() => { if (longPressRef.current.timer) { window.clearTimeout(longPressRef.current.timer); longPressRef.current.timer = null; } }}
+                  className={`w-full flex items-center justify-between rounded-2xl border p-3 transition-all text-left cursor-pointer shadow-sm ${
+                    unread > 0
+                      ? 'border-emerald-500/30 bg-emerald-500/[0.06] hover:bg-emerald-500/10'
+                      : 'border-zinc-800 bg-zinc-900/80 hover:border-zinc-700 hover:bg-zinc-900'
+                  }`}
                 >
                   <div className="flex items-center gap-3 min-w-0 pr-2">
                     <div className="relative shrink-0">
@@ -1828,27 +1946,71 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
 
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-bold font-mono text-zinc-100">
+                        <span className={`text-xs font-mono truncate ${unread > 0 ? 'font-black text-white' : 'font-bold text-zinc-100'}`}>
                           {conv.type === 'group'
                             ? conv.name || 'Group chat'
                             : isSupport ? 'Official Verified Support' : `User #${other}`}
                         </span>
-                        {(conv.mutedBy || []).includes(currentUser.id) && (
+                        {isMuted && (
                           <BellOff className="w-3 h-3 text-zinc-500 shrink-0" />
                         )}
                       </div>
-                      <p className="text-[11px] text-zinc-400 truncate max-w-[200px] sm:max-w-xs mt-0.5">
+                      <p className={`text-[11px] truncate max-w-[200px] sm:max-w-xs mt-0.5 ${unread > 0 ? 'text-zinc-200 font-semibold' : 'text-zinc-400'}`}>
                         {conv.lastMessage || 'No messages yet'}
                       </p>
                     </div>
                   </div>
 
-                  <span className="text-[10px] font-mono text-zinc-500 shrink-0 self-start mt-0.5">
-                    {new Date(conv.lastMessageAt || conv.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </span>
+                  <div className="flex flex-col items-end gap-1.5 shrink-0 self-start mt-0.5">
+                    <span className={`text-[10px] font-mono ${unread > 0 ? 'text-emerald-400 font-bold' : 'text-zinc-500'}`}>
+                      {new Date(conv.lastMessageAt || conv.timestamp || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    {unread > 0 && (
+                      <span
+                        aria-label={`${unread} unread messages`}
+                        className={`min-w-[22px] h-[22px] px-1.5 rounded-full text-[11px] font-black flex items-center justify-center shadow ${
+                          isMuted ? 'bg-zinc-600 text-zinc-100' : 'bg-emerald-500 text-zinc-950'
+                        }`}
+                      >
+                        {unread > 99 ? '99+' : unread}
+                      </span>
+                    )}
+                  </div>
                 </button>
               );
             })}
+
+            {rowMenu && (
+              <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm" onClick={() => setRowMenu(null)}>
+                <div
+                  className="w-full sm:max-w-xs rounded-t-3xl sm:rounded-2xl border border-zinc-800 bg-zinc-900 p-3 pb-6 space-y-1 animate-in slide-in-from-bottom duration-150"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <p className="px-2 pb-1 text-[10px] font-mono uppercase tracking-wider text-zinc-500 truncate">
+                    {rowMenu.conv.type === 'group' ? (rowMenu.conv.name || 'Group chat') : `Chat with ${getOtherParticipant(rowMenu.conv)}`}
+                  </p>
+                  <button
+                    onClick={() => { void BoostPayStore.markConversationUnread(rowMenu.conv.id); setUnreadCounts(BoostPayStore.getUnreadCounts(currentUser.id)); setRowMenu(null); }}
+                    className="w-full flex items-center gap-2.5 rounded-xl px-3 py-3 text-xs font-semibold text-zinc-100 hover:bg-zinc-800 cursor-pointer min-h-[44px]"
+                  >
+                    <Mail className="w-4 h-4 text-emerald-400" /> {unreadOnly || unreadCounts[rowMenu.conv.id] ? 'Keep unread' : 'Mark as unread'}
+                  </button>
+                  <button
+                    onClick={() => { void BoostPayStore.markConversationRead(rowMenu.conv.id); setUnreadCounts(BoostPayStore.getUnreadCounts(currentUser.id)); setRowMenu(null); }}
+                    className="w-full flex items-center gap-2.5 rounded-xl px-3 py-3 text-xs font-semibold text-zinc-100 hover:bg-zinc-800 cursor-pointer min-h-[44px]"
+                  >
+                    <CheckCheck className="w-4 h-4 text-emerald-400" /> Mark as read
+                  </button>
+                  <button
+                    onClick={() => { setRowMenu(null); openConversation(rowMenu.conv); }}
+                    className="w-full flex items-center gap-2.5 rounded-xl px-3 py-3 text-xs font-semibold text-zinc-100 hover:bg-zinc-800 cursor-pointer min-h-[44px]"
+                  >
+                    <MessageSquare className="w-4 h-4 text-zinc-400" /> Open chat
+                  </button>
+                  <button onClick={() => setRowMenu(null)} className="w-full rounded-xl px-3 py-2.5 text-[11px] font-semibold text-zinc-400 hover:bg-zinc-800 cursor-pointer min-h-[40px]">Cancel</button>
+                </div>
+              </div>
+            )}
 
             {filteredConversations.length === 0 && (
               <div className="py-10 text-center text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-2xl">

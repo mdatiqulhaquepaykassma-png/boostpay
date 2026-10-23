@@ -40,6 +40,7 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastData[]>([]);
   const [unreadNotifCount, setUnreadNotifCount] = useState<number>(0);
   const [hasUnreadChat, setHasUnreadChat] = useState<boolean>(false);
+  const [chatUnreadCount, setChatUnreadCount] = useState<number>(0);
 
   // Modals state
   const [isSendMoneyOpen, setIsSendMoneyOpen] = useState(false);
@@ -77,17 +78,24 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  // Listen for real-time chat updates to toggle unread badge on Chat tab
+  // Listen for real-time chat updates to keep the Chat tab badge accurate
+  // (Telegram-style numeric badge = total unread messages across conversations)
   useEffect(() => {
-    const unsubChat = BoostPayStore.subscribeToChat((_convs, msgs) => {
-      if (activeTab !== 'MESSENGER' && currentUser?.id) {
-        const last = msgs[msgs.length - 1];
-        if (last && last.senderId !== currentUser.id) {
-          setHasUnreadChat(true);
-        }
-      }
-    });
-    return unsubChat;
+    const recompute = () => {
+      const uid = currentUser?.id;
+      if (!uid) { setChatUnreadCount(0); setHasUnreadChat(false); return; }
+      const cached = BoostPayStore.getCachedUnread();
+      const local = BoostPayStore.getTotalUnread(uid);
+      const total = Math.max(local, Number(cached.total || 0));
+      setChatUnreadCount(total);
+      setHasUnreadChat(total > 0);
+    };
+    recompute();
+    const unsubChat = BoostPayStore.subscribeToChat(() => recompute());
+    const t = window.setInterval(() => {
+      if (currentUser?.id) void BoostPayStore.fetchUnreadSummary().then(recompute);
+    }, 45000);
+    return () => { unsubChat(); window.clearInterval(t); };
   }, [activeTab, currentUser?.id]);
 
   // Connect user to real-time chat SSE stream
@@ -556,6 +564,8 @@ export default function App() {
               <button
                 onClick={() => {
                   setActiveTab('MESSENGER');
+                  const uid = currentUser?.id;
+                  setChatUnreadCount(uid ? BoostPayStore.getTotalUnread(uid) : 0);
                   setHasUnreadChat(false);
                 }}
                 className={`relative flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition cursor-pointer min-h-[44px] ${
@@ -564,7 +574,12 @@ export default function App() {
               >
                 <div className="relative">
                   <MessageSquare className="w-5 h-5 stroke-[2.2]" />
-                  {hasUnreadChat && activeTab !== 'MESSENGER' && (
+                  {chatUnreadCount > 0 && (
+                    <span className="absolute -top-1.5 -right-2 min-w-[16px] h-4 px-1 rounded-full bg-emerald-500 text-zinc-950 text-[9px] font-black flex items-center justify-center ring-2 ring-zinc-950">
+                      {chatUnreadCount > 99 ? '99+' : chatUnreadCount}
+                    </span>
+                  )}
+                  {chatUnreadCount === 0 && hasUnreadChat && activeTab !== 'MESSENGER' && (
                     <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5 rounded-full bg-amber-400 ring-2 ring-zinc-950" />
                   )}
                 </div>

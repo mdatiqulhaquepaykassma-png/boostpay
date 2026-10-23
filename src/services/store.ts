@@ -9,6 +9,7 @@ const STORAGE_TRANSACTIONS = 'boostpay_transactions_v4';
 const STORAGE_CONVERSATIONS = 'boostpay_conversations_v4';
 const STORAGE_MESSAGES = 'boostpay_messages_v4';
 const STORAGE_NOTIFICATIONS = 'boostpay_notifications_v4';
+const STORAGE_UNREAD = 'boostpay_unread_v1';
 const STORAGE_CONFIG = 'boostpay_config_v4';
 
 export interface ToastData {
@@ -427,14 +428,129 @@ export class BoostPayStore {
     }
   }
 
-  static async markConversationRead(conversationId: string): Promise<void> {
+  /**
+   * Mark a conversation as read. Records the checkpoint locally as well so the
+   * badge disappears instantly (the server response carries the authoritative
+   * unread map for all other conversations).
+   */
+  static async markConversationRead(conversationId: string, upTo?: number): Promise<void> {
+    const me = this.getCurrentUser()?.id || '';
+    const at = upTo && isFinite(upTo) ? Math.min(Number(upTo), Date.now()) : Date.now();
+    if (me) {
+      const convs = this.getConversations();
+      const idx = convs.findIndex(c => c.id === conversationId);
+      if (idx >= 0) {
+        convs[idx] = { ...(convs[idx] as any), lastRead: { ...((convs[idx] as any).lastRead || {}), [me]: at } } as any;
+        localStorage.setItem(STORAGE_CONVERSATIONS, JSON.stringify(convs));
+        this.triggerChatUpdate(convs, this.getMessages());
+      }
+    }
     try {
-      await fetch('/api/chat/read', {
+      const res = await fetch('/api/chat/read', {
         method: 'POST',
         headers: this.authHeaders(),
-        body: JSON.stringify({ conversationId })
+        body: JSON.stringify({ conversationId, upTo: at })
       });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data?.unread) this.applyUnreadSummary(data.unread);
+      }
     } catch { /* offline */ }
+  }
+
+  /** Telegram-style "Mark as unread": rewind my checkpoint, badge returns. */
+  static async markConversationUnread(conversationId: string): Promise<void> {
+    const me = this.getCurrentUser()?.id || '';
+    if (me) {
+      const msgs = this.getMessages()
+        .filter(m => m.conversationId === conversationId && m.senderId !== me && !(m as any).deleted)
+        .sort((a, b) => b.timestamp - a.timestamp);
+      const newest = msgs[0];
+      const at = newest ? Math.max(0, newest.timestamp - 1) : 0;
+      const convs = this.getConversations();
+      const idx = convs.findIndex(c => c.id === conversationId);
+      if (idx >= 0) {
+        convs[idx] = { ...(convs[idx] as any), lastRead: { ...((convs[idx] as any).lastRead || {}), [me]: at } } as any;
+        localStorage.setItem(STORAGE_CONVERSATIONS, JSON.stringify(convs));
+        this.triggerChatUpdate(convs, this.getMessages());
+      }
+    }
+    try {
+      const res = await fetch('/api/chat/read', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ conversationId, unread: true })
+      });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data?.unread) this.applyUnreadSummary(data.unread);
+      }
+    } catch { /* offline */ }
+  }
+
+  /** Cache the authoritative unread map and notify the UI. */
+  static applyUnreadSummary(summary: { total?: number; conversations?: Record<string, number> } | null): void {
+    if (!summary) return;
+    try {
+      localStorage.setItem(STORAGE_UNREAD, JSON.stringify({
+        total: Number(summary.total || 0),
+        conversations: summary.conversations || {},
+        at: Date.now()
+      }));
+    } catch { /* ignore */ }
+    this.triggerChatUpdate(this.getConversations(), this.getMessages());
+  }
+
+  /** Server-authoritative unread counts (per conversation + total). */
+  static async fetchUnreadSummary(): Promise<{ total: number; conversations: Record<string, number> }> {
+    try {
+      const res = await fetch('/api/chat/unread', { headers: this.authHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const out = { total: Number(data.total || 0), conversations: data.conversations || {} };
+        this.applyUnreadSummary(out);
+        return out;
+      }
+    } catch { /* offline */ }
+    return { total: 0, conversations: {} };
+  }
+
+  static getCachedUnread(): { total: number; conversations: Record<string, number> } {
+    try {
+      const raw = localStorage.getItem(STORAGE_UNREAD);
+      if (!raw) return { total: 0, conversations: {} };
+      const j = JSON.parse(raw);
+      return { total: Number(j.total || 0), conversations: j.conversations || {} };
+    } catch { return { total: 0, conversations: {} }; }
+  }
+
+  /**
+   * Local unread counts computed from cached conversations + messages.
+   * Used for instant rendering; the server value in STORAGE_UNREAD wins.
+   */
+  static getUnreadCounts(userId: string): Record<string, number> {
+    const uid = String(userId || '');
+    const out: Record<string, number> = {};
+    if (!uid) return out;
+    const convs = this.getConversations();
+    const msgs = this.getMessages();
+    for (const c of convs) {
+      if (!Array.isArray(c.participants) || !c.participants.map(String).includes(uid)) continue;
+      const since = Number(((c as any).lastRead || {})[uid] || 0);
+      let n = 0;
+      for (const m of msgs) {
+        if (m.conversationId !== c.id) continue;
+        if (String(m.senderId) === uid) continue;
+        if ((m as any).deleted) continue;
+        if (Number(m.timestamp || 0) > since) n++;
+      }
+      if (n > 0) out[c.id] = n;
+    }
+    return out;
+  }
+
+  static getTotalUnread(userId: string): number {
+    return Object.values(this.getUnreadCounts(userId)).reduce((a, b) => a + b, 0);
   }
 
   static async sendTyping(conversationId: string): Promise<void> {

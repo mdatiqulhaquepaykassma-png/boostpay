@@ -2195,8 +2195,10 @@ async function startServer() {
     // USER PATH: only safe data is exposed: never auth tokens, sessions, admin accounts,
     // audit logs, or other users' private chat/notification content.
     const me = req.authUserId ? String(req.authUserId) : '';
+    const unreadForMe = me ? unreadSummary(db, me) : { total: 0, conversations: {} };
     res.json({
       users: (db.users || []).map(publicUser),
+      unread: unreadForMe,
       config: db.config,
       transactions: (db.transactions || []).filter((t: any) => String(t.userId) === me || String(t.recipientId) === me),
       conversations: (db.conversations || []).filter((c: any) => Array.isArray(c.participants) && c.participants.includes(me)),
@@ -3248,6 +3250,9 @@ async function startServer() {
         if (!conv.lastRead) conv.lastRead = {};
         if (!conv.mutedBy) conv.mutedBy = [];
       }
+      // The author has obviously read their own message.
+      if (!conv.lastRead) conv.lastRead = {};
+      conv.lastRead[String(cleanSender)] = now;
 
       const newMsg: any = {
         id: `MSG-${now}-${Math.random().toString(36).substring(2, 7)}`,
@@ -3516,20 +3521,79 @@ async function startServer() {
     }
   });
 
+  // ── Unread tracking (Telegram-style) ──────────────────────────────────────
+  // A conversation is unread when it holds messages newer than my lastRead
+  // checkpoint that were sent by somebody else. Counts are computed on the
+  // server so every client (app, admin console, second device) agrees.
+  function countUnreadForConv(db: any, conv: any, userId: string): number {
+    if (!conv || !Array.isArray(conv.participants)) return 0;
+    const uid = String(userId || '');
+    if (!uid || !conv.participants.map((p: any) => String(p)).includes(uid)) return 0;
+    const since = Number(((conv.lastRead || {}) as any)[uid] || 0);
+    let n = 0;
+    for (const m of (db.messages || [])) {
+      if (String(m.conversationId) !== String(conv.id)) continue;
+      if (String(m.senderId) === uid) continue;
+      if (m.deleted) continue;
+      if (Number(m.timestamp || 0) > since) n++;
+    }
+    return n;
+  }
+
+  function unreadSummary(db: any, userId: string): { total: number; conversations: Record<string, number> } {
+    const conversations: Record<string, number> = {};
+    let total = 0;
+    for (const c of (db.conversations || [])) {
+      const n = countUnreadForConv(db, c, userId);
+      if (n > 0) { conversations[String(c.id)] = n; total += n; }
+    }
+    return { total, conversations };
+  }
+
+  /** Counts for the signed-in account (user or admin support inbox). */
+  app.get('/api/chat/unread', (req: any, res) => {
+    try {
+      const who = String(req.authUserId || (req.authAdmin ? 'ADMIN_SUPPORT' : ''));
+      if (!who) return res.status(400).json({ error: 'Authentication required.' });
+      const db = readDb();
+      res.json({ success: true, ...unreadSummary(db, who), at: Date.now() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/chat/read', (req: any, res) => {
     try {
-      const { conversationId } = req.body;
+      const { conversationId, upTo, unread } = req.body;
       const cleanId = String(conversationId || '').trim();
       const who = String(req.authUserId || (req.authAdmin ? 'ADMIN_SUPPORT' : ''));
       if (!cleanId || !who) return res.status(400).json({ error: 'conversationId is required.' });
       const db = readDb();
       const conv = (db.conversations || []).find((c: any) => c.id === cleanId);
       if (!conv) return res.status(404).json({ error: 'Conversation not found.' });
+      if (!Array.isArray(conv.participants) || !conv.participants.map((p: any) => String(p)).includes(who)) {
+        return res.status(403).json({ error: 'Not a member of this conversation.' });
+      }
       if (!conv.lastRead) conv.lastRead = {};
-      conv.lastRead[who] = Date.now();
+      if (unread === true) {
+        // Telegram "Mark as unread": rewind the checkpoint to just before the
+        // newest message from someone else so the badge comes back.
+        const incoming = (db.messages || [])
+          .filter((m: any) => String(m.conversationId) === cleanId && String(m.senderId) !== who && !m.deleted)
+          .sort((a: any, b: any) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+        const newest = incoming[0];
+        conv.lastRead[who] = newest ? Math.max(0, Number(newest.timestamp || 0) - 1) : 0;
+      } else {
+        const requested = Number(upTo);
+        const ceiling = Date.now();
+        conv.lastRead[who] = isFinite(requested) && requested > 0
+          ? Math.min(requested, ceiling)   // never allow a future checkpoint
+          : ceiling;
+      }
       writeDb(db);
       broadcastConvEvent(conv, { type: 'chat_event', event: 'read_update', conversationId: cleanId, userId: who, at: conv.lastRead[who] });
-      res.json({ success: true });
+      const summary = unreadSummary(db, who);
+      res.json({ success: true, at: conv.lastRead[who], unread: summary });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
