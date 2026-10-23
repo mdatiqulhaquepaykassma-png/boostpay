@@ -1302,6 +1302,20 @@ export class BoostPayStore {
   }
 
   /**
+   * Tell the user why a boost action did not take effect. The server owns boost
+   * state, so the app must never pretend a cycle is running locally.
+   */
+  private static boostFailureToast(title: string, message: string): void {
+    this.triggerToast({
+      id: `T-BOOST-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      type: 'SYSTEM_ALERT',
+      title,
+      message,
+      timestamp: Date.now()
+    });
+  }
+
+  /**
    * Start 24/7 background boost directly on the server
    */
   static async startServerBoost(userId: string): Promise<User | null> {
@@ -1311,36 +1325,21 @@ export class BoostPayStore {
         headers: this.authHeaders(),
         body: JSON.stringify({ userId })
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.user) {
-          this.saveSingleUser(data.user);
-          return data.user;
-        }
+      const data = await res.json().catch(() => null);
+      if (res.ok && data && data.user) {
+        this.saveSingleUser(data.user);
+        return data.user;
       }
+      // No local fallback: a fake local cycle used to be pushed to /api/sync and showed a
+      // running boost (with progress) that the server knew nothing about, so the balance
+      // never grew. Report the server's answer instead.
+      this.boostFailureToast('Boost not started', (data && data.error) || 'Please try again.');
+      return null;
     } catch (err) {
       console.warn('startServerBoost network error:', err);
+      this.boostFailureToast('Connection problem', 'You are offline - boosting is controlled by the server.');
+      return null;
     }
-
-    // Local fallback
-    const users = this.getUsers();
-    const user = users.find(u => u.id === userId);
-    if (!user || user.balance <= 0) return null;
-
-    const targetDuration = this.calculateDynamicDuration(user.balance, users);
-    user.boostState = {
-      isActive: true,
-      isPaused: false,
-      startedAt: Date.now(),
-      pausedAt: 0,
-      elapsedMs: 0,
-      targetDurationMs: targetDuration,
-      startingBalance: user.balance,
-      accumulatedYield: 0
-    };
-    this.saveUsers(users);
-    this.setCurrentUser(user);
-    return user;
   }
 
   /**
@@ -1353,25 +1352,18 @@ export class BoostPayStore {
         headers: this.authHeaders(),
         body: JSON.stringify({ userId })
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.user) {
-          this.saveSingleUser(data.user);
-          return data.user;
-        }
+      const data = await res.json().catch(() => null);
+      if (res.ok && data && data.user) {
+        this.saveSingleUser(data.user);
+        return data.user;
       }
+      this.boostFailureToast('Could not pause', (data && data.error) || 'Please try again.');
+      return null;
     } catch (err) {
       console.warn('pauseServerBoost network error:', err);
+      this.boostFailureToast('Connection problem', 'You are offline - boosting is controlled by the server.');
+      return null;
     }
-
-    const users = this.getUsers();
-    const user = users.find(u => u.id === userId);
-    if (!user) return null;
-    user.boostState.isPaused = true;
-    user.boostState.pausedAt = Date.now();
-    this.saveUsers(users);
-    this.setCurrentUser(user);
-    return user;
   }
 
   /**
@@ -1384,25 +1376,18 @@ export class BoostPayStore {
         headers: this.authHeaders(),
         body: JSON.stringify({ userId })
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.user) {
-          this.saveSingleUser(data.user);
-          return data.user;
-        }
+      const data = await res.json().catch(() => null);
+      if (res.ok && data && data.user) {
+        this.saveSingleUser(data.user);
+        return data.user;
       }
+      this.boostFailureToast('Could not resume', (data && data.error) || 'Please try again.');
+      return null;
     } catch (err) {
       console.warn('resumeServerBoost network error:', err);
+      this.boostFailureToast('Connection problem', 'You are offline - boosting is controlled by the server.');
+      return null;
     }
-
-    const users = this.getUsers();
-    const user = users.find(u => u.id === userId);
-    if (!user) return null;
-    user.boostState.isPaused = false;
-    user.boostState.startedAt = Date.now() - (user.boostState.elapsedMs || 0);
-    this.saveUsers(users);
-    this.setCurrentUser(user);
-    return user;
   }
 
   private static saveSingleUser(user: User): void {
