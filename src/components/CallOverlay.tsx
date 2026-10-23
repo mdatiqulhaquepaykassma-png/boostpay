@@ -513,7 +513,9 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
           from
         };
         callIdRef.current = callId;
-        const name = `User #${from}`;
+        const name = /^AGT-/i.test(String(from))
+          ? `Agent ${from}`
+          : String(from) === 'ADMIN' ? 'BoostPay Support' : `User #${from}`;
         setPeer({ id: String(from), name });
         setMedia(signal.media === 'video' ? 'video' : 'audio');
         setPhase('incoming');

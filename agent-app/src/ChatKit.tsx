@@ -123,16 +123,22 @@ export function useVoiceRecorder(onDone: (dataUrl: string, durationMs: number) =
 }
 
 /* ── message bubble ─────────────────────────────────────────────────────── */
+export type ChatAccent = 'amber' | 'cyan' | 'emerald';
+
+const ACCENT_STYLES: Record<ChatAccent, { bubble: string; time: string; bg: string; ring: string }> = {
+  amber: { bubble: 'border-amber-500/25 bg-amber-500/15 text-amber-50', time: 'text-amber-200/60', bg: 'bg-amber-500', ring: 'focus:border-amber-500/60' },
+  cyan: { bubble: 'border-cyan-500/25 bg-cyan-500/15 text-cyan-50', time: 'text-cyan-200/60', bg: 'bg-cyan-500', ring: 'focus:border-cyan-500/60' },
+  emerald: { bubble: 'border-emerald-500/25 bg-emerald-500/15 text-emerald-50', time: 'text-emerald-200/60', bg: 'bg-emerald-500', ring: 'focus:border-emerald-500/60' }
+};
+
 export const ChatBubble: React.FC<{
   msg: ChatMessageLike;
   mine: boolean;
-  accent: 'amber' | 'cyan';
+  accent: ChatAccent;
   peerRead: boolean;
 }> = ({ msg, mine, accent, peerRead }) => {
-  const mineCls = accent === 'amber'
-    ? 'border-amber-500/25 bg-amber-500/15 text-amber-50'
-    : 'border-cyan-500/25 bg-cyan-500/15 text-cyan-50';
-  const timeCls = accent === 'amber' ? 'text-amber-200/60' : 'text-cyan-200/60';
+  const mineCls = ACCENT_STYLES[accent].bubble;
+  const timeCls = ACCENT_STYLES[accent].time;
   return (
     <div className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
       <div className={`max-w-[84%] rounded-2xl border px-3 py-2 text-[12px] leading-relaxed ${mine ? mineCls : 'border-zinc-700/70 bg-zinc-800 text-zinc-100'}`}>
@@ -165,13 +171,15 @@ export const ChatBubble: React.FC<{
 
 /* ── composer ───────────────────────────────────────────────────────────── */
 export const ChatComposer: React.FC<{
-  accent: 'amber' | 'cyan';
+  accent: ChatAccent;
+  /** Reply isolation: only replies emitted for this scope are picked up. */
+  scope?: string;
   placeholder?: string;
   busy?: boolean;
   onSend: (payload: ChatSendPayload) => Promise<void> | void;
   onTyping?: () => void;
   onError?: (msg: string) => void;
-}> = ({ accent, placeholder = 'Write a message…', busy = false, onSend, onTyping, onError }) => {
+}> = ({ accent, scope = 'default', placeholder = 'Write a message…', busy = false, onSend, onTyping, onError }) => {
   const [text, setText] = useState('');
   const [reply, setReply] = useState<{ id: string; text: string; sender?: string } | null>(null);
   const [sending, setSending] = useState(false);
@@ -182,11 +190,13 @@ export const ChatComposer: React.FC<{
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail) setReply(detail);
+      if (!detail) return;
+      if (String(detail.scope || 'default') !== scope) return;
+      setReply({ id: String(detail.id), text: String(detail.text || ''), sender: detail.sender });
     };
     window.addEventListener('chatkit:reply', handler as EventListener);
     return () => window.removeEventListener('chatkit:reply', handler as EventListener);
-  }, []);
+  }, [scope]);
 
   const fail = (m: string) => { if (onError) onError(m); };
   const recorder = useVoiceRecorder(
@@ -194,7 +204,7 @@ export const ChatComposer: React.FC<{
     (m) => fail(m)
   );
 
-  const accentBg = accent === 'amber' ? 'bg-amber-500 focus:border-amber-500/60' : 'bg-cyan-500 focus:border-cyan-500/60';
+  const accentBg = `${ACCENT_STYLES[accent].bg} ${ACCENT_STYLES[accent].ring}`;
 
   const submit = async (payload: ChatSendPayload) => {
     setSending(true);
@@ -267,7 +277,7 @@ export const ChatComposer: React.FC<{
             placeholder={placeholder}
             className={`min-w-0 flex-1 rounded-2xl border border-zinc-800 bg-zinc-900 px-3.5 py-2.5 text-[12px] text-white placeholder-zinc-600 outline-none ${accentBg}`}
           />
-          <button type="submit" disabled={busy || sending || !text.trim()} className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-zinc-950 disabled:opacity-40 ${accent === 'amber' ? 'bg-amber-500' : 'bg-cyan-500'}`}>
+          <button type="submit" disabled={busy || sending || !text.trim()} className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-zinc-950 disabled:opacity-40 ${ACCENT_STYLES[accent].bg}`}>
             <Send className="h-4 w-4" />
           </button>
         </form>
@@ -280,7 +290,9 @@ export const ChatComposer: React.FC<{
 export const ChatList: React.FC<{
   messages: ChatMessageLike[];
   myRole: string;
-  accent: 'amber' | 'cyan';
+  accent: ChatAccent;
+  /** Reply isolation: events are emitted with this scope (see ChatComposer). */
+  scope?: string;
   peerReadKey: 'readByUser' | 'readByAgent' | 'readByManagement';
   loading?: boolean;
   emptyTitle?: string;
@@ -288,10 +300,14 @@ export const ChatList: React.FC<{
   className?: string;
   style?: React.CSSProperties;
   listRef?: React.RefObject<HTMLDivElement | null>;
-}> = ({ messages, myRole, accent, peerReadKey, loading, emptyTitle, emptyHint, className = '', style, listRef }) => {
+}> = ({ messages, myRole, accent, scope = 'default', peerReadKey, loading, emptyTitle, emptyHint, className = '', style, listRef }) => {
+  const pressTimer = useRef<number | null>(null);
+  const clearPress = () => {
+    if (pressTimer.current !== null) { window.clearTimeout(pressTimer.current); pressTimer.current = null; }
+  };
   const openReply = (m: ChatMessageLike) => {
     const preview = m.kind === 'photo' ? 'Photo' : m.kind === 'voice' ? 'Voice message' : String(m.text || '').slice(0, 120);
-    window.dispatchEvent(new CustomEvent('chatkit:reply', { detail: { id: m.id, text: preview, sender: m.senderRole } }));
+    window.dispatchEvent(new CustomEvent('chatkit:reply', { detail: { id: m.id, text: preview, sender: m.senderRole, scope } }));
   };
   return (
     <div ref={listRef} className={`space-y-2 overflow-y-auto overscroll-contain ${className}`} style={style}>
@@ -305,7 +321,16 @@ export const ChatList: React.FC<{
       ) : messages.map((m) => {
         const mine = m.senderRole === myRole;
         return (
-          <div key={m.id} onDoubleClick={() => openReply(m)} title="Double-tap to reply">
+          <div
+            key={m.id}
+            onDoubleClick={() => openReply(m)}
+            onContextMenu={(e) => { e.preventDefault(); openReply(m); }}
+            onTouchStart={() => { clearPress(); pressTimer.current = window.setTimeout(() => { pressTimer.current = null; openReply(m); }, 450); }}
+            onTouchEnd={clearPress}
+            onTouchMove={clearPress}
+            onTouchCancel={clearPress}
+            title="Hold to reply"
+          >
             <ChatBubble msg={m} mine={mine} accent={accent} peerRead={mine ? (m as any)[peerReadKey] === true : false} />
           </div>
         );

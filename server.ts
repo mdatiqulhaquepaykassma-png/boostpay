@@ -241,6 +241,27 @@ interface ChatSseClient {
 }
 const chatSseClients = new Map<string, ChatSseClient>();
 
+/**
+ * Live SSE connections for the Agent console (AGT-xxxx).
+ * Used for WebRTC call signaling (agent <-> user) and inbound chat wake-ups.
+ */
+interface AgentSseClient {
+  id: string;
+  agentId: string;
+  sid?: string;
+  res: express.Response;
+}
+const agentSseClients = new Map<string, AgentSseClient>();
+
+function pushToAgent(agentId: string, event: Record<string, any>) {
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const [clientId, client] of agentSseClients.entries()) {
+    if (client.agentId === String(agentId)) {
+      try { client.res.write(payload); } catch { agentSseClients.delete(clientId); }
+    }
+  }
+}
+
 function broadcastChatMessage(message: any, conversation: any) {
   const payload = JSON.stringify({
     type: 'chat_message',
@@ -1636,6 +1657,37 @@ function requireSuperAdmin(req: any, res: any, next: any) {
   next();
 }
 
+/**
+ * Guard for routes shared by the user app and the agent console.
+ * Resolves the caller to req.authUserId / req.authAdmin / req.authAgentId.
+ */
+function requireUserAdminOrAgent(req: any, res: any, next: any) {
+  const payload = verifyToken(getBearerToken(req));
+  if (!payload || !['USER', 'ADMIN', 'AGENT'].includes(payload.role)) {
+    return res.status(401).json({ error: 'Authentication required. Please sign in.' });
+  }
+  let db: any = null;
+  try { db = readDb(); } catch { /* ignore */ }
+  const blocked = sessionBlockReason(db, payload);
+  if (blocked) return res.status(401).json({ error: blocked });
+  if (payload.role === 'USER') {
+    const exists = ((db && db.users) || []).some((x: any) => String(x.id) === String(payload.sub));
+    if (!exists) return res.status(401).json({ error: 'This account no longer exists. Please sign in again.' });
+    req.authUserId = String(payload.sub);
+  } else if (payload.role === 'AGENT') {
+    const agent = ((db && db.agents) || []).find((a: any) => String(a.id) === String(payload.sub));
+    if (!agent) return res.status(401).json({ error: 'This agent account no longer exists.' });
+    if (agent.isActive === false) return res.status(403).json({ error: 'This agent account is disabled. Contact management.' });
+    req.authAgentId = String(agent.id);
+  } else {
+    req.authAdmin = payload.sub;
+  }
+  req.authSid = payload.sid;
+  req.authAdminRole = payload.adminRole || 'SUPERADMIN';
+  try { if (db) touchSession(db, payload.sid); } catch { /* non-fatal */ }
+  next();
+}
+
 function requireUserOrAdmin(req: any, res: any, next: any) {
   const payload = verifyToken(getBearerToken(req));
   if (!payload || (payload.role !== 'USER' && payload.role !== 'ADMIN')) {
@@ -2410,6 +2462,7 @@ async function startServer() {
       const sig = String((req.query && (req.query as any).t) || '');
       if (fid && sig && sig === signAttachmentId(fid)) return next();
     }
+    if (String(req.path || '') === '/call-signal') return requireUserAdminOrAgent(req, res, next);
     return requireUserOrAdmin(req, res, next);
   });
   app.use('/api/sync', requireUserOrAdmin);
@@ -3601,31 +3654,76 @@ async function startServer() {
     } catch(e:any){ res.status(500).json({error:e.message}); }
   });
 
-  // WebRTC call signaling — admin-only direct calls; users may only request via text
+  // WebRTC call signaling — voice/video calls between:
+  //   • ADMIN  <-> USER            (support calls, unchanged)
+  //   • AGENT  <-> USER            (owner request 2026-10-23: agent must be able to
+  //                                 call a user and answer a user's call)
+  //   • USER   <-> AGENT
+  // User <-> user direct calls stay admin-only (owner rule).
+  const CALL_SIGNAL_KINDS = [
+    'offer', 'answer', 'ice', 'reject', 'hangup', 'cancel',
+    'video-request', 'video-accept', 'video-decline', 'video-cancel'
+  ];
   app.post('/api/chat/call-signal', (req: any, res) => {
     try {
-      // Only ADMIN may initiate direct voice/video calls — USER must send a text request instead
-      const isUserCaller = !!(req as any).authUserId && !(req as any).authAdmin;
-      if (isUserCaller) {
-        return res.status(403).json({ error: 'Direct voice/video calls are admin-only. Send a text like “Requesting voice call” and an admin will call you if approved.' });
-      }
+      const callerUser = String(req.authUserId || '');
+      const callerAgent = String(req.authAgentId || '');
+      const isAdmin = !!req.authAdmin;
       const { targetId, signal } = req.body || {};
       const cleanTarget = String(targetId || '').trim();
       if (!cleanTarget || !signal || typeof signal !== 'object') {
         return res.status(400).json({ error: 'targetId and signal are required.' });
       }
-      if (cleanTarget === String(req.authUserId)) {
+      if (cleanTarget === callerUser || cleanTarget === callerAgent) {
         return res.status(400).json({ error: 'Cannot signal yourself.' });
       }
-      // privacy: check if recipient disabled voice calls
-      try { const dbChk=readDb(); const rec:any=(dbChk.users||[]).find((u:any)=> String(u.id)===cleanTarget); if (rec && (rec as any).allowVoiceCall===false) return res.status(403).json({ error: 'User has disabled voice calls.' }); } catch {}
       const kind = String(signal.kind || '').slice(0, 20);
-      if (!['offer', 'answer', 'ice', 'reject', 'hangup', 'cancel'].includes(kind)) {
+      if (!CALL_SIGNAL_KINDS.includes(kind)) {
         return res.status(400).json({ error: 'Unknown signal type.' });
       }
-      pushToUser(cleanTarget, {
+      const db = readDb();
+      let targetIsAgent = /^AGT-/i.test(cleanTarget);
+      let deliverToAgent = '';
+      let deliverToUser = '';
+
+      if (callerAgent) {
+        // ── Agent is calling / answering a user ──────────────────────────────
+        if (targetIsAgent) return res.status(400).json({ error: 'An agent can only call users.' });
+        const user = (db.users || []).find((u: any) => String(u.id) === cleanTarget);
+        if (!user) return res.status(404).json({ error: 'User not found.' });
+        if (user.isBlocked) return res.status(403).json({ error: 'This user account is suspended.' });
+        if (user.allowVoiceCall === false) return res.status(403).json({ error: 'User has disabled voice calls.' });
+        // Only users who opened a thread with this agent can be called.
+        const known = (db.agentMessages || []).some((m: any) =>
+          String(m.agentId) === callerAgent && String(m.userId) === cleanTarget);
+        if (!known) {
+          return res.status(403).json({ error: 'You can only call a user who has messaged you first.' });
+        }
+        deliverToUser = cleanTarget;
+      } else if (callerUser) {
+        // ── User calling / answering an agent ───────────────────────────────
+        if (targetIsAgent) {
+          const agent = (db.agents || []).find((a: any) => String(a.id) === cleanTarget);
+          if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+          if (agent.isActive === false) return res.status(403).json({ error: 'This agent is not available right now.' });
+          deliverToAgent = String(agent.id);
+        } else {
+          // user <-> user direct calls remain admin-only
+          return res.status(403).json({ error: 'Direct voice/video calls to other users are admin-only. You can call a BoostPay agent from your agent chat.' });
+        }
+      } else if (isAdmin) {
+        const user = (db.users || []).find((u: any) => String(u.id) === cleanTarget);
+        if (!user) return res.status(404).json({ error: 'User not found.' });
+        if (user.allowVoiceCall === false) return res.status(403).json({ error: 'User has disabled voice calls.' });
+        deliverToUser = cleanTarget;
+      } else {
+        return res.status(401).json({ error: 'Authentication required.' });
+      }
+
+      const outgoing = {
         type: 'call_signal',
-        from: String(req.authUserId || (req.authAdmin ? 'ADMIN_SUPPORT' : '')),
+        from: callerAgent || callerUser || (isAdmin ? 'ADMIN_SUPPORT' : ''),
+        fromRole: callerAgent ? 'AGENT' : (isAdmin ? 'ADMIN' : 'USER'),
         signal: {
           kind,
           callId: String(signal.callId || '').slice(0, 60),
@@ -3641,8 +3739,10 @@ async function startServer() {
             : undefined
         },
         timestamp: Date.now()
-      });
-      res.json({ success: true });
+      };
+      if (deliverToAgent) pushToAgent(deliverToAgent, outgoing);
+      if (deliverToUser) pushToUser(deliverToUser, outgoing);
+      res.json({ success: true, delivered: deliverToAgent ? 'AGENT' : 'USER' });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -8224,6 +8324,7 @@ async function startServer() {
       db.agentMessages.push(msg);
       if (db.agentMessages.length > 5000) db.agentMessages.length = 5000;
       writeDb(db);
+      try { pushToAgent(String(agent.id), { type: 'agent_chat_message', userId: String(user.id), at: msg.at }); } catch { /* ignore */ }
       res.json({ success: true, message: publicAgentMsg(msg) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
@@ -8510,6 +8611,28 @@ async function startServer() {
         .sort((a, b) => b.lastAt - a.lastAt);
       res.json({ success: true, threads, unread: agentUnreadForUser(db, me) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /**
+   * Agent console: live SSE stream.
+   * Carries WebRTC call signaling (agent <-> user) and chat wake-ups so the
+   * agent sees a new user message without waiting for the 6 s poll.
+   */
+  app.get('/api/agent/stream', requireAgent, (req: any, res: any) => {
+    const me = String(req.authAgentId);
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+    const clientId = `${me}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    agentSseClients.set(clientId, { id: clientId, agentId: me, sid: String((req as any).authSid || ''), res });
+    res.write(`data: ${JSON.stringify({ type: 'connected', agentId: me, timestamp: Date.now() })}\n\n`);
+    const pingInterval = setInterval(() => {
+      try { res.write(': ping\n\n'); } catch { clearInterval(pingInterval); agentSseClients.delete(clientId); }
+    }, 20000);
+    req.on('close', () => { clearInterval(pingInterval); agentSseClients.delete(clientId); });
   });
 
   /** Agent: list of users who messaged this agent (IDs only). */

@@ -10,6 +10,35 @@ interface AgentListResponse {
   minUserSend: number; maxUserSend: number; agents: AgentOption[];
 }
 
+/**
+ * Copy helper that also works on iOS Safari / non-secure contexts where
+ * navigator.clipboard is missing or rejects the promise.
+ */
+const copyText = async (text: string): Promise<boolean> => {
+  const value = String(text || '');
+  if (!value) return false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch { /* fall through to the legacy path */ }
+  try {
+    const area = document.createElement('textarea');
+    area.value = value;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.top = '-1000px';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    area.setSelectionRange(0, value.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(area);
+    return ok;
+  } catch { return false; }
+};
+
 const claimClock = (msLeft: number) => {
   const t = Math.max(0, Math.floor(msLeft / 1000));
   return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
@@ -43,6 +72,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   const [nowTs, setNowTs] = useState(Date.now());
   const [notice, setNotice] = useState('');
   const [cancellingId, setCancellingId] = useState('');
+  const [copiedCode, setCopiedCode] = useState('');
 
   const [unreadByAgent, setUnreadByAgent] = useState<Record<string, number>>({});
 
@@ -109,7 +139,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
 
   useEffect(() => {
     if (!isOpen) return;
-    setAmount(''); setNote(''); setError(''); setReceipt(null); setAgentId(''); setNotice('');
+    setAmount(''); setNote(''); setError(''); setReceipt(null); setAgentId(''); setNotice(''); setCopiedCode('');
     setAgentSearch(''); setPickerOpen(false); setChatOpen(false);
     void load();
     void loadInbox();
@@ -211,15 +241,27 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
 
                 <div className="mt-4 rounded-3xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-4 text-center">
                   <div className="flex items-center justify-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.2em] text-emerald-300/80"><KeyRound className="h-3 w-3" /> Claim code</div>
-                  <div className="mt-1 flex items-center justify-center gap-2">
-                    <span className="font-mono text-4xl font-black tracking-[0.35em] text-white">{receipt.claimCode || '----'}</span>
-                    <button
-                      type="button"
-                      onClick={() => { void navigator.clipboard?.writeText(receipt.claimCode).catch(() => undefined); }}
-                      className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-2 text-emerald-300 cursor-pointer"
-                      aria-label="Copy claim code"
-                    ><Copy className="h-3.5 w-3.5" /></button>
+                  <div className="mt-1.5 select-all font-mono text-[30px] font-black leading-none tracking-[0.22em] text-white [text-indent:0.22em]">
+                    {receipt.claimCode || '----'}
                   </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const ok = await copyText(receipt.claimCode);
+                      setCopiedCode(ok ? receipt.claimCode : '');
+                      setNotice(ok ? '' : `Copy failed — bolo agent ke code ta: ${receipt.claimCode}`);
+                      if (ok) window.setTimeout(() => setCopiedCode(''), 2000);
+                    }}
+                    className={`mt-2.5 inline-flex h-9 items-center justify-center gap-1.5 rounded-xl border px-3 text-[10.5px] font-bold transition cursor-pointer ${
+                      copiedCode === receipt.claimCode
+                        ? 'border-emerald-400 bg-emerald-400/20 text-emerald-100'
+                        : 'border-emerald-500/40 bg-zinc-950/40 text-emerald-300 active:scale-[0.98]'
+                    }`}
+                    aria-label="Copy claim code"
+                  >
+                    {copiedCode === receipt.claimCode ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    {copiedCode === receipt.claimCode ? 'Copied!' : 'Copy code'}
+                  </button>
                   {receipt.expiresAt ? (
                     <div className="mt-2 flex items-center justify-center gap-1.5 text-[11px] font-bold text-amber-300">
                       <Clock className="h-3.5 w-3.5" />
@@ -275,8 +317,18 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5">
-                            <span className="font-mono text-base font-black tracking-[0.2em] text-white">{p.claimCode}</span>
+                            <span className="select-all font-mono text-base font-black tracking-[0.16em] text-white">{p.claimCode}</span>
                             <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 font-mono text-[8.5px] font-bold text-amber-300">{claimClock(p.expiresAt - nowTs)}</span>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const ok = await copyText(p.claimCode);
+                                setCopiedCode(ok ? p.claimCode : '');
+                                if (ok) window.setTimeout(() => setCopiedCode(''), 2000);
+                              }}
+                              className="shrink-0 rounded-lg border border-zinc-700 bg-zinc-900 p-1 text-zinc-300 cursor-pointer"
+                              aria-label="Copy claim code"
+                            >{copiedCode === p.claimCode ? <CheckCircle2 className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}</button>
                           </div>
                           <div className="mt-0.5 truncate text-[9.5px] text-zinc-500">Agent {p.agentId} · ${Number(p.amount).toFixed(2)} · total ${Number(p.total).toFixed(2)}</div>
                         </div>

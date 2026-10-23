@@ -346,6 +346,10 @@ const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => 
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);
   const listRef = useRef<HTMLDivElement | null>(null);
+  // Stable ref: the parent passes an inline callback, and depending on it made
+  // the 6 s poll re-subscribe on every render (unnecessary request storm).
+  const onReadRef = useRef(onRead);
+  useEffect(() => { onReadRef.current = onRead; }, [onRead]);
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -354,10 +358,10 @@ const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => 
       setMsgs(res.messages || []);
       setPeerTyping(!!res.peerTyping);
       setErr('');
-      onRead();
+      try { onReadRef.current(); } catch { /* ignore */ }
     } catch (e: any) { if (!quiet) setErr(e?.message || 'Could not load the conversation.'); }
     finally { if (!quiet) setLoading(false); }
-  }, [agent.id, onRead]);
+  }, [agent.id]);
 
   useEffect(() => {
     void load();
@@ -393,6 +397,7 @@ const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => 
           messages={msgs}
           myRole="MANAGEMENT"
           accent="cyan"
+          scope={`mgmt-agent-${agent.id}`}
           peerReadKey="readByAgent"
           loading={loading}
           emptyTitle="No messages yet"
@@ -405,6 +410,7 @@ const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => 
 
         <ChatComposer
           accent="cyan"
+          scope={`mgmt-agent-${agent.id}`}
           placeholder="Message this agent…"
           onSend={send}
           onTyping={typing}

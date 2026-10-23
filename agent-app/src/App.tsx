@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownLeft, ArrowUpRight, BadgeCheck, Banknote, Check, ChevronRight, CircleDollarSign,
-  Copy, History, Home, KeyRound, LogOut, Lock, MessageSquare, Receipt, Search, Send, Sparkles,
-  Ticket, User, UserRound, Wallet, X, Zap
+  Copy, History, Home, KeyRound, LogOut, Lock, MessageSquare, Phone, Receipt, Search, Send, Sparkles,
+  Ticket, User, UserRound, Video, Wallet, X, Zap
 } from 'lucide-react';
 import { ChatComposer, ChatList, chatDay, ChatMessageLike, ChatSendPayload } from './ChatKit';
+import { AgentCallManager, startCallTo } from './CallOverlay';
 
 /* ── API client ─────────────────────────────────────────────────────────── */
 const TOKEN_KEY = 'bpa_token_v1';
@@ -519,6 +520,12 @@ const ChatsScreen: React.FC<{
   const [mgmtId, setMgmtId] = useState(managementId || '');
   const [mgmtLoading, setMgmtLoading] = useState(false);
   const mgmtListRef = useRef<HTMLDivElement | null>(null);
+  // Refs keep the polling effects from re-subscribing on every parent render
+  // (previously that produced a self-sustaining request loop).
+  const onReadRef = useRef(onRead);
+  const onMgmtReadRef = useRef(onManagementRead);
+  useEffect(() => { onReadRef.current = onRead; }, [onRead]);
+  useEffect(() => { onMgmtReadRef.current = onManagementRead; }, [onManagementRead]);
 
   /* ── agent ↔ user ───────────────────────────────────────────────────── */
   const loadThread = useCallback(async (userId: string, quiet = false) => {
@@ -527,13 +534,13 @@ const ChatsScreen: React.FC<{
       setMessages(res.messages || []);
       setPeerTyping(!!res.peerTyping);
       setThreadErr('');
-      onRead();
+      try { onReadRef.current(); } catch { /* ignore */ }
     } catch (err: any) { if (!quiet) setThreadErr(err?.message || 'Could not open the conversation.'); }
-  }, [onRead]);
+  }, []);
 
   useEffect(() => {
     if (!openUser) return;
-    setMessages([]); setThreadErr('');
+    setMessages([]); setThreadErr(''); setPeerTyping(false);
     void loadThread(openUser);
     const iv = window.setInterval(() => { void loadThread(openUser, true); }, 6000);
     return () => window.clearInterval(iv);
@@ -561,10 +568,10 @@ const ChatsScreen: React.FC<{
       setMgmtId(res.managementId || '');
       setMgmtTyping(!!res.peerTyping);
       setMgmtErr(res.note || '');
-      if (onManagementRead) onManagementRead();
+      try { onMgmtReadRef.current?.(); } catch { /* ignore */ }
     } catch (err: any) { if (!quiet) setMgmtErr(err?.message || 'Could not load the management thread.'); }
     finally { if (!quiet) setMgmtLoading(false); }
-  }, [onManagementRead]);
+  }, []);
 
   useEffect(() => {
     if (view !== 'MANAGEMENT') return;
@@ -604,6 +611,7 @@ const ChatsScreen: React.FC<{
             messages={mgmtMsgs}
             myRole="AGENT"
             accent="amber"
+            scope="agent-management"
             peerReadKey="readByManagement"
             loading={mgmtLoading}
             emptyTitle="No messages yet"
@@ -616,6 +624,7 @@ const ChatsScreen: React.FC<{
           {mgmtErr ? <div className="mx-3 mb-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10.5px] font-semibold text-amber-200">{mgmtErr}</div> : null}
           <ChatComposer
             accent="amber"
+            scope="agent-management"
             placeholder="Message your management…"
             onSend={sendManagement}
             onTyping={typingToManagement}
@@ -637,7 +646,19 @@ const ChatsScreen: React.FC<{
               <div className="text-[9px] text-zinc-500">{peerTyping ? 'typing…' : 'Only this user sees the reply'}</div>
             </div>
           </div>
-          <UserRound className="h-4 w-4 text-zinc-600" />
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              onClick={() => startCallTo(openUser, `User #${openUser}`, 'audio')}
+              className="flex h-8 w-8 items-center justify-center rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 active:scale-95"
+              title="Voice call this user"
+            ><Phone className="h-4 w-4" /></button>
+            <button
+              onClick={() => startCallTo(openUser, `User #${openUser}`, 'video')}
+              className="flex h-8 w-8 items-center justify-center rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 active:scale-95"
+              title="Video call this user"
+            ><Video className="h-4 w-4" /></button>
+            <UserRound className="h-4 w-4 text-zinc-600" />
+          </div>
         </div>
 
         <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/40">
@@ -645,6 +666,7 @@ const ChatsScreen: React.FC<{
             messages={messages}
             myRole="AGENT"
             accent="amber"
+            scope={`agent-user-${openUser}`}
             peerReadKey="readByUser"
             emptyTitle="No messages"
             emptyHint="You can only reply to users who messaged you first."
@@ -655,6 +677,7 @@ const ChatsScreen: React.FC<{
           {threadErr ? <div className="mx-3 mb-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{threadErr}</div> : null}
           <ChatComposer
             accent="amber"
+            scope={`agent-user-${openUser}`}
             placeholder="Reply to this user…"
             onSend={sendUser}
             onTyping={typingToUser}
@@ -995,6 +1018,8 @@ export default function App() {
   return (
     <div className="min-h-screen bg-zinc-950 text-white">
       <Toast toast={toastState} onClose={() => setToastState(null)} />
+      {/* 1:1 voice/video calls with users + live chat wake-ups */}
+      <AgentCallManager agentId={agent.id} onChatWake={() => { void loadChats(); }} />
       <div className="mx-auto flex min-h-screen w-full max-w-[430px] flex-col">
         <header className="safe-pt sticky top-0 z-20 flex items-center justify-between border-b border-zinc-800/70 bg-zinc-950/95 px-4 py-3 backdrop-blur">
           <div className="flex items-center gap-2">
