@@ -986,6 +986,14 @@ const EmailVerifyCard: React.FC<{ agent: Agent; toast: (t: { type: 'ok' | 'err';
 
 const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () => void; toast: (t: { type: 'ok' | 'err'; text: string }) => void; onRefresh?: () => void }> = ({ agent, settings, onLogout, toast, onRefresh }) => {
   const [openPw, setOpenPw] = useState(false);
+  // Shown on the profile so it is obvious whether the phone is running the
+  // latest build or a cached older one (that caused "the fix is not there").
+  const [build, setBuild] = useState('');
+  useEffect(() => {
+    let alive = true;
+    void fetch('/api/health').then((r) => r.json()).then((j) => { if (alive && j?.version) setBuild(`App build ${j.version}`); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const [cur, setCur] = useState('');
   const [next, setNext] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -1049,6 +1057,7 @@ const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () =
         <LogOut className="h-4 w-4" /> Sign out
       </button>
       <p className="pb-2 text-center text-[9px] leading-relaxed text-zinc-600">BoostPay Agent · mobile only · only the latest signed-in device stays active</p>
+      <p className="pb-4 text-center text-[9px] font-mono text-zinc-700">{build || 'build …'}</p>
     </div>
   );
 };
