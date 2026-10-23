@@ -725,6 +725,20 @@ export class BoostPayStore {
               for (const cb of this.typingListeners) {
                 try { cb({ conversationId: data.conversationId, userId: data.userId, timestamp: data.timestamp }); } catch { /* ignore */ }
               }
+            } else if (data.type === 'session_revoked') {
+              // Single-device login: the server revoked this session because the
+              // account signed in somewhere else. Drop the session right away
+              // instead of waiting for the next API call to return 401.
+              isTerminated = true;
+              try { es.close(); } catch { /* ignore */ }
+              this.chatEventSource = null;
+              this.activeStreamUserId = null;
+              this.setCurrentUser(null);
+              try {
+                window.dispatchEvent(new CustomEvent('boostpay:session-revoked', {
+                  detail: { reason: String(data.reason || 'Signed in on another device.') }
+                }));
+              } catch { /* ignore */ }
             } else if (data.type === 'chat_event' && data.event) {
               this.handleChatEvent(data);
             } else if (data.type === 'call_signal' && data.signal) {

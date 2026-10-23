@@ -227,6 +227,7 @@ setInterval(()=>{ const n=Date.now(); for(const [k,v] of otpEmailBuckets) if(v.r
 interface ChatSseClient {
   id: string;
   userId: string;
+  sid?: string;
   res: express.Response;
 }
 const chatSseClients = new Map<string, ChatSseClient>();
@@ -1273,6 +1274,54 @@ function sessionSnapshot(db: any): SessionRecord[] {
   if (!Array.isArray(db.sessions)) db.sessions = [];
   return db.sessions;
 }
+/** Push a "you were signed out" event to the affected device(s) and close their
+ *  chat stream, so a second-device login kicks the first device immediately
+ *  instead of waiting for its next API call. */
+function kickRevokedStreams(userId: string, revokedSids: Set<string>, reason: string): void {
+  try {
+    for (const [clientId, client] of chatSseClients.entries()) {
+      if (String(client.userId) !== String(userId)) continue;
+      const sid = String(client.sid || '');
+      // Close streams of the revoked sessions; also close unidentified legacy
+      // streams since they can no longer be validated.
+      if (revokedSids.size > 0 && sid && !revokedSids.has(sid)) continue;
+      try {
+        client.res.write(`data: ${JSON.stringify({ type: 'session_revoked', reason, timestamp: Date.now() })}\n\n`);
+        client.res.end();
+      } catch { /* stream already gone */ }
+      chatSseClients.delete(clientId);
+    }
+  } catch { /* never block login */ }
+}
+
+/** Why a signed token may no longer be used (null = still valid).
+ *  Single source of truth for USER *and* ADMIN protected routes. */
+function sessionBlockReason(db: any, payload: any): string | null {
+  if (!payload) return 'Authentication required. Please sign in.';
+  const sid = String(payload.sid || '');
+  // Tokens issued before session tracking (or forged without a session) are no
+  // longer accepted: they cannot be revoked, which would defeat the device cap.
+  if (!sid) return 'Your session is no longer valid. Please sign in again.';
+  if (revokedSessions.has(sid)) return 'This session was signed out. Please sign in again.';
+  try {
+    const rec = sessionSnapshot(db).find((x: SessionRecord) => x.id === sid);
+    // A session id belongs to exactly one account/role — a token that claims a
+    // different subject than its session is never honoured.
+    if (rec && (String(rec.userId) !== String(payload.sub) || String(rec.role) !== String(payload.role))) {
+      return 'Your session is no longer valid. Please sign in again.';
+    }
+    if (rec && rec.revoked) {
+      revokedSessions.add(sid);
+      return 'This session was signed out. Please sign in again.';
+    }
+    if (rec && rec.lastSeenAt && Date.now() - rec.lastSeenAt > 7 * 24 * 3600 * 1000) {
+      rec.revoked = true; revokedSessions.add(sid); writeDb(db);
+      return 'Session expired due to 7-day inactivity. Please sign in again.';
+    }
+  } catch { /* non-fatal */ }
+  return null;
+}
+
 function createSession(db: any, userId: string, role: 'USER' | 'ADMIN', ip: string, userAgent: string): SessionRecord {
   const sess: SessionRecord = {
     id: 'SESS-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
@@ -1285,12 +1334,16 @@ function createSession(db: any, userId: string, role: 'USER' | 'ADMIN', ip: stri
   };
   // CONCURRENCY CAP 1/device: 2nd login auto-logs-out 1st device — revoke all other active sessions for same user+role
   try {
-    const all = sessionSnapshot(db);
-    for (const s of all) {
+    const revokedIds = new Set<string>();
+    for (const s of sessionSnapshot(db)) {
       if (String(s.userId)===String(userId) && s.role===role && !s.revoked && s.id!==sess.id) {
         s.revoked = true;
         revokedSessions.add(s.id);
+        revokedIds.add(s.id);
       }
+    }
+    if (revokedIds.size > 0) {
+      kickRevokedStreams(String(userId), revokedIds, 'You were signed in on another device, so this device was signed out.');
     }
   } catch {}
   sessionSnapshot(db).unshift(sess);
@@ -1430,8 +1483,11 @@ function requireUser(req: any, res: any, next: any) {
   if (!payload || payload.role !== 'USER') {
     return res.status(401).json({ error: 'Authentication required. Please sign in.' });
   }
-  if (payload.sid && revokedSessions.has(payload.sid)) {
-    return res.status(401).json({ error: 'This session was signed out. Please sign in again.' });
+  {
+    let dbChk: any = null;
+    try { dbChk = readDb(); } catch { /* ignore */ }
+    const blocked = sessionBlockReason(dbChk, payload);
+    if (blocked) return res.status(401).json({ error: blocked });
   }
   // A token is only valid while its account still exists: an admin deleting a
   // user must immediately kill that user's API access (previously the JWT kept
@@ -1472,8 +1528,11 @@ function requireAdmin(req: any, res: any, next: any) {
   if (!payload || payload.role !== 'ADMIN') {
     return res.status(401).json({ error: 'Administrator authentication required.' });
   }
-  if (payload.sid && revokedSessions.has(payload.sid)) {
-    return res.status(401).json({ error: 'This admin session was signed out.' });
+  {
+    let dbChkA: any = null;
+    try { dbChkA = readDb(); } catch { /* ignore */ }
+    const blockedA = sessionBlockReason(dbChkA, payload);
+    if (blockedA) return res.status(401).json({ error: blockedA });
   }
   req.authAdmin = payload.sub;
   req.authSid = payload.sid;
@@ -1508,13 +1567,23 @@ function requireUserOrAdmin(req: any, res: any, next: any) {
   if (!payload || (payload.role !== 'USER' && payload.role !== 'ADMIN')) {
     return res.status(401).json({ error: 'Authentication required. Please sign in.' });
   }
+  let db: any = null;
+  try { db = readDb(); } catch { /* fall through with null */ }
+  // Single-device cap: a session revoked by a login on another device must lose
+  // access here too (this guard covers /api/db, /api/chat and /api/sync — before
+  // this check the first device kept full access after being "signed out").
+  const blocked = sessionBlockReason(db, payload);
+  if (blocked) return res.status(401).json({ error: blocked });
   if (payload.role === 'USER') {
     req.authUserId = payload.sub;
     let exists = false;
-    try { const db: any = readDb(); exists = (db.users || []).some((x: any) => String(x.id) === String(payload.sub)); } catch { exists = true; }
+    try { exists = ((db && db.users) || []).some((x: any) => String(x.id) === String(payload.sub)); } catch { exists = true; }
     if (!exists) return res.status(401).json({ error: 'This account no longer exists. Please sign in again.' });
   }
   if (payload.role === 'ADMIN') req.authAdmin = payload.sub;
+  req.authSid = payload.sid;
+  req.authAdminRole = payload.adminRole || 'SUPERADMIN';
+  try { if (db) touchSession(db, payload.sid); } catch { /* non-fatal */ }
   next();
 }
 
@@ -2952,7 +3021,7 @@ async function startServer() {
     });
 
     const clientId = `${userId}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    chatSseClients.set(clientId, { id: clientId, userId, res });
+    chatSseClients.set(clientId, { id: clientId, userId, sid: String((req as any).authSid || ''), res });
 
     // Send immediate initial connection confirmation
     res.write(`data: ${JSON.stringify({ type: 'connected', clientId, userId, timestamp: Date.now() })}\n\n`);

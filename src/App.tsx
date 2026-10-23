@@ -302,6 +302,23 @@ export default function App() {
     })();
   }, [currentUser?.id]);
 
+  // Single-device login: the server pushes session_revoked to the older device.
+  useEffect(() => {
+    const onRevoked = (ev: Event) => {
+      const reason = String((ev as CustomEvent).detail?.reason || 'Signed in on another device.');
+      BoostPayStore.setCurrentUser(null);
+      setCurrentUser(null);
+      BoostPayStore.triggerToast({
+        id: 'session-revoked',
+        type: 'ERROR',
+        title: 'Signed out',
+        message: reason
+      } as any);
+    };
+    window.addEventListener('boostpay:session-revoked', onRevoked);
+    return () => window.removeEventListener('boostpay:session-revoked', onRevoked);
+  }, []);
+
   // Session expiry: any API 401 while logged in bounces to the login screen
   useEffect(() => {
     const origFetch = window.fetch.bind(window);
