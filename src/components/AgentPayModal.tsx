@@ -3,7 +3,7 @@ import { Store, X, CheckCircle2, AlertTriangle, ArrowRight, Copy } from 'lucide-
 import { BoostPayStore } from '../services/store';
 import { User } from '../types';
 
-interface AgentOption { id: string; name: string; balance: number }
+interface AgentOption { id: string; name: string }
 interface AgentListResponse {
   success: boolean; enabled: boolean; feePercent: number;
   minUserSend: number; maxUserSend: number; agents: AgentOption[];

@@ -7172,7 +7172,8 @@ async function startServer() {
       maxUserSend: s.maxUserSend,
       agents: (db.agents || [])
         .filter((a: any) => a.isActive !== false)
-        .map((a: any) => ({ id: a.id, name: a.name || '', balance: round2(a.balance || 0) }))
+        // Agent float stays private — users only need the ID and display name.
+        .map((a: any) => ({ id: a.id, name: a.name || '' }))
     });
   });
 
