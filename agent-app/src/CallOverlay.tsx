@@ -155,6 +155,7 @@ export const AgentCallManager: FC<{ agentId: string; onChatWake?: () => void }> 
               emitAgentCallSignal({ from: String(data.from || ''), signal: data.signal });
             } else if (data && data.type === 'agent_chat_message') {
               try { onWakeRef.current(); } catch { /* ignore */ }
+              try { window.dispatchEvent(new CustomEvent('boostpay:agent-chat-wake')); } catch { /* ignore */ }
             }
           } catch { /* ignore malformed frames */ }
         };

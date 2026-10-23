@@ -49,6 +49,8 @@ interface Props {
   onClose: () => void;
   currentUser: User;
   onSuccess: (updatedUser: User) => void;
+  /** 'CHAT' opens straight into the agent conversation list. */
+  initialView?: 'PAY' | 'CHAT';
 }
 
 /**
@@ -56,7 +58,10 @@ interface Props {
  * The fee is charged to the user on top of the amount (owner decision):
  *   user balance -= amount + fee,  agent receives the full amount.
  */
-export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSuccess }) => {
+export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSuccess, initialView = 'PAY' }) => {
+  const [view, setView] = useState<'PAY' | 'CHAT'>(initialView);
+  const [threads, setThreads] = useState<Array<{ agentId: string; lastText: string; lastAt: number; unread: number; lastSender?: string; isActive?: boolean }>>([]);
+  const [threadsLoading, setThreadsLoading] = useState(false);
   const [data, setData] = useState<AgentListResponse | null>(null);
   const [agentId, setAgentId] = useState('');
   const [agentSearch, setAgentSearch] = useState('');
@@ -77,6 +82,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   const [unreadByAgent, setUnreadByAgent] = useState<Record<string, number>>({});
 
   const loadInbox = useCallback(async () => {
+    setThreadsLoading(true);
     try {
       const res = await fetch('/api/user/agent-inbox', { headers: BoostPayStore.authHeaders() });
       if (!res.ok) return;
@@ -84,7 +90,9 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
       const map: Record<string, number> = {};
       for (const t of json.threads || []) if (t.unread > 0) map[t.agentId] = t.unread;
       setUnreadByAgent(map);
+      setThreads(Array.isArray(json.threads) ? json.threads : []);
     } catch { /* ignore */ }
+    finally { setThreadsLoading(false); }
   }, []);
 
   const load = useCallback(async () => {
@@ -139,12 +147,21 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
 
   useEffect(() => {
     if (!isOpen) return;
+    setView(initialView);
     setAmount(''); setNote(''); setError(''); setReceipt(null); setAgentId(''); setNotice(''); setCopiedCode('');
     setAgentSearch(''); setPickerOpen(false); setChatOpen(false);
     void load();
     void loadInbox();
     void loadPending();
-  }, [isOpen, load, loadInbox, loadPending]);
+  }, [isOpen, initialView, load, loadInbox, loadPending]);
+
+  // live wake-up: previews/unread refresh the moment an agent writes
+  useEffect(() => {
+    if (!isOpen) return;
+    const onLive = () => { void loadInbox(); };
+    window.addEventListener('boostpay:agent-chat', onLive as EventListener);
+    return () => window.removeEventListener('boostpay:agent-chat', onLive as EventListener);
+  }, [isOpen, loadInbox]);
 
   const feePercent = Number(data?.feePercent || 0);
   const numAmount = Number(amount || 0);
@@ -211,14 +228,60 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
           <div className="flex items-center gap-2">
             <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/15"><Store className="w-4 h-4 text-emerald-400" /></span>
             <div>
-              <div className="text-sm font-black text-white">Pay an Agent</div>
-              <div className="text-[9px] font-medium text-zinc-500">Cash in / cash out with a BoostPay agent</div>
+              <div className="text-sm font-black text-white">{view === 'CHAT' ? 'Agent Chats' : 'Pay an Agent'}</div>
+              <div className="text-[9px] font-medium text-zinc-500">{view === 'CHAT' ? 'Your conversations with BoostPay agents' : 'Cash in / cash out with a BoostPay agent'}</div>
             </div>
           </div>
-          <button onClick={onClose} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 text-zinc-400 hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setView((v) => (v === 'CHAT' ? 'PAY' : 'CHAT'))}
+              className="rounded-xl border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-[9.5px] font-bold text-emerald-300 cursor-pointer"
+            >{view === 'CHAT' ? 'Pay' : 'Chats'}</button>
+            <button onClick={onClose} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 text-zinc-400 hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
+          </div>
         </div>
 
-        {receipt ? (
+        {view === 'CHAT' ? (
+          <div className="p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Conversations</span>
+              <span className="text-[9px] text-zinc-600">{threads.length} agent{threads.length === 1 ? '' : 's'}</span>
+            </div>
+            {threadsLoading && threads.length === 0 ? (
+              <p className="py-8 text-center text-[11px] text-zinc-500">Loading conversations…</p>
+            ) : threads.length === 0 ? (
+              <div className="rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-8 text-center">
+                <MessageSquare className="mx-auto h-5 w-5 text-zinc-600" />
+                <p className="mt-2 text-[11px] font-semibold text-zinc-300">No agent conversations yet</p>
+                <p className="mt-1 text-[10px] leading-relaxed text-zinc-500">Pick an agent in the Pay tab and tap “Message” to start a chat. Agent replies show up here.</p>
+                <button type="button" onClick={() => setView('PAY')} className="mt-3 rounded-2xl bg-emerald-500 px-4 py-2 text-[11px] font-black text-zinc-950 cursor-pointer">Find an agent</button>
+              </div>
+            ) : (
+              <div className="divide-y divide-zinc-800/70">
+                {threads.map((t) => (
+                  <button
+                    key={t.agentId}
+                    type="button"
+                    onClick={() => { setAgentId(t.agentId); setChatOpen(true); }}
+                    className="flex w-full items-center gap-2.5 py-2.5 text-left cursor-pointer"
+                  >
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-300"><Store className="h-4 w-4" /></span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[11.5px] font-bold text-white">Agent {t.agentId}</span>
+                      <span className="block truncate text-[9.5px] text-zinc-500">{t.lastSender === 'USER' ? 'You: ' : ''}{t.lastText || 'No messages'}</span>
+                    </span>
+                    <span className="shrink-0 text-right">
+                      <span className="block text-[8.5px] text-zinc-600">{t.lastAt ? new Date(t.lastAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                      {t.unread > 0 ? <span className="mt-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[9px] font-black text-zinc-950">{t.unread > 9 ? '9+' : t.unread}</span> : null}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <p className="mt-3 px-1 text-center text-[9px] leading-relaxed text-zinc-600">Only your User ID is shared with the agent. No names or emails.</p>
+          </div>
+        ) : receipt ? (
           <div className="p-5">
             {receipt.cancelled ? (
               <div className="text-center">

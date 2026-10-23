@@ -369,15 +369,12 @@ const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => 
     return () => window.clearInterval(iv);
   }, [load]);
 
-  useEffect(() => {
-    const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [msgs.length]);
+
 
   const send = async (payload: ChatSendPayload) => {
     setErr('');
     const res = await api<{ message: MsgRow }>(`/api/management/agents/${agent.id}/messages`, { method: 'POST', body: payload });
-    setMsgs((prev) => [...prev, res.message]);
+    setMsgs((prev) => (prev.some((m) => m.id === res.message.id) ? prev : [...prev, res.message]));
   };
   const typing = () => { void api(`/api/management/agents/${agent.id}/typing`, { method: 'POST', body: {} }).catch(() => {}); };
 

@@ -1,5 +1,5 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
-import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut, Settings, Store
+import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut, Settings, Store, MessageSquare
 } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User, BoostState, SystemConfig } from '../types';
@@ -35,6 +35,7 @@ interface BalanceCardProps {
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
   onOpenAgentPay?: () => void;
+  onOpenAgentChat?: () => void;
 }
 
 const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
@@ -45,7 +46,8 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   minuteRatePercent,
   onOpenSendMoney,
   onOpenQR,
-  onOpenAgentPay
+  onOpenAgentPay,
+  onOpenAgentChat
 }) => {
   const isRunning = boostState.isActive && !boostState.isPaused;
   const [liveAccrued, setLiveAccrued] = useState(0);
@@ -54,7 +56,7 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   const [agentUnread, setAgentUnread] = useState(0);
 
   useEffect(() => {
-    if (!onOpenAgentPay) return;
+    if (!onOpenAgentPay && !onOpenAgentChat) return;
     let alive = true;
     const pull = async () => {
       try {
@@ -66,8 +68,14 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
     };
     void pull();
     const iv = window.setInterval(pull, 20000);
-    return () => { alive = false; window.clearInterval(iv); };
-  }, [onOpenAgentPay]);
+    const onLive = () => { void pull(); };
+    window.addEventListener('boostpay:agent-chat', onLive as EventListener);
+    return () => {
+      alive = false;
+      window.clearInterval(iv);
+      window.removeEventListener('boostpay:agent-chat', onLive as EventListener);
+    };
+  }, [onOpenAgentPay, onOpenAgentChat]);
 
   useEffect(() => {
     if (!isRunning) {
@@ -215,8 +223,18 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
           >
             <Store className="w-3.5 h-3.5" />
             Pay an Agent
+          </button>
+        )}
+
+        {onOpenAgentChat && (
+          <button
+            onClick={onOpenAgentChat}
+            className="mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-2xl border border-sky-500/30 bg-sky-500/10 text-[11px] font-bold text-sky-300 transition hover:bg-sky-500/15 active:scale-[0.99] cursor-pointer"
+          >
+            <MessageSquare className="w-3.5 h-3.5" />
+            Agent Chats
             {agentUnread > 0 && (
-              <span className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[9px] font-black text-zinc-950">
+              <span className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-sky-400 px-1 text-[9px] font-black text-zinc-950">
                 {agentUnread > 9 ? '9+' : agentUnread}
               </span>
             )}
@@ -443,6 +461,7 @@ interface Props {
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
   onOpenAgentPay?: () => void;
+  onOpenAgentChat?: () => void;
   onOpenSecurity?: () => void;
   onOpenInbox?: () => void;
   onOpenSettings?: () => void;
@@ -457,6 +476,7 @@ export const WalletView: FC<Props> = ({
   onOpenSendMoney,
   onOpenQR,
   onOpenAgentPay,
+  onOpenAgentChat,
   onOpenSecurity,
   onOpenInbox,
   onOpenSettings,
@@ -571,6 +591,7 @@ export const WalletView: FC<Props> = ({
         onOpenSendMoney={onOpenSendMoney}
         onOpenQR={onOpenQR}
         onOpenAgentPay={onOpenAgentPay}
+        onOpenAgentChat={onOpenAgentChat}
       />
 
       {/* 3. ISOLATED DYNAMIC COMPOUNDING CARD */}

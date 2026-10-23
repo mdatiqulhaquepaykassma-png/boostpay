@@ -302,6 +302,19 @@ export const ChatList: React.FC<{
   listRef?: React.RefObject<HTMLDivElement | null>;
 }> = ({ messages, myRole, accent, scope = 'default', peerReadKey, loading, emptyTitle, emptyHint, className = '', style, listRef }) => {
   const pressTimer = useRef<number | null>(null);
+  const innerRef = useRef<HTMLDivElement | null>(null);
+  const firstPaint = useRef(true);
+  // Auto-scroll only when the reader is already at the bottom — otherwise a new
+  // message yanked people out of the history they were reading.
+  useEffect(() => {
+    const el = (listRef && listRef.current) || innerRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+    if (firstPaint.current || nearBottom) {
+      el.scrollTop = el.scrollHeight;
+      firstPaint.current = false;
+    }
+  }, [messages.length, listRef]);
   const clearPress = () => {
     if (pressTimer.current !== null) { window.clearTimeout(pressTimer.current); pressTimer.current = null; }
   };
@@ -310,7 +323,14 @@ export const ChatList: React.FC<{
     window.dispatchEvent(new CustomEvent('chatkit:reply', { detail: { id: m.id, text: preview, sender: m.senderRole, scope } }));
   };
   return (
-    <div ref={listRef} className={`space-y-2 overflow-y-auto overscroll-contain ${className}`} style={style}>
+    <div
+      ref={(node) => {
+        innerRef.current = node;
+        if (listRef) (listRef as any).current = node;
+      }}
+      className={`space-y-2 overflow-y-auto overscroll-contain ${className}`}
+      style={style}
+    >
       {loading ? (
         <p className="py-8 text-center text-[11px] text-zinc-600">Loading…</p>
       ) : messages.length === 0 ? (

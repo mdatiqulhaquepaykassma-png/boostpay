@@ -51,10 +51,17 @@ export const AgentMessageSheet: FC<Props> = ({ isOpen, agentId, agentName, onClo
     return () => window.clearInterval(iv);
   }, [isOpen, agentId, load]);
 
+  // Live wake-up from the server stream: an agent reply shows up at once.
   useEffect(() => {
-    const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length]);
+    if (!isOpen || !agentId) return;
+    const onLive = (e: Event) => {
+      const detail = (e as CustomEvent).detail || {};
+      if (detail.agentId && String(detail.agentId) !== String(agentId)) return;
+      void load(true);
+    };
+    window.addEventListener('boostpay:agent-chat', onLive as EventListener);
+    return () => window.removeEventListener('boostpay:agent-chat', onLive as EventListener);
+  }, [isOpen, agentId, load]);
 
   const send = async (payload: ChatSendPayload) => {
     setError('');
@@ -65,7 +72,7 @@ export const AgentMessageSheet: FC<Props> = ({ isOpen, agentId, agentName, onClo
     });
     const json = await res.json().catch(() => null);
     if (!res.ok) throw new Error(json?.error || 'Message could not be sent.');
-    setMessages((prev) => [...prev, json.message]);
+    setMessages((prev) => (prev.some((m) => m.id === json.message.id) ? prev : [...prev, json.message]));
   };
 
   const typing = () => {

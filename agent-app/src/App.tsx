@@ -546,16 +546,13 @@ const ChatsScreen: React.FC<{
     return () => window.clearInterval(iv);
   }, [openUser, loadThread]);
 
-  useEffect(() => {
-    const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, openUser]);
+  // scroll is handled by ChatKit (only when the reader is at the bottom)
 
   const sendUser = async (payload: ChatSendPayload) => {
     if (!openUser) return;
     setThreadErr('');
     const res = await api<any>('/api/agent/message-user', { method: 'POST', body: { userId: openUser, ...payload } });
-    setMessages((prev) => [...prev, res.message]);
+    setMessages((prev) => (prev.some((m) => m.id === res.message.id) ? prev : [...prev, res.message]));
   };
   const typingToUser = () => { if (openUser) void api('/api/agent/typing', { method: 'POST', body: { userId: openUser } }).catch(() => {}); };
 
@@ -580,15 +577,24 @@ const ChatsScreen: React.FC<{
     return () => window.clearInterval(iv);
   }, [view, loadManagement]);
 
+
+
+  // Live wake-up from the agent SSE stream (new user message / management reply):
+  // refresh whatever the agent is currently looking at, without waiting for the poll.
   useEffect(() => {
-    const el = mgmtListRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [mgmtMsgs.length, view]);
+    const onWake = () => {
+      try { onReadRef.current(); } catch { /* ignore */ }
+      if (openUser) void loadThread(openUser, true);
+      if (view === 'MANAGEMENT') void loadManagement(true);
+    };
+    window.addEventListener('boostpay:agent-chat-wake', onWake as EventListener);
+    return () => window.removeEventListener('boostpay:agent-chat-wake', onWake as EventListener);
+  }, [openUser, view, loadThread, loadManagement]);
 
   const sendManagement = async (payload: ChatSendPayload) => {
     setMgmtErr('');
     const res = await api<any>('/api/agent/message-management', { method: 'POST', body: payload });
-    setMgmtMsgs((prev) => [...prev, res.message]);
+    setMgmtMsgs((prev) => (prev.some((m) => m.id === res.message.id) ? prev : [...prev, res.message]));
   };
   const typingToManagement = () => { void api('/api/agent/typing-management', { method: 'POST', body: {} }).catch(() => {}); };
 
@@ -950,13 +956,13 @@ export default function App() {
     } catch { /* ignore */ } finally { setLoadingHistory(false); }
   }, []);
 
-  const loadChats = useCallback(async () => {
-    setLoadingChats(true);
+  const loadChats = useCallback(async (quiet = false) => {
+    if (!quiet) setLoadingChats(true);
     try {
       const res = await api<any>('/api/agent/chats');
       setChats(res.chats || []);
       setChatUnread(Number(res.unread) || 0);
-    } catch { /* ignore */ } finally { setLoadingChats(false); }
+    } catch { /* ignore */ } finally { if (!quiet) setLoadingChats(false); }
   }, []);
 
   useEffect(() => {
@@ -1051,7 +1057,7 @@ export default function App() {
               chats={chats}
               loading={loadingChats}
               toast={toast}
-              onRead={() => void loadChats()}
+              onRead={() => void loadChats(true)}
               managementId={(agent as any).ownerManagementId || ''}
               managementUnread={mgmtUnread}
               onManagementRead={() => { void refresh(); }}

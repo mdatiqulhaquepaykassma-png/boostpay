@@ -46,6 +46,7 @@ export default function App() {
   // Modals state
   const [isSendMoneyOpen, setIsSendMoneyOpen] = useState(false);
   const [isAgentPayOpen, setIsAgentPayOpen] = useState(false);
+  const [agentPayView, setAgentPayView] = useState<'PAY' | 'CHAT'>('PAY');
 
   // System config state
   const [config, setConfig] = useState<SystemConfig>(BoostPayStore.getConfig());
@@ -503,7 +504,8 @@ export default function App() {
                   onUpdateUser={(updated: User) => setCurrentUser({ ...updated })}
                   onOpenSendMoney={() => setIsSendMoneyOpen(true)}
                   onOpenQR={() => setIsQROpen(true)}
-                  onOpenAgentPay={() => setIsAgentPayOpen(true)}
+                  onOpenAgentPay={() => { setAgentPayView('PAY'); setIsAgentPayOpen(true); }}
+                  onOpenAgentChat={() => { setAgentPayView('CHAT'); setIsAgentPayOpen(true); }}
                   onOpenSecurity={() => setIsSecurityOpen(true)}
                   onOpenSettings={() => setIsSettingsOpen(true)}
                   onOpenInbox={() => {
@@ -639,6 +641,7 @@ export default function App() {
           isOpen={isAgentPayOpen}
           onClose={() => setIsAgentPayOpen(false)}
           currentUser={currentUser}
+          initialView={agentPayView}
           onSuccess={(updated) => setCurrentUser({ ...updated })}
         />
       )}

@@ -741,6 +741,14 @@ export class BoostPayStore {
               } catch { /* ignore */ }
             } else if (data.type === 'chat_event' && data.event) {
               this.handleChatEvent(data);
+            } else if (data.type === 'agent_chat_message') {
+              // An agent replied / wrote in the user↔agent thread: let the chat
+              // sheets and the Pay-an-Agent badge refresh immediately.
+              try {
+                window.dispatchEvent(new CustomEvent('boostpay:agent-chat', {
+                  detail: { agentId: String(data.agentId || ''), at: Number(data.at || Date.now()) }
+                }));
+              } catch { /* ignore */ }
             } else if (data.type === 'call_signal' && data.signal) {
               for (const cb of this.callSignalListeners) {
                 try { cb({ from: String(data.from || ''), signal: data.signal }); } catch { /* listener error */ }

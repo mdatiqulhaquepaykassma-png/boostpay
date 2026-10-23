@@ -311,7 +311,20 @@ function saveAttachmentToDisk(dataUrl: string, prefix: string): { fileId: string
     const buf = Buffer.from(b64, 'base64');
     if (!buf.length || buf.length > 6*1024*1024) return null;
     const fileId = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
-    const ext = mime.includes('png')?'png': mime.includes('jpeg')||mime.includes('jpg')?'jpg': mime.includes('webp')?'webp': mime.includes('gif')?'gif': mime.includes('pdf')?'pdf': mime.includes('audio')?'webm': mime.includes('video')?'mp4':'bin';
+    // Audio must keep its real container: iOS/Safari records audio/mp4 (m4a),
+    // Chrome records audio/webm. Serving an mp4 recording as audio/webm made
+    // voice notes unplayable on iPhone.
+    const ext = mime.includes('png') ? 'png'
+      : mime.includes('jpeg') || mime.includes('jpg') ? 'jpg'
+      : mime.includes('webp') ? 'webp'
+      : mime.includes('gif') ? 'gif'
+      : mime.includes('pdf') ? 'pdf'
+      : mime.includes('audio/mp4') || mime.includes('audio/aac') || mime.includes('audio/m4a') ? 'm4a'
+      : mime.includes('audio/ogg') ? 'ogg'
+      : mime.includes('audio/wav') || mime.includes('audio/x-wav') ? 'wav'
+      : mime.includes('audio/mpeg') ? 'mp3'
+      : mime.includes('audio') ? 'webm'
+      : mime.includes('video') ? 'mp4' : 'bin';
     const fname = `${fileId}.${ext}`;
     const fpath = path.join(UPLOAD_DIR, fname);
     fs.writeFileSync(fpath, buf);
@@ -375,10 +388,12 @@ function chatContentFromBody(body: any, maxLen = 500): ChatContent {
   return { ok: true, kind: 'text', text };
 }
 
-function chatReplyPatch(list: any[], replyToId: any) {
+function chatReplyPatch(list: any[], replyToId: any, sameThread?: (m: any) => boolean) {
   const id = String(replyToId || '').trim();
   if (!id) return null;
-  const src = (list || []).find((m: any) => String(m.id) === id);
+  // Replies are scoped to one thread: a replyToId from another conversation must
+  // never be echoed back as a quote (that leaked message text across threads).
+  const src = (list || []).find((m: any) => String(m.id) === id && (!sameThread || sameThread(m)));
   if (!src) return null;
   const preview = src.kind === 'photo' ? 'Photo' : src.kind === 'voice' ? 'Voice message' : String(src.text || '').slice(0, 120);
   return { replyToId: String(src.id), replyToText: preview, replyToSender: String(src.senderRole || '') };
@@ -3266,8 +3281,8 @@ async function startServer() {
       let b = rateBuckets.get(perConvKey);
       if (!b || (b as any).resetAt < Date.now()) { b={ count:0, resetAt: Date.now()+60000 } as any; rateBuckets.set(perConvKey,b as any); }
       (b as any).count +=1;
-      if ((b as any).count > 20) {
-        return res.status(429).json({ error: 'You are sending messages too fast in this chat (20/min). Slow down.' });
+      if ((b as any).count > 40) {
+        return res.status(429).json({ error: 'You are sending messages too fast in this chat (40/min). Slow down.' });
       }
       // Text sanitization — prevent stored XSS
       if (typeof req.body.text === 'string') req.body.text = sanitizeText(req.body.text, 2000);
@@ -3418,8 +3433,15 @@ async function startServer() {
           const arr = (map[uidStr]||[]).filter((t:number)=> nowS - t < 60000);
           arr.push(nowS);
           map[uidStr]=arr;
-          if (arr.length > (afC.maxMessagesPerMin||10)) {
-            // freeze temporarily
+          // Chatting is not a financial action: a normal conversation must never
+          // freeze a balance. Over the soft limit we simply ask the user to slow
+          // down; only sustained abuse (hard limit) is logged/frozen.
+          const softLimit = Math.max(30, Number(afC.maxMessagesPerMin) || 10);
+          const hardLimit = Math.max(softLimit * 3, Number(afC.chatSpamFreezeAt) || 90);
+          if (arr.length > softLimit && arr.length <= hardLimit) {
+            return res.status(429).json({ error: 'You are sending messages too fast. Please slow down a moment.' });
+          }
+          if (arr.length > hardLimit) {
             const dbSpam = readDb();
             const uSpam = (dbSpam.users||[]).find((x:any)=> String(x.id)===uidStr);
             if (uSpam && !uSpam.isFrozen) {
@@ -3646,7 +3668,11 @@ async function startServer() {
       // Optional: check if requester is participant of any message that owns this file (privacy)
       // For now allow any authed user to fetch (since URL is unguessable: fileId has random suffix)
       const ext = path.extname(fpath).toLowerCase();
-      const mimeMap:any = {'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif','.pdf':'application/pdf','.webm':'audio/webm','.mp4':'video/mp4','.bin':'application/octet-stream'};
+      const mimeMap:any = {
+        '.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif',
+        '.pdf':'application/pdf','.webm':'audio/webm','.m4a':'audio/mp4','.ogg':'audio/ogg','.wav':'audio/wav',
+        '.mp3':'audio/mpeg','.mp4':'video/mp4','.bin':'application/octet-stream'
+      };
       res.setHeader('Content-Type', mimeMap[ext]||'application/octet-stream');
       res.setHeader('Cache-Control','public, max-age=86400');
       res.setHeader('Content-Disposition', `inline; filename="${fid}${ext}"`);
@@ -8294,7 +8320,7 @@ async function startServer() {
   });
 
   /** User → agent: start or continue a thread. */
-  app.post('/api/user/message-agent', requireUser, rateLimit(30), (req: any, res) => {
+  app.post('/api/user/message-agent', requireUser, rateLimit(60), (req: any, res) => {
     try {
       const db = ensureAgentMessages(ensureAgentCollections(readDb()));
       const settings = agentSettingsOf(db);
@@ -8318,11 +8344,14 @@ async function startServer() {
         at: Date.now(),
         readByUser: true,
         readByAgent: false,
-        ...(chatReplyPatch(db.agentMessages || [], req.body && req.body.replyToId) || {})
+        ...(chatReplyPatch(db.agentMessages || [], req.body && req.body.replyToId,
+              (m: any) => String(m.agentId) === String(agent.id) && String(m.userId) === String(user.id)) || {})
       };
       delete (msg as any).ok;
       db.agentMessages.push(msg);
-      if (db.agentMessages.length > 5000) db.agentMessages.length = 5000;
+      // Trim from the FRONT: the array is append-ordered, so `length = 5000`
+      // threw away the newest messages instead of the oldest ones.
+      if (db.agentMessages.length > 5000) db.agentMessages.splice(0, db.agentMessages.length - 5000);
       writeDb(db);
       try { pushToAgent(String(agent.id), { type: 'agent_chat_message', userId: String(user.id), at: msg.at }); } catch { /* ignore */ }
       res.json({ success: true, message: publicAgentMsg(msg) });
@@ -8448,7 +8477,7 @@ async function startServer() {
   });
 
   /** Agent → its own management. */
-  app.post('/api/agent/message-management', requireAgent, rateLimit(30), (req: any, res) => {
+  app.post('/api/agent/message-management', requireAgent, rateLimit(60), (req: any, res) => {
     try {
       const db = ensureManagementMessages(ensureAgentCollections(readDb()));
       const me = String(req.authAgentId);
@@ -8465,12 +8494,15 @@ async function startServer() {
         id: 'MMSG-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
         managementId, agentId: me, senderRole: 'AGENT', ...content, at: Date.now(),
         readByAgent: true, readByManagement: false,
-        ...(chatReplyPatch(db.managementMessages || [], req.body && req.body.replyToId) || {})
+        ...(chatReplyPatch(db.managementMessages || [], req.body && req.body.replyToId,
+              (m: any) => String(m.managementId) === managementId && String(m.agentId) === me) || {})
       };
       delete (msg as any).ok;
       db.managementMessages.push(msg);
-      if (db.managementMessages.length > 5000) db.managementMessages.length = 5000;
+      if (db.managementMessages.length > 5000) db.managementMessages.splice(0, db.managementMessages.length - 5000);
       writeDb(db);
+      // Management apps poll their thread every 6s — no agent wake-up needed here
+      // (waking the sender's own console just caused a redundant refetch).
       res.json({ success: true, message: publicMgmtMsg(msg) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
@@ -8539,7 +8571,7 @@ async function startServer() {
   });
 
   /** Management → one of its own agents. */
-  app.post('/api/management/agents/:id/messages', requireManagement, rateLimit(30), (req: any, res) => {
+  app.post('/api/management/agents/:id/messages', requireManagement, rateLimit(60), (req: any, res) => {
     try {
       const db = ensureManagementMessages(ensureAgentCollections(readDb()));
       const mine = String(req.authManagementId);
@@ -8553,11 +8585,12 @@ async function startServer() {
         id: 'MMSG-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
         managementId: mine, agentId: String(agent.id), senderRole: 'MANAGEMENT', ...content, at: Date.now(),
         readByManagement: true, readByAgent: false,
-        ...(chatReplyPatch(db.managementMessages || [], req.body && req.body.replyToId) || {})
+        ...(chatReplyPatch(db.managementMessages || [], req.body && req.body.replyToId,
+              (m: any) => String(m.managementId) === mine && String(m.agentId) === String(agent.id)) || {})
       };
       delete (msg as any).ok;
       db.managementMessages.push(msg);
-      if (db.managementMessages.length > 5000) db.managementMessages.length = 5000;
+      if (db.managementMessages.length > 5000) db.managementMessages.splice(0, db.managementMessages.length - 5000);
       writeDb(db);
       res.json({ success: true, message: publicMgmtMsg(msg) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
@@ -8599,7 +8632,11 @@ async function startServer() {
         if (String(m.userId) !== me) continue;
         const key = String(m.agentId);
         const row = map.get(key) || { agentId: key, lastText: '', lastAt: 0, unread: 0 };
-        if (Number(m.at) >= row.lastAt) { row.lastAt = Number(m.at); row.lastText = String(m.text || ''); }
+        if (Number(m.at) >= row.lastAt) {
+          row.lastAt = Number(m.at);
+          row.lastText = chatPreviewOf(m);
+          row.lastSender = m.senderRole;
+        }
         if (m.senderRole === 'AGENT' && !m.readByUser) row.unread += 1;
         map.set(key, row);
       }
@@ -8678,7 +8715,10 @@ async function startServer() {
       const userId = String(req.query.userId || '').trim();
       if (!userId) return res.status(400).json({ error: 'Choose a conversation first.' });
       const rows = threadRows(db, me, userId);
-      if (rows.length === 0) return res.status(404).json({ error: 'No conversation with this user yet.' });
+      if (rows.length === 0) {
+        // Not an error: the console can open a thread row that has no history yet.
+        return res.json({ success: true, messages: [], unread: agentUnreadTotal(db, me), peerTyping: false, empty: true });
+      }
       let changed = false;
       for (const m of (db.agentMessages || [])) {
         if (String(m.agentId) === me && String(m.userId) === userId && m.senderRole === 'USER' && !m.readByAgent) {
@@ -8691,7 +8731,7 @@ async function startServer() {
   });
 
   /** Agent → user: reply only inside an existing thread (no cold messaging). */
-  app.post('/api/agent/message-user', requireAgent, rateLimit(30), (req: any, res) => {
+  app.post('/api/agent/message-user', requireAgent, rateLimit(60), (req: any, res) => {
     try {
       const db = ensureAgentMessages(ensureAgentCollections(readDb()));
       const me = String(req.authAgentId);
@@ -8715,12 +8755,14 @@ async function startServer() {
         at: Date.now(),
         readByUser: false,
         readByAgent: true,
-        ...(chatReplyPatch(db.agentMessages || [], req.body && req.body.replyToId) || {})
+        ...(chatReplyPatch(db.agentMessages || [], req.body && req.body.replyToId,
+              (m: any) => String(m.agentId) === me && String(m.userId) === userId) || {})
       };
       delete (msg as any).ok;
       db.agentMessages.push(msg);
-      if (db.agentMessages.length > 5000) db.agentMessages.length = 5000;
+      if (db.agentMessages.length > 5000) db.agentMessages.splice(0, db.agentMessages.length - 5000);
       writeDb(db);
+      try { pushToUser(String(user.id), { type: 'agent_chat_message', agentId: me, at: msg.at }); } catch { /* ignore */ }
       res.json({ success: true, message: publicAgentMsg(msg) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
@@ -8849,6 +8891,21 @@ async function startServer() {
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // One-time repair: earlier builds froze accounts (blocking chat AND payments)
+  // for ordinary chat speed. That rule no longer freezes, so release anyone the
+  // old rule caught, then never touch it again.
+  try {
+    const dbBoot = readDb();
+    let released = 0;
+    for (const u of (dbBoot.users || [])) {
+      if (u && u.isFrozen && /Auto anti-fraud chat spam/i.test(String(u.frozenReason || ''))) {
+        u.isFrozen = false; delete u.frozenReason; delete u.frozenUntil; u.isTempFreeze = false; u.unfrozenAt = Date.now();
+        released++;
+      }
+    }
+    if (released) { console.log(`[boot] released ${released} account(s) frozen by the old chat-spam rule`); writeDb(dbBoot); }
+  } catch (err) { console.error('[boot] chat-spam release skipped:', err); }
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`BoostPay Server listening on port ${PORT} [Version: ${SERVER_VERSION}]`);
