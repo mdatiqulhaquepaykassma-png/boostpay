@@ -1,5 +1,5 @@
 import { FC, useCallback, useEffect, useMemo, useState } from 'react';
-import { Store, X, CheckCircle2, AlertTriangle, ArrowRight, Copy } from 'lucide-react';
+import { Store, X, CheckCircle2, AlertTriangle, ChevronDown, Search, UserRound } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User } from '../types';
 
@@ -24,6 +24,8 @@ interface Props {
 export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSuccess }) => {
   const [data, setData] = useState<AgentListResponse | null>(null);
   const [agentId, setAgentId] = useState('');
+  const [agentSearch, setAgentSearch] = useState('');
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
   const [loading, setLoading] = useState(false);
@@ -50,6 +52,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   useEffect(() => {
     if (!isOpen) return;
     setAmount(''); setNote(''); setError(''); setReceipt(null); setAgentId('');
+    setAgentSearch(''); setPickerOpen(false);
     void load();
   }, [isOpen, load]);
 
@@ -58,6 +61,12 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   const fee = useMemo(() => Math.round(numAmount * feePercent) / 100, [numAmount, feePercent]);
   const total = useMemo(() => Math.round((numAmount + fee) * 100) / 100, [numAmount, fee]);
   const selectedAgent = data?.agents.find((a) => a.id === agentId) || null;
+  const query = agentSearch.trim().toLowerCase();
+  const filteredAgents = useMemo(() => {
+    const list = data?.agents || [];
+    if (!query) return list;
+    return list.filter((a) => `${a.id} ${a.name || ''}`.toLowerCase().includes(query));
+  }, [data, query]);
 
   if (!isOpen) return null;
 
@@ -135,25 +144,88 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
               </div>
             ) : (
               <>
-                <div>
-                  <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Choose agent</span>
-                  <div className="space-y-1.5 max-h-44 overflow-y-auto overscroll-contain">
-                    {data.agents.map((a) => (
-                      <button
-                        type="button"
-                        key={a.id}
-                        onClick={() => setAgentId(a.id)}
-                        className={`w-full flex items-center gap-2.5 rounded-2xl border px-3 py-2.5 text-left transition cursor-pointer ${agentId === a.id ? 'border-emerald-500/60 bg-emerald-500/10' : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'}`}
-                      >
-                        <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-zinc-800 font-mono text-[10px] font-bold text-zinc-300">{(a.name || a.id).slice(0, 1).toUpperCase()}</span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-[12px] font-bold text-white">{a.name || a.id}</span>
-                          <span className="block font-mono text-[9px] text-zinc-500">{a.id}</span>
-                        </span>
-                        {agentId === a.id ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <ArrowRight className="w-4 h-4 text-zinc-600" />}
-                      </button>
-                    ))}
-                  </div>
+                <div className="relative">
+                  <span className="mb-1.5 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                    <span>Choose agent</span>
+                    <span className="font-mono text-[9px] normal-case text-zinc-600">{data.agents.length} available</span>
+                  </span>
+
+                  {/* dropdown trigger — shows the chosen agent */}
+                  <button
+                    type="button"
+                    onClick={() => setPickerOpen((v) => !v)}
+                    className={`flex w-full items-center gap-2.5 rounded-2xl border px-3 py-2.5 text-left transition cursor-pointer ${pickerOpen ? 'border-emerald-500/60 bg-emerald-500/10' : agentId ? 'border-zinc-700 bg-zinc-950' : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'}`}
+                  >
+                    <span className={`flex h-8 w-8 items-center justify-center rounded-xl ${agentId ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-800 text-zinc-400'}`}>
+                      {selectedAgent ? (
+                        <span className="text-[11px] font-black">{(selectedAgent.name || selectedAgent.id).slice(0, 1).toUpperCase()}</span>
+                      ) : (
+                        <UserRound className="h-4 w-4" />
+                      )}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className={`block truncate text-[12px] font-bold ${selectedAgent ? 'text-white' : 'text-zinc-500'}`}>
+                        {selectedAgent ? selectedAgent.name || selectedAgent.id : 'Select an agent'}
+                      </span>
+                      <span className="block font-mono text-[9px] text-zinc-500">
+                        {selectedAgent ? selectedAgent.id : 'Search by agent ID or name'}
+                      </span>
+                    </span>
+                    <ChevronDown className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform ${pickerOpen ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {/* dropdown panel — search + filtered list */}
+                  {pickerOpen ? (
+                    <div className="absolute inset-x-0 z-20 mt-1.5 overflow-hidden rounded-2xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/60">
+                      <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-2">
+                        <Search className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                        <input
+                          autoFocus
+                          value={agentSearch}
+                          onChange={(e) => setAgentSearch(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') setPickerOpen(false);
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              if (filteredAgents[0]) {
+                                setAgentId(filteredAgents[0].id);
+                                setPickerOpen(false);
+                                setAgentSearch('');
+                              }
+                            }
+                          }}
+                          placeholder="Search agent ID or name…"
+                          className="w-full bg-transparent text-[12px] text-white placeholder-zinc-600 outline-none"
+                        />
+                        {agentSearch ? (
+                          <button type="button" onClick={() => setAgentSearch('')} className="rounded-lg p-1 text-zinc-500 hover:text-white cursor-pointer" aria-label="Clear search">
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        ) : null}
+                      </div>
+                      <div className="max-h-52 overflow-y-auto overscroll-contain">
+                        {filteredAgents.length === 0 ? (
+                          <p className="px-3 py-5 text-center text-[11px] text-zinc-500">No agent matches “{agentSearch.trim()}”.</p>
+                        ) : (
+                          filteredAgents.map((a) => (
+                            <button
+                              type="button"
+                              key={a.id}
+                              onClick={() => { setAgentId(a.id); setPickerOpen(false); setAgentSearch(''); }}
+                              className={`flex w-full items-center gap-2.5 border-b border-zinc-800/60 px-3 py-2.5 text-left transition last:border-0 cursor-pointer ${agentId === a.id ? 'bg-emerald-500/10' : 'hover:bg-zinc-800/60'}`}
+                            >
+                              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-zinc-800 font-mono text-[10px] font-bold text-zinc-300">{(a.name || a.id).slice(0, 1).toUpperCase()}</span>
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-[12px] font-bold text-white">{a.name || a.id}</span>
+                                <span className="block font-mono text-[9px] text-zinc-500">{a.id}</span>
+                              </span>
+                              {agentId === a.id ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" /> : null}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
 
                 <label className="block">
