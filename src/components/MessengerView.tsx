@@ -873,6 +873,10 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     }
   };
 
+  // Composer capabilities (user request: photos only — no files, polls,
+  // contacts or voice notes from user accounts).
+  const CAN_SEND_VOICE = false;
+
   // ───────────────── INFO SHEET ─────────────────
   // User request: no attachments in p2p chat — photos only. File/document,
   // poll, contact-card and sticker sending have been removed from the composer.
@@ -1676,14 +1680,18 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                   className={`flex-1 rounded-full border px-4 py-2.5 text-xs placeholder-zinc-500 focus:outline-none transition-colors ${isPeerBlocked ? 'border-zinc-800 bg-zinc-900/60 text-zinc-500 cursor-not-allowed' : 'border-zinc-800 bg-zinc-900 text-white focus:border-amber-500/60'}`}
                 />
 
-                <button
-                  type="button"
-                  onClick={startRecording}
-                  className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
-                  title="Record voice message"
-                >
-                  <Mic className="w-4 h-4" />
-                </button>
+                {/* Voice notes are admin-only on the server, so user accounts get
+                    a text + photo composer (no dead mic button). */}
+                {CAN_SEND_VOICE && (
+                  <button
+                    type="button"
+                    onClick={startRecording}
+                    className="rounded-2xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-zinc-400 hover:text-amber-400 hover:border-amber-500/40 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0"
+                    title="Record voice message"
+                  >
+                    <Mic className="w-4 h-4" />
+                  </button>
+                )}
 
                 <button
                   type="submit"
