@@ -455,11 +455,6 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
   const longPressRef = useRef<{ timer: number | null; fired: boolean }>({ timer: null, fired: false });
 
   // Telegram-style extras: stickers, files, polls, contacts, message info
-  const [showStickerPicker, setShowStickerPicker] = useState(false);
-  const [showPollCreator, setShowPollCreator] = useState(false);
-  const [pollQuestion, setPollQuestion] = useState('');
-  const [pollOptions, setPollOptions] = useState<string[]>(['', '']);
-  const [showContactPicker, setShowContactPicker] = useState(false);
   const [nearbyUsers, setNearbyUsers] = useState<any[]>([]);
   const [showNearby, setShowNearby] = useState(false);
   const [peerStatus, setPeerStatus] = useState<{lastSeen:number, allowMessages:boolean, allowVoiceCall:boolean}|null>(null);
@@ -878,62 +873,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     }
   };
 
-  // ───────────────── STICKERS / FILES / POLLS / CONTACTS / INFO ─────────────────
-  const STICKER_PALETTE = ['😀', '😂', '🥰', '😎', '🤩', '😭', '😡', '👍', '👎', '🙏', '👏', '💪', '🔥', '💯', '🎉', '❤️', '💔', '✨', '⭐', '💎', '🚀', '☕', '🍕', '🏆'];
-
-  const handleSendSticker = async (emoji: string) => {
-    if (!activeConv) return;
-    setShowStickerPicker(false);
-    const recipient = activeConv.type === 'group' ? activeConv.id : getOtherParticipant(activeConv);
-    await BoostPayStore.sendChatMessage(recipient, emoji, 'USER', undefined, undefined, { stickerEmoji: emoji });
-    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
-  };
-
-  const handleSendFile = (file: File) => {
-    if (!activeConv) return;
-    if (file.size > 4 * 1024 * 1024) {
-      void BoostPayStore.triggerToast('File is too large (max 4MB).');
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const dataUrl = String(reader.result || '');
-      const recipient = activeConv.type === 'group' ? activeConv.id : getOtherParticipant(activeConv);
-      await BoostPayStore.sendChatMessage(recipient, `📎 ${file.name}`, 'USER', undefined, undefined, {
-        fileData: dataUrl,
-        fileName: file.name,
-        fileSize: file.size
-      });
-      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleSendPoll = async () => {
-    if (!activeConv) return;
-    const q = pollQuestion.trim();
-    const opts = pollOptions.map(o => o.trim()).filter(Boolean);
-    if (!q || opts.length < 2) {
-      void BoostPayStore.triggerToast('Poll needs a question and at least 2 options.');
-      return;
-    }
-    const recipient = activeConv.type === 'group' ? activeConv.id : getOtherParticipant(activeConv);
-    await BoostPayStore.sendChatMessage(recipient, `📊 Poll: ${q}`, 'USER', undefined, undefined, {
-      poll: { question: q, options: opts.map(t => ({ text: t, votes: [] })) }
-    });
-    setShowPollCreator(false);
-    setPollQuestion('');
-    setPollOptions(['', '']);
-    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
-  };
-
-  const handleSendContact = async (contactId: string) => {
-    if (!activeConv) return;
-    setShowContactPicker(false);
-    const recipient = activeConv.type === 'group' ? activeConv.id : getOtherParticipant(activeConv);
-    await BoostPayStore.sendChatMessage(recipient, '👤 Contact card', 'USER', undefined, undefined, { contactId });
-    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
-  };
+  // ───────────────── INFO SHEET ─────────────────
+  // User request: no attachments in p2p chat — photos only. File/document,
+  // poll, contact-card and sticker sending have been removed from the composer.
 
   const handleVotePoll = async (m: Message, optionIndex: number) => {
     const poll = await BoostPayStore.pollVote(m.id, optionIndex);
@@ -1190,10 +1132,14 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
       const dataUrl = String(reader.result || '');
       if (!dataUrl.startsWith('data:image/')) return;
       const recipient = activeConv.type === 'group' ? activeConv.id : getOtherParticipant(activeConv);
-      await BoostPayStore.sendChatMessage(recipient, '📷 Photo', 'USER', undefined, undefined, {
+      const res = await BoostPayStore.sendChatMessage(recipient, '📷 Photo', 'USER', undefined, undefined, {
         photoData: dataUrl,
         replyTo: replyTo ? { id: replyTo.id, text: replyTo.text || '', senderId: replyTo.senderId } : null
       });
+      if (!res.success) {
+        void BoostPayStore.triggerToast(res.error || 'Photo could not be sent.');
+        return;
+      }
       setReplyTo(null);
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
     };
@@ -1625,30 +1571,6 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Sticker picker */}
-          {showStickerPicker && (
-            <div className="shrink-0 px-3 py-2 border-t border-zinc-800/80 bg-zinc-900/95 backdrop-blur-md animate-in fade-in duration-100">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[9px] font-mono text-zinc-400 uppercase tracking-wider">Stickers</span>
-                <button type="button" onClick={() => setShowStickerPicker(false)} className="text-zinc-500 hover:text-white cursor-pointer p-1">
-                  <X className="w-3 h-3" />
-                </button>
-              </div>
-              <div className="grid grid-cols-8 gap-1">
-                {STICKER_PALETTE.map((emoji) => (
-                  <button
-                    key={emoji}
-                    type="button"
-                    onClick={() => void handleSendSticker(emoji)}
-                    className="flex h-9 w-9 items-center justify-center rounded-xl hover:bg-zinc-800 text-xl transition-transform active:scale-125 cursor-pointer"
-                  >
-                    {emoji}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
           {/* Collapsible Quick Emoji Bar */}
           {showEmojiPicker && (
             <div className="shrink-0 px-3 py-1.5 border-t border-zinc-800/80 bg-zinc-900/90 backdrop-blur-md flex items-center gap-1.5 animate-in fade-in duration-100">
@@ -1726,9 +1648,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                     type="button"
                     onClick={() => setShowAttachmentMenu(v => !v)}
                     className={`rounded-2xl border px-3 py-2.5 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0 ${showAttachmentMenu ? 'border-amber-500/50 bg-amber-500/15 text-amber-400' : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'}`}
-                    title="Attachments"
+                    title="Send photo"
                   >
-                    <Paperclip className="w-4 h-4" />
+                    <ImagePlus className="w-4 h-4" />
                   </button>
                   {showAttachmentMenu && (
                     <div className="absolute bottom-full left-0 mb-2 flex flex-col gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-900 p-2 shadow-2xl min-w-[180px] z-20">
@@ -1736,17 +1658,6 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                         <ImagePlus className="w-4 h-4 text-amber-400" /> Photo
                         <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) { handleSendPhoto(f); setShowAttachmentMenu(false); } e.target.value = ''; }} />
                       </label>
-                      <label className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 cursor-pointer transition">
-                        <Paperclip className="w-4 h-4 text-sky-400" /> File / Document
-                        <input type="file" className="hidden" onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) { handleSendFile(f); setShowAttachmentMenu(false); } e.target.value = ''; }} />
-                      </label>
-                      {/* Sticker quick button hidden per user request (was causing send bug) */}
-                      <button type="button" onClick={() => { setShowPollCreator(true); setShowAttachmentMenu(false); }} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 transition text-left">
-                        <BarChart3 className="w-4 h-4 text-emerald-400" /> Poll
-                      </button>
-                      <button type="button" onClick={() => { setShowContactPicker(true); setShowAttachmentMenu(false); }} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 transition text-left">
-                        <UserPlus className="w-4 h-4 text-sky-400" /> Contact
-                      </button>
                       <button type="button" onClick={() => { setShowAttachmentMenu(false); setShowEmojiPicker(v=> !v); }} className="flex items-center gap-2.5 rounded-xl px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 transition text-left">
                         <Smile className="w-4 h-4 text-amber-400" /> Insert Emoji
                       </button>
@@ -2433,88 +2344,6 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
           className="hidden"
         />
       ))}
-
-      {/* Poll creator */}
-      {showPollCreator && (
-        <div className="fixed inset-0 z-[125] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-0 sm:p-4" onClick={() => setShowPollCreator(false)}>
-          <div className="w-full max-w-md rounded-t-3xl sm:rounded-3xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-emerald-400" /> Create Poll</h3>
-            <input
-              value={pollQuestion}
-              onChange={(e) => setPollQuestion(e.target.value)}
-              placeholder="Ask a question…"
-              className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-xs text-white placeholder-zinc-600 focus:border-amber-500/60 focus:outline-none"
-            />
-            <div className="mt-2.5 space-y-2">
-              {pollOptions.map((opt, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <input
-                    value={opt}
-                    onChange={(e) => setPollOptions(prev => prev.map((o, j) => j === i ? e.target.value : o))}
-                    placeholder={`Option ${i + 1}`}
-                    className="flex-1 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-600 focus:border-amber-500/60 focus:outline-none"
-                  />
-                  {pollOptions.length > 2 && (
-                    <button
-                      type="button"
-                      onClick={() => setPollOptions(prev => prev.filter((_, j) => j !== i))}
-                      className="text-zinc-500 hover:text-red-400 p-1.5 cursor-pointer"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-            {pollOptions.length < 10 && (
-              <button
-                type="button"
-                onClick={() => setPollOptions(prev => [...prev, ''])}
-                className="mt-2 text-[11px] text-amber-400 hover:text-amber-300 font-semibold cursor-pointer"
-              >
-                + Add option
-              </button>
-            )}
-            <div className="mt-4 flex gap-2">
-              <button onClick={() => setShowPollCreator(false)} className="flex-1 rounded-2xl border border-zinc-800 bg-zinc-950 py-2.5 text-xs font-bold text-zinc-300 hover:bg-zinc-800 cursor-pointer">
-                Cancel
-              </button>
-              <button onClick={() => void handleSendPoll()} className="flex-1 rounded-2xl bg-amber-500 py-2.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer">
-                Send Poll
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Contact picker */}
-      {showContactPicker && (
-        <div className="fixed inset-0 z-[125] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-0 sm:p-4" onClick={() => setShowContactPicker(false)}>
-          <div className="w-full max-w-md rounded-t-3xl sm:rounded-3xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2"><UserPlus className="w-4 h-4 text-sky-400" /> Share Contact</h3>
-            <div className="max-h-64 overflow-y-auto overscroll-contain space-y-1.5">
-              {BoostPayStore.getUsers().filter(u => u.id !== currentUser.id).slice(0, 30).map((u) => (
-                <button
-                  key={u.id}
-                  onClick={() => void handleSendContact(u.id)}
-                  className="w-full flex items-center gap-2.5 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-left hover:border-sky-500/40 transition cursor-pointer"
-                >
-                  <div className="h-8 w-8 rounded-full bg-sky-500/15 border border-sky-500/30 flex items-center justify-center text-[10px] font-bold text-sky-300 font-mono">
-                    #{u.id}
-                  </div>
-                  <div>
-                    <div className="text-xs text-zinc-100 font-mono font-semibold">User #{u.id}</div>
-                    <div className="text-[9px] text-zinc-500 font-mono">Tap to share</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-            <button onClick={() => setShowContactPicker(false)} className="mt-3 w-full rounded-2xl bg-zinc-800 py-2.5 text-xs font-semibold text-zinc-300 hover:bg-zinc-700 cursor-pointer">
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Message info sheet */}
       {infoMsg && (

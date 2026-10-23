@@ -927,7 +927,14 @@ export class BoostPayStore {
           return { success: true, message: data.message, conversation: data.conversation };
         }
       }
-      return { success: true, message: optimisticMsg, conversation: updatedConv };
+      // Server rejected the message (e.g. attachments are photo-only): drop the
+      // optimistic bubble so it never looks delivered when it was not.
+      let reason = 'Message could not be sent.';
+      try { const err = await res.json(); if (err && err.error) reason = String(err.error); } catch { /* ignore */ }
+      const rolledBack = this.getMessages().filter(m => m.id !== optimisticMsg.id);
+      localStorage.setItem(STORAGE_MESSAGES, JSON.stringify(rolledBack));
+      this.triggerChatUpdate(this.getConversations(), rolledBack);
+      return { success: false, error: reason };
     } catch {
       // Offline fallback: keep optimistic message
       return { success: true, message: optimisticMsg, conversation: updatedConv };

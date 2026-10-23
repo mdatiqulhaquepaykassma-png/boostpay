@@ -284,7 +284,7 @@ function saveAttachmentToDisk(dataUrl: string, prefix: string): { fileId: string
     const fname = `${fileId}.${ext}`;
     const fpath = path.join(UPLOAD_DIR, fname);
     fs.writeFileSync(fpath, buf);
-    return { fileId, url: `/api/chat/file/${fileId}`, mime, size: buf.length };
+    return { fileId, url: attachmentUrl(fileId), mime, size: buf.length };
   } catch { return null; }
 }
 function resolveAttachmentPath(fileId: string): string | null {
@@ -295,6 +295,32 @@ function resolveAttachmentPath(fileId: string): string | null {
     return hit ? path.join(UPLOAD_DIR, hit) : null;
   } catch { return null; }
 }
+/** Chat media is displayed by <img>/<audio> tags, which cannot send an
+ *  Authorization header. A short HMAC of the (random, unguessable) fileId is
+ *  appended to the URL instead, so media works without leaking the file to
+ *  anyone who simply guesses an id. */
+function signAttachmentId(fileId: string): string {
+  return crypto.createHmac('sha256', API_SECRET).update(`chatfile:${String(fileId)}`).digest('base64url').slice(0, 32);
+}
+function attachmentUrl(fileId: string): string {
+  return `/api/chat/file/${fileId}?t=${signAttachmentId(fileId)}`;
+}
+/** Re-sign media links that were stored before signed URLs existed. */
+function ensureSignedMediaUrls(doc: any): boolean {
+  let changed = false;
+  for (const m of (doc && doc.messages) || []) {
+    if (!m) continue;
+    const pairs: [string, string][] = [['photoFileId', 'photoUrl'], ['fileId', 'fileUrl'], ['voiceFileId', 'voiceUrl']];
+    for (const [idKey, urlKey] of pairs) {
+      const id = (m as any)[idKey];
+      if (!id) continue;
+      const want = attachmentUrl(String(id));
+      if ((m as any)[urlKey] !== want) { (m as any)[urlKey] = want; changed = true; }
+    }
+  }
+  return changed;
+}
+
 function cleanupOldAttachments() {
   try {
     const db = readDb();
@@ -2172,7 +2198,17 @@ async function startServer() {
   app.use('/api/transfer', requireUser);
   app.use('/api/boost', requireUser);
   app.use('/api/notifications', requireUser);
-  app.use('/api/chat', requireUserOrAdmin);
+  app.use('/api/chat', (req: any, res: any, next: any) => {
+    // /api/chat/file/<id>?t=<sig> is loaded by <img>/<audio> tags (no auth
+    // header possible). A valid HMAC signature stands in for the bearer token.
+    const mediaPath = String(req.path || '').match(/^\/file\/([^/]+)$/);
+    if (mediaPath) {
+      const fid = String(mediaPath[1] || '');
+      const sig = String((req.query && (req.query as any).t) || '');
+      if (fid && sig && sig === signAttachmentId(fid)) return next();
+    }
+    return requireUserOrAdmin(req, res, next);
+  });
   app.use('/api/sync', requireUserOrAdmin);
   app.use('/api/db', requireUserOrAdmin);
   // ---------------------------------------------------------------------------
@@ -3033,14 +3069,15 @@ async function startServer() {
         const vd = String(req.body.voiceData);
         if (vd.length > 3*1024*1024) return res.status(413).json({ error: 'Voice note too large (max 3MB).' });
       }
-      // Permission model (user request): USER cannot send voice/photo/file directly — must request via text, only ADMIN can send media/calls
+      // Permission model (user request): in the user app chat photos are the only
+      // media a USER may send. File/document attachments and voice messages stay
+      // blocked for user accounts (admins keep their existing abilities).
       const isUserSender = !!(req as any).authUserId && !(req as any).authAdmin;
       const rawKind = String((req.body && req.body.kind) || '');
       const hasVoicePayload = !!req.body.voiceData || rawKind === 'voice';
-      const hasPhotoPayload = !!req.body.photoData || rawKind === 'photo';
       const hasFilePayload = !!req.body.fileData || rawKind === 'file';
-      if (isUserSender && (hasVoicePayload || hasPhotoPayload || hasFilePayload)) {
-        return res.status(403).json({ error: 'Attachments & voice messages are admin-only. You can request via text — e.g. “Please send me the file” or “Requesting voice call” — and an admin will respond with media/call if approved.' });
+      if (isUserSender && (hasFilePayload || hasVoicePayload)) {
+        return res.status(403).json({ error: 'Only photos can be sent in chat. File attachments and voice messages are disabled.' });
       }
 
       const { senderId, senderRole, recipientId, text, voiceData, voiceDurationMs, photoData, replyTo, forwardedFrom, fileData, fileName, fileSize, contactId, poll, stickerEmoji } = req.body;
@@ -6772,11 +6809,11 @@ async function startServer() {
   // entire message history of every existing chat as unread.
   try {
     const baselineDb: any = readDb();
-    if (ensureUnreadBaseline(baselineDb)) {
-      writeDb(baselineDb);
-      console.log('[chat] unread baseline initialised (existing conversations start read)');
-    }
-  } catch (err) { console.error('[chat] unread baseline failed:', err); }
+    let touched = ensureUnreadBaseline(baselineDb);
+    if (!touched) touched = false;
+    if (ensureSignedMediaUrls(baselineDb)) touched = true;
+    if (touched) writeDb(baselineDb);
+  } catch (err) { console.error('[chat] startup migration failed:', err); }
 
   // Deploy/restart safety: flush the debounced file cache and the last
   // PostgreSQL write before the container is stopped, so the I/O batching
