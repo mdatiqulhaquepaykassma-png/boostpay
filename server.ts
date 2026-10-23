@@ -490,6 +490,7 @@ const INITIAL_DB = {
   ],
   config: {
     minuteRatePercent: 0.001605, // 0.001605% per minute
+    autoRestartBoost: true, // keep compounding cycles running server-side after each payout
     hourlyRatePercent: 0.09634, // ~0.0963% equivalent per hour
     minBoostMs: 60000, // 1 minute minimum
     maxBoostMs: 86400000, // 24 hours maximum
@@ -1822,6 +1823,12 @@ setInterval(() => {
       ? config.minuteRatePercent
       : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605);
     const ratePerMs = (minuteRate / 100) / 60000;
+    // Owner switches (absent in older config objects = enabled — prod had no value stored,
+    // so the previous engine ran with neither of these readable at all):
+    //  autoRestartBoost — start the next cycle automatically after each payout
+    //  compoundingEnabled — master switch: off = no compounding reward is credited
+    const autoRestartOn = (config as any).autoRestartBoost !== false;
+    const compoundingOn = (config as any).compoundingEnabled !== false;
 
     for (const user of db.users) {
       // Auto-unfreeze 1h temp locks + freeze pause
@@ -1893,7 +1900,11 @@ setInterval(() => {
         if (elapsed >= target) {
           // === DEDUP GUARD: strictly prevent double-award (55s minimum gap) ===
           const lastReward = (db.transactions||[]).find((t:any)=> t.type==='REWARD' && String(t.userId)===String(user.id));
-          if (lastReward && now - Number(lastReward.timestamp) < 55000) {
+          // The per-cycle guard (boostStartAt, below) is authoritative for normal cycles.
+          // The coarse 55s window stays only as a fallback for legacy cycles with no start key —
+          // otherwise it wrongly blocked the FIRST payout of a freshly restarted short cycle.
+          const legacyCycle = Number(user.boostState.startedAt || 0) <= 0;
+          if (legacyCycle && lastReward && now - Number(lastReward.timestamp) < 55000) {
             console.warn(`[TICKER] Skipping duplicate reward for user ${user.id} — last reward ${now - Number(lastReward.timestamp)}ms ago (strict 55s guard)`);
             // No credit — reset boost cycle to inactive to avoid stuck infinite loop
             const dedupNextDuration = calculateDynamicDuration(user.balance, db.users, config);
@@ -1950,9 +1961,18 @@ setInterval(() => {
           // ---- Security: compounding credit guards (duplicate/amount bounds/balanceAfter verify) ----
           const priorBal = Number(user.balance) || 0;
           // amount bounds: yield must be finite, positive, and within 0 < yield <= priorBal*0.5 + epsilon (prevents inflation exploit without exposing exact secret rate)
-          if (!isFinite(finalYield) || finalYield <= 0 || finalYield > (priorBal * 0.5 + 1e-6)) {
-            console.warn(`[ticker] blocked abnormal yield ${finalYield} for user ${user.id} priorBal ${priorBal}`);
-            // skip credit — still complete cycle to avoid infinite loop
+          if (!compoundingOn) {
+            console.log(`[ticker] compounding disabled by admin — cycle closed for user ${user.id} without reward`);
+          }
+          if (!compoundingOn || !isFinite(finalYield) || finalYield <= 0 || finalYield > (priorBal * 0.5 + 1e-6)) {
+            // A zero balance legitimately yields 0 — that is not an anomaly, so it is
+            // logged once as info instead of spamming the log every cycle.
+            if (priorBal > 0) {
+              console.warn(`[ticker] blocked abnormal yield ${finalYield} for user ${user.id} priorBal ${priorBal}`);
+            } else {
+              console.log(`[ticker] user ${user.id} has no balance to compound — cycle closed without reward`);
+            }
+            // skip credit — the cycle still closes below (and will not auto-restart)
           } else {
             // balanceAfter expected check pre-flight
             const expectedBal = priorBal + finalYield;
@@ -2049,22 +2069,48 @@ setInterval(() => {
             }
           } catch (refErr) { console.error('Refer commission error:', refErr); }
 
-          // Calculate new duration based on latest balance (for the NEXT manual cycle)
+          // Calculate new duration based on latest balance (for the NEXT cycle)
           const nextDuration = calculateDynamicDuration(user.balance, db.users, config);
 
-          // Cycle is COMPLETE — compounding stays stopped until the user
-          // explicitly starts a new cycle (never auto-restarts).
-          user.boostState = {
-            isActive: false,
-            isPaused: false,
-            startedAt: 0,
-            pausedAt: 0,
-            elapsedMs: 0,
-            targetDurationMs: nextDuration,
-            startingBalance: user.balance,
-            accumulatedYield: 0,
-            justCompletedReward: finalYield
-          };
+          // ── Owner setting: keep the compounding cycle running automatically ──
+          // The restart is decided ONLY here, server-side. Conditions: the setting is
+          // on (default), the account is healthy, and there is balance to compound.
+          // A zero/invalid yield or a frozen/suspended/paused account always stops
+          // the cycle, so no account can spin a 0.00 reward every minute forever.
+          const balanceOk = (Number(user.balance) || 0) >= 0.1;
+          const accountOk = !user.isFrozen && !user.isBlocked;
+          const yieldOk = isFinite(finalYield) && finalYield > 0 && compoundingOn;
+          const shouldAutoRestart = autoRestartOn && balanceOk && accountOk && yieldOk;
+
+          if (shouldAutoRestart) {
+            const nextStart = now;
+            user.boostState = {
+              isActive: true,
+              isPaused: false,
+              startedAt: nextStart,
+              pausedAt: 0,
+              elapsedMs: 0,
+              targetDurationMs: calculateDynamicDuration(user.balance, db.users, config),
+              startingBalance: Number(user.balance) || 0,
+              accumulatedYield: 0,
+              justCompletedReward: finalYield,
+              autoRestarted: true
+            } as any;
+            console.log(`[TICKER] auto-restarted cycle for user ${user.id} (balance ${user.balance}, target ${user.boostState.targetDurationMs}ms)`);
+          } else {
+            // Cycle is COMPLETE — compounding stays stopped until the user starts again.
+            user.boostState = {
+              isActive: false,
+              isPaused: false,
+              startedAt: 0,
+              pausedAt: 0,
+              elapsedMs: 0,
+              targetDurationMs: nextDuration,
+              startingBalance: user.balance,
+              accumulatedYield: 0,
+              justCompletedReward: finalYield
+            };
+          }
           updated = true;
           broadcastUserUpdate(db, user.id);
           pushToUser(String(user.id), {
@@ -2689,12 +2735,17 @@ async function startServer() {
     try { await prev; return await fn(); } finally { rel(); if(boostLocks.get(key)===cur) boostLocks.delete(key); }
   }
   const boostIdempotency = new Map<string,{at:number, resp:any}>();
-  function boostIdemKey(uid:string, body:any){ const h=String(body?.idempotencyKey||body?.boostKey||'').trim(); if(h) return `boost:${uid}:${h}`; return `boost:${uid}:${Math.floor(Date.now()/15000)}`; } // 15s bucket
+  // Idempotency is ONLY honoured for an explicit client key (idempotencyKey / boostKey).
+  // The old 15s time bucket cached a response per user, so a legitimate start or resume
+  // within 15s of the previous call silently did nothing (disabled auto-boost, then the
+  // user's next start was swallowed). Double-clicks are already absorbed by the
+  // "already active" check inside withBoostLock, and there is no harm in re-starting.
+  function boostIdemKey(uid:string, body:any){ const h=String(body?.idempotencyKey||body?.boostKey||'').trim(); return h ? `boost:${uid}:${h}` : ''; }
   app.post('/api/boost/start', async (req: any, res) => {
     const uid = String(req.body?.userId||'');
     if (String(uid) !== String(req.authUserId)) return res.status(403).json({ error: 'You can only manage your own boost.' });
     const ik = boostIdemKey(uid, req.body);
-    const dup = boostIdempotency.get(ik); if(dup && Date.now()-dup.at < 15000) return res.json({...dup.resp, duplicate:true});
+    if (ik) { const dup = boostIdempotency.get(ik); if(dup && Date.now()-dup.at < 60000) return res.json({...dup.resp, duplicate:true}); }
     try {
       const result = await withBoostLock(uid, async ()=>{
         const db = readDb();
@@ -2716,7 +2767,7 @@ async function startServer() {
         return { status:200, body:{ success:true, user: publicUser(user) } };
       });
       if(result.status!==200) return res.status(result.status).json(result.body);
-      boostIdempotency.set(ik,{at:Date.now(), resp: result.body});
+      if (ik) boostIdempotency.set(ik,{at:Date.now(), resp: result.body});
       if(boostIdempotency.size>1000){ const s=[...boostIdempotency.entries()].sort((a,b)=>a[1].at-b[1].at); for(let i=0;i<200;i++) boostIdempotency.delete(s[i][0]); }
       return res.json(result.body);
     } catch (err: any) { return res.status(500).json({ error: err.message }); }
@@ -2846,33 +2897,12 @@ async function startServer() {
             // could make the ticker see "elapsed >= target" instantly and pay the same cycle
             // again (duplicate rewards). A client "start" is honoured, but timing + base
             // balance are always rebuilt server-side.
-            let safeBoostState = serverUser.boostState;
-            const incBs: any = incUser.boostState;
-            const serverBsActive = !!(serverUser.boostState && serverUser.boostState.isActive && !serverUser.boostState.isPaused);
-            if (!serverBsActive) {
-              if (incBs && typeof incBs === 'object' && incBs.isActive && !incBs.isPaused) {
-                safeBoostState = {
-                  isActive: true,
-                  isPaused: false,
-                  startedAt: Date.now(),
-                  pausedAt: 0,
-                  elapsedMs: 0,
-                  targetDurationMs: calculateDynamicDuration(Number(serverUser.balance) || 0, mergedUsers, current.config || INITIAL_DB.config),
-                  startingBalance: Number(serverUser.balance) || 0,
-                  accumulatedYield: 0
-                } as any;
-              } else if (serverUser.boostState) {
-                safeBoostState = {
-                  ...(serverUser.boostState as any),
-                  isActive: false,
-                  isPaused: false,
-                  startedAt: 0,
-                  pausedAt: 0,
-                  elapsedMs: 0,
-                  startingBalance: Number(serverUser.balance) || 0
-                } as any;
-              }
-            }
+            // FIX (auto-boost loop): a client push may NOT start, stop or restart a
+            // cycle. Previously a stale client copy (isActive:true) made /api/sync start a
+            // brand-new cycle on every poll — users with a 0 balance then re-opened a
+            // cycle every 60s and the ticker logged "blocked abnormal yield 0" forever.
+            // Boost timing is owned exclusively by /api/boost/* and the server ticker.
+            const safeBoostState = serverUser.boostState;
             mergedUsers[idx] = {
               ...incUser,
               phrase: incUser.phrase || serverUser.phrase,
@@ -5386,6 +5416,7 @@ async function startServer() {
       }
       // boolean flags
       if (incomingConfig.compoundingEnabled !== undefined) (db.config as any).compoundingEnabled = !!incomingConfig.compoundingEnabled;
+      if (incomingConfig.autoRestartBoost !== undefined) (db.config as any).autoRestartBoost = !!incomingConfig.autoRestartBoost;
       if (incomingConfig.maintenanceMode !== undefined) (db.config as any).maintenanceMode = !!incomingConfig.maintenanceMode;
       // referral passthrough
       if (incomingConfig.referral && typeof incomingConfig.referral==='object') {
