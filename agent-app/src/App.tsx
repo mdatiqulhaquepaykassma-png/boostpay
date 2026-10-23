@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownLeft, ArrowUpRight, BadgeCheck, Banknote, Check, ChevronRight, CircleDollarSign,
-  Copy, History, Home, LogOut, Lock, Send, Sparkles, User, Wallet, X, Zap
+  Copy, History, Home, LogOut, Lock, MessageSquare, Send, Sparkles, User, UserRound, Wallet, X, Zap
 } from 'lucide-react';
 
 /* ── API client ─────────────────────────────────────────────────────────── */
@@ -16,6 +16,8 @@ type Settings = {
   feePercentOnUserSend: number; commissionPercentOnReceive: number;
   commissionPercentOnSend: number; minUserSend: number; maxUserSend: number;
 };
+type ChatRow = { userId: string; lastText: string; lastAt: number; unread: number; lastSender?: string };
+type ChatMsg = { id: string; agentId: string; userId: string; senderRole: 'USER' | 'AGENT'; text: string; at: number };
 type LedgerRow = {
   id: string; at: number; type: string; amount: number; fee: number; commission: number;
   balanceAfter: number; userId?: string; note?: string; actor?: string;
@@ -345,6 +347,144 @@ const ReceiveScreen: React.FC<{ agent: Agent; settings: Settings; onCopy: (v: st
   );
 };
 
+/* ── messages (user ↔ agent) ────────────────────────────────────────────── */
+const clockTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const dayTime = (ts: number) => {
+  const d = new Date(ts);
+  if (d.toDateString() === new Date().toDateString()) return clockTime(ts);
+  return `${d.toLocaleDateString([], { day: '2-digit', month: 'short' })} · ${clockTime(ts)}`;
+};
+
+const ChatsScreen: React.FC<{ chats: ChatRow[]; loading: boolean; toast: (t: { type: 'ok' | 'err'; text: string }) => void; onRead: () => void }> = ({ chats, loading, toast, onRead }) => {
+  const [openUser, setOpenUser] = useState<string | null>(null);
+  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [threadErr, setThreadErr] = useState('');
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  const openThread = useCallback(async (userId: string) => {
+    setOpenUser(userId); setMessages([]); setThreadErr('');
+    try {
+      const res = await api<any>(`/api/agent/chat?userId=${encodeURIComponent(userId)}`);
+      setMessages(res.messages || []);
+      onRead();
+    } catch (err: any) { setThreadErr(err?.message || 'Could not open the conversation.'); }
+  }, [onRead]);
+
+  const refreshThread = useCallback(async (userId: string) => {
+    try {
+      const res = await api<any>(`/api/agent/chat?userId=${encodeURIComponent(userId)}`);
+      setMessages(res.messages || []);
+      onRead();
+    } catch { /* ignore */ }
+  }, [onRead]);
+
+  useEffect(() => {
+    if (!openUser) return;
+    const iv = window.setInterval(() => { void refreshThread(openUser); }, 8000);
+    return () => window.clearInterval(iv);
+  }, [openUser, refreshThread]);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages.length, openUser]);
+
+  const send = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!openUser || !text.trim()) return;
+    setBusy(true); setThreadErr('');
+    try {
+      const res = await api<any>('/api/agent/message-user', { method: 'POST', body: { userId: openUser, text: text.trim() } });
+      setMessages((prev) => [...prev, res.message]);
+      setText('');
+      toast({ type: 'ok', text: 'Reply sent' });
+    } catch (err: any) { setThreadErr(err?.message || 'Reply could not be sent.'); }
+    finally { setBusy(false); }
+  };
+
+  if (openUser) {
+    return (
+      <div className="flex flex-col" style={{ minHeight: 'calc(100vh - 190px)' }}>
+        <div className="mb-2 flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900/60 px-3 py-2">
+          <div className="flex items-center gap-2">
+            <button onClick={() => { setOpenUser(null); onRead(); }} className="rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 text-zinc-400"><ChevronRight className="h-3.5 w-3.5 rotate-180" /></button>
+            <div>
+              <div className="text-[11px] font-black text-white">User #{openUser}</div>
+              <div className="text-[9px] text-zinc-500">Only this user sees the reply</div>
+            </div>
+          </div>
+          <UserRound className="h-4 w-4 text-zinc-600" />
+        </div>
+
+        <div ref={listRef} className="flex-1 space-y-2 overflow-y-auto overscroll-contain rounded-2xl border border-zinc-800 bg-zinc-950/40 p-2.5" style={{ maxHeight: '48vh' }}>
+          {messages.length === 0 ? (
+            <p className="py-8 text-center text-[11px] text-zinc-600">Loading conversation…</p>
+          ) : messages.map((m) => {
+            const mine = m.senderRole === 'AGENT';
+            return (
+              <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[82%] rounded-2xl border px-3 py-2 text-[12px] leading-relaxed ${mine ? 'border-amber-500/25 bg-amber-500/15 text-amber-50' : 'border-zinc-700/70 bg-zinc-800 text-zinc-100'}`}>
+                  <div className="whitespace-pre-wrap break-words">{m.text}</div>
+                  <div className={`mt-1 text-right text-[8px] ${mine ? 'text-amber-200/60' : 'text-zinc-500'}`}>{dayTime(m.at)}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {threadErr ? <div className="mt-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{threadErr}</div> : null}
+
+        <form onSubmit={send} className="mt-2 flex items-end gap-2">
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value.slice(0, 1000))}
+            placeholder="Reply to this user…"
+            className="min-w-0 flex-1 rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-[12px] text-white placeholder-zinc-600 outline-none focus:border-amber-500/60"
+          />
+          <button type="submit" disabled={busy || !text.trim()} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-500 text-zinc-950 disabled:opacity-40">
+            <Send className="h-4 w-4" />
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <Card>
+        <div className="mb-2 flex items-center justify-between">
+          <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><MessageSquare className="h-3 w-3" /> User messages</div>
+          <span className="text-[9px] text-zinc-600">{chats.length} conversation{chats.length === 1 ? '' : 's'}</span>
+        </div>
+        {loading ? (
+          <p className="py-6 text-center text-[11px] text-zinc-600">Loading…</p>
+        ) : chats.length === 0 ? (
+          <p className="py-6 text-center text-[11px] leading-relaxed text-zinc-600">No messages yet.<br />Users can message you from their app (Pay an Agent → Message).</p>
+        ) : (
+          <div className="divide-y divide-zinc-800/70">
+            {chats.map((c) => (
+              <button key={c.userId} onClick={() => void openThread(c.userId)} className="flex w-full items-center gap-2.5 py-2.5 text-left">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-zinc-800 text-[11px] font-black text-zinc-300"><UserRound className="h-4 w-4" /></div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-[11px] font-bold text-white">User #{c.userId}</div>
+                  <div className="truncate text-[9.5px] text-zinc-500">{c.lastSender === 'AGENT' ? 'You: ' : ''}{c.lastText}</div>
+                </div>
+                <div className="shrink-0 text-right">
+                  <div className="text-[8.5px] text-zinc-600">{timeAgo(c.lastAt)}</div>
+                  {c.unread > 0 ? <div className="mt-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-black text-zinc-950">{c.unread > 9 ? '9+' : c.unread}</div> : null}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </Card>
+      <p className="px-1 text-center text-[9px] leading-relaxed text-zinc-600">You can only reply to users who messaged you first. No user names or emails are shown — User IDs only.</p>
+    </div>
+  );
+};
+
 /* ── history ────────────────────────────────────────────────────────────── */
 const labelFor = (t: string) => ({
   USER_TO_AGENT: 'Received from user',
@@ -422,7 +562,7 @@ const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () =
 );
 
 /* ── app shell ──────────────────────────────────────────────────────────── */
-type Tab = 'HOME' | 'SEND' | 'RECEIVE' | 'HISTORY' | 'PROFILE';
+type Tab = 'HOME' | 'SEND' | 'RECEIVE' | 'CHATS' | 'HISTORY' | 'PROFILE';
 
 export default function App() {
   const [agent, setAgent] = useState<Agent | null>(() => {
@@ -432,6 +572,9 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>({ feePercentOnUserSend: 2, commissionPercentOnReceive: 1, commissionPercentOnSend: 1, minUserSend: 1, maxUserSend: 100000 });
   const [platform, setPlatform] = useState<any>(null);
   const [history, setHistory] = useState<LedgerRow[]>([]);
+  const [chats, setChats] = useState<ChatRow[]>([]);
+  const [chatUnread, setChatUnread] = useState(0);
+  const [loadingChats, setLoadingChats] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [tab, setTab] = useState<Tab>('HOME');
   const [toastState, setToastState] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
@@ -456,6 +599,15 @@ export default function App() {
     } catch { /* ignore */ } finally { setLoadingHistory(false); }
   }, []);
 
+  const loadChats = useCallback(async () => {
+    setLoadingChats(true);
+    try {
+      const res = await api<any>('/api/agent/chats');
+      setChats(res.chats || []);
+      setChatUnread(Number(res.unread) || 0);
+    } catch { /* ignore */ } finally { setLoadingChats(false); }
+  }, []);
+
   useEffect(() => {
     const onSignedOut = () => { setAgent(null); setToken(''); };
     window.addEventListener('bpa:signed-out', onSignedOut);
@@ -466,9 +618,10 @@ export default function App() {
     if (!token) return;
     void refresh();
     void loadHistory();
-    const iv = window.setInterval(() => { void refresh(); void loadHistory(); }, 20000);
+    void loadChats();
+    const iv = window.setInterval(() => { void refresh(); void loadHistory(); void loadChats(); }, 20000);
     return () => window.clearInterval(iv);
-  }, [token, refresh, loadHistory]);
+  }, [token, refresh, loadHistory, loadChats]);
 
   useEffect(() => {
     if (!token) return;
@@ -506,6 +659,7 @@ export default function App() {
     { id: 'HOME', label: 'Home', icon: Home },
     { id: 'SEND', label: 'Send', icon: Send },
     { id: 'RECEIVE', label: 'Receive', icon: ArrowDownLeft },
+    { id: 'CHATS', label: 'Chats', icon: MessageSquare },
     { id: 'HISTORY', label: 'History', icon: History },
     { id: 'PROFILE', label: 'Profile', icon: User }
   ];
@@ -539,6 +693,7 @@ export default function App() {
             />
           )}
           {tab === 'RECEIVE' && <ReceiveScreen agent={agent} settings={settings} onCopy={copy} history={history} />}
+          {tab === 'CHATS' && <ChatsScreen chats={chats} loading={loadingChats} toast={toast} onRead={() => void loadChats()} />}
           {tab === 'HISTORY' && <HistoryScreen rows={history} loading={loadingHistory} />}
           {tab === 'PROFILE' && <ProfileScreen agent={agent} settings={settings} onLogout={logout} />}
         </main>
@@ -549,8 +704,11 @@ export default function App() {
               const Icon = t.icon;
               const active = tab === t.id;
               return (
-                <button key={t.id} onClick={() => setTab(t.id)} className={`flex flex-1 flex-col items-center gap-1 rounded-xl py-1.5 transition ${active ? 'text-amber-400' : 'text-zinc-500'}`}>
-                  <Icon className={`h-4.5 w-4.5 ${active ? 'h-5 w-5' : 'h-5 w-5'}`} />
+                <button key={t.id} onClick={() => setTab(t.id)} className={`relative flex flex-1 flex-col items-center gap-1 rounded-xl py-1.5 transition ${active ? 'text-amber-400' : 'text-zinc-500'}`}>
+                  <Icon className="h-5 w-5" />
+                  {t.id === 'CHATS' && chatUnread > 0 ? (
+                    <span className="absolute right-1/2 top-0.5 -mr-4 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-black text-zinc-950">{chatUnread > 9 ? '9+' : chatUnread}</span>
+                  ) : null}
                   <span className="text-[9px] font-bold tracking-wide">{t.label}</span>
                 </button>
               );

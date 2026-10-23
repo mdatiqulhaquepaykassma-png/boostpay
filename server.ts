@@ -7058,7 +7058,8 @@ async function startServer() {
       },
       // Owner rule: only user accounts can boost.
       flags: { boostEnabled: false, boostReason: 'Boost is available for user accounts only.' },
-      platform: agentPlatformStats(db)
+      platform: agentPlatformStats(db),
+      unreadMessages: agentUnreadTotal(db, String(req.authAgentId))
     });
   });
 
@@ -7207,7 +7208,8 @@ async function startServer() {
       agents: (db.agents || [])
         .filter((a: any) => a.isActive !== false)
         // Agent float stays private — users only need the ID and display name.
-        .map((a: any) => ({ id: a.id, name: a.name || '' }))
+        .map((a: any) => ({ id: a.id, name: a.name || '' })),
+      unreadMessages: agentUnreadForUser(db, String(req.authUserId))
     });
   });
 
@@ -7742,6 +7744,194 @@ async function startServer() {
     const db = ensureAgentCollections(readDb());
     const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
     res.json({ success: true, ledger: (db.agentLedger || []).slice(0, limit), stats: agentPlatformStats(db) });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Agent ↔ user messaging (owner request: "agent k message dete parbe")
+  //   • A user can message any active agent (threads live in db.agentMessages).
+  //   • An agent can only reply inside a thread the user opened first — no
+  //     cold messaging, no user directory exposure.
+  //   • Owner rule: no names / emails in either inbox — User IDs and agent IDs only.
+  // ═══════════════════════════════════════════════════════════════════════════
+  const AGENT_MSG_MAX = 1000;
+  const agentMsgKey = (agentId: string, userId: string) => `${String(agentId)}::${String(userId)}`;
+
+  function ensureAgentMessages(db: any) {
+    if (!Array.isArray(db.agentMessages)) db.agentMessages = [];
+    return db;
+  }
+
+  function threadRows(db: any, agentId: string, userId: string) {
+    return (db.agentMessages || [])
+      .filter((m: any) => String(m.agentId) === String(agentId) && String(m.userId) === String(userId))
+      .sort((a: any, b: any) => Number(a.at) - Number(b.at));
+  }
+
+  function agentUnreadForUser(db: any, userId: string) {
+    return (db.agentMessages || []).filter((m: any) => String(m.userId) === String(userId) && m.senderRole === 'AGENT' && !m.readByUser).length;
+  }
+
+  function agentUnreadTotal(db: any, agentId: string) {
+    return (db.agentMessages || []).filter((m: any) => String(m.agentId) === String(agentId) && m.senderRole === 'USER' && !m.readByAgent).length;
+  }
+
+  const publicAgentMsg = (m: any) => ({
+    id: m.id, agentId: m.agentId, userId: m.userId, senderRole: m.senderRole,
+    text: m.text, at: m.at
+  });
+
+  /** User → agent: start or continue a thread. */
+  app.post('/api/user/message-agent', requireUser, rateLimit(30), (req: any, res) => {
+    try {
+      const db = ensureAgentMessages(ensureAgentCollections(readDb()));
+      const settings = agentSettingsOf(db);
+      const agentId = String((req.body && req.body.agentId) || '').trim();
+      const text = sanitizeText((req.body && req.body.text) || '', AGENT_MSG_MAX).trim();
+      if (!agentId) return res.status(400).json({ error: 'Choose an agent first.' });
+      if (!text) return res.status(400).json({ error: 'Message cannot be empty.' });
+      if (!settings.enabled) return res.status(403).json({ error: 'Agent messaging is currently disabled.' });
+      const agent = (db.agents || []).find((a: any) => String(a.id) === agentId);
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      if (agent.isActive === false) return res.status(403).json({ error: 'This agent is not available right now.' });
+      const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      if (user.isBlocked) return res.status(403).json({ error: 'Your account is suspended.' });
+      const msg = {
+        id: 'AMSG-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
+        agentId: String(agent.id),
+        userId: String(user.id),
+        senderRole: 'USER',
+        text,
+        at: Date.now(),
+        readByUser: true,
+        readByAgent: false
+      };
+      db.agentMessages.push(msg);
+      if (db.agentMessages.length > 5000) db.agentMessages.length = 5000;
+      writeDb(db);
+      res.json({ success: true, message: publicAgentMsg(msg) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** User: read a thread with one agent (marks the agent's replies as read). */
+  app.get('/api/user/agent-thread', requireUser, (req: any, res) => {
+    try {
+      const db = ensureAgentMessages(ensureAgentCollections(readDb()));
+      const agentId = String(req.query.agentId || '').trim();
+      const agent = (db.agents || []).find((a: any) => String(a.id) === agentId);
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      const me = String(req.authUserId);
+      const rows = threadRows(db, agentId, me).slice(-200);
+      let changed = false;
+      for (const m of (db.agentMessages || [])) {
+        if (String(m.agentId) === agentId && String(m.userId) === me && m.senderRole === 'AGENT' && !m.readByUser) {
+          m.readByUser = true; changed = true;
+        }
+      }
+      if (changed) writeDb(db);
+      res.json({
+        success: true,
+        agent: { id: agent.id, name: agent.name || '' },
+        messages: rows.map(publicAgentMsg),
+        unread: agentUnreadForUser(db, me)
+      });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** User: inbox of agent threads (one row per agent). */
+  app.get('/api/user/agent-inbox', requireUser, (req: any, res) => {
+    try {
+      const db = ensureAgentMessages(ensureAgentCollections(readDb()));
+      const me = String(req.authUserId);
+      const map = new Map<string, any>();
+      for (const m of (db.agentMessages || [])) {
+        if (String(m.userId) !== me) continue;
+        const key = String(m.agentId);
+        const row = map.get(key) || { agentId: key, lastText: '', lastAt: 0, unread: 0 };
+        if (Number(m.at) >= row.lastAt) { row.lastAt = Number(m.at); row.lastText = String(m.text || ''); }
+        if (m.senderRole === 'AGENT' && !m.readByUser) row.unread += 1;
+        map.set(key, row);
+      }
+      const threads = Array.from(map.values())
+        .map((r) => {
+          const a = (db.agents || []).find((x: any) => String(x.id) === r.agentId);
+          return { ...r, agentName: (a && a.name) || '', isActive: !a || a.isActive !== false };
+        })
+        .sort((a, b) => b.lastAt - a.lastAt);
+      res.json({ success: true, threads, unread: agentUnreadForUser(db, me) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent: list of users who messaged this agent (IDs only). */
+  app.get('/api/agent/chats', requireAgent, (req: any, res) => {
+    try {
+      const db = ensureAgentMessages(ensureAgentCollections(readDb()));
+      const me = String(req.authAgentId);
+      const map = new Map<string, any>();
+      for (const m of (db.agentMessages || [])) {
+        if (String(m.agentId) !== me) continue;
+        const key = String(m.userId);
+        const row = map.get(key) || { userId: key, lastText: '', lastAt: 0, unread: 0 };
+        if (Number(m.at) >= row.lastAt) { row.lastAt = Number(m.at); row.lastText = String(m.text || ''); row.lastSender = m.senderRole; }
+        if (m.senderRole === 'USER' && !m.readByAgent) row.unread += 1;
+        map.set(key, row);
+      }
+      const chats = Array.from(map.values()).sort((a, b) => b.lastAt - a.lastAt);
+      res.json({ success: true, chats, unread: agentUnreadTotal(db, me) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent: read one thread (marks the user's messages as read). */
+  app.get('/api/agent/chat', requireAgent, (req: any, res) => {
+    try {
+      const db = ensureAgentMessages(ensureAgentCollections(readDb()));
+      const me = String(req.authAgentId);
+      const userId = String(req.query.userId || '').trim();
+      if (!userId) return res.status(400).json({ error: 'Choose a conversation first.' });
+      const rows = threadRows(db, me, userId);
+      if (rows.length === 0) return res.status(404).json({ error: 'No conversation with this user yet.' });
+      let changed = false;
+      for (const m of (db.agentMessages || [])) {
+        if (String(m.agentId) === me && String(m.userId) === userId && m.senderRole === 'USER' && !m.readByAgent) {
+          m.readByAgent = true; changed = true;
+        }
+      }
+      if (changed) writeDb(db);
+      res.json({ success: true, messages: rows.slice(-200).map(publicAgentMsg), unread: agentUnreadTotal(db, me) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent → user: reply only inside an existing thread (no cold messaging). */
+  app.post('/api/agent/message-user', requireAgent, rateLimit(30), (req: any, res) => {
+    try {
+      const db = ensureAgentMessages(ensureAgentCollections(readDb()));
+      const me = String(req.authAgentId);
+      const userId = String((req.body && req.body.userId) || '').trim();
+      const text = sanitizeText((req.body && req.body.text) || '', AGENT_MSG_MAX).trim();
+      if (!userId) return res.status(400).json({ error: 'Choose a conversation first.' });
+      if (!text) return res.status(400).json({ error: 'Message cannot be empty.' });
+      const started = threadRows(db, me, userId);
+      if (started.length === 0) {
+        return res.status(403).json({ error: 'You can only reply to users who messaged you first.' });
+      }
+      const user = (db.users || []).find((u: any) => String(u.id) === userId);
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      if (user.isBlocked) return res.status(403).json({ error: 'This user account is suspended.' });
+      const msg = {
+        id: 'AMSG-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
+        agentId: me,
+        userId: String(user.id),
+        senderRole: 'AGENT',
+        text,
+        at: Date.now(),
+        readByUser: false,
+        readByAgent: true
+      };
+      db.agentMessages.push(msg);
+      if (db.agentMessages.length > 5000) db.agentMessages.length = 5000;
+      writeDb(db);
+      res.json({ success: true, message: publicAgentMsg(msg) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
   // Serve the built static app UNLESS explicitly running in development mode.

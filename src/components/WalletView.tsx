@@ -50,6 +50,24 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   const isRunning = boostState.isActive && !boostState.isPaused;
   const [liveAccrued, setLiveAccrued] = useState(0);
   const [idCopied, setIdCopied] = useState(false);
+  // Unread agent replies — shown as a badge on the "Pay an Agent" entry.
+  const [agentUnread, setAgentUnread] = useState(0);
+
+  useEffect(() => {
+    if (!onOpenAgentPay) return;
+    let alive = true;
+    const pull = async () => {
+      try {
+        const res = await fetch('/api/user/agent-inbox', { headers: BoostPayStore.authHeaders() });
+        if (!res.ok) return;
+        const json = await res.json();
+        if (alive) setAgentUnread(Number(json.unread) || 0);
+      } catch { /* ignore */ }
+    };
+    void pull();
+    const iv = window.setInterval(pull, 20000);
+    return () => { alive = false; window.clearInterval(iv); };
+  }, [onOpenAgentPay]);
 
   useEffect(() => {
     if (!isRunning) {
@@ -197,6 +215,11 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
           >
             <Store className="w-3.5 h-3.5" />
             Pay an Agent
+            {agentUnread > 0 && (
+              <span className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[9px] font-black text-zinc-950">
+                {agentUnread > 9 ? '9+' : agentUnread}
+              </span>
+            )}
           </button>
         )}
       </div>

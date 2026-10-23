@@ -1,5 +1,6 @@
 import { FC, useCallback, useEffect, useMemo, useState } from 'react';
-import { Store, X, CheckCircle2, AlertTriangle, ChevronDown, Search, UserRound } from 'lucide-react';
+import { Store, X, CheckCircle2, AlertTriangle, ChevronDown, Search, UserRound, MessageSquare } from 'lucide-react';
+import { AgentMessageSheet } from './AgentMessageSheet';
 import { BoostPayStore } from '../services/store';
 import { User } from '../types';
 
@@ -26,12 +27,26 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   const [agentId, setAgentId] = useState('');
   const [agentSearch, setAgentSearch] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [receipt, setReceipt] = useState<{ amount: number; fee: number; total: number; agentId: string; txId: string } | null>(null);
+
+  const [unreadByAgent, setUnreadByAgent] = useState<Record<string, number>>({});
+
+  const loadInbox = useCallback(async () => {
+    try {
+      const res = await fetch('/api/user/agent-inbox', { headers: BoostPayStore.authHeaders() });
+      if (!res.ok) return;
+      const json = await res.json();
+      const map: Record<string, number> = {};
+      for (const t of json.threads || []) if (t.unread > 0) map[t.agentId] = t.unread;
+      setUnreadByAgent(map);
+    } catch { /* ignore */ }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -52,9 +67,10 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   useEffect(() => {
     if (!isOpen) return;
     setAmount(''); setNote(''); setError(''); setReceipt(null); setAgentId('');
-    setAgentSearch(''); setPickerOpen(false);
+    setAgentSearch(''); setPickerOpen(false); setChatOpen(false);
     void load();
-  }, [isOpen, load]);
+    void loadInbox();
+  }, [isOpen, load, loadInbox]);
 
   const feePercent = Number(data?.feePercent || 0);
   const numAmount = Number(amount || 0);
@@ -99,6 +115,13 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   };
 
   return (
+    <>
+    <AgentMessageSheet
+      isOpen={chatOpen}
+      agentId={chatOpen ? (receipt?.agentId || agentId) : ''}
+      agentName={selectedAgent?.name}
+      onClose={() => { setChatOpen(false); void loadInbox(); }}
+    />
     <div className="fixed inset-0 z-[130] flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-sm p-0 sm:p-4" onClick={onClose}>
       <div
         className="w-full max-w-md rounded-t-3xl sm:rounded-3xl border border-zinc-800 bg-zinc-900 shadow-2xl max-h-[92vh] overflow-y-auto"
@@ -129,6 +152,12 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
               <div className="flex justify-between"><span className="text-zinc-500">Balance</span><span className="font-bold text-white">${Number(currentUser.balance || 0).toFixed(2)}</span></div>
             </div>
             <button onClick={onClose} className="mt-4 h-11 w-full rounded-2xl bg-amber-500 text-xs font-black text-zinc-950 cursor-pointer">Done</button>
+            <button
+              onClick={() => setChatOpen(true)}
+              className="mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 text-[11px] font-bold text-zinc-300 transition hover:border-emerald-500/40 hover:text-emerald-300 cursor-pointer"
+            >
+              <MessageSquare className="h-3.5 w-3.5" /> Message agent {receipt.agentId}
+            </button>
           </div>
         ) : (
           <form onSubmit={submit} className="p-4 space-y-3">
@@ -219,6 +248,9 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                                 <span className="block truncate text-[12px] font-bold text-white">{a.name || a.id}</span>
                                 <span className="block font-mono text-[9px] text-zinc-500">{a.id}</span>
                               </span>
+                              {unreadByAgent[a.id] ? (
+                                <span className="shrink-0 rounded-full bg-emerald-500 px-1.5 py-0.5 text-[9px] font-black text-zinc-950">{unreadByAgent[a.id]}</span>
+                              ) : null}
                               {agentId === a.id ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" /> : null}
                             </button>
                           ))
@@ -227,6 +259,20 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                     </div>
                   ) : null}
                 </div>
+
+                {selectedAgent ? (
+                  <button
+                    type="button"
+                    onClick={() => setChatOpen(true)}
+                    className="flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-[11px] font-bold text-zinc-300 transition hover:border-emerald-500/40 hover:text-emerald-300 cursor-pointer"
+                  >
+                    <MessageSquare className="h-3.5 w-3.5" />
+                    Message {selectedAgent.name || selectedAgent.id}
+                    {unreadByAgent[selectedAgent.id] ? (
+                      <span className="rounded-full bg-emerald-500 px-1.5 py-0.5 text-[9px] font-black text-zinc-950">{unreadByAgent[selectedAgent.id]}</span>
+                    ) : null}
+                  </button>
+                ) : null}
 
                 <label className="block">
                   <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Amount (USD)</span>
@@ -278,5 +324,6 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
         )}
       </div>
     </div>
+    </>
   );
 };
