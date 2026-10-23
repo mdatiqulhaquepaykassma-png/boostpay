@@ -490,7 +490,6 @@ const INITIAL_DB = {
   ],
   config: {
     minuteRatePercent: 0.001605, // 0.001605% per minute
-    autoRestartBoost: true, // keep compounding cycles running server-side after each payout
     hourlyRatePercent: 0.09634, // ~0.0963% equivalent per hour
     minBoostMs: 60000, // 1 minute minimum
     maxBoostMs: 86400000, // 24 hours maximum
@@ -1823,11 +1822,8 @@ setInterval(() => {
       ? config.minuteRatePercent
       : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605);
     const ratePerMs = (minuteRate / 100) / 60000;
-    // Owner switches (absent in older config objects = enabled — prod had no value stored,
-    // so the previous engine ran with neither of these readable at all):
-    //  autoRestartBoost — start the next cycle automatically after each payout
-    //  compoundingEnabled — master switch: off = no compounding reward is credited
-    const autoRestartOn = (config as any).autoRestartBoost !== false;
+    // Compounding master switch (absent in older config objects = enabled).
+    // OFF => no reward is credited and the cycle closes.
     const compoundingOn = (config as any).compoundingEnabled !== false;
 
     for (const user of db.users) {
@@ -2072,45 +2068,21 @@ setInterval(() => {
           // Calculate new duration based on latest balance (for the NEXT cycle)
           const nextDuration = calculateDynamicDuration(user.balance, db.users, config);
 
-          // ── Owner setting: keep the compounding cycle running automatically ──
-          // The restart is decided ONLY here, server-side. Conditions: the setting is
-          // on (default), the account is healthy, and there is balance to compound.
-          // A zero/invalid yield or a frozen/suspended/paused account always stops
-          // the cycle, so no account can spin a 0.00 reward every minute forever.
-          const balanceOk = (Number(user.balance) || 0) >= 0.1;
-          const accountOk = !user.isFrozen && !user.isBlocked;
-          const yieldOk = isFinite(finalYield) && finalYield > 0 && compoundingOn;
-          const shouldAutoRestart = autoRestartOn && balanceOk && accountOk && yieldOk;
-
-          if (shouldAutoRestart) {
-            const nextStart = now;
-            user.boostState = {
-              isActive: true,
-              isPaused: false,
-              startedAt: nextStart,
-              pausedAt: 0,
-              elapsedMs: 0,
-              targetDurationMs: calculateDynamicDuration(user.balance, db.users, config),
-              startingBalance: Number(user.balance) || 0,
-              accumulatedYield: 0,
-              justCompletedReward: finalYield,
-              autoRestarted: true
-            } as any;
-            console.log(`[TICKER] auto-restarted cycle for user ${user.id} (balance ${user.balance}, target ${user.boostState.targetDurationMs}ms)`);
-          } else {
-            // Cycle is COMPLETE — compounding stays stopped until the user starts again.
-            user.boostState = {
-              isActive: false,
-              isPaused: false,
-              startedAt: 0,
-              pausedAt: 0,
-              elapsedMs: 0,
-              targetDurationMs: nextDuration,
-              startingBalance: user.balance,
-              accumulatedYield: 0,
-              justCompletedReward: finalYield
-            };
-          }
+          // ── OWNER RULE (2026-10-23): no automatic start, no automatic stop ──
+          // One cycle = one user click. When the cycle completes the reward is credited
+          // and boosting stops; the next cycle only begins when the user presses Start
+          // again (POST /api/boost/start). The ticker never restarts a cycle by itself.
+          user.boostState = {
+            isActive: false,
+            isPaused: false,
+            startedAt: 0,
+            pausedAt: 0,
+            elapsedMs: 0,
+            targetDurationMs: nextDuration,
+            startingBalance: user.balance,
+            accumulatedYield: 0,
+            justCompletedReward: finalYield
+          };
           updated = true;
           broadcastUserUpdate(db, user.id);
           pushToUser(String(user.id), {
@@ -2757,6 +2729,15 @@ async function startServer() {
         // FIX: prevent double-start race — if already active, return existing instead of resetting
         if (user.boostState?.isActive && !user.boostState?.isPaused) {
           return { status:200, body:{ success:true, user: publicUser(user), alreadyActive:true } };
+        }
+        // A paused cycle must never be silently restarted from zero by a Start click:
+        // treat the click as "continue from where I paused".
+        if (user.boostState?.isActive && user.boostState?.isPaused) {
+          user.boostState.isPaused = false;
+          user.boostState.pausedAt = 0;
+          user.boostState.startedAt = Date.now() - (Number(user.boostState.elapsedMs) || 0);
+          writeDb(db);
+          return { status:200, body:{ success:true, user: publicUser(user), alreadyActive:true, resumed:true } };
         }
         const targetDuration = calculateDynamicDuration(user.balance, db.users, db.config);
         user.boostState = {
@@ -5416,7 +5397,6 @@ async function startServer() {
       }
       // boolean flags
       if (incomingConfig.compoundingEnabled !== undefined) (db.config as any).compoundingEnabled = !!incomingConfig.compoundingEnabled;
-      if (incomingConfig.autoRestartBoost !== undefined) (db.config as any).autoRestartBoost = !!incomingConfig.autoRestartBoost;
       if (incomingConfig.maintenanceMode !== undefined) (db.config as any).maintenanceMode = !!incomingConfig.maintenanceMode;
       // referral passthrough
       if (incomingConfig.referral && typeof incomingConfig.referral==='object') {

@@ -745,7 +745,6 @@ export const AdminSystemSettingsView: FC = () => {
         maxBoostMs: cfg.maxBoostMs,
         targetDurationMs: cfg.targetDurationMs,
         compoundingEnabled: cfg.compoundingEnabled,
-        autoRestartBoost: cfg.autoRestartBoost !== false,
         maintenanceMode: cfg.maintenanceMode,
         referral: cfg.referral,
         antifraud: cfg.antifraud
@@ -780,9 +779,6 @@ export const AdminSystemSettingsView: FC = () => {
           <div><label className="text-[10px] font-mono text-zinc-500">Max Boost (ms)</label><input type="number" value={cfg.maxBoostMs ?? ''} onChange={e=> setCfg({...cfg, maxBoostMs: parseInt(e.target.value)||0})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
           <div><label className="text-[10px] font-mono text-zinc-500">Target Duration (ms, optional)</label><input type="number" value={cfg.targetDurationMs ?? ''} onChange={e=> setCfg({...cfg, targetDurationMs: parseInt(e.target.value)||0})} className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white"/></div>
           <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={cfg.compoundingEnabled !== false} onChange={e=> setCfg({...cfg, compoundingEnabled: e.target.checked})} /> Compounding enabled (master switch)</label>
-          <label className="flex items-center gap-2 text-xs text-zinc-300" title="When ON the server starts the next cycle automatically after each payout (balance >= 0.1, account healthy). When OFF every cycle must be started by the user.">
-            <input type="checkbox" checked={cfg.autoRestartBoost !== false} onChange={e=> setCfg({...cfg, autoRestartBoost: e.target.checked})} /> Auto-restart cycle after payout
-          </label>
           <label className="flex items-center gap-2 text-xs text-zinc-300"><input type="checkbox" checked={!!cfg.maintenanceMode} onChange={e=> setCfg({...cfg, maintenanceMode: e.target.checked})} /> Maintenance mode</label>
         </div>
       </div>
