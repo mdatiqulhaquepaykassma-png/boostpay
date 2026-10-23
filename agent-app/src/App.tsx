@@ -18,6 +18,7 @@ type Settings = {
 };
 type ChatRow = { userId: string; lastText: string; lastAt: number; unread: number; lastSender?: string };
 type ChatMsg = { id: string; agentId: string; userId: string; senderRole: 'USER' | 'AGENT'; text: string; at: number };
+type MgmtMsg = { id: string; managementId: string; agentId: string; senderRole: 'MANAGEMENT' | 'AGENT'; text: string; at: number };
 type LedgerRow = {
   id: string; at: number; type: string; amount: number; fee: number; commission: number;
   balanceAfter: number; userId?: string; note?: string; actor?: string;
@@ -355,8 +356,56 @@ const dayTime = (ts: number) => {
   return `${d.toLocaleDateString([], { day: '2-digit', month: 'short' })} · ${clockTime(ts)}`;
 };
 
-const ChatsScreen: React.FC<{ chats: ChatRow[]; loading: boolean; toast: (t: { type: 'ok' | 'err'; text: string }) => void; onRead: () => void }> = ({ chats, loading, toast, onRead }) => {
+const ChatsScreen: React.FC<{
+  chats: ChatRow[]; loading: boolean; toast: (t: { type: 'ok' | 'err'; text: string }) => void; onRead: () => void;
+  managementId?: string; managementUnread?: number; onManagementRead?: () => void;
+}> = ({ chats, loading, toast, onRead, managementId, managementUnread = 0, onManagementRead }) => {
   const [openUser, setOpenUser] = useState<string | null>(null);
+  const [view, setView] = useState<'LIST' | 'MANAGEMENT'>('LIST');
+  const [mgmtMsgs, setMgmtMsgs] = useState<MgmtMsg[]>([]);
+  const [mgmtText, setMgmtText] = useState('');
+  const [mgmtBusy, setMgmtBusy] = useState(false);
+  const [mgmtErr, setMgmtErr] = useState('');
+  const [mgmtId, setMgmtId] = useState(managementId || '');
+  const [mgmtLoading, setMgmtLoading] = useState(false);
+  const mgmtListRef = useRef<HTMLDivElement | null>(null);
+
+  const loadManagement = useCallback(async (quiet = false) => {
+    if (!quiet) setMgmtLoading(true);
+    try {
+      const res = await api<any>('/api/agent/management-thread');
+      setMgmtMsgs(res.messages || []);
+      setMgmtId(res.managementId || '');
+      setMgmtErr(res.note || '');
+      if (onManagementRead) onManagementRead();
+    } catch (err: any) { if (!quiet) setMgmtErr(err?.message || 'Could not load the management thread.'); }
+    finally { if (!quiet) setMgmtLoading(false); }
+  }, [onManagementRead]);
+
+  useEffect(() => {
+    if (view !== 'MANAGEMENT') return;
+    void loadManagement();
+    const iv = window.setInterval(() => { void loadManagement(true); }, 8000);
+    return () => window.clearInterval(iv);
+  }, [view, loadManagement]);
+
+  useEffect(() => {
+    const el = mgmtListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [mgmtMsgs.length, view]);
+
+  const sendManagement = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mgmtText.trim()) return;
+    setMgmtBusy(true); setMgmtErr('');
+    try {
+      const res = await api<any>('/api/agent/message-management', { method: 'POST', body: { text: mgmtText.trim() } });
+      setMgmtMsgs((prev) => [...prev, res.message]);
+      setMgmtText('');
+      toast({ type: 'ok', text: 'Message sent to management' });
+    } catch (err: any) { setMgmtErr(err?.message || 'Message could not be sent.'); }
+    finally { setMgmtBusy(false); }
+  };
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -403,6 +452,58 @@ const ChatsScreen: React.FC<{ chats: ChatRow[]; loading: boolean; toast: (t: { t
     } catch (err: any) { setThreadErr(err?.message || 'Reply could not be sent.'); }
     finally { setBusy(false); }
   };
+
+  if (view === 'MANAGEMENT') {
+    return (
+      <div className="flex flex-col">
+        <div className="mb-2 flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900/60 px-3 py-2">
+          <div className="flex items-center gap-2">
+            <button onClick={() => { setView('LIST'); onRead(); }} className="rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 text-zinc-400"><ChevronRight className="h-3.5 w-3.5 rotate-180" /></button>
+            <div>
+              <div className="text-[11px] font-black text-white">Management</div>
+              <div className="font-mono text-[9px] text-zinc-500">{mgmtId || managementId || '—'}</div>
+            </div>
+          </div>
+          <CircleDollarSign className="h-4 w-4 text-zinc-600" />
+        </div>
+
+        <div ref={mgmtListRef} className="flex-1 space-y-2 overflow-y-auto overscroll-contain rounded-2xl border border-zinc-800 bg-zinc-950/40 p-2.5" style={{ maxHeight: '52vh', minHeight: '220px' }}>
+          {mgmtLoading ? (
+            <p className="py-8 text-center text-[11px] text-zinc-600">Loading…</p>
+          ) : mgmtMsgs.length === 0 ? (
+            <div className="py-8 text-center">
+              <p className="text-[11px] font-semibold text-zinc-300">No messages yet</p>
+              <p className="mt-1 px-6 text-[10px] leading-relaxed text-zinc-600">Ask your management about float, limits or a collection. Only your management account sees this thread.</p>
+            </div>
+          ) : mgmtMsgs.map((m) => {
+            const mine = m.senderRole === 'AGENT';
+            return (
+              <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[82%] rounded-2xl border px-3 py-2 text-[12px] leading-relaxed ${mine ? 'border-amber-500/25 bg-amber-500/15 text-amber-50' : 'border-zinc-700/70 bg-zinc-800 text-zinc-100'}`}>
+                  <div className="whitespace-pre-wrap break-words">{m.text}</div>
+                  <div className={`mt-1 text-right text-[8px] ${mine ? 'text-amber-200/60' : 'text-zinc-500'}`}>{dayTime(m.at)}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {mgmtErr ? <div className="mt-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10.5px] font-semibold text-amber-200">{mgmtErr}</div> : null}
+
+        <form onSubmit={sendManagement} className="mt-2 flex items-end gap-2">
+          <input
+            value={mgmtText}
+            onChange={(e) => setMgmtText(e.target.value.slice(0, 1000))}
+            placeholder="Message your management…"
+            className="min-w-0 flex-1 rounded-2xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-[12px] text-white placeholder-zinc-600 outline-none focus:border-amber-500/60"
+          />
+          <button type="submit" disabled={mgmtBusy || !mgmtText.trim()} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-500 text-zinc-950 disabled:opacity-40">
+            <Send className="h-4 w-4" />
+          </button>
+        </form>
+      </div>
+    );
+  }
 
   if (openUser) {
     return (
@@ -453,6 +554,21 @@ const ChatsScreen: React.FC<{ chats: ChatRow[]; loading: boolean; toast: (t: { t
 
   return (
     <div className="space-y-3">
+      <Card>
+        <div className="mb-2 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><CircleDollarSign className="h-3 w-3" /> Management</div>
+        <button onClick={() => setView('MANAGEMENT')} className="flex w-full items-center gap-2.5 text-left">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-amber-500/15 text-amber-300"><CircleDollarSign className="h-4 w-4" /></div>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[11px] font-bold text-white">{managementId || mgmtId || 'Not assigned'}</div>
+            <div className="truncate text-[9.5px] text-zinc-500">{managementId ? 'Message your management account' : 'No management account assigned yet'}</div>
+          </div>
+          {managementUnread > 0 ? (
+            <span className="shrink-0 rounded-full bg-amber-500 px-1.5 py-0.5 text-[9px] font-black text-zinc-950">{managementUnread > 9 ? '9+' : managementUnread}</span>
+          ) : null}
+          <ChevronRight className="h-4 w-4 shrink-0 text-zinc-600" />
+        </button>
+      </Card>
+
       <Card>
         <div className="mb-2 flex items-center justify-between">
           <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><MessageSquare className="h-3 w-3" /> User messages</div>
@@ -574,6 +690,7 @@ export default function App() {
   const [history, setHistory] = useState<LedgerRow[]>([]);
   const [chats, setChats] = useState<ChatRow[]>([]);
   const [chatUnread, setChatUnread] = useState(0);
+  const [mgmtUnread, setMgmtUnread] = useState(0);
   const [loadingChats, setLoadingChats] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [tab, setTab] = useState<Tab>('HOME');
@@ -588,6 +705,7 @@ export default function App() {
       localStorage.setItem(AGENT_KEY, JSON.stringify(res.agent));
       setSettings(res.settings);
       setPlatform(res.platform);
+      setMgmtUnread(Number(res.unreadManagement) || 0);
     } catch { /* handled by api() on 401 */ }
   }, []);
 
@@ -693,7 +811,17 @@ export default function App() {
             />
           )}
           {tab === 'RECEIVE' && <ReceiveScreen agent={agent} settings={settings} onCopy={copy} history={history} />}
-          {tab === 'CHATS' && <ChatsScreen chats={chats} loading={loadingChats} toast={toast} onRead={() => void loadChats()} />}
+          {tab === 'CHATS' && (
+            <ChatsScreen
+              chats={chats}
+              loading={loadingChats}
+              toast={toast}
+              onRead={() => void loadChats()}
+              managementId={(agent as any).ownerManagementId || ''}
+              managementUnread={mgmtUnread}
+              onManagementRead={() => { void refresh(); }}
+            />
+          )}
           {tab === 'HISTORY' && <HistoryScreen rows={history} loading={loadingHistory} />}
           {tab === 'PROFILE' && <ProfileScreen agent={agent} settings={settings} onLogout={logout} />}
         </main>
@@ -706,8 +834,8 @@ export default function App() {
               return (
                 <button key={t.id} onClick={() => setTab(t.id)} className={`relative flex flex-1 flex-col items-center gap-1 rounded-xl py-1.5 transition ${active ? 'text-amber-400' : 'text-zinc-500'}`}>
                   <Icon className="h-5 w-5" />
-                  {t.id === 'CHATS' && chatUnread > 0 ? (
-                    <span className="absolute right-1/2 top-0.5 -mr-4 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-black text-zinc-950">{chatUnread > 9 ? '9+' : chatUnread}</span>
+                  {t.id === 'CHATS' && (chatUnread + mgmtUnread) > 0 ? (
+                    <span className="absolute right-1/2 top-0.5 -mr-4 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-black text-zinc-950">{(chatUnread + mgmtUnread) > 9 ? '9+' : chatUnread + mgmtUnread}</span>
                   ) : null}
                   <span className="text-[9px] font-bold tracking-wide">{t.label}</span>
                 </button>

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDownLeft, ArrowUpRight, Building2, Check, ChevronRight, CircleDollarSign, Coins,
-  Copy, History, Home, Landmark, LogOut, Plus, Save, Send, Settings2, ShieldCheck, User, Users, X
+  Copy, History, Home, Landmark, LogOut, MessageSquare, Plus, Save, Send, Settings2, ShieldCheck, User, Users, X
 } from 'lucide-react';
 
 /* ── API client ─────────────────────────────────────────────────────────── */
@@ -23,6 +23,8 @@ type Stats = {
 };
 type LedgerRow = { id: string; at: number; type: string; amount: number; fee: number; commission: number; balanceAfter: number; agentId: string; userId?: string; note?: string };
 type WalletRow = { id: string; at: number; type: string; amount: number; balanceAfter: number; agentId?: string; note?: string };
+type MsgRow = { id: string; managementId: string; agentId: string; senderRole: 'MANAGEMENT' | 'AGENT'; text: string; at: number };
+type MsgThread = { agentId: string; lastText: string; lastAt: number; unread: number; lastSender: string };
 
 const money = (n: number) => (Number.isFinite(Number(n)) ? Number(n) : 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const timeAgo = (ts: number) => {
@@ -246,8 +248,103 @@ const CreateAgentSheet: React.FC<{ mgmtBalance: number; onClose: () => void; onC
   );
 };
 
+/* ── agent chat (management ↔ its own agents) ───────────────────────────── */
+const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => void; toast: (t: any) => void }> = ({ agent, onClose, onRead, toast }) => {
+  const [msgs, setMsgs] = useState<MsgRow[]>([]);
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(true);
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
+    try {
+      const res = await api<{ messages: MsgRow[] }>(`/api/management/agents/${agent.id}/messages`);
+      setMsgs(res.messages || []);
+      setErr('');
+      onRead();
+    } catch (e: any) { if (!quiet) setErr(e?.message || 'Could not load the conversation.'); }
+    finally { if (!quiet) setLoading(false); }
+  }, [agent.id, onRead]);
+
+  useEffect(() => {
+    void load();
+    const iv = window.setInterval(() => { void load(true); }, 8000);
+    return () => window.clearInterval(iv);
+  }, [load]);
+
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [msgs.length]);
+
+  const send = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!text.trim()) return;
+    setBusy(true); setErr('');
+    try {
+      const res = await api<{ message: MsgRow }>(`/api/management/agents/${agent.id}/messages`, { method: 'POST', body: { text: text.trim() } });
+      setMsgs((prev) => [...prev, res.message]);
+      setText('');
+    } catch (e2: any) { setErr(e2?.message || 'Message could not be sent.'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col justify-end">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative mx-auto flex h-[80vh] w-full max-w-[430px] flex-col rounded-t-3xl border border-zinc-800 bg-zinc-900">
+        <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-black text-white">{agent.name || agent.id}</div>
+            <div className="font-mono text-[9px] text-zinc-500">{agent.id}</div>
+          </div>
+          <button onClick={onClose} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 text-zinc-400"><X className="h-4 w-4" /></button>
+        </div>
+
+        <div ref={listRef} className="flex-1 space-y-2 overflow-y-auto overscroll-contain px-3 py-3">
+          {loading ? (
+            <p className="py-8 text-center text-[11px] text-zinc-500">Loading…</p>
+          ) : msgs.length === 0 ? (
+            <div className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-950/70 p-4 text-center">
+              <MessageSquare className="mx-auto h-5 w-5 text-zinc-600" />
+              <p className="mt-2 text-[11px] font-semibold text-zinc-300">No messages yet</p>
+              <p className="mt-1 text-[10px] leading-relaxed text-zinc-500">Send instructions, float notices or a collection request. Only this agent sees this thread.</p>
+            </div>
+          ) : msgs.map((m) => {
+            const mine = m.senderRole === 'MANAGEMENT';
+            return (
+              <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[82%] rounded-2xl border px-3 py-2 text-[12px] leading-relaxed ${mine ? 'border-cyan-500/25 bg-cyan-500/15 text-cyan-50' : 'border-zinc-700/70 bg-zinc-800 text-zinc-100'}`}>
+                  <div className="whitespace-pre-wrap break-words">{m.text}</div>
+                  <div className={`mt-1 text-right text-[8px] ${mine ? 'text-cyan-200/60' : 'text-zinc-500'}`}>{timeAgo(m.at)}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {err ? <div className="mx-3 mb-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{err}</div> : null}
+
+        <form onSubmit={send} className="flex items-end gap-2 border-t border-zinc-800 bg-zinc-950/80 px-3 py-2.5">
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value.slice(0, 1000))}
+            placeholder="Message this agent…"
+            className="min-w-0 flex-1 rounded-2xl border border-zinc-800 bg-zinc-900 px-3.5 py-2.5 text-[12px] text-white placeholder-zinc-600 outline-none focus:border-cyan-500/60"
+          />
+          <button type="submit" disabled={busy || !text.trim()} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-cyan-500 text-zinc-950 disabled:opacity-40">
+            <Send className="h-4 w-4" />
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+};
+
 /* ── app ────────────────────────────────────────────────────────────────── */
-type Tab = 'HOME' | 'AGENTS' | 'CONFIG' | 'HISTORY' | 'PROFILE';
+type Tab = 'HOME' | 'AGENTS' | 'MESSAGES' | 'CONFIG' | 'HISTORY' | 'PROFILE';
 
 export default function App() {
   const [mgr, setMgr] = useState<Mgmt | null>(() => {
@@ -259,6 +356,9 @@ export default function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [ledger, setLedger] = useState<LedgerRow[]>([]);
   const [wallet, setWallet] = useState<WalletRow[]>([]);
+  const [threads, setThreads] = useState<MsgThread[]>([]);
+  const [msgUnread, setMsgUnread] = useState(0);
+  const [chatAgent, setChatAgent] = useState<AgentRow | null>(null);
   const [balance, setBalance] = useState(0);
   const [tab, setTab] = useState<Tab>('HOME');
   const [selected, setSelected] = useState<AgentRow | null>(null);
@@ -270,16 +370,19 @@ export default function App() {
   const loadAll = useCallback(async () => {
     if (!localStorage.getItem(TOKEN_KEY)) return;
     try {
-      const [a, me, l] = await Promise.all([
+      const [a, me, l, msg] = await Promise.all([
         api<any>('/api/management/agents'),
         api<any>('/api/management/me'),
-        api<any>('/api/management/ledger?limit=150')
+        api<any>('/api/management/ledger?limit=150'),
+        api<any>('/api/management/messages')
       ]);
       setAgents(a.agents || []); setSettings(a.settings || settings); setStats(a.stats || null);
       if (me.management) { setMgr(me.management); localStorage.setItem(MGR_KEY, JSON.stringify(me.management)); }
       setBalance(Number(me.balance ?? a.balance ?? me.management?.balance ?? 0));
       setLedger(l.ledger || []);
       setWallet(l.wallet || []);
+      setThreads(msg.threads || []);
+      setMsgUnread(Number(msg.unread) || 0);
     } catch { /* 401 handled in api() */ }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -325,6 +428,7 @@ export default function App() {
   const tabs: Array<{ id: Tab; label: string; icon: any }> = [
     { id: 'HOME', label: 'Home', icon: Home },
     { id: 'AGENTS', label: 'Agents', icon: Users },
+    { id: 'MESSAGES', label: 'Chats', icon: MessageSquare },
     { id: 'CONFIG', label: 'Config', icon: Settings2 },
     { id: 'HISTORY', label: 'History', icon: History },
     { id: 'PROFILE', label: 'Profile', icon: User }
@@ -422,6 +526,42 @@ export default function App() {
                   </div>
                 </button>
               ))}
+            </div>
+          )}
+
+          {tab === 'MESSAGES' && (
+            <div className="space-y-3">
+              <Card>
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><MessageSquare className="h-3 w-3" /> Agent chats</div>
+                  <span className="text-[9px] text-zinc-600">{agents.length} agent{agents.length === 1 ? '' : 's'}</span>
+                </div>
+                {agents.length === 0 ? (
+                  <p className="py-6 text-center text-[11px] text-zinc-600">No agents yet. Create one first.</p>
+                ) : (
+                  <div className="divide-y divide-zinc-800/70">
+                    {[...agents]
+                      .sort((a, b) => (threads.find((t) => t.agentId === b.id)?.lastAt || 0) - (threads.find((t) => t.agentId === a.id)?.lastAt || 0))
+                      .map((a) => {
+                        const t = threads.find((x) => x.agentId === a.id);
+                        return (
+                          <button key={a.id} onClick={() => setChatAgent(a)} className="flex w-full items-center gap-2.5 py-2.5 text-left">
+                            <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl text-[11px] font-black ${a.isActive ? 'bg-cyan-500/15 text-cyan-300' : 'bg-zinc-800 text-zinc-500'}`}>{(a.name || a.id).slice(0, 1).toUpperCase()}</div>
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-[11px] font-bold text-white">{a.name || a.id}</div>
+                              <div className="truncate text-[9.5px] text-zinc-500">{t ? (t.lastSender === 'MANAGEMENT' ? 'You: ' : '') + t.lastText : 'Tap to start a chat'}</div>
+                            </div>
+                            <div className="shrink-0 text-right">
+                              {t ? <div className="text-[8.5px] text-zinc-600">{timeAgo(t.lastAt)}</div> : null}
+                              {t && t.unread > 0 ? <div className="mt-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-cyan-500 px-1 text-[9px] font-black text-zinc-950">{t.unread > 9 ? '9+' : t.unread}</div> : null}
+                            </div>
+                          </button>
+                        );
+                      })}
+                  </div>
+                )}
+              </Card>
+              <p className="px-1 text-center text-[9px] leading-relaxed text-zinc-600">You can chat only with agents created under your management. IDs only — no user names or emails.</p>
             </div>
           )}
 
@@ -560,8 +700,11 @@ export default function App() {
               const Icon = t.icon;
               const active = tab === t.id;
               return (
-                <button key={t.id} onClick={() => setTab(t.id)} className={`flex flex-1 flex-col items-center gap-1 rounded-xl py-1.5 transition ${active ? 'text-cyan-400' : 'text-zinc-500'}`}>
+                <button key={t.id} onClick={() => setTab(t.id)} className={`relative flex flex-1 flex-col items-center gap-1 rounded-xl py-1.5 transition ${active ? 'text-cyan-400' : 'text-zinc-500'}`}>
                   <Icon className="h-5 w-5" />
+                  {t.id === 'MESSAGES' && msgUnread > 0 ? (
+                    <span className="absolute right-1/2 top-0.5 -mr-4 flex h-4 min-w-4 items-center justify-center rounded-full bg-cyan-500 px-1 text-[9px] font-black text-zinc-950">{msgUnread > 9 ? '9+' : msgUnread}</span>
+                  ) : null}
                   <span className="text-[9px] font-bold tracking-wide">{t.label}</span>
                 </button>
               );
@@ -579,6 +722,7 @@ export default function App() {
           onChanged={() => { void loadAll(); }}
         />
       ) : null}
+      {chatAgent ? <ChatSheet agent={chatAgent} onClose={() => setChatAgent(null)} onRead={() => { void loadAll(); }} toast={toast} /> : null}
       {creating ? <CreateAgentSheet mgmtBalance={balance} onClose={() => setCreating(false)} toast={toast} onCreated={() => { void loadAll(); }} /> : null}
     </div>
   );

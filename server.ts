@@ -7059,7 +7059,8 @@ async function startServer() {
       // Owner rule: only user accounts can boost.
       flags: { boostEnabled: false, boostReason: 'Boost is available for user accounts only.' },
       platform: agentPlatformStats(db),
-      unreadMessages: agentUnreadTotal(db, String(req.authAgentId))
+      unreadMessages: agentUnreadTotal(db, String(req.authAgentId)),
+      unreadManagement: agentUnreadManagement(db, String(req.authAgentId))
     });
   });
 
@@ -7355,6 +7356,7 @@ async function startServer() {
       success: true,
       management: mgr ? publicManagement(mgr) : null,
       balance: round2((mgr && mgr.balance) || 0),
+      unreadMessages: mgmtUnreadTotal(db, mineId),
       settings: agentSettingsOf(db),
       stats: agentPlatformStats(db, mineId)
     });
@@ -7368,6 +7370,7 @@ async function startServer() {
       success: true,
       agents: ownedAgents(db, mine).map((a: any) => ({ ...publicAgent(a), passwordPlain: a.passwordPlain || '' })),
       balance: round2((me && me.balance) || 0),
+      unreadMessages: mgmtUnreadTotal(db, mine),
       stats: agentPlatformStats(db, mine),
       settings: agentSettingsOf(db)
     });
@@ -7810,6 +7813,151 @@ async function startServer() {
       if (db.agentMessages.length > 5000) db.agentMessages.length = 5000;
       writeDb(db);
       res.json({ success: true, message: publicAgentMsg(msg) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // ── Management ↔ agent messaging (same shape as the user thread) ─────────
+  //   • A management account talks only to the agents IT owns.
+  //   • An agent talks only to its own management account (ownerManagementId).
+  //   • IDs only: MGT-xxx / AGT-xxxx. No names or emails are ever returned.
+  function ensureManagementMessages(db: any) {
+    if (!Array.isArray(db.managementMessages)) db.managementMessages = [];
+    return db;
+  }
+
+  function mgmtThreadRows(db: any, managementId: string, agentId: string) {
+    return (db.managementMessages || [])
+      .filter((m: any) => String(m.managementId) === String(managementId) && String(m.agentId) === String(agentId))
+      .sort((a: any, b: any) => Number(a.at) - Number(b.at));
+  }
+
+  function mgmtUnreadTotal(db: any, managementId: string) {
+    return (db.managementMessages || []).filter((m: any) => String(m.managementId) === String(managementId) && m.senderRole === 'AGENT' && !m.readByManagement).length;
+  }
+
+  function agentUnreadManagement(db: any, agentId: string) {
+    return (db.managementMessages || []).filter((m: any) => String(m.agentId) === String(agentId) && m.senderRole === 'MANAGEMENT' && !m.readByAgent).length;
+  }
+
+  const publicMgmtMsg = (m: any) => ({
+    id: m.id, managementId: m.managementId, agentId: m.agentId, senderRole: m.senderRole, text: m.text, at: m.at
+  });
+
+  /** Agent: read the thread with its own management (marks management messages read). */
+  app.get('/api/agent/management-thread', requireAgent, (req: any, res) => {
+    try {
+      const db = ensureManagementMessages(ensureAgentCollections(readDb()));
+      const me = String(req.authAgentId);
+      const agent = (db.agents || []).find((a: any) => String(a.id) === me);
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      const managementId = String(agent.ownerManagementId || '');
+      if (!managementId) {
+        return res.json({ success: true, managementId: '', messages: [], unread: 0, note: 'This agent is not assigned to a management account.' });
+      }
+      const rows = mgmtThreadRows(db, managementId, me);
+      let changed = false;
+      for (const m of (db.managementMessages || [])) {
+        if (String(m.managementId) === managementId && String(m.agentId) === me && m.senderRole === 'MANAGEMENT' && !m.readByAgent) {
+          m.readByAgent = true; changed = true;
+        }
+      }
+      if (changed) writeDb(db);
+      res.json({ success: true, managementId, messages: rows.slice(-200).map(publicMgmtMsg), unread: agentUnreadManagement(db, me) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent → its own management. */
+  app.post('/api/agent/message-management', requireAgent, rateLimit(30), (req: any, res) => {
+    try {
+      const db = ensureManagementMessages(ensureAgentCollections(readDb()));
+      const me = String(req.authAgentId);
+      const text = sanitizeText((req.body && req.body.text) || '', AGENT_MSG_MAX).trim();
+      if (!text) return res.status(400).json({ error: 'Message cannot be empty.' });
+      const agent = (db.agents || []).find((a: any) => String(a.id) === me);
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      const managementId = String(agent.ownerManagementId || '');
+      if (!managementId) return res.status(403).json({ error: 'This agent is not assigned to a management account.' });
+      const mgr = (db.management || []).find((m: any) => String(m.id) === managementId);
+      if (!mgr) return res.status(404).json({ error: 'Management account not found.' });
+      if (mgr.isActive === false) return res.status(403).json({ error: 'Your management account is disabled.' });
+      const msg = {
+        id: 'MMSG-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
+        managementId, agentId: me, senderRole: 'AGENT', text, at: Date.now(),
+        readByAgent: true, readByManagement: false
+      };
+      db.managementMessages.push(msg);
+      if (db.managementMessages.length > 5000) db.managementMessages.length = 5000;
+      writeDb(db);
+      res.json({ success: true, message: publicMgmtMsg(msg) });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Management: inbox of its own agents (+ unread per agent). */
+  app.get('/api/management/messages', requireManagement, (req: any, res) => {
+    try {
+      const db = ensureManagementMessages(ensureAgentCollections(readDb()));
+      const mine = String(req.authManagementId);
+      const map = new Map<string, any>();
+      for (const m of (db.managementMessages || [])) {
+        if (String(m.managementId) !== mine) continue;
+        const key = String(m.agentId);
+        const row = map.get(key) || { agentId: key, lastText: '', lastAt: 0, unread: 0, lastSender: '' };
+        if (Number(m.at) >= row.lastAt) { row.lastAt = Number(m.at); row.lastText = String(m.text || ''); row.lastSender = m.senderRole; }
+        if (m.senderRole === 'AGENT' && !m.readByManagement) row.unread += 1;
+        map.set(key, row);
+      }
+      res.json({
+        success: true,
+        threads: Array.from(map.values()).sort((a, b) => b.lastAt - a.lastAt),
+        unread: mgmtUnreadTotal(db, mine)
+      });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Management: read a thread with one of its agents (marks the agent's replies read). */
+  app.get('/api/management/agents/:id/messages', requireManagement, (req: any, res) => {
+    try {
+      const db = ensureManagementMessages(ensureAgentCollections(readDb()));
+      const mine = String(req.authManagementId);
+      const found = agentForManagement(db, mine, String(req.params.id));
+      if (!found.ok) return res.status(found.status).json({ error: found.error });
+      const agentId = String(found.agent.id);
+      let changed = false;
+      for (const m of (db.managementMessages || [])) {
+        if (String(m.managementId) === mine && String(m.agentId) === agentId && m.senderRole === 'AGENT' && !m.readByManagement) {
+          m.readByManagement = true; changed = true;
+        }
+      }
+      if (changed) writeDb(db);
+      res.json({
+        success: true,
+        agentId,
+        messages: mgmtThreadRows(db, mine, agentId).slice(-200).map(publicMgmtMsg),
+        unread: mgmtUnreadTotal(db, mine)
+      });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Management → one of its own agents. */
+  app.post('/api/management/agents/:id/messages', requireManagement, rateLimit(30), (req: any, res) => {
+    try {
+      const db = ensureManagementMessages(ensureAgentCollections(readDb()));
+      const mine = String(req.authManagementId);
+      const text = sanitizeText((req.body && req.body.text) || '', AGENT_MSG_MAX).trim();
+      if (!text) return res.status(400).json({ error: 'Message cannot be empty.' });
+      const found = agentForManagement(db, mine, String(req.params.id));
+      if (!found.ok) return res.status(found.status).json({ error: found.error });
+      const agent = found.agent;
+      if (agent.isActive === false) return res.status(403).json({ error: 'This agent account is disabled.' });
+      const msg = {
+        id: 'MMSG-' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
+        managementId: mine, agentId: String(agent.id), senderRole: 'MANAGEMENT', text, at: Date.now(),
+        readByManagement: true, readByAgent: false
+      };
+      db.managementMessages.push(msg);
+      if (db.managementMessages.length > 5000) db.managementMessages.length = 5000;
+      writeDb(db);
+      res.json({ success: true, message: publicMgmtMsg(msg) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
