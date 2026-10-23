@@ -3069,15 +3069,15 @@ async function startServer() {
         const vd = String(req.body.voiceData);
         if (vd.length > 3*1024*1024) return res.status(413).json({ error: 'Voice note too large (max 3MB).' });
       }
-      // Permission model (user request): in the user app chat photos are the only
-      // media a USER may send. File/document attachments and voice messages stay
-      // blocked for user accounts (admins keep their existing abilities).
+      // Permission model (user request): users may send photos, voice notes and
+      // text — file/document attachments stay disabled for user accounts.
+      // (Admins keep their existing abilities.)
       const isUserSender = !!(req as any).authUserId && !(req as any).authAdmin;
       const rawKind = String((req.body && req.body.kind) || '');
       const hasVoicePayload = !!req.body.voiceData || rawKind === 'voice';
       const hasFilePayload = !!req.body.fileData || rawKind === 'file';
-      if (isUserSender && (hasFilePayload || hasVoicePayload)) {
-        return res.status(403).json({ error: 'Only photos can be sent in chat. File attachments and voice messages are disabled.' });
+      if (isUserSender && hasFilePayload) {
+        return res.status(403).json({ error: 'File attachments are disabled. Photos and voice messages can be sent.' });
       }
 
       const { senderId, senderRole, recipientId, text, voiceData, voiceDurationMs, photoData, replyTo, forwardedFrom, fileData, fileName, fileSize, contactId, poll, stickerEmoji } = req.body;

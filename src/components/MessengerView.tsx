@@ -873,9 +873,9 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
     }
   };
 
-  // Composer capabilities (user request: photos only — no files, polls,
-  // contacts or voice notes from user accounts).
-  const CAN_SEND_VOICE = false;
+  // Composer capabilities (user request: photos + voice — no file attachments,
+  // polls or contact cards from user accounts).
+  const CAN_SEND_VOICE = true;
 
   // ───────────────── INFO SHEET ─────────────────
   // User request: no attachments in p2p chat — photos only. File/document,
