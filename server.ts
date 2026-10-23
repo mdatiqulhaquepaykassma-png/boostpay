@@ -302,12 +302,31 @@ function broadcastChatMessageReaction(messageId: string, reactions: any, convers
 }
 
 // ── Attachment storage helpers (fix storage-full: save base64 to disk, serve via /api/chat/file/:id, auto-cleanup old files) ──
+/**
+ * Parse a browser data-URL. Chrome/Safari ship the recorder mime WITH parameters
+ * ("data:audio/webm;codecs=opus;base64,…"), and a naive /^data:([^;]+);base64,/
+ * regex silently rejected every real voice note as "not an audio file".
+ * Here the parameters are dropped and only the base type is kept.
+ */
+function parseDataUrl(dataUrl: string): { mime: string; base64: string } | null {
+  const s = String(dataUrl || '');
+  if (!/^data:/i.test(s)) return null;
+  const comma = s.indexOf(',');
+  if (comma < 0) return null;
+  const params = s.slice(5, comma).split(';').map((x) => x.trim()).filter(Boolean);
+  if (!params.some((x) => /^base64$/i.test(x))) return null;
+  const mime = String(params[0] || 'application/octet-stream').toLowerCase();
+  const base64 = s.slice(comma + 1).replace(/\s+/g, '');
+  if (!base64) return null;
+  return { mime, base64 };
+}
+
 function saveAttachmentToDisk(dataUrl: string, prefix: string): { fileId: string; url: string; mime: string; size: number } | null {
   try {
-    const m = String(dataUrl||'').match(/^data:([^;]+);base64,(.+)$/);
-    if (!m) return null;
-    const mime = m[1]||'application/octet-stream';
-    const b64 = m[2]||'';
+    const parsed = parseDataUrl(dataUrl);
+    if (!parsed) return null;
+    const mime = parsed.mime;
+    const b64 = parsed.base64;
     const buf = Buffer.from(b64, 'base64');
     if (!buf.length || buf.length > 6*1024*1024) return null;
     const fileId = `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2,7)}`;
@@ -368,16 +387,16 @@ function chatContentFromBody(body: any, maxLen = 500): ChatContent {
   const text = sanitizeText(body?.text || '', maxLen).trim();
   if (kind === 'photo') {
     if (!photo) return { ok: false, error: 'Photo data is missing.' };
-    const mime = (String(photo).match(/^data:([^;]+);base64,/) || [])[1] || '';
-    if (!/^image\//i.test(mime)) return { ok: false, error: 'Only photos can be sent in chat.' };
+    const mime = (parseDataUrl(photo) || {} as any).mime || '';
+    if (!/^image\//i.test(String(mime))) return { ok: false, error: 'Only photos can be sent in chat.' };
     const saved = saveAttachmentToDisk(photo, 'chatphoto');
     if (!saved) return { ok: false, error: 'Photo could not be saved (max 6 MB).' };
     return { ok: true, kind, text, photoFileId: saved.fileId, photoUrl: saved.url };
   }
   if (kind === 'voice') {
     if (!voice) return { ok: false, error: 'Voice data is missing.' };
-    const mime = (String(voice).match(/^data:([^;]+);base64,/) || [])[1] || '';
-    if (!/^audio\//i.test(mime)) return { ok: false, error: 'Only voice notes can be sent.' };
+    const mime = (parseDataUrl(voice) || {} as any).mime || '';
+    if (!/^audio\//i.test(String(mime))) return { ok: false, error: 'Only voice notes can be sent.' };
     const dur = Math.max(0, Math.min(120000, Number(body?.voiceDurationMs) || 0));
     if (dur > 120000) return { ok: false, error: 'Voice message too long (max 2 minutes).' };
     const saved = saveAttachmentToDisk(voice, 'chatvoice');
@@ -2340,11 +2359,27 @@ async function startServer() {
 
   // Body parser — global 1mb (was 100kb → caused PayloadTooLarge on /api/sync with photos/history); chat uploads allow larger via route-specific parsers BEFORE global
   // NOTE: route-specific parsers must come BEFORE global parser so they consume body first
-  app.use('/api/chat/send', express.json({ limit: '5mb' }));
+  app.use('/api/chat/send', express.json({ limit: '8mb' }));
+  // Chat media (photo / voice) travels as a base64 data URL inside JSON. A 2 minute
+  // voice note or a phone photo is far bigger than the 1 mb global limit, so every
+  // agent/management media message was rejected with 413 before it reached the route.
+  app.use('/api/user/message-agent', express.json({ limit: '8mb' }));
+  app.use('/api/user/message-agent', express.urlencoded({ limit: '8mb', extended: true }));
+  app.use('/api/agent/message-user', express.json({ limit: '8mb' }));
+  app.use('/api/agent/message-management', express.json({ limit: '8mb' }));
+  app.use('/api/management/agents', express.json({ limit: '8mb' }));
   app.use('/api/chat/group-call', express.json({ limit: '1mb' }));
   app.use('/api/sync', express.json({ limit: '10mb' }));
   app.use('/api/db', express.json({ limit: '5mb' }));
   app.use(express.json({ limit: '1mb' }));
+  // Answer oversized uploads with JSON instead of Express' default HTML page —
+  // the apps could only show a generic "Request failed (413)" before.
+  app.use((err: any, _req: any, res: any, next: any) => {
+    if (err && (err.type === 'entity.too.large' || err.status === 413)) {
+      return res.status(413).json({ error: 'That file is too large to send. Use a shorter voice note or a smaller photo.' });
+    }
+    return next(err);
+  });
   // Reject direct wallet manipulation — client must never send balance/creditAmount to any endpoint except admin/adjust (which is RBAC guarded)
   app.use((req:any,res:any,next:any)=>{
     const badKeys = ['balance','creditAmount','credit_amount','lifetimeProfit','walletBalance'];
@@ -7196,7 +7231,9 @@ async function startServer() {
     ownerManagementId: a.ownerManagementId || '',
     createdAt: a.createdAt || 0,
     lastLoginAt: a.lastLoginAt || 0,
-    createdBy: a.createdBy || ''
+    createdBy: a.createdBy || '',
+    emailVerified: !!a.emailVerified,
+    emailVerifiedAt: a.emailVerifiedAt || 0
   });
 
   const publicManagement = (m: any) => ({
@@ -7421,6 +7458,67 @@ async function startServer() {
       recordAuditLog(db, 'AGENT_PASSWORD_RESET', String(agent.email || agent.id), `Agent ${agent.id} reset the password with an email code`);
       writeDb(db);
       res.json({ success: true, message: 'Password updated. Please sign in with the new password.' });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent: send a 6-digit code to the agent's own Gmail. */
+  app.post('/api/agent/verify-email', requireAgent, rateLimit(6), async (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const agent: any = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId));
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      const email = String(agent.email || '').toLowerCase();
+      if (!email.includes('@')) return res.status(400).json({ error: 'No email is attached to this agent account.' });
+      if (agent.emailVerified) return res.json({ success: true, alreadyVerified: true, message: 'This email is already verified.' });
+      const rl = checkOtpRateLimit(email, clientIp(req));
+      if (!rl.ok) return res.status(429).json({ error: rl.error, retryAfter: rl.retryAfter });
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      agent.emailVerificationCode = code;
+      agent.emailVerificationExpires = Date.now() + 15 * 60 * 1000;
+      agent.emailVerificationSentAt = Date.now();
+      writeDb(db);
+      const html = emailWrap('Agent Email Verification', `<p style="margin:0 0 10px">Hi <b>Agent ${agent.id}</b>,</p><p style="margin:0 0 12px">Your BoostPay Agent email verification code:</p><div style="text-align:center;margin:14px 0"><span style="display:inline-block;background:#09090b;border:1px solid #27272a;padding:12px 22px;border-radius:12px;font-family:monospace;font-size:22px;font-weight:800;letter-spacing:5px;color:#f59e0b">${code}</span></div><p style="margin:0;font-size:12px;color:#a1a1aa">Valid for 15 minutes. Enter this code in the Agent console (Profile → Verify email).</p>`);
+      const mail = await sendMail(email, 'BoostPay Agent — Verify Your Email', html);
+      if (!mail.ok) return res.status(502).json({ error: 'Could not send the verification email right now. Please try again in a moment.' });
+      res.json({ success: true, message: 'Verification code sent to your Gmail. Check inbox/spam.' });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent: confirm the code and mark the email verified. */
+  app.post('/api/agent/verify-email/confirm', requireAgent, rateLimit(20), (req: any, res) => {
+    try {
+      const code = String((req.body && (req.body.code || req.body.token)) || '').trim();
+      if (!code) return res.status(400).json({ error: 'Enter the 6-digit code from your Gmail.' });
+      const db = ensureAgentCollections(readDb());
+      const agent: any = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId));
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      if (agent.emailVerified) return res.json({ success: true, verified: true, message: 'This email is already verified.' });
+      if (!agent.emailVerificationCode || String(agent.emailVerificationCode) !== code) return res.status(400).json({ error: 'Invalid verification code.' });
+      if (agent.emailVerificationExpires && Date.now() > Number(agent.emailVerificationExpires)) return res.status(400).json({ error: 'Code expired. Request a new one.' });
+      agent.emailVerified = true;
+      agent.emailVerifiedAt = Date.now();
+      delete agent.emailVerificationCode;
+      delete agent.emailVerificationExpires;
+      recordAuditLog(db, 'AGENT_EMAIL_VERIFIED', String(agent.email || agent.id), `Agent ${agent.id} verified email`);
+      writeDb(db);
+      res.json({ success: true, verified: true, message: 'Email verified.' });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /** Agent: current verification state. */
+  app.get('/api/agent/verify-email/status', requireAgent, (req: any, res) => {
+    try {
+      const db = ensureAgentCollections(readDb());
+      const agent: any = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId));
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      res.json({
+        success: true,
+        email: agent.email || '',
+        emailVerified: !!agent.emailVerified,
+        emailVerifiedAt: agent.emailVerifiedAt || 0,
+        pending: !!agent.emailVerificationCode,
+        expiresAt: agent.emailVerificationExpires || 0
+      });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 

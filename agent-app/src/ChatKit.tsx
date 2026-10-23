@@ -37,7 +37,36 @@ export type ChatSendPayload = {
 };
 
 const MAX_PHOTO_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Phone cameras produce 3–8 MB JPEGs; base64 makes them ~33% bigger again and the
+ * upload used to be rejected. Downscale to 1600 px / q0.82 before sending — still
+ * sharp on a phone screen, roughly 200–400 KB.
+ */
+const shrinkPhoto = async (file: File): Promise<string> => {
+  const dataUrl = await fileToDataUrl(file);
+  if (file.size <= 600 * 1024) return dataUrl;
+  try {
+    const img = document.createElement('img');
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('bad image'));
+      img.src = dataUrl;
+    });
+    const max = 1600;
+    const scale = Math.min(1, max / Math.max(img.width || 1, img.height || 1));
+    if (scale >= 1) return dataUrl;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round((img.width || max) * scale);
+    canvas.height = Math.round((img.height || max) * scale);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.82);
+  } catch { return dataUrl; }
+};
 const MAX_VOICE_MS = 120000;
+const MAX_VOICE_BYTES = 3 * 1024 * 1024;
 
 export const chatClock = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 export const chatDay = (ts: number) => {
@@ -77,7 +106,13 @@ export function useVoiceRecorder(onDone: (dataUrl: string, durationMs: number) =
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
       const mime = types.find((t) => (window as any).MediaRecorder.isTypeSupported?.(t)) || '';
-      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      // 32 kbps mono is plenty for speech and keeps a 2-minute note ~480 KB,
+      // well inside the server's chat upload limit (the default 128 kbps produced
+      // notes the API rejected as too large).
+      const rec = new MediaRecorder(stream, {
+        ...(mime ? { mimeType: mime } : {}),
+        audioBitsPerSecond: 32000
+      } as MediaRecorderOptions);
       recRef.current = rec;
       chunks.current = [];
       cancelled.current = false;
@@ -92,7 +127,8 @@ export function useVoiceRecorder(onDone: (dataUrl: string, durationMs: number) =
         const ms = Date.now() - startedAt.current;
         if (ms < 500) { onError('Hold a little longer to record a voice message.'); return; }
         const blob = new Blob(chunks.current, { type: rec.mimeType || 'audio/webm' });
-        if (blob.size > MAX_PHOTO_BYTES) { onError('Voice message is too large.'); return; }
+        if (!blob.size) { onError('Nothing was recorded. Check the microphone permission and try again.'); return; }
+        if (blob.size > MAX_VOICE_BYTES) { onError('Voice message is too long. Keep it under 2 minutes.'); return; }
         try { onDone(await fileToDataUrl(blob), Math.min(ms, MAX_VOICE_MS)); }
         catch { onError('Could not prepare the voice message.'); }
       };
@@ -213,7 +249,8 @@ export const ChatComposer: React.FC<{
       setReply(null);
       if (payload.kind === 'text') setText('');
     } catch (err: any) {
-      fail(err?.message || 'Message could not be sent.');
+      const raw = String(err?.message || '');
+      fail(/413|too large|payload/i.test(raw) ? 'That file was too large to send — try a shorter voice note or a smaller photo.' : (raw || 'Message could not be sent.'));
     } finally { setSending(false); }
   };
 
@@ -221,7 +258,7 @@ export const ChatComposer: React.FC<{
     if (!file) return;
     if (!/^image\//i.test(file.type)) { fail('Only photos can be sent.'); return; }
     if (file.size > MAX_PHOTO_BYTES) { fail('Photo is larger than 4 MB.'); return; }
-    try { await submit({ kind: 'photo', photo: await fileToDataUrl(file), text: text.trim() || undefined }); }
+    try { await submit({ kind: 'photo', photo: await shrinkPhoto(file), text: text.trim() || undefined }); }
     catch { fail('Could not read the photo.'); }
   };
 
@@ -338,11 +375,22 @@ export const ChatList: React.FC<{
           <p className="text-[11px] font-semibold text-zinc-300">{emptyTitle || 'No messages yet'}</p>
           {emptyHint ? <p className="mt-1 px-6 text-[10px] leading-relaxed text-zinc-600">{emptyHint}</p> : null}
         </div>
-      ) : messages.map((m) => {
+      ) : messages.map((m, i) => {
         const mine = m.senderRole === myRole;
+        const prev = i > 0 ? messages[i - 1] : null;
+        const newDay = !prev || new Date(prev.at).toDateString() !== new Date(m.at).toDateString();
         return (
+          <div key={m.id}>
+          {newDay ? (
+            <div className="my-2 flex items-center justify-center">
+              <span className="rounded-full bg-zinc-900/80 px-2.5 py-0.5 text-[8.5px] font-bold uppercase tracking-wider text-zinc-500">
+                {new Date(m.at).toDateString() === new Date().toDateString()
+                  ? 'Today'
+                  : new Date(m.at).toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' })}
+              </span>
+            </div>
+          ) : null}
           <div
-            key={m.id}
             onDoubleClick={() => openReply(m)}
             onContextMenu={(e) => { e.preventDefault(); openReply(m); }}
             onTouchStart={() => { clearPress(); pressTimer.current = window.setTimeout(() => { pressTimer.current = null; openReply(m); }, 450); }}
@@ -352,6 +400,7 @@ export const ChatList: React.FC<{
             title="Hold to reply"
           >
             <ChatBubble msg={m} mine={mine} accent={accent} peerRead={mine ? (m as any)[peerReadKey] === true : false} />
+          </div>
           </div>
         );
       })}

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownLeft, ArrowUpRight, BadgeCheck, Banknote, Check, ChevronRight, CircleDollarSign,
-  Copy, History, Home, KeyRound, LogOut, Lock, MessageSquare, Phone, Receipt, Search, Send, Sparkles,
-  Ticket, User, UserRound, Video, Wallet, X, Zap
+  Copy, History, Home, Image as ImageIcon, KeyRound, LogOut, Lock, MailCheck, MessageSquare, Mic, Phone,
+  Receipt, Search, Send, ShieldCheck, Sparkles, Ticket, User, UserRound, Video, Wallet, X, Zap
 } from 'lucide-react';
 import { ChatComposer, ChatList, chatDay, ChatMessageLike, ChatSendPayload } from './ChatKit';
 import { AgentCallManager, startCallTo } from './CallOverlay';
@@ -14,6 +14,7 @@ const AGENT_KEY = 'bpa_agent_v1';
 type Agent = {
   id: string; name: string; email: string; balance: number; commissionLifetime: number;
   sentTotal: number; receivedTotal: number; isActive: boolean; createdAt: number;
+  emailVerified?: boolean; emailVerifiedAt?: number; ownerManagementId?: string;
 };
 type Settings = {
   feePercentOnUserSend: number; commissionPercentOnReceive: number;
@@ -509,9 +510,11 @@ const ChatsScreen: React.FC<{
 }> = ({ chats, loading, toast, onRead, managementId, managementUnread = 0, onManagementRead }) => {
   const [openUser, setOpenUser] = useState<string | null>(null);
   const [view, setView] = useState<'LIST' | 'MANAGEMENT'>('LIST');
+  const [q, setQ] = useState('');
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [peerTyping, setPeerTyping] = useState(false);
   const [threadErr, setThreadErr] = useState('');
+  const [threadLoading, setThreadLoading] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
 
   const [mgmtMsgs, setMgmtMsgs] = useState<MgmtMsg[]>([]);
@@ -519,7 +522,6 @@ const ChatsScreen: React.FC<{
   const [mgmtErr, setMgmtErr] = useState('');
   const [mgmtId, setMgmtId] = useState(managementId || '');
   const [mgmtLoading, setMgmtLoading] = useState(false);
-  const mgmtListRef = useRef<HTMLDivElement | null>(null);
   // Refs keep the polling effects from re-subscribing on every parent render
   // (previously that produced a self-sustaining request loop).
   const onReadRef = useRef(onRead);
@@ -529,6 +531,7 @@ const ChatsScreen: React.FC<{
 
   /* ── agent ↔ user ───────────────────────────────────────────────────── */
   const loadThread = useCallback(async (userId: string, quiet = false) => {
+    if (!quiet) setThreadLoading(true);
     try {
       const res = await api<any>(`/api/agent/chat?userId=${encodeURIComponent(userId)}`);
       setMessages(res.messages || []);
@@ -536,6 +539,7 @@ const ChatsScreen: React.FC<{
       setThreadErr('');
       try { onReadRef.current(); } catch { /* ignore */ }
     } catch (err: any) { if (!quiet) setThreadErr(err?.message || 'Could not open the conversation.'); }
+    finally { if (!quiet) setThreadLoading(false); }
   }, []);
 
   useEffect(() => {
@@ -545,8 +549,6 @@ const ChatsScreen: React.FC<{
     const iv = window.setInterval(() => { void loadThread(openUser, true); }, 6000);
     return () => window.clearInterval(iv);
   }, [openUser, loadThread]);
-
-  // scroll is handled by ChatKit (only when the reader is at the bottom)
 
   const sendUser = async (payload: ChatSendPayload) => {
     if (!openUser) return;
@@ -577,8 +579,6 @@ const ChatsScreen: React.FC<{
     return () => window.clearInterval(iv);
   }, [view, loadManagement]);
 
-
-
   // Live wake-up from the agent SSE stream (new user message / management reply):
   // refresh whatever the agent is currently looking at, without waiting for the poll.
   useEffect(() => {
@@ -598,21 +598,44 @@ const ChatsScreen: React.FC<{
   };
   const typingToManagement = () => { void api('/api/agent/typing-management', { method: 'POST', body: {} }).catch(() => {}); };
 
+  /* ── thread header (shared by both threads) ─────────────────────────── */
+  const ThreadHeader: React.FC<{
+    title: string; subtitle: string; initials: string; onBack: () => void;
+    onCall?: () => void; onVideo?: () => void;
+  }> = ({ title, subtitle, initials, onBack, onCall, onVideo }) => (
+    <div className="flex shrink-0 items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/70 px-2 py-1.5">
+      <button onClick={onBack} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-950 text-zinc-400 active:scale-95">
+        <ChevronRight className="h-4 w-4 rotate-180" />
+      </button>
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-[11px] font-black text-amber-300">{initials}</div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[12px] font-black leading-tight text-white">{title}</div>
+        <div className={`truncate text-[9px] ${/typing/.test(subtitle) ? 'font-semibold text-amber-300' : 'text-zinc-500'}`}>{subtitle}</div>
+      </div>
+      {onCall ? (
+        <button onClick={onCall} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 active:scale-95" title="Voice call">
+          <Phone className="h-4 w-4" />
+        </button>
+      ) : null}
+      {onVideo ? (
+        <button onClick={onVideo} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 active:scale-95" title="Video call">
+          <Video className="h-4 w-4" />
+        </button>
+      ) : null}
+    </div>
+  );
+
+  /* ── management thread ──────────────────────────────────────────────── */
   if (view === 'MANAGEMENT') {
     return (
-      <div className="flex flex-col">
-        <div className="mb-2 flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-          <div className="flex items-center gap-2">
-            <button onClick={() => { setView('LIST'); onRead(); }} className="rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 text-zinc-400"><ChevronRight className="h-3.5 w-3.5 rotate-180" /></button>
-            <div>
-              <div className="text-[11px] font-black text-white">Management</div>
-              <div className="font-mono text-[9px] text-zinc-500">{mgmtId || managementId || '—'}</div>
-            </div>
-          </div>
-          <CircleDollarSign className="h-4 w-4 text-zinc-600" />
-        </div>
-
-        <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/40">
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <ThreadHeader
+          title="Management"
+          subtitle={mgmtTyping ? 'typing…' : (mgmtId || managementId || 'Not assigned')}
+          initials="M"
+          onBack={() => { setView('LIST'); onRead(); }}
+        />
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/50">
           <ChatList
             messages={mgmtMsgs}
             myRole="AGENT"
@@ -622,123 +645,146 @@ const ChatsScreen: React.FC<{
             loading={mgmtLoading}
             emptyTitle="No messages yet"
             emptyHint="Ask your management about float, limits or a collection. Only your management account sees this thread."
-            className="p-2.5"
-            listRef={mgmtListRef}
-            style={{ maxHeight: '52vh', minHeight: '220px' } as any}
+            className="min-h-0 flex-1 space-y-2 px-2.5 py-2"
           />
-          {mgmtTyping ? <div className="px-3 pb-1 text-[9px] font-semibold text-zinc-500">Management is typing…</div> : null}
-          {mgmtErr ? <div className="mx-3 mb-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10.5px] font-semibold text-amber-200">{mgmtErr}</div> : null}
-          <ChatComposer
-            accent="amber"
-            scope="agent-management"
-            placeholder="Message your management…"
-            onSend={sendManagement}
-            onTyping={typingToManagement}
-            onError={(m) => setMgmtErr(m)}
-          />
+          {mgmtErr ? <div className="mx-2.5 mb-1.5 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[10.5px] font-semibold text-amber-200">{mgmtErr}</div> : null}
+          <div className="shrink-0">
+            <ChatComposer
+              accent="amber"
+              scope="agent-management"
+              placeholder="Message your management…"
+              onSend={sendManagement}
+              onTyping={typingToManagement}
+              onError={(m) => { setMgmtErr(m); toast({ type: 'err', text: m }); }}
+            />
+          </div>
         </div>
       </div>
     );
   }
 
+  /* ── agent ↔ user thread ────────────────────────────────────────────── */
   if (openUser) {
     return (
-      <div className="flex flex-col" style={{ minHeight: 'calc(100vh - 190px)' }}>
-        <div className="mb-2 flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-900/60 px-3 py-2">
-          <div className="flex items-center gap-2">
-            <button onClick={() => { setOpenUser(null); onRead(); }} className="rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 text-zinc-400"><ChevronRight className="h-3.5 w-3.5 rotate-180" /></button>
-            <div>
-              <div className="text-[11px] font-black text-white">User #{openUser}</div>
-              <div className="text-[9px] text-zinc-500">{peerTyping ? 'typing…' : 'Only this user sees the reply'}</div>
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            <button
-              onClick={() => startCallTo(openUser, `User #${openUser}`, 'audio')}
-              className="flex h-8 w-8 items-center justify-center rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 active:scale-95"
-              title="Voice call this user"
-            ><Phone className="h-4 w-4" /></button>
-            <button
-              onClick={() => startCallTo(openUser, `User #${openUser}`, 'video')}
-              className="flex h-8 w-8 items-center justify-center rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-300 active:scale-95"
-              title="Video call this user"
-            ><Video className="h-4 w-4" /></button>
-            <UserRound className="h-4 w-4 text-zinc-600" />
-          </div>
-        </div>
-
-        <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/40">
+      <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <ThreadHeader
+          title={`User #${openUser}`}
+          subtitle={peerTyping ? 'typing…' : 'Only this user sees your reply'}
+          initials="U"
+          onBack={() => { setOpenUser(null); onRead(); }}
+          onCall={() => startCallTo(openUser, `User #${openUser}`, 'audio')}
+          onVideo={() => startCallTo(openUser, `User #${openUser}`, 'video')}
+        />
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/50">
           <ChatList
             messages={messages}
             myRole="AGENT"
             accent="amber"
             scope={`agent-user-${openUser}`}
             peerReadKey="readByUser"
-            emptyTitle="No messages"
-            emptyHint="You can only reply to users who messaged you first."
-            className="p-2.5"
+            loading={threadLoading && messages.length === 0}
+            emptyTitle="No messages yet"
+            emptyHint="Say hello. You can send text, photos and voice notes — the user gets them instantly."
+            className="min-h-0 flex-1 space-y-2 px-2.5 py-2"
             listRef={listRef}
-            style={{ maxHeight: '48vh', minHeight: '200px' } as any}
           />
-          {threadErr ? <div className="mx-3 mb-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{threadErr}</div> : null}
-          <ChatComposer
-            accent="amber"
-            scope={`agent-user-${openUser}`}
-            placeholder="Reply to this user…"
-            onSend={sendUser}
-            onTyping={typingToUser}
-            onError={(m) => setThreadErr(m)}
-          />
+          {threadErr ? <div className="mx-2.5 mb-1.5 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[10.5px] font-semibold text-red-200">{threadErr}</div> : null}
+          <div className="shrink-0">
+            <ChatComposer
+              accent="amber"
+              scope={`agent-user-${openUser}`}
+              placeholder="Reply to this user…"
+              onSend={sendUser}
+              onTyping={typingToUser}
+              onError={(m) => { setThreadErr(m); toast({ type: 'err', text: m }); }}
+            />
+          </div>
         </div>
       </div>
     );
   }
 
-  return (
-    <div className="space-y-3">
-      <Card>
-        <div className="mb-2 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><CircleDollarSign className="h-3 w-3" /> Management</div>
-        <button onClick={() => setView('MANAGEMENT')} className="flex w-full items-center gap-2.5 text-left">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-amber-500/15 text-amber-300"><CircleDollarSign className="h-4 w-4" /></div>
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-[11px] font-bold text-white">{managementId || mgmtId || 'Not assigned'}</div>
-            <div className="truncate text-[9.5px] text-zinc-500">{managementId ? 'Message your management account' : 'No management account assigned yet'}</div>
-          </div>
-          {managementUnread > 0 ? (
-            <span className="shrink-0 rounded-full bg-amber-500 px-1.5 py-0.5 text-[9px] font-black text-zinc-950">{managementUnread > 9 ? '9+' : managementUnread}</span>
-          ) : null}
-          <ChevronRight className="h-4 w-4 shrink-0 text-zinc-600" />
-        </button>
-      </Card>
+  /* ── conversation list ──────────────────────────────────────────────── */
+  const term = q.trim().toLowerCase();
+  const visibleChats = term ? chats.filter((c) => `${c.userId} ${c.lastText || ''}`.toLowerCase().includes(term)) : chats;
+  const totalUnread = chats.reduce((n, c) => n + (c.unread > 0 ? c.unread : 0), 0) + managementUnread;
+  const previewIcon = (text: string) => {
+    if (/^photo$/i.test(text)) return <ImageIcon className="h-3 w-3" />;
+    if (/^voice message$/i.test(text)) return <Mic className="h-3 w-3" />;
+    return null;
+  };
 
-      <Card>
-        <div className="mb-2 flex items-center justify-between">
-          <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><MessageSquare className="h-3 w-3" /> User messages</div>
-          <span className="text-[9px] text-zinc-600">{chats.length} conversation{chats.length === 1 ? '' : 's'}</span>
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-2">
+      <div className="flex shrink-0 items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/70 px-3 py-2">
+        <Search className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search User # or message…"
+          className="min-w-0 flex-1 bg-transparent text-[11.5px] text-white placeholder-zinc-600 outline-none"
+        />
+        {q ? <button onClick={() => setQ('')} className="shrink-0 text-zinc-500"><X className="h-3.5 w-3.5" /></button> : null}
+      </div>
+
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain pb-1">
+        <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50">
+          <button onClick={() => setView('MANAGEMENT')} className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left active:bg-zinc-800/40">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-amber-300"><CircleDollarSign className="h-4 w-4" /></div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[11.5px] font-bold text-white">Management</div>
+              <div className="truncate text-[9.5px] text-zinc-500">{managementId ? 'Float, limits and collections' : 'No management account assigned yet'}</div>
+            </div>
+            {managementUnread > 0 ? (
+              <span className="shrink-0 rounded-full bg-amber-500 px-1.5 py-0.5 text-[9px] font-black text-zinc-950">{managementUnread > 9 ? '9+' : managementUnread}</span>
+            ) : <ChevronRight className="h-4 w-4 shrink-0 text-zinc-600" />}
+          </button>
         </div>
-        {loading ? (
-          <p className="py-6 text-center text-[11px] text-zinc-600">Loading…</p>
-        ) : chats.length === 0 ? (
-          <p className="py-6 text-center text-[11px] leading-relaxed text-zinc-600">No messages yet.<br />Users can message you from their app (Pay an Agent → Message).</p>
-        ) : (
-          <div className="divide-y divide-zinc-800/70">
-            {chats.map((c) => (
-              <button key={c.userId} onClick={() => void setOpenUser(c.userId)} className="flex w-full items-center gap-2.5 py-2.5 text-left">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-zinc-800 text-[11px] font-black text-zinc-300"><UserRound className="h-4 w-4" /></div>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[11px] font-bold text-white">User #{c.userId}</div>
-                  <div className="truncate text-[9.5px] text-zinc-500">{c.lastSender === 'AGENT' ? 'You: ' : ''}{c.lastText}</div>
-                </div>
-                <div className="shrink-0 text-right">
-                  <div className="text-[8.5px] text-zinc-600">{timeAgo(c.lastAt)}</div>
-                  {c.unread > 0 ? <div className="mt-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-black text-zinc-950">{c.unread > 9 ? '9+' : c.unread}</div> : null}
-                </div>
-              </button>
-            ))}
+
+        <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50">
+          <div className="flex items-center justify-between border-b border-zinc-800/70 px-3 py-2">
+            <span className="flex items-center gap-1.5 text-[9.5px] font-bold uppercase tracking-wider text-zinc-500"><MessageSquare className="h-3 w-3" /> User messages</span>
+            <span className="text-[9px] font-semibold text-zinc-600">{totalUnread > 0 ? `${totalUnread} unread` : `${chats.length} chat${chats.length === 1 ? '' : 's'}`}</span>
           </div>
-        )}
-      </Card>
-      <p className="px-1 text-center text-[9px] leading-relaxed text-zinc-600">You can only reply to users who messaged you first. No user names or emails are shown — User IDs only.</p>
+          {loading && chats.length === 0 ? (
+            <p className="py-8 text-center text-[11px] text-zinc-600">Loading conversations…</p>
+          ) : visibleChats.length === 0 ? (
+            <div className="px-4 py-8 text-center">
+              <MessageSquare className="mx-auto h-5 w-5 text-zinc-700" />
+              <p className="mt-2 text-[11px] font-semibold text-zinc-400">{term ? 'No conversation matches that search.' : 'No user has messaged you yet.'}</p>
+              <p className="mt-1 text-[9.5px] leading-relaxed text-zinc-600">{term ? 'Try a different User # or word.' : 'Users start the chat from their app: Pay an Agent → Message.'}</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-800/60">
+              {visibleChats.map((c) => (
+                <button key={c.userId} onClick={() => void setOpenUser(c.userId)} className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left active:bg-zinc-800/40">
+                  <div className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-zinc-300">
+                    <UserRound className="h-4 w-4" />
+                    {c.unread > 0 ? <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-zinc-900 bg-amber-400" /> : null}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[11.5px] font-bold text-white">User #{c.userId}</div>
+                    <div className="flex items-center gap-1 truncate text-[9.5px] text-zinc-500">
+                      {previewIcon(c.lastText)}
+                      <span className="truncate">{(c.lastSender === 'AGENT' ? 'You: ' : '') + (c.lastText || 'No messages yet')}</span>
+                    </div>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <div className="text-[8.5px] text-zinc-600">{c.lastAt ? timeAgo(c.lastAt) : ''}</div>
+                    {c.unread > 0 ? (
+                      <div className="mt-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-black text-zinc-950">{c.unread > 9 ? '9+' : c.unread}</div>
+                    ) : null}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <p className="px-2 text-center text-[9px] leading-relaxed text-zinc-600">
+          You can only reply to users who messaged you first. No user names or emails are shown — User IDs only.
+        </p>
+      </div>
     </div>
   );
 };
@@ -849,7 +895,96 @@ const HistoryScreen: React.FC<{ rows: LedgerRow[]; loading: boolean }> = ({ rows
 };
 
 /* ── profile + password change ──────────────────────────────────────────── */
-const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () => void; toast: (t: { type: 'ok' | 'err'; text: string }) => void }> = ({ agent, settings, onLogout, toast }) => {
+/* ── email verification ─────────────────────────────────────────────────── */
+const EmailVerifyCard: React.FC<{ agent: Agent; toast: (t: { type: 'ok' | 'err'; text: string }) => void; onVerified?: () => void }> = ({ agent, toast, onVerified }) => {
+  const [verified, setVerified] = useState<boolean>(!!agent.emailVerified);
+  const [sent, setSent] = useState(false);
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  const [note, setNote] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    void api<any>('/api/agent/verify-email/status')
+      .then((r) => { if (alive) { setVerified(!!r.emailVerified); setSent(!!r.pending); } })
+      .catch(() => { /* not fatal */ });
+    return () => { alive = false; };
+  }, []);
+
+  const sendCode = async () => {
+    setErr(''); setNote(''); setBusy(true);
+    try {
+      const r = await api<any>('/api/agent/verify-email', { method: 'POST', body: {} });
+      if (r?.alreadyVerified) { setVerified(true); onVerified?.(); }
+      else { setSent(true); setNote(`Code sent to ${agent.email}. Check inbox and spam.`); }
+      toast({ type: 'ok', text: 'Verification code sent to your Gmail' });
+    } catch (e: any) { setErr(e?.message || 'Could not send the code.'); }
+    finally { setBusy(false); }
+  };
+
+  const confirmCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const c = code.replace(/\D/g, '').slice(0, 6);
+    if (c.length !== 6) { setErr('Enter the 6-digit code from your Gmail.'); return; }
+    setErr(''); setNote(''); setBusy(true);
+    try {
+      await api('/api/agent/verify-email/confirm', { method: 'POST', body: { code: c } });
+      setVerified(true); setSent(false); setCode('');
+      onVerified?.();
+      toast({ type: 'ok', text: 'Email verified' });
+    } catch (e2: any) { setErr(e2?.message || 'Could not verify the code.'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-2 text-[11px] font-bold text-white"><MailCheck className="h-4 w-4 text-amber-400" /> Email verification</span>
+        {verified ? (
+          <span className="flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-black text-emerald-300"><ShieldCheck className="h-3 w-3" /> Verified</span>
+        ) : (
+          <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[9px] font-black text-amber-300">Not verified</span>
+        )}
+      </div>
+      <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-500">
+        {verified
+          ? 'Your Gmail is confirmed. You can use it for password reset and management contact.'
+          : `Verify ${agent.email} with a 6-digit code. A verified Gmail is required for password reset.`}
+      </p>
+
+      {!verified ? (
+        sent ? (
+          <form onSubmit={confirmCode} className="mt-2.5 space-y-2">
+            <input
+              className={inputCls}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              placeholder="6-digit code"
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+            />
+            {err ? <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[10.5px] font-semibold text-red-200">{err}</div> : null}
+            {note ? <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[10.5px] font-semibold text-emerald-200">{note}</div> : null}
+            <div className="flex gap-2">
+              <button type="submit" disabled={busy} className="flex h-10 flex-1 items-center justify-center rounded-2xl bg-amber-500 text-[11px] font-black text-zinc-950 disabled:opacity-60">{busy ? 'Checking…' : 'Verify email'}</button>
+              <button type="button" onClick={() => void sendCode()} disabled={busy} className="h-10 rounded-2xl border border-zinc-700 px-3 text-[10px] font-bold text-zinc-300 disabled:opacity-60">Resend</button>
+            </div>
+          </form>
+        ) : (
+          <div className="mt-2.5 space-y-2">
+            {err ? <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[10.5px] font-semibold text-red-200">{err}</div> : null}
+            <button onClick={() => void sendCode()} disabled={busy} className="flex h-10 w-full items-center justify-center gap-2 rounded-2xl bg-amber-500 text-[11px] font-black text-zinc-950 disabled:opacity-60">
+              <MailCheck className="h-4 w-4" /> {busy ? 'Sending…' : 'Send code to my Gmail'}
+            </button>
+          </div>
+        )
+      ) : null}
+    </Card>
+  );
+};
+
+const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () => void; toast: (t: { type: 'ok' | 'err'; text: string }) => void; onRefresh?: () => void }> = ({ agent, settings, onLogout, toast, onRefresh }) => {
   const [openPw, setOpenPw] = useState(false);
   const [cur, setCur] = useState('');
   const [next, setNext] = useState('');
@@ -877,12 +1012,12 @@ const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () =
         <div className="flex items-center gap-3">
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/15 text-lg font-black text-amber-400">{(agent.name || agent.id).slice(0, 1).toUpperCase()}</div>
           <div className="min-w-0">
-            <div className="flex items-center gap-1.5 truncate text-sm font-black text-white">{agent.name || agent.id} <BadgeCheck className="h-3.5 w-3.5 text-emerald-400" /></div>
+            <div className="flex items-center gap-1.5 truncate text-sm font-black text-white">{agent.name || agent.id} <BadgeCheck className={`h-3.5 w-3.5 ${agent.emailVerified ? 'text-emerald-400' : 'text-zinc-600'}`} /></div>
             <div className="truncate text-[11px] text-zinc-500">Agent · {agent.id}</div>
           </div>
         </div>
         <div className="mt-3 space-y-1.5 text-[11px]">
-          <div className="flex justify-between"><span className="text-zinc-500">Email</span><span className="font-semibold text-zinc-200">{agent.email}</span></div>
+          <div className="flex items-center justify-between"><span className="text-zinc-500">Email</span><span className="flex items-center gap-1 font-semibold text-zinc-200">{agent.email}{agent.emailVerified ? <BadgeCheck className="h-3 w-3 text-emerald-400" /> : null}</span></div>
           <div className="flex justify-between"><span className="text-zinc-500">Balance</span><span className="font-black text-white">${money(agent.balance)}</span></div>
           <div className="flex justify-between"><span className="text-zinc-500">Lifetime commission</span><span className="font-black text-emerald-400">${money(agent.commissionLifetime)}</span></div>
           <div className="flex justify-between"><span className="text-zinc-500">User fee (paid by user)</span><span className="font-semibold text-zinc-200">{settings.feePercentOnUserSend}%</span></div>
@@ -890,6 +1025,8 @@ const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () =
           <div className="flex justify-between"><span className="text-zinc-500">Commission on send</span><span className="font-semibold text-zinc-200">{settings.commissionPercentOnSend}%</span></div>
         </div>
       </Card>
+
+      <EmailVerifyCard agent={agent} toast={toast} onVerified={onRefresh} />
 
       <Card>
         <button onClick={() => { setOpenPw((v) => !v); setErr(''); }} className="flex w-full items-center justify-between">
@@ -1022,11 +1159,11 @@ export default function App() {
   ];
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-white">
+    <div className="min-h-[100dvh] bg-zinc-950 text-white">
       <Toast toast={toastState} onClose={() => setToastState(null)} />
       {/* 1:1 voice/video calls with users + live chat wake-ups */}
       <AgentCallManager agentId={agent.id} onChatWake={() => { void loadChats(); }} />
-      <div className="mx-auto flex min-h-screen w-full max-w-[430px] flex-col">
+      <div className="mx-auto flex h-[100dvh] min-h-[100dvh] w-full max-w-[430px] flex-col overflow-hidden">
         <header className="safe-pt sticky top-0 z-20 flex items-center justify-between border-b border-zinc-800/70 bg-zinc-950/95 px-4 py-3 backdrop-blur">
           <div className="flex items-center gap-2">
             <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500"><Zap className="h-4 w-4 text-zinc-950" /></div>
@@ -1041,7 +1178,9 @@ export default function App() {
           </div>
         </header>
 
-        <main className="flex-1 px-4 py-4 pb-24">
+        <main className={tab === 'CHATS'
+            ? 'flex min-h-0 flex-1 flex-col overflow-hidden px-3 pb-[calc(env(safe-area-inset-bottom,0px)+72px)] pt-3'
+            : 'min-h-0 flex-1 overflow-y-auto px-4 pb-24 pt-4'}>
           {tab === 'HOME' && <HomeScreen agent={agent} settings={settings} platform={platform} onCopy={copy} onGoto={setTab} />}
           {tab === 'SEND' && (
             <SendScreen
@@ -1064,7 +1203,7 @@ export default function App() {
             />
           )}
           {tab === 'HISTORY' && <HistoryScreen rows={history} loading={loadingHistory} />}
-          {tab === 'PROFILE' && <ProfileScreen agent={agent} settings={settings} onLogout={logout} toast={toast} />}
+          {tab === 'PROFILE' && <ProfileScreen agent={agent} settings={settings} onLogout={logout} toast={toast} onRefresh={() => void refresh()} />}
         </main>
 
         <nav className="safe-pb fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[430px] border-t border-zinc-800 bg-zinc-950/97 backdrop-blur">
