@@ -7174,6 +7174,29 @@ async function startServer() {
     if (!Array.isArray(db.agentPayouts)) db.agentPayouts = [];
     return db.agentPayouts;
   }
+
+  /* ── OWNER RULE (2026-10-24): only BOOST-EARNED dollars may leave the wallet
+   * through an agent. "Pay an Agent" therefore shows an "Available Boosted
+   * Withdraw" figure and the user can never send more than that.
+   *   withdrawable = min(current balance, lifetimeProfit − already withdrawn profit)
+   * `lifetimeProfit` grows only from boost rewards + referral commission on boost
+   * yield, so a plain agent deposit is NOT withdrawable until it has boosted.
+   * The fee is charged on top and comes from the balance, never from this cap. */
+  const floor2 = (n: number) => Math.floor((Number(n) || 0) * 100 + 1e-9) / 100;
+  function boostWithdrawable(user: any): number {
+    if (!user) return 0;
+    const balance = floor2(user.balance);
+    const profitLeft = floor2((Number(user.lifetimeProfit) || 0) - (Number(user.boostProfitWithdrawn) || 0));
+    return floor2(Math.max(0, Math.min(balance, profitLeft)));
+  }
+  /** Take `amount` out of the withdrawable profit bucket (called once per payout). */
+  function holdBoostProfit(user: any, amount: number) {
+    user.boostProfitWithdrawn = round2((Number(user.boostProfitWithdrawn) || 0) + (Number(amount) || 0));
+  }
+  /** Give it back when a claim code is cancelled or expires (idempotent per payout). */
+  function releaseBoostProfit(user: any, amount: number) {
+    user.boostProfitWithdrawn = round2(Math.max(0, (Number(user.boostProfitWithdrawn) || 0) - (Number(amount) || 0)));
+  }
   function makeClaimCode(db: any): string {
     for (let attempt = 0; attempt < 50; attempt++) {
       let code = '';
@@ -7193,6 +7216,7 @@ async function startServer() {
       const user = (db.users || []).find((u: any) => String(u.id) === String(p.userId));
       if (user) {
         user.balance = round2(Number(user.balance || 0) + Number(p.amount) + Number(p.fee || 0));
+        releaseBoostProfit(user, Number(p.amount) || 0);
         if (user.boostState) { try { user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config); } catch { /* ignore */ } }
         const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
         if (!Array.isArray(db.transactions)) db.transactions = [];
@@ -7777,13 +7801,19 @@ async function startServer() {
   app.get('/api/agents', requireUser, (req: any, res) => {
     const db = ensureAgentCollections(readDb());
     const s = agentSettingsOf(db);
-    if (!s.enabled) return res.json({ success: true, enabled: false, agents: [], feePercent: 0, minUserSend: 0, maxUserSend: 0 });
+    // Only boosted dollars can be withdrawn through an agent (owner rule 2026-10-24).
+    const me = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+    const maxWithdraw = boostWithdrawable(me);
+    if (!s.enabled) return res.json({ success: true, enabled: false, agents: [], feePercent: 0, minUserSend: 0, maxUserSend: 0, maxWithdraw });
     res.json({
       success: true,
       enabled: true,
       feePercent: s.feePercentOnUserSend,
       minUserSend: s.minUserSend,
       maxUserSend: s.maxUserSend,
+      // "Available Boosted Withdraw" — the hard cap for a single agent payout.
+      maxWithdraw,
+      balance: round2(Number(me && me.balance) || 0),
       agents: (db.agents || [])
         .filter((a: any) => a.isActive !== false)
         // Agent float stays private — users only need the ID and display name.
@@ -7825,12 +7855,26 @@ async function startServer() {
         if (round2(user.balance || 0) < total) {
           return { status: 400, body: { error: `Insufficient balance. Amount ${parsed.value.toFixed(2)} + fee ${fee.toFixed(2)} = ${total.toFixed(2)} required.` } };
         }
+        // ── OWNER RULE: only boosted dollars can be withdrawn through an agent.
+        const withdrawable = boostWithdrawable(user);
+        if (parsed.value > withdrawable) {
+          return {
+            status: 400,
+            body: {
+              error: `Only boosted dollars can be withdrawn through an agent. Available boosted withdraw amount: ${withdrawable.toFixed(2)}. It grows when a boosting cycle pays out.`,
+              maxWithdrawable: withdrawable
+            }
+          };
+        }
         const commission = pctOf(parsed.value, s.commissionPercentOnReceive);
         // ── Owner rule: the agent is NOT credited yet. The user gets a 4-character
         //    claim code (letters + digits, e.g. "h68d"); the agent types it in its app
         //    and only then receives the money. Unclaimed codes expire after 30 minutes
         //    (or the user can cancel) and the full amount + fee goes back to the user.
         user.balance = round2(Number(user.balance || 0) - total);
+        // Reserve this amount from the boosted-profit bucket so two pending claim
+        // codes can never withdraw the same profit twice.
+        holdBoostProfit(user, parsed.value);
         if (user.boostState) {
           try { user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config); } catch { /* ignore */ }
         }
@@ -8514,6 +8558,7 @@ async function startServer() {
       const now = Date.now();
       const refund = round2(Number(payout.amount) + Number(payout.fee || 0));
       user.balance = round2(Number(user.balance || 0) + refund);
+      releaseBoostProfit(user, Number(payout.amount) || 0);
       if (user.boostState) { try { user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config); } catch { /* ignore */ } }
       payout.status = 'CANCELLED';
       payout.closedAt = now;

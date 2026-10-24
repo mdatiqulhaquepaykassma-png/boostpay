@@ -8,6 +8,9 @@ interface AgentOption { id: string; name: string }
 interface AgentListResponse {
   success: boolean; enabled: boolean; feePercent: number;
   minUserSend: number; maxUserSend: number; agents: AgentOption[];
+  /** Owner rule: only boosted dollars can leave the wallet through an agent. */
+  maxWithdraw?: number;
+  balance?: number;
 }
 
 /**
@@ -137,13 +140,14 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
       const updated: User = { ...currentUser, balance: Number(json.balance ?? currentUser.balance) };
       BoostPayStore.setCurrentUser(updated);
       onSuccess(updated);
+      void load();
       setNotice(`Cancelled — $${Number(json.refunded || 0).toFixed(2)} refunded to your wallet.`);
       setReceipt((r) => (r && r.payoutId === id ? { ...r, cancelled: true } : r));
       await loadPending();
     } catch (err: any) {
       setNotice(err?.message || 'Could not cancel.');
     } finally { setCancellingId(''); }
-  }, [currentUser, onSuccess, loadPending]);
+  }, [currentUser, onSuccess, loadPending, load]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -164,6 +168,8 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   }, [isOpen, loadInbox]);
 
   const feePercent = Number(data?.feePercent || 0);
+  // "Available Boosted Withdraw" — the server-calculated cap (never trust the client).
+  const maxWithdraw = Number(data?.maxWithdraw ?? currentUser.balance ?? 0);
   const numAmount = Number(amount || 0);
   const fee = useMemo(() => Math.round(numAmount * feePercent) / 100, [numAmount, feePercent]);
   const total = useMemo(() => Math.round((numAmount + fee) * 100) / 100, [numAmount, fee]);
@@ -184,6 +190,10 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
     if (!/^\d+(\.\d{1,2})?$/.test(amount.trim())) { setError('Enter an amount with at most 2 decimals.'); return; }
     if (data && numAmount < data.minUserSend) { setError(`Minimum payment is ${data.minUserSend}.`); return; }
     if (data && numAmount > data.maxUserSend) { setError(`Maximum payment is ${data.maxUserSend}.`); return; }
+    if (numAmount > maxWithdraw) {
+      setError(`Only boosted dollars can be withdrawn through an agent. Available boosted withdraw amount: $${maxWithdraw.toFixed(2)}.`);
+      return;
+    }
     if (total > Number(currentUser.balance || 0)) { setError(`Insufficient balance. You need ${total.toFixed(2)} (amount + fee).`); return; }
     setBusy(true);
     try {
@@ -521,6 +531,37 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                     ) : null}
                   </button>
                 ) : null}
+
+                {/* Available Boosted Withdraw — only boost-earned dollars can go out via an agent */}
+                <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[9px] font-bold uppercase tracking-[0.16em] text-emerald-300/80">
+                        Available Boosted Withdraw
+                      </div>
+                      <div className="mt-0.5 font-mono text-[20px] font-black leading-none text-white">
+                        ${maxWithdraw.toFixed(2)}
+                      </div>
+                      <div className="mt-1 text-[9px] leading-relaxed text-zinc-500">
+                        Only the profit earned from boosting can be withdrawn through an agent.
+                        Wallet balance ${Number(currentUser.balance || 0).toFixed(2)}.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAmount(maxWithdraw > 0 ? maxWithdraw.toFixed(2) : '')}
+                      disabled={maxWithdraw <= 0}
+                      className="shrink-0 rounded-xl border border-emerald-500/40 bg-zinc-950/40 px-2.5 py-1.5 text-[10px] font-bold text-emerald-300 disabled:opacity-40 cursor-pointer"
+                    >
+                      Max
+                    </button>
+                  </div>
+                  {maxWithdraw <= 0 ? (
+                    <div className="mt-1.5 rounded-lg bg-amber-500/10 px-2 py-1.5 text-[9.5px] font-semibold text-amber-200">
+                      Nothing withdrawable yet — start a boosting cycle to earn boosted dollars first.
+                    </div>
+                  ) : null}
+                </div>
 
                 <label className="block">
                   <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Amount (USD)</span>
