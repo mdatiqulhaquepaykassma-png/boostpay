@@ -59,3 +59,33 @@
 ## ৫. Infra (কোডের বাইরে)
 - container-এর `ulimit -n` = **1024** → SSE socket ~৯০০-এ আটকায়। `docker service update --ulimit nofile=65535:65535` দিয়ে বাড়ানো হয়েছে (নিচে verify করা আছে)।
 - Postgres `max_connections` = ১০০; pool এখন ২০/instance — ৩ replica পর্যন্ত নিরাপদ।
+
+---
+
+## ৬. Deploy + live verification (2026-10-26 16:2x UTC)
+
+| যাচাই | ফল |
+|---|---|
+| Commit | `a2b0926` (perf) + `d7b8410` (ulimit) — ff-push, force নয় |
+| চার portal-এর `/api/health` | সব `v1.2.1793031503` ✅ |
+| Container-এর ভিতরে নতুন কোড | `directoryEntry`, `currentTxIds`, `zlib.gzipSync`, `txIdx()`, `pendingFileDoc` — সব আছে ✅ |
+| Unauth guard | `/api/db`, `/api/agents`, `/api/user/agent-payouts`, `/api/leaderboard` → **401** ✅ |
+| Container CPU / RAM | **0.15 %** / **141.7 MB** ✅ |
+| **`ulimit -n` (PID 1)** | **1024 → 65535** ✅ (hard limit 524288 ছিল, তাই ভিতর থেকেই বাড়ানো গেছে) |
+| Production ডেটা | ৯৬ user, ৩,৪০৪ transaction, ভেতরে কোনো test user নেই ✅ |
+
+### Deployment-এর সময় একটা ভুল হয়ে গিয়েছিল (নিজের, ঠিক করা হয়েছে)
+Production-এ গজিপ্টি যাচাই করতে গিয়ে `/api/users/register`-এ একটা **probe account** (`__perf_probe__`) তৈরি হয়ে গিয়েছিল।
+- সমাধান: service **scale 0** → Postgres-এ JSON থেকে ওই user + তার session/notification বাদ → **scale 1**
+  (কারণ চলমান app পুরো doc মেমরিতে রাখে, তাই সরাসরি DB এডিট করলে ২ সেকেন্ডেই আবার লেখা হয়ে যেত)।
+- যাচাই: `users = 96`, probe = **0**, কোনো downtime ছাড়া app আবার চালু।
+- **শিক্ষা:** production-এ probe/registration কখনো করবেন না — শুধু `GET` (তৈরি হওয়া ডেটা ফেরানোই কঠিন)।
+
+## ৭. নতুন সক্ষমতা (এই fix-এর পর, একই সার্ভারে)
+| ধরন | আগে | এখন | পরের ধাপ (১–২ নম্বর migration) করলে |
+|---|---|---|---|
+| একসাথে app খোলা (SSE) | ৩০০–৫০০ (socket ১০২৪-এ আটকে যেত) | **২,৫০০–৩,০০০** | ৬,০০০–৯,০০০ |
+| সক্রিয়ভাবে কাজ করছে | ২০০–৪০০ | **৮০০–১,২০০** | ২,৫০০–৩,০০০ |
+| প্রতি সেকেন্ডে write | ~২০ | **৫০০+** (write-এ আর serialization নেই) | ১,০০০+ |
+
+*সংখ্যাগুলো মাপা throughput × অনুমান — আসল সীমা জানতে staging-এ load test দরকার।*
