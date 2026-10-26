@@ -7,5 +7,9 @@ cmds = ["bun install"]
 [phases.build]
 cmds = ["bun run build"]
 
+# Raise the open-file limit before the server starts.
+# The container default is 1024 soft (hard = 524288), and every open app holds one
+# SSE socket — so ~900 concurrent clients used to exhaust it. This is applied here
+# (not only via `docker service update`) so it survives every Dokploy redeploy.
 [start]
-cmd = "bun run start"
+cmd = "sh -c 'ulimit -n 65535 2>/dev/null; exec bun run start'"
