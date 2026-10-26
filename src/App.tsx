@@ -164,7 +164,9 @@ export default function App() {
     refreshState();
     BoostPayStore.getBanner().then(setSystemBanner);
     // Full-site realtime: SSE instant + 12s fallback poll (renderless — only diff triggers re-render; pause when tab hidden)
-    const interval = setInterval(()=> { if (document.visibilityState === 'visible') refreshState(); }, 12000);
+    // PERF: SSE pushes changes instantly; this poll is only a safety net, so 20s
+    // (was 12s) cuts the per-client request rate by 40 % without any UX change.
+    const interval = setInterval(()=> { if (document.visibilityState === 'visible') refreshState(); }, 20000);
     // also listen for storage events (cross-tab) to keep in sync without reload
     const onStorage = (e: StorageEvent) => {
       if (e.key?.includes('boostpay_') || e.key?.includes('boostpay_current')) {

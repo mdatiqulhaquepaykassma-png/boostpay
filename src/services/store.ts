@@ -254,7 +254,11 @@ export class BoostPayStore {
         method: 'POST',
         headers: this.authHeaders(),
         body: JSON.stringify({
-          users: this.getUsers(),
+          // PERF: push only MY record. The server merge is authoritative for everyone
+          // else (balance/boost/credentials always come from the server), so uploading
+          // the whole local directory was pure mobile-data + server CPU waste — it grows
+          // with the total user count (≈300 KB per sync at 1,000 users).
+          users: [this.getCurrentUser()].filter(Boolean),
           transactions: this.getTransactions(),
           conversations: this.getConversations(),
           messages: this.getMessages(),

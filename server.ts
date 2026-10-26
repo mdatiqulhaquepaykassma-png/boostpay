@@ -3,6 +3,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import zlib from 'zlib';
 import { Pool } from 'pg';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
@@ -990,7 +991,10 @@ const BACKUP_INTERVAL_MS = Number(process.env.DB_BACKUP_INTERVAL_MS || 30 * 60 *
 const BACKUP_KEEP = Number(process.env.DB_BACKUP_KEEP || 24);
 const PG_FLUSH_MS = Number(process.env.DB_PG_FLUSH_MS || 2000);           // 2s debounce
 const LASTSEEN_FLUSH_MS = 5 * 60 * 1000;                                  // persist lastSeen every 5 min
-let pendingFilePayload: string | null = null;
+
+// /api/db is gzipped on the wire (≈10:1 for JSON): at 1,000 users the payload is
+// ~230 KB, and the app fetches it on open/login. Cheap to encode, big on mobile data.
+let pendingFileDoc: any = null;   // latest doc waiting for the debounced file flush (no per-write serialization)
 let fileFlushTimer: any = null;
 let lastBackupAt = 0;
 let lastSeenFlushAt = 0;
@@ -1028,27 +1032,29 @@ function writeDb(data: any) {
       if (!Array.isArray(data.auditLogs)) data.auditLogs = Array.isArray(pgDoc.auditLogs) ? pgDoc.auditLogs : [];
     }
 
-    const payload = JSON.stringify(data, null, 2);
+    // PERF: the document used to be JSON.stringify-ed on EVERY write (~27 ms of
+    // blocked event loop for a 4 MB doc), even though Postgres only persists it
+    // every 2 s. Serialization is now done once per flush, not once per write.
     writeCount++;
 
     const writeFileNow = () => {
       const tempFile = `${DB_FILE}.tmp`;
-      fs.writeFileSync(tempFile, payload, 'utf-8');
+      fs.writeFileSync(tempFile, JSON.stringify(data), 'utf-8');
       fs.renameSync(tempFile, DB_FILE);
     };
 
     if (pgPool) {
       // Postgres holds the state: keep the local file as a debounced cache only.
-      pendingFilePayload = payload;
+      pendingFileDoc = data;
       if (!fileFlushTimer) {
         fileFlushTimer = setTimeout(() => {
           fileFlushTimer = null;
-          const body = pendingFilePayload;
-          pendingFilePayload = null;
-          if (!body) return;
+          const doc = pendingFileDoc;
+          pendingFileDoc = null;
+          if (!doc) return;
           try {
             const tempFile = `${DB_FILE}.tmp`;
-            fs.writeFileSync(tempFile, body, 'utf-8');
+            fs.writeFileSync(tempFile, JSON.stringify(doc), 'utf-8');
             fs.renameSync(tempFile, DB_FILE);
           } catch (err) {
             console.error('Error flushing db file cache:', err);
@@ -1068,7 +1074,7 @@ function writeDb(data: any) {
       lastBackupAt = Date.now();
       const backupFile = rotateBackups();
       if (backupFile) {
-        try { fs.writeFileSync(backupFile, payload, 'utf-8'); } catch { /* disk full etc. */ }
+        try { fs.writeFileSync(backupFile, JSON.stringify(data), 'utf-8'); } catch { /* disk full etc. */ }
       }
     }
   } catch (err) {
@@ -1117,7 +1123,7 @@ async function initPostgres(): Promise<void> {
     const u = new URL(DATABASE_URL);
     pgPool = new Pool({
       connectionString: DATABASE_URL,
-      max: 5,
+      max: Number(process.env.PG_POOL_MAX || 20),
       connectionTimeoutMillis: 8000,
       idleTimeoutMillis: 30000
     });
@@ -1754,6 +1760,33 @@ function publicUser(u: any): any {
   return { ...rest, boostState: liveBoostState(u) };
 }
 
+/**
+ * Slim directory row for OTHER users (perf + privacy).
+ * The user app only renders id / balance / profit and the boost state of peers
+ * (leaderboard, dynamic boost duration, transfer preview, "chat with user #N").
+ * Emails and account metadata are never included — the payload also shrinks by
+ * ~60 %, which matters because every client polls /api/db.
+ */
+function directoryEntry(u: any): any {
+  const bs = liveBoostState(u) || {};
+  return {
+    id: u.id,
+    balance: Number(u.balance) || 0,
+    lifetimeProfit: Number(u.lifetimeProfit) || 0,
+    isFrozen: !!u.isFrozen,
+    isBlocked: !!u.isBlocked,
+    boostState: {
+      isActive: !!bs.isActive,
+      isPaused: !!bs.isPaused,
+      startedAt: Number(bs.startedAt) || 0,
+      elapsedMs: Number(bs.elapsedMs) || 0,
+      targetDurationMs: Number(bs.targetDurationMs) || 0,
+      startingBalance: Number(bs.startingBalance) || 0,
+      accumulatedYield: Number(bs.accumulatedYield) || 0
+    }
+  };
+}
+
 /** Escape HTML to prevent stored XSS when user content is ever rendered as HTML */
 function escapeHtml(s: string): string {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
@@ -1985,9 +2018,15 @@ function calculateDynamicDuration(userBalance: number, users: any[], config: any
     return Math.round(minMs + (numBal / 1000) * (maxMs - minMs));
   }
 
-  const balances = users.map((u: any) => Number(u.balance) || 0);
-  const minBal = Math.min(...balances);
-  const maxBal = Math.max(...balances);
+  // PERF/SAFETY: single pass — `Math.min(...balances)` throws "Maximum call stack
+  // size exceeded" once the user base is large enough to blow the argument limit.
+  let minBal = Infinity, maxBal = -Infinity;
+  for (const u of users) {
+    const b = Number(u.balance) || 0;
+    if (b < minBal) minBal = b;
+    if (b > maxBal) maxBal = b;
+  }
+  if (!isFinite(minBal)) { minBal = 0; maxBal = 0; }
 
   if (maxBal === minBal) {
     return numBal > 0 ? maxMs : minMs;
@@ -2025,6 +2064,38 @@ setInterval(() => {
     // Compounding master switch (absent in older config objects = enabled).
     // OFF => no reward is credited and the cycle closes.
     const compoundingOn = (config as any).compoundingEnabled !== false;
+
+    // ── PERF (2026-10-26): per-tick indexes ─────────────────────────────────
+    // Every cycle-completion used to run linear `.find`/`.some` scans over the
+    // transactions array (and over users for the referrer), i.e. O(users × tx)
+    // work per second. These helpers build one pass of indexes and are only
+    // created when a cycle actually completes, so an idle tick stays O(users).
+    let _txIdx: { lastRewardByUser: Map<string, any>; paidCycles: Set<string> } | null = null;
+    const txIdx = () => {
+      if (_txIdx) return _txIdx;
+      const lastRewardByUser = new Map<string, any>();
+      const paidCycles = new Set<string>();
+      const txs: any[] = db.transactions || [];
+      for (let i = 0; i < txs.length; i++) {
+        const t: any = txs[i];
+        if (!t || t.type !== 'REWARD') continue;
+        const uid = String(t.userId);
+        if (!lastRewardByUser.has(uid)) lastRewardByUser.set(uid, t);          // newest-first array ⇒ first hit wins
+        if (i < 5000) paidCycles.add(uid + ':' + String(Number(t.boostStartAt))); // same window as the old slice(0,5000)
+      }
+      _txIdx = { lastRewardByUser, paidCycles };
+      return _txIdx;
+    };
+    let _userById: Map<string, any> | null = null;
+    const userById = (id: string) => {
+      if (!_userById) { _userById = new Map(); for (const u of db.users) _userById.set(String(u.id), u); }
+      return _userById.get(String(id));
+    };
+    let _refByReferred: Map<string, any> | null = null;
+    const referralOf = (id: string) => {
+      if (!_refByReferred) { _refByReferred = new Map(); for (const r of (db.referrals || [])) _refByReferred.set(String(r.referredId), r); }
+      return _refByReferred.get(String(id));
+    };
 
     for (const user of db.users) {
       // Auto-unfreeze 1h temp locks + freeze pause
@@ -2095,7 +2166,7 @@ setInterval(() => {
 
         if (elapsed >= target) {
           // === DEDUP GUARD: strictly prevent double-award (55s minimum gap) ===
-          const lastReward = (db.transactions||[]).find((t:any)=> t.type==='REWARD' && String(t.userId)===String(user.id));
+          const lastReward = txIdx().lastRewardByUser.get(String(user.id));
           // The per-cycle guard (boostStartAt, below) is authoritative for normal cycles.
           // The coarse 55s window stays only as a fallback for legacy cycles with no start key —
           // otherwise it wrongly blocked the FIRST payout of a freshly restarted short cycle.
@@ -2124,9 +2195,7 @@ setInterval(() => {
           // so we compare the persisted boostStartAt of existing REWARD tx with the current cycle.
           const cycleStartKey = Number(user.boostState.startedAt || 0);
           if (cycleStartKey > 0) {
-            const alreadyPaid = (db.transactions || []).slice(0, 5000).some(
-              (t:any) => t.type === 'REWARD' && String(t.userId) === String(user.id) && Number(t.boostStartAt) === cycleStartKey
-            );
+            const alreadyPaid = txIdx().paidCycles.has(String(user.id) + ':' + String(cycleStartKey));
             if (alreadyPaid) {
               console.warn(`[TICKER] Cycle ${cycleStartKey} already paid for user ${user.id} — blocking duplicate reward`);
               const dupNextDuration = calculateDynamicDuration(user.balance, db.users, config);
@@ -2222,10 +2291,10 @@ setInterval(() => {
           } as any);
           // ---- Referral commission on compounding (1-10% dynamic) ------------
           try {
-            const refEntry = (db.referrals || []).find((r:any)=> String(r.referredId)===String(user.id));
+            const refEntry = referralOf(String(user.id));
             if (refEntry) {
               const referrerId = String(refEntry.referrerId);
-              const referrer = (db.users || []).find((u:any)=> String(u.id)===referrerId);
+              const referrer = userById(referrerId);
               const rcfg: any = (db.config || INITIAL_DB.config).referral;
               // Referral commission: only blocked if referrer is frozen. Previously required boost ON, but that caused 12/27 to earn 0 while paused — fixed to solo solved (frozen check only).
               const referrerCanEarn = referrer && !referrer.isFrozen;
@@ -2562,18 +2631,37 @@ async function startServer() {
     // audit logs, or other users' private chat/notification content.
     const me = req.authUserId ? String(req.authUserId) : '';
     const unreadForMe = me ? unreadSummary(db, me) : { total: 0, conversations: {} };
-    res.json({
-      users: (db.users || []).map(publicUser),
+    // PERF: one pass over conversations instead of a nested find() per message
+    // (was O(messages × conversations) on every poll), and my own record is the
+    // only one sent in full — peers get the slim directoryEntry projection.
+    const myConvIds = new Set<string>();
+    const myConversations = (db.conversations || []).filter((c: any) => {
+      const mine = Array.isArray(c.participants) && c.participants.includes(me);
+      if (mine) myConvIds.add(String(c.id));
+      return mine;
+    });
+    const payload = {
+      users: (db.users || []).map((u: any) => (String(u.id) === me ? publicUser(u) : directoryEntry(u))),
       unread: unreadForMe,
       config: db.config,
       transactions: (db.transactions || []).filter((t: any) => String(t.userId) === me || String(t.recipientId) === me),
-      conversations: (db.conversations || []).filter((c: any) => Array.isArray(c.participants) && c.participants.includes(me)),
-      messages: (db.messages || []).filter((m: any) => {
-        const conv = (db.conversations || []).find((c: any) => c.id === m.conversationId);
-        return conv && Array.isArray(conv.participants) && conv.participants.includes(me);
-      }),
+      conversations: myConversations,
+      messages: (db.messages || []).filter((m: any) => myConvIds.has(String(m.conversationId))),
       notifications: (db.notifications || []).filter((n: any) => String(n.userId) === me)
-    });
+    };
+
+    // PERF: gzip on the wire (≈10:1 for JSON — the payload is mostly repeated keys).
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Vary', 'Accept-Encoding');
+    if (String(req.headers['accept-encoding'] || '').includes('gzip')) {
+      try {
+        const gz = zlib.gzipSync(Buffer.from(JSON.stringify(payload)));
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Encoding', 'gzip');
+        return res.end(gz);
+      } catch { /* fall through to plain JSON */ }
+    }
+    return res.json(payload);
   });
 
   // 4. Single-user fetch endpoint (fast, keeps session synced without large payload)
@@ -3081,11 +3169,15 @@ async function startServer() {
       // The server is authoritative for balances, credentials and admin-managed flags:
       // a stale client push can never rewrite them (money integrity + blocked users stay blocked).
       let mergedUsers = [...current.users];
+      // PERF: index by id once — `mergedUsers.findIndex(...)` inside this loop made a
+      // 1,000-user client push O(n²) (≈1 M id comparisons per sync).
+      const mergedIdxById = new Map<string, number>();
+      for (let i = 0; i < mergedUsers.length; i++) mergedIdxById.set(String(mergedUsers[i].id), i);
       if (Array.isArray(incoming.users)) {
         for (const rawIncUser of incoming.users) {
           const incUser = sanitizeIncomingUser(rawIncUser);
           if (!incUser || incUser.id === undefined || incUser.id === null) continue;
-          const idx = mergedUsers.findIndex(u => u.id === incUser.id);
+          const idx = mergedIdxById.has(String(incUser.id)) ? (mergedIdxById.get(String(incUser.id)) as number) : -1;
           if (idx >= 0) {
             // Preserve active server boostState if running on server
             // Authoritative server balance is STRICTLY preserved; client sync cannot overwrite balance
@@ -3146,8 +3238,13 @@ async function startServer() {
         }
       }
       // Filter out any remaining client-injected REWARD/COMMISSION that slipped via older clients
+      // PERF: this used `.some()` over ALL current transactions for EVERY row, i.e.
+      // O(n²) — measured 2.5 s of blocked event loop per sync at 20k transactions.
+      // A Set of existing ids keeps the exact same predicate in O(n).
+      const currentTxIds = new Set<string>();
+      for (const ct of (current.transactions || [])) if (ct && ct.id !== undefined) currentTxIds.add(String(ct.id));
       let transactionsToSave = Array.from(txMap.values())
-        .filter((t:any)=> !SERVER_ONLY_TX_TYPES.has(String(t.type)) || (current.transactions||[]).some((ct:any)=> String(ct.id)===String(t.id)))
+        .filter((t:any)=> !SERVER_ONLY_TX_TYPES.has(String(t.type)) || currentTxIds.has(String(t.id)))
         .sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
 
       // Non-destructive merge of conversations
@@ -9032,11 +9129,11 @@ async function startServer() {
   const flushPendingState = async () => {
     try {
       if (fileFlushTimer) { clearTimeout(fileFlushTimer); fileFlushTimer = null; }
-      if (pendingFilePayload) {
+      if (pendingFileDoc) {
         const tempFile = `${DB_FILE}.tmp`;
-        fs.writeFileSync(tempFile, pendingFilePayload, 'utf-8');
+        fs.writeFileSync(tempFile, JSON.stringify(pendingFileDoc), 'utf-8');
         fs.renameSync(tempFile, DB_FILE);
-        pendingFilePayload = null;
+        pendingFileDoc = null;
       }
     } catch (err) { console.error('shutdown file flush failed:', err); }
     try {
