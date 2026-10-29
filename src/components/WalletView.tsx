@@ -50,6 +50,11 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   const isRunning = boostState.isActive && !boostState.isPaused;
   const [liveAccrued, setLiveAccrued] = useState(0);
   const [idCopied, setIdCopied] = useState(false);
+  // Same server-clock anchor as the boosting card (see the comment there).
+  const liveAnchorRef = useRef({ base: boostState.elapsedMs || 0, at: Date.now(), elapsed: boostState.elapsedMs || 0 });
+  if (liveAnchorRef.current.elapsed !== (boostState.elapsedMs || 0)) {
+    liveAnchorRef.current = { base: boostState.elapsedMs || 0, at: Date.now(), elapsed: boostState.elapsedMs || 0 };
+  }
   // Unread agent replies. Agent conversations now live in the Chat tab; this
   // badge is only a hint on the wallet shortcut.
   const [agentUnread, setAgentUnread] = useState(0);
@@ -97,9 +102,8 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
 
     const tick = () => {
       const now = Date.now();
-      const currentElapsed = boostState.startedAt && boostState.startedAt > 0
-        ? Math.min(now - boostState.startedAt, targetMs)
-        : Math.min(initialElapsed + (now - mountTime), targetMs);
+      const anchor = liveAnchorRef.current;
+      const currentElapsed = Math.max(0, Math.min(anchor.base + (now - anchor.at), targetMs));
       
       if (now - lastRender >= 50 || currentElapsed >= targetMs) {
         lastRender = now;
@@ -269,9 +273,15 @@ const IsolatedBoostingCard: FC<BoostingCardProps> = memo(({
 
   const [elapsedMs, setElapsedMs] = useState(boostState.elapsedMs || 0);
   const [liveYield, setLiveYield] = useState(boostState.accumulatedYield || 0);
+  // Anchor for live progress: the server's own elapsed value + when we received it.
+  // Previously progress was `Date.now() - startedAt`, i.e. it depended on the PHONE's clock:
+  // a device a few minutes off showed 0s / 0.0% (or 100% instantly) while the server compounded
+  // normally — the card looked frozen/stopped. Server time is the only clock we trust now.
+  const anchorRef = useRef({ base: boostState.elapsedMs || 0, at: Date.now() });
 
   // Synchronize when boostState properties change externally
   useEffect(() => {
+    anchorRef.current = { base: boostState.elapsedMs || 0, at: Date.now() };
     setElapsedMs(boostState.elapsedMs || 0);
     setLiveYield(boostState.accumulatedYield || 0);
   }, [boostState.elapsedMs, boostState.accumulatedYield, boostState.isActive, boostState.isPaused]);
@@ -290,9 +300,8 @@ const IsolatedBoostingCard: FC<BoostingCardProps> = memo(({
 
     const tick = () => {
       const now = Date.now();
-      const nextElapsed = boostState.startedAt && boostState.startedAt > 0
-        ? Math.min(now - boostState.startedAt, targetMs)
-        : Math.min(initialElapsed + (now - mountTime), targetMs);
+      const anchor = anchorRef.current;
+      const nextElapsed = Math.max(0, Math.min(anchor.base + (now - anchor.at), targetMs));
 
       if (now - lastRender >= 50 || nextElapsed >= targetMs) {
         lastRender = now;
@@ -324,8 +333,6 @@ const IsolatedBoostingCard: FC<BoostingCardProps> = memo(({
     userId,
     baseBalance,
     boostState.startingBalance,
-    boostState.startedAt,
-    boostState.elapsedMs,
     boostState.targetDurationMs,
     dynamicTargetDurationMs,
     minuteRatePercent,

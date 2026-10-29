@@ -1757,7 +1757,10 @@ function requireUserOrAdmin(req: any, res: any, next: any) {
 function publicUser(u: any): any {
   if (!u || typeof u !== 'object') return u;
   const { password, passwordPlain, passwordHash, phrase, resetToken, resetExpires, emailVerificationCode, emailVerificationExpires, ...rest } = u;
-  return { ...rest, boostState: liveBoostState(u) };
+  // serverTime lets the app paint boost progress from elapsedMs + time-since-receipt instead of
+  // `Date.now() - startedAt`. A phone whose clock is a few minutes off used to show 0 s / 0.0 %
+  // (or jump straight to 100 %) while the server compounded normally.
+  return { ...rest, boostState: liveBoostState(u), serverTime: Date.now() };
 }
 
 /**
@@ -3033,7 +3036,7 @@ async function startServer() {
         if (Number(user.balance) < 0.1) return { status:400, body:{ error: 'Minimum 0.1 balance required to start boosting' } };
         // FIX: prevent double-start race — if already active, return existing instead of resetting
         if (user.boostState?.isActive && !user.boostState?.isPaused) {
-          return { status:200, body:{ success:true, user: publicUser(user), alreadyActive:true } };
+          return { status:200, body:{ success:true, serverTime: Date.now(), user: publicUser(user), alreadyActive:true } };
         }
         // A paused cycle must never be silently restarted from zero by a Start click:
         // treat the click as "continue from where I paused".
@@ -3042,7 +3045,8 @@ async function startServer() {
           user.boostState.pausedAt = 0;
           user.boostState.startedAt = Date.now() - (Number(user.boostState.elapsedMs) || 0);
           writeDb(db);
-          return { status:200, body:{ success:true, user: publicUser(user), alreadyActive:true, resumed:true } };
+          broadcastUserUpdate(db, user.id);
+          return { status:200, body:{ success:true, serverTime: Date.now(), user: publicUser(user), alreadyActive:true, resumed:true } };
         }
         const targetDuration = calculateDynamicDuration(user.balance, db.users, db.config);
         user.boostState = {
@@ -3050,7 +3054,11 @@ async function startServer() {
           targetDurationMs: targetDuration, startingBalance: user.balance, accumulatedYield: 0
         };
         writeDb(db);
-        return { status:200, body:{ success:true, user: publicUser(user) } };
+        // Push the new running state immediately (pause/resume already did this). Without it the
+        // user's other device — and this device's own SSE — kept the old "idle" snapshot until the
+        // next 20 s poll, which is what made the card look stopped right after tapping Boost.
+        broadcastUserUpdate(db, user.id);
+        return { status:200, body:{ success:true, serverTime: Date.now(), user: publicUser(user) } };
       });
       if(result.status!==200) return res.status(result.status).json(result.body);
       if (ik) boostIdempotency.set(ik,{at:Date.now(), resp: result.body});
@@ -3072,7 +3080,7 @@ async function startServer() {
           return { status:404, body:{ error: 'User not found' } };
         }
         if (user.boostState.isPaused) {
-          return { status:200, body:{ success:true, user: publicUser(user), alreadyPaused:true } };
+          return { status:200, body:{ success:true, serverTime: Date.now(), user: publicUser(user), alreadyPaused:true } };
         }
         // Freeze progress at the pause instant so pause never resets compounding.
         const pbs = user.boostState;
@@ -3095,7 +3103,7 @@ async function startServer() {
         user.boostState.pausedAt = Date.now();
         writeDb(db);
         broadcastUserUpdate(db, user.id);
-        return { status:200, body:{ success: true, user: publicUser(user) } };
+        return { status:200, body:{ success: true, serverTime: Date.now(), user: publicUser(user) } };
       });
       if (result.status!==200) return res.status(result.status).json(result.body);
       return res.json(result.body);
@@ -3123,14 +3131,14 @@ async function startServer() {
           return { status:403, body:{ error: 'Your account is suspended.' } };
         }
         if (!user.boostState.isPaused) {
-          return { status:200, body:{ success:true, user: publicUser(user), alreadyResumed:true } };
+          return { status:200, body:{ success:true, serverTime: Date.now(), user: publicUser(user), alreadyResumed:true } };
         }
         user.boostState.isPaused = false;
         user.boostState.startedAt = Date.now() - (user.boostState.elapsedMs || 0);
         user.boostState.pausedAt = 0;
         writeDb(db);
         broadcastUserUpdate(db, user.id);
-        return { status:200, body:{ success: true, user: publicUser(user) } };
+        return { status:200, body:{ success: true, serverTime: Date.now(), user: publicUser(user) } };
       });
       if (result.status!==200) return res.status(result.status).json(result.body);
       return res.json(result.body);

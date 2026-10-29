@@ -104,6 +104,16 @@ export function getDefaultConfig(): SystemConfig {
 
 export class BoostPayStore {
   private static isSyncing = false;
+  // ---- BOOST STATE ORDERING (fixes "click Boost -> UI shows stopped while the server keeps running") ----
+  // The phone polls the server (/api/db, /api/users/:id) and receives SSE user_update events. A
+  // response that was produced BEFORE the user tapped Start can land AFTER the start response (mobile
+  // RTT 0.5-3 s) and used to overwrite the fresh RUNNING state with the old IDLE one, so the card showed
+  // "Start Boosting" (timer frozen) while the server happily kept compounding. Reload re-read the truth,
+  // which is why it always looked fine afterwards. These two stamps let us reject such out-of-order payloads.
+  private static boostConfirmedAtClient = 0;   // client clock, ms
+  private static boostConfirmedAtServer = 0;   // server clock, ms (from the action response)
+  private static boostPendingAtClient = 0;     // set while a start/resume request is in flight
+  private static boostReverifyTimer: any = null;
   private static toastListeners: ((toast: ToastData) => void)[] = [];
   private static seenNotificationIds = new Set<string>();
   private static hasSeededInitialHistory = false;
@@ -138,9 +148,12 @@ export class BoostPayStore {
                 ...(cleanServer as any),
                 balance: Number(serverU.balance) || 0,
                 lifetimeProfit: Number(serverU.lifetimeProfit) || 0,
-                boostState: (serverU.boostState && serverU.boostState.isActive)
-                  ? serverU.boostState
-                  : (localU.boostState || serverU.boostState)
+                // Server is authoritative (an old rule kept a stale LOCAL running cycle forever,
+                // which showed progress the server never had). Only a payload that predates the
+                // user's own Start tap is ignored.
+                boostState: this.isStaleIdlePayload(serverU, localU)
+                  ? localU.boostState
+                  : (serverU.boostState || localU.boostState)
               };
               mergedMap.set(localU.id, mergedUser);
             } else {
@@ -711,7 +724,8 @@ export class BoostPayStore {
               }
             } else if (data.type === 'user_update' && data.user) {
               // Authoritative realtime profile/balance/boost update
-              this.mergeRealtimeUser(data.user);
+              // (with the event's server timestamp, so a buffered/stale event cannot stop the card)
+              this.mergeRealtimeUser(data.user, Number(data.timestamp) || 0);
             } else if (data.type === 'notification' && data.notification) {
               const notifs = this.getNotifications();
               if (!notifs.some(n => n.id === data.notification.id)) {
@@ -1206,9 +1220,52 @@ export class BoostPayStore {
 
 
   /** The server strips credentials — never persist secrets in localStorage. */
-  private static mergeServerUser(serverUser: User, localUser?: User | null): User {
+  /** Remember that the server itself just confirmed the current boost state. */
+  private static noteBoostConfirmed(serverTime?: number): void {
+    this.boostConfirmedAtClient = Date.now();
+    const st = Number(serverTime) || 0;
+    if (st > 0) this.boostConfirmedAtServer = st;
+    this.boostPendingAtClient = 0;
+  }
+
+  /**
+   * True when an incoming payload is OLDER than the boost state the server already confirmed.
+   * Only ever protects a live cycle from an "idle" answer (never the other way round), and only
+   * for 60 s after the confirmation — after that the server's word is final.
+   */
+  private static isStaleIdlePayload(serverUser: any, localUser: any, ordering?: { clientIssuedAt?: number; serverAt?: number }): boolean {
+    if (!serverUser || !localUser) return false;
+    if (String(serverUser.id) !== String(localUser.id)) return false;
+    const localBs = (localUser as any).boostState;
+    const srvBs = (serverUser as any).boostState;
+    if (!localBs || !srvBs) return false;
+    if (!localBs.isActive || srvBs.isActive) return false;      // only a RUNNING local vs IDLE server
+    const clientRef = Math.max(this.boostConfirmedAtClient, this.boostPendingAtClient);
+    if (!clientRef || Date.now() - clientRef > 60000) return false;
+    if (ordering && ordering.clientIssuedAt) return ordering.clientIssuedAt < clientRef;
+    if (ordering && ordering.serverAt) {
+      return this.boostConfirmedAtServer > 0 && ordering.serverAt < this.boostConfirmedAtServer;
+    }
+    return true;   // no ordering information: keep the confirmed cycle, then re-verify with the server
+  }
+
+  /** One short-delay authoritative re-read so a rejected payload can never hide a real stop. */
+  private static scheduleBoostReverify(userId: string): void {
+    if (this.boostReverifyTimer) return;
+    this.boostReverifyTimer = setTimeout(() => {
+      this.boostReverifyTimer = null;
+      void this.syncUserFromServer(userId).catch(() => {});
+    }, 1500);
+  }
+
+  private static mergeServerUser(serverUser: User, localUser?: User | null, ordering?: { clientIssuedAt?: number; serverAt?: number }): User {
     const { password, phrase, passwordPlain, passwordHash, resetToken, resetExpires, emailVerificationCode, emailVerificationExpires, ...clean } = serverUser as any;
-    void localUser;
+    // Out-of-order safety: a poll/event produced before the user's Start tap must not flip the
+    // running card back to "stopped" (the server keeps compounding, so the UI would lie until reload).
+    const localBs = localUser && (localUser as any).boostState;
+    if (localBs && this.isStaleIdlePayload(serverUser as any, localUser as any, ordering)) {
+      (clean as any).boostState = localBs;
+    }
     return clean as User;
   }
 
@@ -1219,6 +1276,7 @@ export class BoostPayStore {
    * Real-time server sync for a single user (keeps boost state and balance 100% accurate)
    */
   static async syncUserFromServer(userId: string): Promise<User | null> {
+    const issuedAt = Date.now();   // payloads created before a Start tap are rejected (see isStaleIdlePayload)
     try {
       const res = await fetch(`/api/users/${userId}`, { headers: this.authHeaders() });
       if (res.ok) {
@@ -1227,7 +1285,10 @@ export class BoostPayStore {
           // Server responses omit credentials — preserve any local secrets
           const users = this.getUsers();
           const idx = users.findIndex(u => u.id === userId);
-          const freshUser: User = this.mergeServerUser(data.user, idx >= 0 ? users[idx] : this.getCurrentUser());
+          const localCopy = idx >= 0 ? users[idx] : this.getCurrentUser();
+          const stale = this.isStaleIdlePayload(data.user, localCopy, { clientIssuedAt: issuedAt });
+          const freshUser: User = this.mergeServerUser(data.user, localCopy, { clientIssuedAt: issuedAt });
+          if (stale) this.scheduleBoostReverify(userId);
           // Update in local users array
           if (idx >= 0) {
             users[idx] = freshUser;
@@ -1343,6 +1404,8 @@ export class BoostPayStore {
    * Start 24/7 background boost directly on the server
    */
   static async startServerBoost(userId: string): Promise<User | null> {
+    // Any poll/event produced from now until the response lands is older than this action.
+    this.boostPendingAtClient = Date.now();
     try {
       const res = await fetch('/api/boost/start', {
         method: 'POST',
@@ -1351,16 +1414,19 @@ export class BoostPayStore {
       });
       const data = await res.json().catch(() => null);
       if (res.ok && data && data.user) {
+        this.noteBoostConfirmed(data.serverTime);   // this answer is newer than anything in flight
         this.saveSingleUser(data.user);
         return data.user;
       }
       // No local fallback: a fake local cycle used to be pushed to /api/sync and showed a
       // running boost (with progress) that the server knew nothing about, so the balance
       // never grew. Report the server's answer instead.
+      this.boostPendingAtClient = 0;
       this.boostFailureToast('Boost not started', (data && data.error) || 'Please try again.');
       return null;
     } catch (err) {
       console.warn('startServerBoost network error:', err);
+      this.boostPendingAtClient = 0;
       this.boostFailureToast('Connection problem', 'You are offline - boosting is controlled by the server.');
       return null;
     }
@@ -1370,6 +1436,8 @@ export class BoostPayStore {
    * Pause boost on the server
    */
   static async pauseServerBoost(userId: string): Promise<User | null> {
+    // Any poll/event produced from now until the response lands is older than this action.
+    // pause is also a state change, tracked the same way\n      this.boostPendingAtClient = Date.now();
     try {
       const res = await fetch('/api/boost/pause', {
         method: 'POST',
@@ -1378,13 +1446,16 @@ export class BoostPayStore {
       });
       const data = await res.json().catch(() => null);
       if (res.ok && data && data.user) {
+        this.noteBoostConfirmed(data.serverTime);   // this answer is newer than anything in flight
         this.saveSingleUser(data.user);
         return data.user;
       }
+      this.boostPendingAtClient = 0;
       this.boostFailureToast('Could not pause', (data && data.error) || 'Please try again.');
       return null;
     } catch (err) {
       console.warn('pauseServerBoost network error:', err);
+      this.boostPendingAtClient = 0;
       this.boostFailureToast('Connection problem', 'You are offline - boosting is controlled by the server.');
       return null;
     }
@@ -1394,6 +1465,8 @@ export class BoostPayStore {
    * Resume boost on the server
    */
   static async resumeServerBoost(userId: string): Promise<User | null> {
+    // Any poll/event produced from now until the response lands is older than this action.
+    this.boostPendingAtClient = Date.now();
     try {
       const res = await fetch('/api/boost/resume', {
         method: 'POST',
@@ -1402,13 +1475,16 @@ export class BoostPayStore {
       });
       const data = await res.json().catch(() => null);
       if (res.ok && data && data.user) {
+        this.noteBoostConfirmed(data.serverTime);   // this answer is newer than anything in flight
         this.saveSingleUser(data.user);
         return data.user;
       }
+      this.boostPendingAtClient = 0;
       this.boostFailureToast('Could not resume', (data && data.error) || 'Please try again.');
       return null;
     } catch (err) {
       console.warn('resumeServerBoost network error:', err);
+      this.boostPendingAtClient = 0;
       this.boostFailureToast('Connection problem', 'You are offline - boosting is controlled by the server.');
       return null;
     }
@@ -1736,11 +1812,15 @@ export class BoostPayStore {
   private static bannerListeners: ((banner: any | null) => void)[] = [];
 
   /** Merge a realtime server user into local caches and notify subscribers. */
-  static mergeRealtimeUser(serverUser: User): void {
+  static mergeRealtimeUser(serverUser: User, serverAt?: number): void {
     if (!serverUser || !serverUser.id) return;
     const users = this.getUsers();
     const idx = users.findIndex(u => u.id === serverUser.id);
-    const merged = this.mergeServerUser(serverUser, idx >= 0 ? users[idx] : null);
+    const localCopy = idx >= 0 ? users[idx] : this.getCurrentUser();
+    const ordering: { serverAt?: number } = serverAt ? { serverAt: Number(serverAt) } : {};
+    const stale = this.isStaleIdlePayload(serverUser, localCopy, ordering);
+    const merged = this.mergeServerUser(serverUser, localCopy, ordering);
+    if (stale) this.scheduleBoostReverify(String(serverUser.id));
     if (idx >= 0) {
       users[idx] = merged;
     } else {
@@ -1750,7 +1830,7 @@ export class BoostPayStore {
     const curId = localStorage.getItem(STORAGE_CURRENT_USER_ID);
     if (curId === String(serverUser.id)) {
       const cur = this.getCurrentUser();
-      const next = this.mergeServerUser(serverUser, cur);
+      const next = this.mergeServerUser(serverUser, cur, ordering);
       localStorage.setItem(STORAGE_CURRENT_USER, JSON.stringify(next));
       for (const listener of this.userListeners) {
         try { listener(next); } catch (e) { console.warn('User listener error:', e); }
