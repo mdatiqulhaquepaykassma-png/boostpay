@@ -249,9 +249,9 @@ interface BoostingCardProps {
   boostState: BoostState;
   dynamicTargetDurationMs: number;
   minuteRatePercent: number;
-  onStartBoost: () => void;
-  onPauseBoost: () => void;
-  onResumeBoost: () => void;
+  onStartBoost: () => void | Promise<void>;
+  onPauseBoost: () => void | Promise<void>;
+  onResumeBoost: () => void | Promise<void>;
   onBoostFinished: (freshUser: User) => void;
   isFrozen?: boolean;
 }
@@ -270,6 +270,16 @@ const IsolatedBoostingCard: FC<BoostingCardProps> = memo(({
 }) => {
   const isRunning = boostState.isActive && !boostState.isPaused;
   const isPaused = boostState.isActive && boostState.isPaused;
+
+  // Tap feedback: on a slow mobile connection the previous version gave no sign that the tap
+  // registered, so people tapped twice and read the unchanged card as "button doesn't work".
+  const [busy, setBusy] = useState<'' | 'start' | 'pause' | 'resume'>('');
+  const run = (kind: 'start' | 'pause' | 'resume', fn: () => void | Promise<void>) => async () => {
+    if (busy) return;
+    setBusy(kind);
+    try { await fn(); } catch { /* the store already surfaced the error */ }
+    finally { setBusy(''); }
+  };
 
   const [elapsedMs, setElapsedMs] = useState(boostState.elapsedMs || 0);
   const [liveYield, setLiveYield] = useState(boostState.accumulatedYield || 0);
@@ -413,29 +423,30 @@ const IsolatedBoostingCard: FC<BoostingCardProps> = memo(({
       <div className="mt-4">
         {!boostState.isActive ? (
           <button
-            onClick={onStartBoost}
-            disabled={isFrozen}
+            onClick={run('start', onStartBoost)}
+            disabled={isFrozen || !!busy}
             title={isFrozen ? 'Account frozen — boosting disabled' : 'Start a boosting cycle'}
-            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-amber-500"
+            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20 disabled:opacity-60 disabled:cursor-wait disabled:hover:bg-amber-500"
           >
-            <Zap className="w-4 h-4 fill-current" /> {isFrozen ? 'Boosting Disabled (Frozen)' : 'Start Boosting'}
+            <Zap className="w-4 h-4 fill-current" /> {isFrozen ? 'Boosting Disabled (Frozen)' : busy === 'start' ? 'Starting…' : 'Start Boosting'}
           </button>
         ) : isPaused ? (
           <button
-            onClick={onResumeBoost}
-            disabled={isFrozen}
+            onClick={run('resume', onResumeBoost)}
+            disabled={isFrozen || !!busy}
             title={isFrozen ? 'Account frozen — boosting disabled' : 'Resume boosting'}
-            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-amber-500"
+            className="w-full h-11 rounded-2xl bg-amber-500 text-xs font-bold text-zinc-950 hover:bg-amber-400 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-amber-500/20 disabled:opacity-60 disabled:cursor-wait disabled:hover:bg-amber-500"
           >
-            <Play className="w-4 h-4 fill-current" /> {isFrozen ? 'Boosting Disabled (Frozen)' : 'Resume Boosting'}
+            <Play className="w-4 h-4 fill-current" /> {isFrozen ? 'Boosting Disabled (Frozen)' : busy === 'resume' ? 'Resuming…' : 'Resume Boosting'}
           </button>
         ) : (
           <>
             <button
-              onClick={onPauseBoost}
-              className="w-full h-11 rounded-2xl border border-zinc-700 bg-zinc-800/70 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer"
+              onClick={run('pause', onPauseBoost)}
+              disabled={!!busy}
+              className="w-full h-11 rounded-2xl border border-zinc-700 bg-zinc-800/70 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60 disabled:cursor-wait"
             >
-              <Pause className="w-4 h-4" /> Pause Boosting
+              <Pause className="w-4 h-4" /> {busy === 'pause' ? 'Pausing…' : 'Pause Boosting'}
             </button>
             <p className="mt-2 text-center text-[10px] text-zinc-500">Pausing freezes progress and unlocks transfers.</p>
           </>

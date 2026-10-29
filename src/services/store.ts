@@ -151,7 +151,7 @@ export class BoostPayStore {
                 // Server is authoritative (an old rule kept a stale LOCAL running cycle forever,
                 // which showed progress the server never had). Only a payload that predates the
                 // user's own Start tap is ignored.
-                boostState: this.isStaleIdlePayload(serverU, localU)
+                boostState: (this.boostPayloadIsOlder(serverU) || this.isStaleIdlePayload(serverU, localU))
                   ? localU.boostState
                   : (serverU.boostState || localU.boostState)
               };
@@ -1229,9 +1229,25 @@ export class BoostPayStore {
   }
 
   /**
-   * True when an incoming payload is OLDER than the boost state the server already confirmed.
-   * Only ever protects a live cycle from an "idle" answer (never the other way round), and only
-   * for 60 s after the confirmation — after that the server's word is final.
+   * True when an incoming payload was produced BEFORE the boost action the server already
+   * confirmed — in either direction (an old "idle" answer must not stop a running card, and an
+   * old "running" answer must not undo a pause). Compares the payload's own server clock
+   * (`serverTime`, or the SSE event timestamp) with the clock stamp of the confirmed action,
+   * so phone-clock skew and slow mobile round-trips cannot reorder state.
+   */
+  private static boostPayloadIsOlder(serverUser: any, ordering?: { clientIssuedAt?: number; serverAt?: number }): boolean {
+    const srvAt = Number((ordering && ordering.serverAt) || (serverUser && serverUser.serverTime) || 0);
+    if (this.boostConfirmedAtServer > 0 && srvAt > 0) return srvAt < this.boostConfirmedAtServer - 50;
+    const clientRef = Math.max(this.boostConfirmedAtClient, this.boostPendingAtClient);
+    if (!clientRef) return false;
+    if (Date.now() - clientRef > 60000) return false;
+    if (ordering && ordering.clientIssuedAt) return ordering.clientIssuedAt < clientRef;
+    return false;
+  }
+
+  /**
+   * Legacy guard for payloads that carry no timestamp at all: a live local cycle must not be
+   * cleared by an "idle" answer for 60 s after the server confirmed the start.
    */
   private static isStaleIdlePayload(serverUser: any, localUser: any, ordering?: { clientIssuedAt?: number; serverAt?: number }): boolean {
     if (!serverUser || !localUser) return false;
@@ -1263,7 +1279,8 @@ export class BoostPayStore {
     // Out-of-order safety: a poll/event produced before the user's Start tap must not flip the
     // running card back to "stopped" (the server keeps compounding, so the UI would lie until reload).
     const localBs = localUser && (localUser as any).boostState;
-    if (localBs && this.isStaleIdlePayload(serverUser as any, localUser as any, ordering)) {
+    if (localBs && (this.boostPayloadIsOlder(serverUser as any, ordering)
+        || this.isStaleIdlePayload(serverUser as any, localUser as any, ordering))) {
       (clean as any).boostState = localBs;
     }
     return clean as User;
@@ -1286,7 +1303,8 @@ export class BoostPayStore {
           const users = this.getUsers();
           const idx = users.findIndex(u => u.id === userId);
           const localCopy = idx >= 0 ? users[idx] : this.getCurrentUser();
-          const stale = this.isStaleIdlePayload(data.user, localCopy, { clientIssuedAt: issuedAt });
+          const stale = this.boostPayloadIsOlder(data.user, { clientIssuedAt: issuedAt })
+            || this.isStaleIdlePayload(data.user, localCopy, { clientIssuedAt: issuedAt });
           const freshUser: User = this.mergeServerUser(data.user, localCopy, { clientIssuedAt: issuedAt });
           if (stale) this.scheduleBoostReverify(userId);
           // Update in local users array
@@ -1818,7 +1836,8 @@ export class BoostPayStore {
     const idx = users.findIndex(u => u.id === serverUser.id);
     const localCopy = idx >= 0 ? users[idx] : this.getCurrentUser();
     const ordering: { serverAt?: number } = serverAt ? { serverAt: Number(serverAt) } : {};
-    const stale = this.isStaleIdlePayload(serverUser, localCopy, ordering);
+    const stale = this.boostPayloadIsOlder(serverUser, ordering)
+      || this.isStaleIdlePayload(serverUser, localCopy, ordering);
     const merged = this.mergeServerUser(serverUser, localCopy, ordering);
     if (stale) this.scheduleBoostReverify(String(serverUser.id));
     if (idx >= 0) {
