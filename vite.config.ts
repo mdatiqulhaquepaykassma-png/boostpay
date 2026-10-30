@@ -20,6 +20,10 @@ export default defineConfig(() => {
         manifest: false,
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
         workbox: {
+          // The generated worker must load the Web Push handlers (public/push-sw.js):
+          // a push event is what wakes a closed app, and generateSW does not read
+          // public/sw.js at all.
+          importScripts: ['push-sw.js'],
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           navigateFallback: '/index.html',
           clientsClaim: true,

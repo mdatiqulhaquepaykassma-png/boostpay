@@ -96,3 +96,11 @@ RESULT 18 pass / 0 fail
 | `agent-app/src/main.tsx`, `management-app/src/main.tsx`, `admin-app/src/main.tsx` | `/sw.js` রেজিস্ট্রেশন (আগে ছিল না, তাই install + push সম্ভব ছিল না) |
 
 **পরের ধাপে চাইলে যোগ করা যায়:** নতুন এজেন্ট রেজিস্ট্রেশন / উইথড্রয়াল রিকোয়েস্ট এলে অ্যাডমিন-ম্যানেজমেন্টে push · "একাধিক মেসেজ এলে একটা সারসংক্ষেপ (digest)" · নোটিফিকেশন বন্ধ/চালু সুইচ প্রোফাইল মেনুতে।
+
+---
+
+## ৬. ডিপ্লয়ের পরে ধরা পড়া একটা ফাঁদ (ঠিক করা হয়েছে)
+
+প্রথম push-এ **user অ্যাপের sw.js-এ push handler আসেনি** — কারণ user অ্যাপের service worker `vite-plugin-pwa` (generateSW) নিজে তৈরি করে, তাই `public/sw.js` production build-এ ব্যবহারই হয় না (agent/management/admin অ্যাপে সেটা হয়, ওরা সাধারণ Vite build)।
+
+**সমাধান:** push handler আলাদা ফাইল `public/push-sw.js`-এ সরানো হয়েছে এবং `vite.config.ts`-এ `workbox.importScripts: ['push-sw.js']` দেওয়া হয়েছে — ফলে generate হওয়া worker-ও push ইভেন্ট পায়। লাইভ যাচাই: চারটি ডোমেইনেই `/sw.js` (বা user অ্যাপে `/push-sw.js`) push handler সহ সার্ভ হচ্ছে ✅
