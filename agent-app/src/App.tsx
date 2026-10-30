@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PushOptIn } from './push/PushOptIn';
+import { PushBell } from './push/PushBell';
 import {
   ArrowDownLeft, ArrowUpRight, BadgeCheck, Banknote, Check, ChevronRight, CircleDollarSign,
   Copy, History, Home, Image as ImageIcon, KeyRound, LogOut, Lock, MailCheck, MessageSquare, Mic, Phone,
@@ -623,6 +623,7 @@ const ChatsScreen: React.FC<{
           <Video className="h-4 w-4" />
         </button>
       ) : null}
+      <PushBell className="!min-h-0 h-8 !rounded-xl !px-2" />
     </div>
   );
 
@@ -726,6 +727,7 @@ const ChatsScreen: React.FC<{
           className="min-w-0 flex-1 bg-transparent text-[11.5px] text-white placeholder-zinc-600 outline-none"
         />
         {q ? <button onClick={() => setQ('')} className="shrink-0 text-zinc-500"><X className="h-3.5 w-3.5" /></button> : null}
+        <PushBell className="!min-h-0 h-8 !rounded-xl !px-2" />
       </div>
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain pb-1">
@@ -1171,8 +1173,6 @@ export default function App() {
   return (
     <div className="min-h-[100dvh] bg-zinc-950 text-white">
       <Toast toast={toastState} onClose={() => setToastState(null)} />
-      {/* Push notifications (new user messages with the app closed) */}
-      <PushOptIn accent="amber" />
       {/* 1:1 voice/video calls with users + live chat wake-ups */}
       <AgentCallManager agentId={agent.id} onChatWake={() => { void loadChats(); }} />
       <div className="mx-auto flex h-[100dvh] min-h-[100dvh] w-full max-w-[430px] flex-col overflow-hidden">

@@ -4,7 +4,6 @@
  */
 
 import { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
-import { PushOptIn } from './push/PushOptIn';
 import { Wallet, Trophy, MessageSquare, Inbox, Download, RefreshCw, Gift, LogOut } from 'lucide-react';
 import { BoostPayStore, ToastData } from './services/store';
 import { User, SystemConfig } from './types';
@@ -374,8 +373,6 @@ export default function App() {
       {/* PWA manual install guidance (iOS / Android / iframe fallback) */}
       <PWAInstallHelp />
 
-      {/* Push notifications: without this the phone stays silent when the app is closed */}
-      {currentUser && <PushOptIn accent="amber" />}
 
       {/* Security Center modal (anti-phishing code + session devices) */}
       {currentUser && (

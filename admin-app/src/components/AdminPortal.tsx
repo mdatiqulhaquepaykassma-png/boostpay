@@ -1,5 +1,5 @@
 import { FC, useState, useEffect, useRef } from 'react';
-import { PushOptIn } from '../push/PushOptIn';
+import { PushBell } from '../push/PushBell';
 import {
   ShieldCheck,
   PlusCircle,
@@ -970,8 +970,6 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   // -------------------------------------------------------------
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans">
-      {/* Push notifications (support messages with the console closed) */}
-      <PushOptIn accent="amber" />
       {/* Real-time audio/video call manager for the Admin Support mailbox */}
       <CallManager currentUser={{ id: 'ADMIN_SUPPORT' }} senderRole="ADMIN" />
       {/* Top Admin Header — polished responsive */}
@@ -1027,6 +1025,8 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                 <span className="hidden sm:inline">Wallet</span>
               </button>
             )}
+
+            <PushBell className="!min-h-0 h-9 !rounded-xl !px-2.5" />
 
             <button
               onClick={handleAdminLogout}

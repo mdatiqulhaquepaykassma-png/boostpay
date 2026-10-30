@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { PushOptIn } from './push/PushOptIn';
+import { PushBell } from './push/PushBell';
 import {
   ArrowDownLeft, ArrowUpRight, Building2, Check, ChevronRight, CircleDollarSign, Coins,
   Copy, History, Home, KeyRound, Landmark, LogOut, MessageSquare, Plus, Receipt, Search, Send, ShieldCheck, User, Users, X
@@ -388,7 +388,10 @@ const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => 
             <div className="truncate text-sm font-black text-white">{agent.name || agent.id}</div>
             <div className="font-mono text-[9px] text-zinc-500">{agent.id}{peerTyping ? ' · typing…' : ''}</div>
           </div>
-          <button onClick={onClose} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 text-zinc-400"><X className="h-4 w-4" /></button>
+          <div className="flex shrink-0 items-center gap-2">
+            <PushBell className="!min-h-0 !rounded-xl !px-2.5 py-1.5" />
+            <button onClick={onClose} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 text-zinc-400"><X className="h-4 w-4" /></button>
+          </div>
         </div>
 
         <ChatList
@@ -755,9 +758,6 @@ export default function App() {
             </div>
           )}
         </main>
-
-        {/* Push notifications (agent messages with the app closed) */}
-        <PushOptIn accent="cyan" />
 
         <nav className="safe-pb fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[430px] border-t border-zinc-800 bg-zinc-950/97 backdrop-blur">
           <div className="flex items-stretch justify-between px-1 py-1.5">

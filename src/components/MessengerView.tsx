@@ -1,4 +1,5 @@
 import React, { FC, useState, useEffect, useCallback, memo, useRef } from 'react';
+import { PushBell } from '../push/PushBell';
 import {
   MessageSquare,
   Store,
@@ -1399,6 +1400,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                 >
                   <Video className="w-4 h-4" />
                 </button>
+                <PushBell />
                 <button
                   onClick={() => setShowChatMenu(s => !s)}
                   title="Chat info & actions"
@@ -1762,6 +1764,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
               <h2 className="text-lg font-bold text-white tracking-tight">Messages</h2>
             </div>
             <div className="flex items-center gap-2">
+              <PushBell />
               <button
                 onClick={() => void loadDiscover()}
                 title="Discover public groups"
