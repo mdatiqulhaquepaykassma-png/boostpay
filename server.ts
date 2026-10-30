@@ -290,11 +290,17 @@ try {
   console.error('[push] VAPID env setup failed:', String(e?.message || e));
 }
 
-function ensureVapidKeys(db: any): boolean {
+/**
+ * `create` is false on the notification path: generating a key pair there would
+ * write the state document in the middle of somebody else's mutation. Only the
+ * subscribe / public-key endpoints create the pair.
+ */
+function ensureVapidKeys(db: any, create = false): boolean {
   if (pushReady) return true;
   try {
     let keys = db.pushKeys;
     if (!keys || !keys.publicKey || !keys.privateKey) {
+      if (!create) return false;
       keys = webpush.generateVAPIDKeys();
       db.pushKeys = { publicKey: keys.publicKey, privateKey: keys.privateKey, createdAt: Date.now() };
       writeDb(db);
@@ -310,7 +316,8 @@ function ensureVapidKeys(db: any): boolean {
   }
 }
 
-type PushOwner = { type: 'ADMIN' | 'USER'; id: string };
+type PushOwnerType = 'ADMIN' | 'USER' | 'AGENT' | 'MANAGEMENT';
+type PushOwner = { type: PushOwnerType; id: string };
 
 function pushSubsFor(db: any, owner: PushOwner): any[] {
   const all = Array.isArray(db.pushSubscriptions) ? db.pushSubscriptions : [];
@@ -357,6 +364,24 @@ function notifyAdminsPush(db: any, payload: { title: string; body: string; tag?:
 
 function notifyUserPush(db: any, userId: string, payload: { title: string; body: string; tag?: string; url?: string }) {
   sendPushTo(db, { type: 'USER', id: String(userId) }, payload);
+}
+
+function notifyAgentPush(db: any, agentId: string, payload: { title: string; body: string; tag?: string; url?: string }) {
+  sendPushTo(db, { type: 'AGENT', id: String(agentId) }, payload);
+}
+
+function notifyManagementPush(db: any, managementId: string, payload: { title: string; body: string; tag?: string; url?: string }) {
+  sendPushTo(db, { type: 'MANAGEMENT', id: String(managementId) }, payload);
+}
+
+/** One-line preview for a chat message of any kind (text / photo / voice / file). */
+function pushPreview(m: any): string {
+  const kind = String(m?.kind || 'text');
+  if (kind === 'photo') return '📷 Photo';
+  if (kind === 'voice') return '🎤 Voice message';
+  if (kind === 'file') return '📎 File';
+  const t = String(m?.text || '').trim();
+  return t ? t.slice(0, 140) : 'New message';
 }
 
 function broadcastChatMessage(message: any, conversation: any) {
@@ -1666,6 +1691,16 @@ function pushNotification(db: any, notif: any) {
   db.notifications.unshift(stamped);
   if (db.notifications.length > 5000) db.notifications.length = 5000;
   pushToUser(String(notif.userId), { type: 'notification', notification: stamped, timestamp: Date.now() });
+  // Same alert as a Web Push, so the phone buzzes with the app closed.
+  // Anything that looks like a secret (reset codes, OTPs, passwords) is stripped
+  // from the lock-screen text on purpose.
+  try {
+    const raw = String(notif.message || '');
+    const sensitive = /(code|otp|password|passcode|pin)\b/i.test(raw);
+    const title = String(notif.title || 'BoostPay').replace(/\s*·.*$/, '').slice(0, 60);
+    const body = sensitive ? 'Tap to open BoostPay and see the details.' : (raw.slice(0, 140) || 'You have a new update.');
+    notifyUserPush(db, String(notif.userId), { title, body, tag: String(notif.type || 'boostpay'), url: '/' });
+  } catch { /* notifications must never break on push problems */ }
   return stamped;
 }
 
@@ -3922,25 +3957,59 @@ async function startServer() {
     }
   });
 
-  // ---- Web Push: subscription management (staff + users) -------------------
+  // ---- Web Push: subscription management (user · agent · management · admin) --
+  // Every app in the platform subscribes its own devices. The account that owns a
+  // subscription decides who gets woken up, so a leaked endpoint is useless.
+  function resolvePushOwner(req: any, res: any, next: any) {
+    const payload = verifyToken(getBearerToken(req));
+    if (!payload || !['USER', 'AGENT', 'ADMIN', 'MANAGEMENT'].includes(String(payload.role))) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    let db: any = null;
+    try { db = readDb(); } catch { /* ignore */ }
+    const blocked = sessionBlockReason(db, payload);
+    if (blocked) return res.status(401).json({ error: blocked });
+    try {
+      if (payload.role === 'USER') {
+        const exists = ((db && db.users) || []).some((x: any) => String(x.id) === String(payload.sub));
+        if (!exists) return res.status(401).json({ error: 'This account no longer exists. Please sign in again.' });
+        req.pushOwner = { type: 'USER', id: String(payload.sub) };
+      } else if (payload.role === 'AGENT') {
+        const agent = ((db && db.agents) || []).find((a: any) => String(a.id) === String(payload.sub));
+        if (!agent) return res.status(401).json({ error: 'This agent account no longer exists.' });
+        if (agent.isActive === false) return res.status(403).json({ error: 'This agent account is disabled. Contact management.' });
+        req.pushOwner = { type: 'AGENT', id: String(agent.id) };
+      } else if (payload.role === 'MANAGEMENT') {
+        const mgr = ((db && db.management) || []).find((m: any) => String(m.id) === String(payload.sub));
+        if (!mgr) return res.status(401).json({ error: 'This management account no longer exists.' });
+        if (mgr.isActive === false) return res.status(403).json({ error: 'This management account is disabled.' });
+        req.pushOwner = { type: 'MANAGEMENT', id: String(mgr.id) };
+      } else {
+        req.pushOwner = { type: 'ADMIN', id: String(payload.sub) };
+      }
+    } catch {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    req.authSid = payload.sid;
+    try { if (db) touchSession(db, payload.sid); } catch { /* non-fatal */ }
+    next();
+  }
+
   // Public key is not a secret (it is handed to every browser that subscribes).
   app.get('/api/push/key', (_req: any, res) => {
     const db = readDb();
-    if (!ensureVapidKeys(db)) return res.status(503).json({ error: 'Push notifications are not available right now.' });
+    if (!ensureVapidKeys(db, true)) return res.status(503).json({ error: 'Push notifications are not available right now.' });
     res.json({ publicKey: pushPublicKey });
   });
 
-  app.post('/api/push/subscribe', requireUserOrAdmin, (req: any, res) => {
+  app.post('/api/push/subscribe', resolvePushOwner, (req: any, res) => {
     const sub = req.body && req.body.subscription;
     if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
       return res.status(400).json({ error: 'A valid push subscription is required.' });
     }
-    const owner: PushOwner | null = req.authAdmin
-      ? { type: 'ADMIN', id: String(req.authAdmin) }
-      : (req.authUserId ? { type: 'USER', id: String(req.authUserId) } : null);
-    if (!owner) return res.status(401).json({ error: 'Authentication required.' });
+    const owner: PushOwner = req.pushOwner;
     const db = readDb();
-    if (!ensureVapidKeys(db)) return res.status(503).json({ error: 'Push notifications are not available right now.' });
+    if (!ensureVapidKeys(db, true)) return res.status(503).json({ error: 'Push notifications are not available right now.' });
     if (!Array.isArray(db.pushSubscriptions)) db.pushSubscriptions = [];
     const endpoint = String(sub.endpoint);
     const existing = db.pushSubscriptions.find((r: any) => r && r.subscription && r.subscription.endpoint === endpoint);
@@ -3961,32 +4030,33 @@ async function startServer() {
     res.json({ success: true, id: record.id, ownerType: owner.type });
   });
 
-  app.post('/api/push/unsubscribe', requireUserOrAdmin, (req: any, res) => {
+  app.post('/api/push/unsubscribe', resolvePushOwner, (req: any, res) => {
     const endpoint = String((req.body && req.body.endpoint) || '');
     if (!endpoint) return res.status(400).json({ error: 'endpoint is required.' });
+    const owner: PushOwner = req.pushOwner;
     const db = readDb();
     const before = (db.pushSubscriptions || []).length;
-    db.pushSubscriptions = (db.pushSubscriptions || []).filter((r: any) => !(r && r.subscription && r.subscription.endpoint === endpoint));
+    // Only the owner may remove an endpoint (an endpoint string alone proves nothing).
+    db.pushSubscriptions = (db.pushSubscriptions || []).filter(
+      (r: any) => !(r && r.subscription && r.subscription.endpoint === endpoint && r.ownerType === owner.type && String(r.ownerId) === owner.id)
+    );
     writeDb(db);
     res.json({ success: true, removed: before - db.pushSubscriptions.length });
   });
 
   // Test the whole chain from a phone (delivers only to the caller's devices).
-  app.post('/api/push/test', requireUserOrAdmin, (req: any, res) => {
-    const owner: PushOwner | null = req.authAdmin
-      ? { type: 'ADMIN', id: String(req.authAdmin) }
-      : (req.authUserId ? { type: 'USER', id: String(req.authUserId) } : null);
-    if (!owner) return res.status(401).json({ error: 'Authentication required.' });
+  app.post('/api/push/test', resolvePushOwner, (req: any, res) => {
+    const owner: PushOwner = req.pushOwner;
     const db = readDb();
     const subs = pushSubsFor(db, owner);
     if (!subs.length) return res.status(400).json({ error: 'No device is subscribed yet on this account.' });
     sendPushTo(db, owner, {
       title: 'BoostPay notifications are on',
-      body: 'This is a test from your console. Real alerts arrive even when the app is closed.',
+      body: 'This is a test from your app. Real alerts arrive even when the app is closed.',
       tag: 'push-test',
       url: '/'
     });
-    res.json({ success: true, devices: subs.length });
+    res.json({ success: true, devices: subs.length, ownerType: owner.type });
   });
 
   // Serve attachment files from disk (auth: only participants can fetch)
@@ -8817,6 +8887,14 @@ async function startServer() {
       if (db.agentMessages.length > 5000) db.agentMessages.splice(0, db.agentMessages.length - 5000);
       writeDb(db);
       try { pushToAgent(String(agent.id), { type: 'agent_chat_message', userId: String(user.id), at: msg.at }); } catch { /* ignore */ }
+      try {
+        notifyAgentPush(db, String(agent.id), {
+          title: `New message · User #${user.id}`,
+          body: pushPreview(msg),
+          tag: `agent-${user.id}`,
+          url: '/'
+        });
+      } catch { /* ignore */ }
       res.json({ success: true, message: publicAgentMsg(msg) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
@@ -8967,6 +9045,14 @@ async function startServer() {
       writeDb(db);
       // Management apps poll their thread every 6s — no agent wake-up needed here
       // (waking the sender's own console just caused a redundant refetch).
+      try {
+        notifyManagementPush(db, managementId, {
+          title: `Agent #${me} sent a message`,
+          body: pushPreview(msg),
+          tag: `mgmt-${me}`,
+          url: '/'
+        });
+      } catch { /* ignore */ }
       res.json({ success: true, message: publicMgmtMsg(msg) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
@@ -9056,6 +9142,14 @@ async function startServer() {
       db.managementMessages.push(msg);
       if (db.managementMessages.length > 5000) db.managementMessages.splice(0, db.managementMessages.length - 5000);
       writeDb(db);
+      try {
+        notifyAgentPush(db, String(agent.id), {
+          title: 'Management sent you a message',
+          body: pushPreview(msg),
+          tag: `mgmt-${mine}`,
+          url: '/'
+        });
+      } catch { /* ignore */ }
       res.json({ success: true, message: publicMgmtMsg(msg) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
@@ -9227,6 +9321,14 @@ async function startServer() {
       if (db.agentMessages.length > 5000) db.agentMessages.splice(0, db.agentMessages.length - 5000);
       writeDb(db);
       try { pushToUser(String(user.id), { type: 'agent_chat_message', agentId: me, at: msg.at }); } catch { /* ignore */ }
+      try {
+        notifyUserPush(db, String(user.id), {
+          title: `New message · Agent #${me}`,
+          body: pushPreview(msg),
+          tag: `agent-chat-${me}`,
+          url: '/'
+        });
+      } catch { /* ignore */ }
       res.json({ success: true, message: publicAgentMsg(msg) });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });

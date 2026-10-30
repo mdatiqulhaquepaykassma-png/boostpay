@@ -8,3 +8,12 @@ createRoot(document.getElementById('root')!).render(
     <App />
   </React.StrictMode>
 );
+
+// PWA: register the service worker (needed for install + push notifications)
+if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((err) => {
+      console.warn('Service worker registration failed:', err);
+    });
+  });
+}

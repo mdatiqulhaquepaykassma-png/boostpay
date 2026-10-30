@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { PushOptIn } from './push/PushOptIn';
 import {
   ArrowDownLeft, ArrowUpRight, BadgeCheck, Banknote, Check, ChevronRight, CircleDollarSign,
   Copy, History, Home, Image as ImageIcon, KeyRound, LogOut, Lock, MailCheck, MessageSquare, Mic, Phone,
@@ -1170,6 +1171,8 @@ export default function App() {
   return (
     <div className="min-h-[100dvh] bg-zinc-950 text-white">
       <Toast toast={toastState} onClose={() => setToastState(null)} />
+      {/* Push notifications (new user messages with the app closed) */}
+      <PushOptIn accent="amber" />
       {/* 1:1 voice/video calls with users + live chat wake-ups */}
       <AgentCallManager agentId={agent.id} onChatWake={() => { void loadChats(); }} />
       <div className="mx-auto flex h-[100dvh] min-h-[100dvh] w-full max-w-[430px] flex-col overflow-hidden">

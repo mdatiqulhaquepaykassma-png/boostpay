@@ -1,0 +1,29 @@
+{
+  "id": "/",
+  "name": "BoostPay Admin Console",
+  "short_name": "BP Admin",
+  "description": "BoostPay admin console \u2014 accounts, ledger, agents and support chat.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": [
+    "window-controls-overlay",
+    "standalone"
+  ],
+  "prefer_related_applications": false,
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "categories": [
+    "finance",
+    "utilities"
+  ]
+}

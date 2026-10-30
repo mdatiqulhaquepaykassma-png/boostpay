@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { PushOptIn } from './push/PushOptIn';
 import {
   ArrowDownLeft, ArrowUpRight, Building2, Check, ChevronRight, CircleDollarSign, Coins,
   Copy, History, Home, KeyRound, Landmark, LogOut, MessageSquare, Plus, Receipt, Search, Send, ShieldCheck, User, Users, X
@@ -754,6 +755,9 @@ export default function App() {
             </div>
           )}
         </main>
+
+        {/* Push notifications (agent messages with the app closed) */}
+        <PushOptIn accent="cyan" />
 
         <nav className="safe-pb fixed inset-x-0 bottom-0 z-30 mx-auto w-full max-w-[430px] border-t border-zinc-800 bg-zinc-950/97 backdrop-blur">
           <div className="flex items-stretch justify-between px-1 py-1.5">
