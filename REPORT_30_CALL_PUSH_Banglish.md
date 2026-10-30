@@ -54,3 +54,10 @@ RESULT 13 pass / 0 fail
 * `public/push-sw.js`, `agent-app/public/sw.js`, `management-app/public/sw.js`, `admin-app/public/sw.js`, `support-app/public/sw.js` — push-এ কল ডিটেকশন, Answer/Decline action, `notificationclick`-এ decline → `reject` API কল, বাকি ক্ষেত্রে অ্যাপ খোলা/ফোকাস।
 * `src/components/CallOverlay.tsx` ও `agent-app/src/CallOverlay.tsx` — `?call=` বা অ্যাপ ফোরগ্রাউন্ডে এলে `/api/chat/call-pending` পড়ে ইনকামিং কল স্ক্রিন + রিংটোন।
 * টাকার হিসাব/boost/commission: **কোনো পরিবর্তন নেই**।
+
+---
+
+## ৬. ডিপ্লয়
+* Commit **`5d12d56`** (non-force push → auto-deploy)। প্রোডাকশন API: **`v1.2.1793392974`**।
+* লাইভ যাচাই (read-only): `/api/chat/call-pending` লগইন ছাড়া **401** · user অ্যাপের `push-sw.js`-এ **Answer/Decline + requireInteraction** আছে · agent অ্যাপের `sw.js`-এ `incoming_call` হ্যান্ডলিং আছে · user ও agent বান্ডলে `call-pending` কল আছে · সাতটি Swarm সার্ভিস **1/1**।
+* **আগের ধাপটি মনে রাখবেন:** কল পুশ পেতে প্রত্যেক প্রান্তের অ্যাপে একবার **🔔 → Turn on notifications** করতে হবে (সেট না থাকলে push আসবে না)।
