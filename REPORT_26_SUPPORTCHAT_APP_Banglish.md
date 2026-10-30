@@ -84,3 +84,11 @@
 
 * `support-app/` (নতুন): `src/App.tsx` (লগইন + ইনবক্স + থ্রেড), `src/api.ts` (API ক্লায়েন্ট), `public/manifest.json`, `public/sw.js`, `public/icon.svg`, `server.ts` (same-origin `/api` proxy), `Dockerfile`, `nixpacks.toml`, `README.md`
 * Commit: `e6460e8` (+ `8e3482f` deploy trigger) — non-force push, auto-deploy চালু
+
+---
+
+## ৭. অটো-ডিপ্লয় যাচাই (শেষ)
+
+* push করলে **নতুন অ্যাপটিও নিজে থেকেই ডিপ্লয় হয়** — শেষ push-এ `BoostPay Support Chat` ডিপ্লয় হয়েছে (status `done`)। অর্থাৎ ভবিষ্যতে `support-app/`-এ কিছু বদলে push করলেই লাইভ হবে।
+* সব সার্ভিস স্বাস্থ্যকর: `boostpay-supportchat-memsqg 1/1` (বাকি ৫টা সহ), ছয়টা হোস্টের health version একই: **`v1.2.1793385686`**।
+* `supportchat.boostpay.online/` → 200, TLS Let's Encrypt ✅
