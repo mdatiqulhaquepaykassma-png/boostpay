@@ -2656,7 +2656,10 @@ async function startServer() {
   app.use('/api/users/register', rateLimit(8)); // 8/min (was 10) — prevent mass fake accounts
   app.use('/api/admin/login', rateLimit(5)); // 5/min (was 6) + below progressive block
   app.use('/api/chat/send', rateLimit(60));
-  app.use('/api/chat/call-signal', rateLimit(40));
+  // A single call can emit 20-60 ICE candidates (more on mobile data), and a
+  // network blip restarts ICE. 40/min silently throttled the handshake, which
+  // looked exactly like "rings but never connects".
+  app.use('/api/chat/call-signal', rateLimit(300));
   // Progressive fail block: after 8 failed logins in 10m, IP blocked 30m (fix: credential stuffing)
   const failedLogins = new Map<string,{count:number, firstAt:number, blockedUntil?:number}>();
   app.use('/api/users/login', (req:any,res:any,next:any)=>{
@@ -4116,6 +4119,40 @@ async function startServer() {
     'offer', 'answer', 'ice', 'reject', 'hangup', 'cancel',
     'video-request', 'video-accept', 'video-decline', 'video-cancel'
   ];
+  /**
+   * ICE configuration for WebRTC calls.
+   * STUN alone only works when both phones can reach each other directly; on
+   * mobile data (carrier NAT / CGNAT) that fails, so the call rings and never
+   * connects. A TURN relay fixes it — configure one and no code change is needed:
+   *   TURN_URLS=turn:turn.example.com:3478,turns:turn.example.com:5349
+   *   TURN_USERNAME=boostpay
+   *   TURN_CREDENTIAL=********
+   * Credentials stay on the server (the bundle never contains them).
+   */
+  let iceConfigCache: { at: number; servers: any[] } | null = null;
+  app.get('/api/rtc/ice', requireUserAdminOrAgent, (_req: any, res) => {
+    try {
+      const now = Date.now();
+      if (iceConfigCache && now - iceConfigCache.at < 10 * 60 * 1000) {
+        return res.json({ iceServers: iceConfigCache.servers });
+      }
+      const stunUrls = String(process.env.STUN_URLS || 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302')
+        .split(',').map((x) => x.trim()).filter(Boolean);
+      const servers: any[] = [{ urls: stunUrls }];
+      const turnUrls = String(process.env.TURN_URLS || process.env.TURN_URL || '')
+        .split(',').map((x) => x.trim()).filter(Boolean);
+      const turnUser = String(process.env.TURN_USERNAME || '').trim();
+      const turnPass = String(process.env.TURN_CREDENTIAL || process.env.TURN_PASSWORD || '').trim();
+      if (turnUrls.length && turnUser && turnPass) {
+        servers.push({ urls: turnUrls, username: turnUser, credential: turnPass });
+      }
+      iceConfigCache = { at: now, servers };
+      res.json({ iceServers: servers, turn: turnUrls.length > 0 && !!turnUser && !!turnPass });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/chat/call-signal', (req: any, res) => {
     try {
       const callerUser = String(req.authUserId || '');
@@ -4160,8 +4197,32 @@ async function startServer() {
           if (agent.isActive === false) return res.status(403).json({ error: 'This agent is not available right now.' });
           deliverToAgent = String(agent.id);
         } else {
-          // user <-> user direct calls remain admin-only
-          return res.status(403).json({ error: 'Direct voice/video calls to other users are admin-only. You can call a BoostPay agent from your agent chat.' });
+          // ── User calling another user ────────────────────────────────────
+          // This used to be refused outright ("admin-only") even though the chat
+          // screen showed voice/video buttons, so the call rang and never
+          // connected. Enabled 2026-10-31 with the same guards the agent side uses:
+          //  · the target must exist, not be suspended and have calls allowed
+          //  · the two accounts must already share a 1:1 conversation (either side
+          //    wrote something), so nobody can cold-call a stranger by guessing an ID
+          const me = (db.users || []).find((u: any) => String(u.id) === callerUser);
+          if (!me) return res.status(401).json({ error: 'This account no longer exists. Please sign in again.' });
+          if (me.isBlocked) return res.status(403).json({ error: 'Your account is suspended.' });
+          const target = (db.users || []).find((u: any) => String(u.id) === cleanTarget);
+          if (!target) return res.status(404).json({ error: 'User not found.' });
+          if (target.isBlocked) return res.status(403).json({ error: 'This user account is suspended.' });
+          if (target.allowVoiceCall === false) return res.status(403).json({ error: 'This user has disabled voice and video calls.' });
+          const pairId = [callerUser, cleanTarget];
+          const sharesThread = (db.conversations || []).some((c: any) => {
+            const parts = Array.isArray(c?.participants) ? c.participants.map(String) : [];
+            return parts.length === 2 && pairId.every((id) => parts.includes(id));
+          }) || (db.messages || []).some((m: any) => {
+            const ids = [String(m.senderId || ''), String(m.recipientId || '')];
+            return pairId.every((id) => ids.includes(id));
+          }) || ((db.conversations || []).some((c: any) => String(c?.id || '') === `CONV-${callerUser}-${cleanTarget}` || String(c?.id || '') === `CONV-${cleanTarget}-${callerUser}`));
+          if (!sharesThread) {
+            return res.status(403).json({ error: 'You can only call a user after you have chatted with each other. Send a message first.' });
+          }
+          deliverToUser = cleanTarget;
         }
       } else if (isAdmin) {
         const user = (db.users || []).find((u: any) => String(u.id) === cleanTarget);

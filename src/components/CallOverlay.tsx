@@ -31,9 +31,29 @@ interface PeerInfo {
   name: string;
 }
 
+// Fallback only: STUN alone cannot connect two phones behind carrier NAT/CGNAT
+// (the call rings and never connects on mobile data). The server hands out the
+// real list — including a TURN relay when one is configured — via /api/rtc/ice.
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }
 ];
+
+let iceServersCache: RTCIceServer[] | null = null;
+async function loadIceServers(): Promise<RTCIceServer[]> {
+  if (iceServersCache) return iceServersCache;
+  try {
+    const res = await fetch('/api/rtc/ice', { headers: BoostPayStore.authHeaders() });
+    if (res.ok) {
+      const data = await res.json().catch(() => null);
+      const servers = data && Array.isArray(data.iceServers) && data.iceServers.length ? data.iceServers : null;
+      if (servers) {
+        iceServersCache = servers as RTCIceServer[];
+        return iceServersCache;
+      }
+    }
+  } catch { /* offline: keep the STUN fallback */ }
+  return ICE_SERVERS;
+}
 
 function fmtDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -132,6 +152,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const srcNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const ring = useRingtone();
+  const startedAtRef = useRef(0);
 
   // Keep refs in sync with state for handlers created once
   useEffect(() => { peerRef.current = peer; }, [peer]);
@@ -178,6 +199,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
     }
     cleanupMedia();
     answeredRef.current = false;
+    startedAtRef.current = 0;
     iAmCallerRef.current = false;
     callIdRef.current = '';
     pendingOfferRef.current = null;
@@ -246,8 +268,11 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
     }
   }, [speakerOn, applyAudioRoute]);
 
-  const setupPeerConnection = useCallback((stream: MediaStream) => {
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const setupPeerConnection = useCallback(async (stream: MediaStream) => {
+    const iceServers = await loadIceServers();
+    // A stale call may have finished while we were fetching the config
+    try { pcRef.current?.close(); } catch { /* noop */ }
+    const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 4, bundlePolicy: 'max-bundle' });
     pcRef.current = pc;
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
     pc.onicecandidate = (e) => {
@@ -292,6 +317,38 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
     };
     pc.oniceconnectionstatechange = onNet;
     pc.onconnectionstatechange = onNet;
+    // Watchdog: if media has still not connected a few seconds after both sides
+    // agreed (typical on mobile data with no relay available), restart ICE once
+    // and tell the user instead of leaving them on a silent "connected" screen.
+    const watchdog = window.setInterval(() => {
+      if (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        window.clearInterval(watchdog);
+        return;
+      }
+      if (!answeredRef.current) return;
+      if (Date.now() - startedAtRef.current < 10000) return;
+      window.clearInterval(watchdog);
+      setNetStatus('reconnecting');
+      try { pc.restartIce(); } catch { /* older browser */ }
+      if (iAmCallerRef.current && pc.signalingState === 'stable') {
+        pc.createOffer({ iceRestart: true }).then((o) => pc.setLocalDescription(o)).then(() => {
+          if (pc.localDescription?.sdp) {
+            return BoostPayStore.sendCallSignal(peerRef.current.id, {
+              kind: 'offer',
+              callId: callIdRef.current,
+              media: callMediaRef.current,
+              sdp: pc.localDescription.sdp
+            });
+          }
+          return undefined;
+        }).catch(() => { /* next attempt happens on the ICE failure event */ });
+      }
+      setError('Still connecting… weak network. Hold on, or try again on Wi-Fi.');
+      window.setTimeout(() => setError(''), 6000);
+    }, 2000);
+    pc.addEventListener('connectionstatechange', () => {
+      if (pc.connectionState === 'connected' || pc.connectionState === 'failed') window.clearInterval(watchdog);
+    });
     return pc;
   }, []);
 
@@ -319,7 +376,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
     callIdRef.current = 'CALL-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e6).toString(36);
     try {
       const stream = await getLocalStream(wantMedia === 'video');
-      const pc = setupPeerConnection(stream);
+      const pc = await setupPeerConnection(stream);
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await BoostPayStore.sendCallSignal(peerId, {
@@ -355,7 +412,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
       const wantVideo = offer.media === 'video';
       setMedia(offer.media);
       const stream = await getLocalStream(wantVideo);
-      const pc = setupPeerConnection(stream);
+      const pc = await setupPeerConnection(stream);
       await pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
       for (const c of pendingIceRef.current) {
         try { await pc.addIceCandidate(c); } catch { /* stale candidate */ }
@@ -369,6 +426,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
         sdp: answer.sdp
       });
       answeredRef.current = true;
+      startedAtRef.current = Date.now();
       setStartedAt(Date.now());
       setPhase('active');
       setNetStatus('ok');
@@ -548,6 +606,7 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
               pendingIceRef.current = [];
             }
             answeredRef.current = true;
+            startedAtRef.current = Date.now();
             setStartedAt(Date.now());
             setPhase('active');
             setNetStatus('ok');
