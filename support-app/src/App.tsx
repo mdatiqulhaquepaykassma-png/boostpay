@@ -10,6 +10,7 @@ import {
   type SupportConversation,
   type SupportMessage,
 } from './api';
+import { currentSubscription, disablePush, enablePush, permissionState, pushSupported, refreshPushSilently, sendTestPush } from './push';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -180,6 +181,123 @@ function Bubble({ msg, mine }: { msg: SupportMessage; mine: boolean }) {
         )}
         <div className={`mt-1 text-right text-[10px] ${mine ? 'text-zinc-800/70' : 'text-zinc-500'}`}>{clock(msg.timestamp)}</div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Notification opt-in (push works with the app closed)
+// ---------------------------------------------------------------------------
+function NotificationBanner() {
+  const [state, setState] = useState<'loading' | 'unsupported' | 'off' | 'on' | 'denied'>(() =>
+    pushSupported() ? 'loading' : 'unsupported'
+  );
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!pushSupported()) return setState('unsupported');
+      if (permissionState() === 'denied') return setState('denied');
+      const sub = await currentSubscription();
+      if (!alive) return;
+      setState(sub ? 'on' : 'off');
+      // keeps the server copy fresh across app updates / device changes
+      if (sub) void refreshPushSilently();
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (state === 'loading' || state === 'unsupported') return null;
+
+  const turnOn = async () => {
+    setBusy(true);
+    setNote('');
+    try {
+      const res = await enablePush();
+      if (res === 'granted') {
+        setState('on');
+        setNote('Notifications on — this device now gets alerts with the app closed.');
+      } else if (res === 'denied') {
+        setState('denied');
+        setNote('Blocked. Allow notifications for this site in your browser settings, then reload.');
+      } else {
+        setState('off');
+      }
+    } catch (err: any) {
+      setNote(err?.message || 'Could not turn notifications on.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const turnOff = async () => {
+    setBusy(true);
+    setNote('');
+    try {
+      await disablePush();
+      setState('off');
+      setNote('Notifications turned off for this device.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const test = async () => {
+    setBusy(true);
+    setNote('');
+    try {
+      const n = await sendTestPush();
+      setNote(`Test sent to ${n} device${n === 1 ? '' : 's'}. Lock the phone to see it arrive.`);
+    } catch (err: any) {
+      setNote(err?.message || 'Test failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (state === 'on') {
+    return (
+      <div className="mx-4 mt-3 rounded-2xl border border-emerald-500/30 bg-emerald-950/30 px-3 py-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[11px] font-semibold text-emerald-300">🔔 Notifications are on</p>
+          <div className="flex gap-2">
+            <button onClick={test} disabled={busy} className="rounded-lg border border-emerald-500/40 px-2 py-1 text-[10px] font-semibold text-emerald-200 disabled:opacity-50">
+              Send test
+            </button>
+            <button onClick={turnOff} disabled={busy} className="rounded-lg border border-zinc-700 px-2 py-1 text-[10px] font-semibold text-zinc-300 disabled:opacity-50">
+              Turn off
+            </button>
+          </div>
+        </div>
+        {note && <p className="mt-1 text-[10px] text-emerald-200/80">{note}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-4 mt-3 rounded-2xl border border-amber-500/40 bg-amber-950/25 px-3 py-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[11px] font-bold text-amber-300">Get alerts when the app is closed</p>
+          <p className="text-[10px] leading-snug text-amber-200/80">
+            {state === 'denied'
+              ? 'Notifications are blocked for this site — allow them in browser settings.'
+              : 'A user message will buzz this phone even if the console is closed.'}
+          </p>
+        </div>
+        <button
+          onClick={turnOn}
+          disabled={busy || state === 'denied'}
+          className="shrink-0 rounded-xl bg-amber-500 px-3 py-2 text-[11px] font-bold text-zinc-950 disabled:opacity-50"
+        >
+          {busy ? '…' : 'Turn on'}
+        </button>
+      </div>
+      {note && <p className="mt-1 text-[10px] text-amber-200/80">{note}</p>}
     </div>
   );
 }
@@ -384,6 +502,8 @@ export default function App() {
       </header>
 
       {error && <p className="mx-4 mt-3 rounded-xl border border-red-500/30 bg-red-950/40 px-3 py-2 text-[11px] text-red-200">{error}</p>}
+
+      <NotificationBanner />
 
       {loading && threads.length === 0 && <p className="px-4 py-8 text-center text-xs text-zinc-500">Loading messages…</p>}
 

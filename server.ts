@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import nodemailer from 'nodemailer';
 import QRCode from 'qrcode';
+import webpush from 'web-push';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -261,6 +262,101 @@ function pushToAgent(agentId: string, event: Record<string, any>) {
       try { client.res.write(payload); } catch { agentSseClients.delete(clientId); }
     }
   }
+}
+
+// ===========================================================================
+// Web Push — notifications that arrive while the app is CLOSED
+// ---------------------------------------------------------------------------
+// A service worker alone cannot wake a closed app; the browser's push service
+// has to do it. Each device subscribes once (PushManager + VAPID) and the
+// subscription is stored on the account that owns it:
+//   db.pushSubscriptions = [{ id, ownerType: 'ADMIN'|'USER', ownerId, subscription, createdAt, ua }]
+// VAPID keys: env override (VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY) or generated
+// once and kept in the state document (db.pushKeys) so they survive redeploys —
+// subscribers stay valid as long as the key pair does not change.
+// ===========================================================================
+let pushReady = false;
+let pushPublicKey = '';
+try {
+  const envPub = (process.env.VAPID_PUBLIC_KEY || '').trim();
+  const envPriv = (process.env.VAPID_PRIVATE_KEY || '').trim();
+  // Set from the first readDb() call (see ensureVapidKeys) — needs the document.
+  if (envPub && envPriv) {
+    webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:support@boostpay.online', envPub, envPriv);
+    pushPublicKey = envPub;
+    pushReady = true;
+  }
+} catch (e: any) {
+  console.error('[push] VAPID env setup failed:', String(e?.message || e));
+}
+
+function ensureVapidKeys(db: any): boolean {
+  if (pushReady) return true;
+  try {
+    let keys = db.pushKeys;
+    if (!keys || !keys.publicKey || !keys.privateKey) {
+      keys = webpush.generateVAPIDKeys();
+      db.pushKeys = { publicKey: keys.publicKey, privateKey: keys.privateKey, createdAt: Date.now() };
+      writeDb(db);
+      console.log('[push] generated a new VAPID key pair (stored in the state document)');
+    }
+    webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:support@boostpay.online', keys.publicKey, keys.privateKey);
+    pushPublicKey = keys.publicKey;
+    pushReady = true;
+    return true;
+  } catch (e: any) {
+    console.error('[push] could not initialise VAPID keys:', String(e?.message || e));
+    return false;
+  }
+}
+
+type PushOwner = { type: 'ADMIN' | 'USER'; id: string };
+
+function pushSubsFor(db: any, owner: PushOwner): any[] {
+  const all = Array.isArray(db.pushSubscriptions) ? db.pushSubscriptions : [];
+  return all.filter((r: any) => r && r.ownerType === owner.type && String(r.ownerId) === String(owner.id));
+}
+
+/** Fire-and-forget delivery. Dead endpoints (404/410) are dropped from the store. */
+function sendPushTo(db: any, owner: PushOwner, payload: { title: string; body: string; tag?: string; url?: string; data?: any }) {
+  if (!ensureVapidKeys(db)) return;
+  const subs = pushSubsFor(db, owner);
+  if (!subs.length) return;
+  const body = JSON.stringify({ ...payload, timestamp: Date.now() });
+  for (const rec of subs) {
+    try {
+      Promise.resolve(
+        webpush.sendNotification(rec.subscription, body, { TTL: 600, urgency: 'high' })
+      ).catch((err: any) => {
+        const code = Number(err?.statusCode || 0);
+        if (code === 404 || code === 410) {
+          // The browser dropped this subscription (app uninstalled, permission reset) — forget it.
+          try {
+            const doc = readDb();
+            const before = (doc.pushSubscriptions || []).length;
+            doc.pushSubscriptions = (doc.pushSubscriptions || []).filter((r: any) => r.id !== rec.id);
+            if (doc.pushSubscriptions.length !== before) writeDb(doc);
+          } catch { /* non-fatal */ }
+        } else {
+          console.warn('[push] delivery failed:', code || String(err?.message || err));
+        }
+      });
+    } catch (e: any) {
+      console.warn('[push] send threw:', String(e?.message || e));
+    }
+  }
+}
+
+/** Everyone who replies to users: support staff + superadmins. */
+function notifyAdminsPush(db: any, payload: { title: string; body: string; tag?: string; url?: string }) {
+  const all = Array.isArray(db.pushSubscriptions) ? db.pushSubscriptions : [];
+  const adminIds = new Set<string>();
+  for (const r of all) if (r && r.ownerType === 'ADMIN') adminIds.add(String(r.ownerId));
+  for (const id of adminIds) sendPushTo(db, { type: 'ADMIN', id }, payload);
+}
+
+function notifyUserPush(db: any, userId: string, payload: { title: string; body: string; tag?: string; url?: string }) {
+  sendPushTo(db, { type: 'USER', id: String(userId) }, payload);
 }
 
 function broadcastChatMessage(message: any, conversation: any) {
@@ -3788,6 +3884,34 @@ async function startServer() {
       // Instant SSE Broadcast to connected clients!
       broadcastChatMessage(newMsg, conv);
 
+      // Push notification (works with the app closed / phone locked).
+      //  · user -> support  => alert every subscribed support device
+      //  · support -> user  => alert that user's devices
+      try {
+        const dbPush = readDb();
+        const preview = newMsg.kind === 'photo' ? '📷 Photo'
+          : newMsg.kind === 'voice' ? '🎤 Voice message'
+          : newMsg.kind === 'file' ? '📎 File'
+          : String(newMsg.text || '').slice(0, 120);
+        if (String(cleanRecipient) === 'ADMIN_SUPPORT') {
+          notifyAdminsPush(dbPush, {
+            title: `New support message · User #${cleanSender}`,
+            body: preview,
+            tag: `support-${conv.id}`,
+            url: '/'
+          });
+        } else if (String(cleanSender) === 'ADMIN_SUPPORT') {
+          notifyUserPush(dbPush, String(cleanRecipient), {
+            title: 'BoostPay Support replied',
+            body: preview,
+            tag: `support-${conv.id}`,
+            url: '/'
+          });
+        }
+      } catch (e: any) {
+        console.warn('[push] chat notification skipped:', String(e?.message || e));
+      }
+
       res.json({
         success: true,
         message: newMsg,
@@ -3796,6 +3920,73 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // ---- Web Push: subscription management (staff + users) -------------------
+  // Public key is not a secret (it is handed to every browser that subscribes).
+  app.get('/api/push/key', (_req: any, res) => {
+    const db = readDb();
+    if (!ensureVapidKeys(db)) return res.status(503).json({ error: 'Push notifications are not available right now.' });
+    res.json({ publicKey: pushPublicKey });
+  });
+
+  app.post('/api/push/subscribe', requireUserOrAdmin, (req: any, res) => {
+    const sub = req.body && req.body.subscription;
+    if (!sub || !sub.endpoint || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+      return res.status(400).json({ error: 'A valid push subscription is required.' });
+    }
+    const owner: PushOwner | null = req.authAdmin
+      ? { type: 'ADMIN', id: String(req.authAdmin) }
+      : (req.authUserId ? { type: 'USER', id: String(req.authUserId) } : null);
+    if (!owner) return res.status(401).json({ error: 'Authentication required.' });
+    const db = readDb();
+    if (!ensureVapidKeys(db)) return res.status(503).json({ error: 'Push notifications are not available right now.' });
+    if (!Array.isArray(db.pushSubscriptions)) db.pushSubscriptions = [];
+    const endpoint = String(sub.endpoint);
+    const existing = db.pushSubscriptions.find((r: any) => r && r.subscription && r.subscription.endpoint === endpoint);
+    const record = {
+      id: existing ? existing.id : 'PUSH-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
+      ownerType: owner.type,
+      ownerId: owner.id,
+      subscription: { endpoint, keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) } },
+      createdAt: existing ? existing.createdAt : Date.now(),
+      updatedAt: Date.now(),
+      ua: String(req.headers['user-agent'] || '').slice(0, 200)
+    };
+    if (existing) Object.assign(existing, record);
+    else db.pushSubscriptions.unshift(record);
+    // keep the store bounded (oldest devices fall off first)
+    if (db.pushSubscriptions.length > 5000) db.pushSubscriptions.length = 5000;
+    writeDb(db);
+    res.json({ success: true, id: record.id, ownerType: owner.type });
+  });
+
+  app.post('/api/push/unsubscribe', requireUserOrAdmin, (req: any, res) => {
+    const endpoint = String((req.body && req.body.endpoint) || '');
+    if (!endpoint) return res.status(400).json({ error: 'endpoint is required.' });
+    const db = readDb();
+    const before = (db.pushSubscriptions || []).length;
+    db.pushSubscriptions = (db.pushSubscriptions || []).filter((r: any) => !(r && r.subscription && r.subscription.endpoint === endpoint));
+    writeDb(db);
+    res.json({ success: true, removed: before - db.pushSubscriptions.length });
+  });
+
+  // Test the whole chain from a phone (delivers only to the caller's devices).
+  app.post('/api/push/test', requireUserOrAdmin, (req: any, res) => {
+    const owner: PushOwner | null = req.authAdmin
+      ? { type: 'ADMIN', id: String(req.authAdmin) }
+      : (req.authUserId ? { type: 'USER', id: String(req.authUserId) } : null);
+    if (!owner) return res.status(401).json({ error: 'Authentication required.' });
+    const db = readDb();
+    const subs = pushSubsFor(db, owner);
+    if (!subs.length) return res.status(400).json({ error: 'No device is subscribed yet on this account.' });
+    sendPushTo(db, owner, {
+      title: 'BoostPay notifications are on',
+      body: 'This is a test from your console. Real alerts arrive even when the app is closed.',
+      tag: 'push-test',
+      url: '/'
+    });
+    res.json({ success: true, devices: subs.length });
   });
 
   // Serve attachment files from disk (auth: only participants can fetch)
