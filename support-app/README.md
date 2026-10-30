@@ -20,3 +20,4 @@ filtered out.
 
 No money logic, no user data beyond the support thread, and nothing is cached
 in the service worker except the app shell.
+
