@@ -85,3 +85,10 @@ PASS  self-call refused / unknown signal / missing target            400, 400, 4
 * `server.ts` — user→user কল অনুমোদন + গার্ড, `call-signal` লিমিট ৩০০/মিনিট, নতুন `/api/rtc/ice` (STUN/TURN কনফিগ)।
 * `src/components/CallOverlay.tsx` — ডাইনামিক ICE কনফিগ, connect ওয়াচডগ + auto ICE-restart, "Still connecting…" বার্তা।
 * টাকার হিসাব/boost/commission: **কোনো পরিবর্তন নেই**।
+
+---
+
+## ৬. ডিপ্লয়
+* Commit **`98453fa`** (non-force push → auto-deploy)। প্রোডাকশন API: **`v1.2.1793392516`**।
+* যাচাই (read-only): `/api/rtc/ice` এখন লগইন ছাড়া `{"error":"Authentication required…"}` দেয় (আগে SPA HTML) · কন্টেইনারে নতুন কোড আছে (`server.ts`-এ user→user গার্ড ও `/api/rtc/ice`) · ইউজার বান্ডল `index-R1buO0M9.js`-এ নতুন ICE কনফিগ কল আছে · সাতটি Swarm সার্ভিস **1/1**।
+* প্রোডাকশনে কোনো কল/ডেটা লেখা হয়নি (standing rule) — আসল কল টেস্ট আপনার ফোনে।
