@@ -657,6 +657,56 @@ export const CallManager: FC<{ currentUser: { id: string }; senderRole?: 'USER' 
     return unsub;
   }, [phase, ring, finishCall, applyAudioRoute, performVideoUpgrade]);
 
+  // ------------------- INCOMING CALL WHILE THE APP WAS CLOSED ---------------
+  // The push notification opens /?call=<id>&from=<id>. The offer itself was kept
+  // server-side (SSE events do not reach a closed app), so it is fetched here and
+  // the normal incoming-call UI takes over from that point.
+  const pickUpPendingCall = useCallback(async () => {
+    if (phase !== 'idle') return;
+    try {
+      const res = await fetch('/api/chat/call-pending', { headers: BoostPayStore.authHeaders() });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      const call = data && data.call;
+      if (!call || !call.sdp || !call.callId) return;
+      if (Date.now() - Number(call.at || 0) > 90000) return;
+      const fromId = String(call.from || '');
+      pendingOfferRef.current = {
+        sdp: String(call.sdp),
+        media: call.media === 'video' ? 'video' : 'audio',
+        callId: String(call.callId),
+        from: fromId
+      };
+      callIdRef.current = String(call.callId);
+      iAmCallerRef.current = false;
+      answeredRef.current = false;
+      const name = /^AGT-/i.test(fromId)
+        ? `Agent ${fromId}`
+        : fromId === 'ADMIN_SUPPORT' ? 'BoostPay Support' : `User #${fromId}`;
+      setPeer({ id: fromId, name });
+      setMedia(call.media === 'video' ? 'video' : 'audio');
+      setPhase('incoming');
+      setError('');
+      ring.startRingtone();
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = window.setTimeout(() => {
+        pendingOfferRef.current = null;
+        ring.stop();
+        setPhase('idle');
+      }, 45000);
+    } catch { /* non-fatal: the caller's ring simply times out */ }
+  }, [phase, ring]);
+
+  useEffect(() => {
+    // 1) cold start straight from the notification tap (?call=...)
+    // 2) coming back to the app later (visibility change)
+    const url = new URL(window.location.href);
+    if (url.searchParams.get('call')) void pickUpPendingCall();
+    const onVisible = () => { if (document.visibilityState === 'visible') void pickUpPendingCall(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [pickUpPendingCall]);
+
   // Start-call request from anywhere in the app
   useEffect(() => {
     const handler = (e: Event) => {

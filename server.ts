@@ -325,7 +325,7 @@ function pushSubsFor(db: any, owner: PushOwner): any[] {
 }
 
 /** Fire-and-forget delivery. Dead endpoints (404/410) are dropped from the store. */
-function sendPushTo(db: any, owner: PushOwner, payload: { title: string; body: string; tag?: string; url?: string; data?: any }) {
+function sendPushTo(db: any, owner: PushOwner, payload: { title: string; body: string; tag?: string; url?: string; kind?: string; callId?: string; from?: string; media?: string; data?: any }) {
   if (!ensureVapidKeys(db)) return;
   const subs = pushSubsFor(db, owner);
   if (!subs.length) return;
@@ -2718,7 +2718,10 @@ async function startServer() {
       const sig = String((req.query && (req.query as any).t) || '');
       if (fid && sig && sig === signAttachmentId(fid)) return next();
     }
-    if (String(req.path || '') === '/call-signal') return requireUserAdminOrAgent(req, res, next);
+    // Calls are signalled and picked up by all three clients (user, agent, admin),
+    // so both call routes share the multi-role guard.
+    const chatSub = String(req.path || '');
+    if (chatSub === '/call-signal' || chatSub === '/call-pending') return requireUserAdminOrAgent(req, res, next);
     return requireUserOrAdmin(req, res, next);
   });
   app.use('/api/sync', requireUserOrAdmin);
@@ -4120,6 +4123,39 @@ async function startServer() {
     'video-request', 'video-accept', 'video-decline', 'video-cancel'
   ];
   /**
+   * Pending incoming call for the signed-in account (if any).
+   * Used when the app was closed: the notification tap opens the app, which asks
+   * here for the offer it missed. Anything older than 90 s is ignored.
+   */
+  app.get('/api/chat/call-pending', requireUserAdminOrAgent, (req: any, res) => {
+    try {
+      const me = String(req.authAgentId || req.authUserId || '');
+      const myType = req.authAgentId ? 'AGENT' : 'USER';
+      if (!me) return res.json({ success: true, call: null });
+      const db = readDb();
+      const nowMs = Date.now();
+      const call = (db.pendingCalls || [])
+        .filter((c: any) => c && String(c.to) === me && String(c.toRole) === myType && nowMs - Number(c.at || 0) < 90000)
+        .sort((a: any, b: any) => Number(b.at) - Number(a.at))[0];
+      if (!call) return res.json({ success: true, call: null });
+      res.json({
+        success: true,
+        call: {
+          callId: call.callId,
+          from: call.from,
+          fromRole: call.fromRole,
+          media: call.media === 'video' ? 'video' : 'audio',
+          sdp: call.sdp,
+          at: call.at,
+          ageMs: nowMs - Number(call.at || 0)
+        }
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
    * ICE configuration for WebRTC calls.
    * STUN alone only works when both phones can reach each other directly; on
    * mobile data (carrier NAT / CGNAT) that fails, so the call rings and never
@@ -4191,6 +4227,10 @@ async function startServer() {
         deliverToUser = cleanTarget;
       } else if (callerUser) {
         // ── User calling / answering an agent ───────────────────────────────
+        if (cleanTarget === 'ADMIN_SUPPORT') {
+          // The support mailbox is a console, not a phone number. Staff call out.
+          return res.status(403).json({ error: 'BoostPay Support cannot be called directly — send a message and staff will call you back.' });
+        }
         if (targetIsAgent) {
           const agent = (db.agents || []).find((a: any) => String(a.id) === cleanTarget);
           if (!agent) return res.status(404).json({ error: 'Agent not found.' });
@@ -4255,6 +4295,58 @@ async function startServer() {
       };
       if (deliverToAgent) pushToAgent(deliverToAgent, outgoing);
       if (deliverToUser) pushToUser(deliverToUser, outgoing);
+
+      // ── Ring a phone whose app is closed ────────────────────────────────
+      // The SSE event above only reaches an OPEN app. An offer therefore used to
+      // vanish if the callee's app was closed ("missed call, no notification").
+      // The offer is now kept for 90 s so the app can pick it up when the user
+      // taps the notification, and a Web Push is sent right away.
+      try {
+        const calleeType = deliverToAgent ? 'AGENT' : (deliverToUser ? 'USER' : '');
+        const calleeId = deliverToAgent || deliverToUser;
+        if (calleeType && calleeId) {
+          const dbCall = readDb();
+          if (!Array.isArray(dbCall.pendingCalls)) dbCall.pendingCalls = [];
+          const nowMs = Date.now();
+          dbCall.pendingCalls = dbCall.pendingCalls.filter((c: any) => c && nowMs - Number(c.at || 0) < 90000);
+          if (kind === 'offer') {
+            dbCall.pendingCalls = dbCall.pendingCalls.filter((c: any) => !(String(c.callId) === String(signal.callId)));
+            dbCall.pendingCalls.push({
+              callId: String(signal.callId || ''),
+              from: outgoing.from,
+              fromRole: outgoing.fromRole,
+              to: String(calleeId),
+              toRole: calleeType,
+              media: signal.media === 'video' ? 'video' : 'audio',
+              sdp: typeof signal.sdp === 'string' ? signal.sdp.slice(0, 60000) : '',
+              at: nowMs
+            });
+            writeDb(dbCall);
+            const callerLabel = outgoing.fromRole === 'AGENT'
+              ? `Agent #${outgoing.from}`
+              : outgoing.fromRole === 'ADMIN' ? 'BoostPay Support' : `User #${outgoing.from}`;
+            const payload: any = {
+              title: signal.media === 'video' ? `📹 Incoming video call` : `📞 Incoming voice call`,
+              body: `${callerLabel} is calling you — tap to answer.`,
+              tag: `call-${String(signal.callId || '')}`,
+              url: `/?call=${encodeURIComponent(String(signal.callId || ''))}&from=${encodeURIComponent(String(outgoing.from))}&media=${signal.media === 'video' ? 'video' : 'audio'}`,
+              kind: 'incoming_call',
+              callId: String(signal.callId || ''),
+              from: String(outgoing.from || ''),
+              media: signal.media === 'video' ? 'video' : 'audio'
+            };
+            if (calleeType === 'AGENT') notifyAgentPush(dbCall, String(calleeId), payload);
+            else notifyUserPush(dbCall, String(calleeId), payload);
+          } else if (['answer', 'reject', 'cancel', 'hangup'].includes(kind)) {
+            const before = dbCall.pendingCalls.length;
+            dbCall.pendingCalls = dbCall.pendingCalls.filter((c: any) => String(c.callId) !== String(signal.callId));
+            if (dbCall.pendingCalls.length !== before) writeDb(dbCall);
+          }
+        }
+      } catch (e: any) {
+        console.warn('[call] pending/push hook skipped:', String(e?.message || e));
+      }
+
       res.json({ success: true, delivered: deliverToAgent ? 'AGENT' : 'USER' });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

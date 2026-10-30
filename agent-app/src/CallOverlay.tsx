@@ -497,6 +497,48 @@ export const AgentCallManager: FC<{ agentId: string; onChatWake?: () => void }> 
   }, [phase, media]);
 
   // ------------------------- SIGNAL HANDLING -------------------------
+  // ------------------- INCOMING CALL WHILE THE APP WAS CLOSED ---------------
+  // The push notification opens /?call=<id>; the offer was kept server-side
+  // because SSE events never reach a closed app.
+  const pickUpPendingCall = useCallback(async () => {
+    if (phase !== 'idle') return;
+    try {
+      const res = await fetch('/api/chat/call-pending', { headers: { Authorization: `Bearer ${agentToken()}` } });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => null);
+      const call = data && data.call;
+      if (!call || !call.sdp || !call.callId) return;
+      if (Date.now() - Number(call.at || 0) > 90000) return;
+      pendingOfferRef.current = {
+        sdp: String(call.sdp),
+        media: call.media === 'video' ? 'video' : 'audio',
+        callId: String(call.callId),
+        from: String(call.from || '')
+      };
+      callIdRef.current = String(call.callId);
+      iAmCallerRef.current = false;
+      answeredRef.current = false;
+      setPeer({ id: String(call.from || ''), name: `User #${call.from}` });
+      setMedia(call.media === 'video' ? 'video' : 'audio');
+      setPhase('incoming');
+      setError('');
+      ring.startRingtone();
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      timeoutRef.current = window.setTimeout(() => {
+        pendingOfferRef.current = null;
+        ring.stop();
+        setPhase('idle');
+      }, 45000);
+    } catch { /* non-fatal */ }
+  }, [phase, ring]);
+
+  useEffect(() => {
+    if (new URL(window.location.href).searchParams.get('call')) void pickUpPendingCall();
+    const onVisible = () => { if (document.visibilityState === 'visible') void pickUpPendingCall(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [pickUpPendingCall]);
+
   useEffect(() => {
     const unsub = onAgentCallSignal(({ from, signal }) => {
       const kind = String(signal?.kind || '');
