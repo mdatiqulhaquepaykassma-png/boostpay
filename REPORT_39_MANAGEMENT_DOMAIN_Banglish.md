@@ -63,3 +63,22 @@ Google-এর পাবলিক DNS-এ `management.boostpay.online` এখন�
 - 관리 hosgulo **DNS-only**, তাই Cloudflare-এর WAF/DDoS শিল্ড এদের ওপরে নেই (মূল ডোমেইন আর ইউজার অ্যাপে আছে)। 대신 সার্ভারের নিজের লগইন সুরক্ষা (rate limit + IP auto-block) কাজ করছে।
 - চাইলে পরের ধাপে: **Cloudflare Origin CA সার্টিফিকেট** নিয়ে এদের আবার proxied করা যাবে (তখন WAF + IP গোপন থাকবে) — এর জন্য টোকেনে `SSL and Certificates: Edit` পারমিশন লাগবে, অথবা ড্যাশবোর্ড → SSL/TLS → Origin Server → Create Certificate।
 - আরও শক্ত করতে চাইলে **Cloudflare Access** দিয়ে admin/management-এ ইমেইল-OTP লগইন বসানো যায় — বললে করে দেব।
+
+---
+
+## ৭. সংযোজন (একই দিনে) — `management.agent.boostpay.online`-ও চালু
+
+আপনি এই লিঙ্কটা দিলেন, তাই আলাদা করে দেখলাম: **Traefik-এ হোস্টটা আগে থেকেই কনফিগার করা ছিল এবং সার্ভারে ওই নামের বৈধ Let's Encrypt সার্টিফিকেটও ছিল** (`subject=CN=management.agent.boostpay.online`, issuer `YR2`) — শুধু **Cloudflare-এ DNS রেকর্ডটাই ছিল না**। রেকর্ড যোগ করলাম (DNS-only, কারণ proxied হলে সার্ট রিনিউ করার সময় আবার HTTP-01 ভাঙবে)।
+
+**ফল:** `https://management.agent.boostpay.online/` → **২০০**, `<title>BoostPay Management</title>`, `/api/health` ঠিক, লগইন রুট কাজ করছে (ভুল পাসওয়ার্ডে ৪০১), বান্ডল ২৮৭ KB লোড হচ্ছে। Google DNS-এও এখন `72.60.42.18` দেখাচ্ছে।
+
+### এখন ম্যানেজমেন্টের ৩টি ঠিকানা চলে
+
+| ঠিকানা | অবস্থা | মন্তব্য |
+|---|---|---|
+| `management.boostpay.online` | ২০০ | **সুপারিশকৃত** (সংক্ষিপ্ত, ব্র্যান্ড-ক্লিন) |
+| `management.agent.boostpay.online` | ২০০ | Dokploy-র আগের হোস্ট, এখন DNS থাকায় চলে |
+| `management.72-60-42-18.sslip.io` | ২০০ | ফলব্যাক |
+
+⚠️ **একটা জরুরি কথা:** ব্রাউজারে প্রতিটি হোস্ট আলাদা `localStorage` — তাই এক ঠিকানায় লগইন করলে অন্য ঠিকানায় লগইন থাকে না। বিভ্রান্তি এড়াতে **একটাই ঠিকানা সবাইকে দিন** (`management.boostpay.online`)।
+চাইলে বাকি দুটোকে ৩০১-রিডাইরেক্ট করে দিতে পারি — বললে Traefik-এ ২ মিনিটের কাজ; তখন শুধু ওই এক ঠিকানাতেই সবাই ঢুকবে।
