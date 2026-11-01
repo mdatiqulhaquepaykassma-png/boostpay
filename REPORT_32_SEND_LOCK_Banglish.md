@@ -361,3 +361,31 @@ Hold $10 মানে — **ওই $10 আটকে থাকবে, বাক�
 
 * ব্যাকএন্ডে কোনো পরিবর্তন নেই — এনফোর্সমেন্ট আগের মতোই (`/api/user/send-to-agent`)। শুধু ইউজার-ইন্টারফেসের নোটিশের জায়গা বদলেছে।
 * `tsc` + `vite build` ক্লিন।
+
+---
+
+# ১৩. 🎯 Sent Money Lock-এর নোটিশও এখন শুধু **Send** চাপলে
+
+আপনার নির্দেশ: *"শুধু Send চাপলে দেখাতে চাই"* — ঠিক pay-an-agent-এর মতোই করা হয়েছে।
+
+## কী সরানো হয়েছে
+* **Wallet / Available Balance-এর নিচের কমলা নোটিশ** (sent money hold) — সম্পূর্ণ বাদ (`sendLock` প্রপ ও কোড দুটোই মুছে দেওয়া হয়েছে)।
+* এখন **হোম, ওয়ালেট, চ্যাট, boost — কোথাও কোনো লক-নোটিশ নেই**।
+
+## এখন কী হবে
+ইউজার **Send Money** খুলে টাকার অ্যামাউন্ট ও Recipient দিয়ে **"Send Money"** চাপলে —
+* full lock: *"Sending money is temporarily locked on your account by support. Receiving money still works — please contact support."*
+* amount hold: *"$10.00 of your balance is temporarily held by support. You can send up to $X right now."*
+* hold পুরো ব্যালেন্স ঢেকে থাকলে: *"$10.00 is temporarily held on your account by support, which currently covers your whole balance. You cannot send money right now."*
+* নোটিশটা **Send বাটনের ঠিক উপরে** কমলা রঙে (🔒) আসে, আর টাকা যায় না (সার্ভারেও ব্লক)।
+* অ্যামাউন্ট বা Recipient বদলালে নোটিশটা নিজে থেকেই মুছে যায়।
+
+## এখন লকের নোটিশ কোথায় কোথায় দেখা যায়
+| জায়গা | নোটিশ |
+|---|---|
+| Wallet / Home / Chat / Boost | ❌ কোনো নোটিশ নেই |
+| Send Money চাপলে (ব্লক হলে) | ✅ কমলা নোটিশ |
+| Pay an Agent চাপলে (ব্লক হলে) | ✅ কমলা নোটিশ |
+
+* ব্যাকএন্ড অপরিবর্তিত — `/api/transfer` ও `/api/user/send-to-agent` আগের মতোই কড়াভাবে চেক করে (অ্যাপ বাইপাস অসম্ভব)।
+* `tsc` + `vite build` ক্লিন; হুক অর্ডার ঠিক রাখতে নতুন `useEffect` মডালের early-return-এর **আগে** বসানো হয়েছে।

@@ -24,6 +24,9 @@ export const P2PTransferModal: FC<Props> = ({
   const [recipientId, setRecipientId] = useState('');
   const [amount, setAmount] = useState('');
   const [error, setError] = useState('');
+  // Admin "sent money" hold — shown ONLY when the user taps Send (owner request:
+  // no standing notice anywhere else in the app).
+  const [lockNotice, setLockNotice] = useState('');
   const [step, setStep] = useState<'INPUT' | 'SUCCESS'>('INPUT');
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -49,6 +52,16 @@ export const P2PTransferModal: FC<Props> = ({
     onClose();
   };
 
+  // Reading the admin hold the server put on this account (not shown up-front).
+  const sendLock = ((currentUser as any)?.sendLock || null) as
+    | { full?: boolean; amount?: number; sendable?: number }
+    | null;
+  const lockHeld = Number(sendLock?.amount || 0);
+  const lockFull = !!sendLock?.full;
+  const lockCap = typeof sendLock?.sendable === 'number' ? sendLock.sendable : null;
+
+  useEffect(() => { setLockNotice(''); }, [amount, recipientId]);
+
   if (!isOpen) return null;
 
   const isBoostActive = currentUser.boostState.isActive && !currentUser.boostState.isPaused;
@@ -56,6 +69,7 @@ export const P2PTransferModal: FC<Props> = ({
   const handleExecuteTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setLockNotice('');
 
     // Check if boost is running
     if (isBoostActive) {
@@ -63,9 +77,21 @@ export const P2PTransferModal: FC<Props> = ({
       return;
     }
 
+    if (lockFull) {
+      setLockNotice('Sending money is temporarily locked on your account by support. Receiving money still works — please contact support.');
+      return;
+    }
+
     const numAmount = parseFloat(amount);
     if (isNaN(numAmount) || numAmount < 0.1) {
       setError('Minimum transfer is 0.1 — enter at least 0.10');
+      return;
+    }
+
+    if (lockCap !== null && numAmount > lockCap) {
+      setLockNotice(lockCap > 0
+        ? `$${lockHeld.toFixed(2)} of your balance is temporarily held by support. You can send up to $${lockCap.toFixed(2)} right now.`
+        : `$${lockHeld.toFixed(2)} is temporarily held on your account by support, which currently covers your whole balance. You cannot send money right now. Please contact support.`);
       return;
     }
 
@@ -238,6 +264,13 @@ export const P2PTransferModal: FC<Props> = ({
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-base font-mono text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
               />
             </div>
+
+            {lockNotice && (
+              <p className="flex items-start gap-1.5 rounded-lg bg-orange-500/10 border border-orange-500/40 p-2.5 text-[11px] text-orange-200 font-semibold">
+                <span className="mt-[1px] leading-none">🔒</span>
+                <span className="min-w-0 break-words">{lockNotice}</span>
+              </p>
+            )}
 
             {error && (
               <p className="rounded-lg bg-red-950/40 border border-red-500/30 p-2.5 text-xs text-red-400 font-medium">
