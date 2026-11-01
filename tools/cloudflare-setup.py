@@ -117,7 +117,7 @@ DESIRED_SETTINGS = {
     'tls_1_3': 'on',
     'http3': 'on',
     'brotli': 'on',
-    'zero_rtt': 'off',                  # 0-RTT replay risk on POST /api/*
+    '0rtt': 'off',                      # 0-RTT replay risk on POST /api*
     'rocket_loader': 'off',             # ← breaks React apps, must stay OFF
     'websockets': 'on',                 # calls need it
     'browser_cache_ttl': 0,             # respect origin headers (we set immutable ourselves)
