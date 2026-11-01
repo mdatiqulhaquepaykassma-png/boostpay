@@ -1226,6 +1226,10 @@ export const SmtpAdminView: FC = () => {
  */
 export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  // Master switch: when false the console asks for no authenticator code at all.
+  const [globalEnabled, setGlobalEnabled] = useState<boolean>(true);
+  const [switchCode, setSwitchCode] = useState('');
+  const [switchBusy, setSwitchBusy] = useState(false);
   const [statusError, setStatusError] = useState('');
   const [secret, setSecret] = useState('');
   const [otpauth, setOtpauth] = useState('');
@@ -1246,10 +1250,39 @@ export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
     const st = await BoostPayStore.adminMfaStatus();
     setEnabled(st.enabled);
     setLegacy(st.legacy);
+    setGlobalEnabled(st.globalEnabled !== false);
     setStatusError(st.enabled === null ? (st.error || 'Could not read MFA status') : '');
   }, []);
 
   useEffect(() => { refreshStatus(); }, [refreshStatus]);
+
+  /**
+   * Master switch. Turning MFA off while an authenticator exists needs the current
+   * 6-digit code (server checks it too); turning it back on never needs a code.
+   */
+  const setMfaEverywhere = async (next: boolean) => {
+    const needsCode = !next && enabled !== false;
+    if (needsCode && switchCode.replace(/[^0-9]/g, '').length !== 6) {
+      setError('Enter the 6-digit code from your authenticator to switch MFA off.');
+      return;
+    }
+    if (!next && !window.confirm('Turn MFA OFF for the whole admin console?\n\nTreasury credit/debit, freeze, delete, backup restore and DB Studio writes will work with the admin password only. Every action is still written to the audit log.')) return;
+    setSwitchBusy(true); setError(''); setOk('');
+    try {
+      const r = await BoostPayStore.adminSetMfaPolicy(next, needsCode ? switchCode.trim() : undefined);
+      if (!r.success) { setError(r.error || 'Could not change MFA.'); return; }
+      setGlobalEnabled(r.globalEnabled !== false);
+      setSwitchCode('');
+      setOk(next
+        ? (r.needsSetup
+            ? 'MFA is ON — but no authenticator is set up yet, so sensitive actions are blocked until you scan the QR below.'
+            : 'MFA is ON — sensitive actions ask for your 6-digit code again.')
+        : 'MFA is OFF — every admin action now works with the admin session only. All actions stay in the audit log.');
+      refreshStatus();
+    } catch (e: any) {
+      setError(e?.message || 'Could not change MFA.');
+    } finally { setSwitchBusy(false); }
+  };
 
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -1325,6 +1358,60 @@ export const AdminMfaView: FC<{ myEmail: string }> = ({ myEmail }) => {
                      : enabled ? 'border-zinc-700 bg-zinc-800 text-zinc-300'
                                : 'border-amber-500/40 bg-amber-500/10 text-amber-300'
         }`}>{statusPill}</span>
+      </div>
+
+      {/* ── Master switch: MFA fully on / fully off ─────────────────────── */}
+      <div className={`rounded-2xl border p-3 sm:p-4 space-y-3 ${
+        globalEnabled ? 'border-emerald-500/30 bg-emerald-500/[0.06]' : 'border-red-500/40 bg-red-500/10'
+      }`}>
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-[11px] font-bold text-white flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 shrink-0" /> MFA for the whole console
+            </p>
+            <p className="text-[10.5px] text-zinc-400 mt-0.5 leading-relaxed">
+              {globalEnabled
+                ? 'ON — treasury, freeze, delete, restore and DB Studio ask for your 6-digit code.'
+                : 'OFF — those actions work with your admin session only. Nothing asks for a code.'}
+            </p>
+          </div>
+          <span className={`shrink-0 rounded-lg border px-2.5 py-1 text-[10px] font-black ${
+            globalEnabled
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+              : 'border-red-500/50 bg-red-500/15 text-red-300'
+          }`}>{globalEnabled ? 'MFA ON' : 'MFA OFF'}</span>
+        </div>
+
+        {globalEnabled && enabled !== false && (
+          <div>
+            <label className="block text-[10px] font-mono text-zinc-500 mb-1">6-digit code (needed to switch off)</label>
+            <input
+              inputMode="numeric"
+              value={switchCode}
+              onChange={(e) => setSwitchCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))}
+              placeholder="••••••"
+              className="w-full min-h-[44px] rounded-xl border border-zinc-800 bg-zinc-900 px-3 text-center text-lg font-mono tracking-[0.3em] text-zinc-100 focus:border-orange-500 focus:outline-none"
+            />
+          </div>
+        )}
+
+        <button
+          onClick={() => setMfaEverywhere(!globalEnabled)}
+          disabled={switchBusy}
+          className={`w-full min-h-[44px] rounded-xl text-xs font-bold px-3 disabled:opacity-50 ${
+            globalEnabled
+              ? 'border border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20'
+              : 'bg-emerald-500 text-zinc-950 hover:bg-emerald-400'
+          }`}
+        >
+          {switchBusy ? 'Saving…' : globalEnabled ? 'Turn MFA OFF (no codes anywhere)' : 'Turn MFA ON (ask for code again)'}
+        </button>
+
+        <p className="text-[10px] leading-relaxed text-zinc-500">
+          {globalEnabled
+            ? 'Switching off needs one current code, so a stolen admin session cannot disable 2FA silently. Send-money and Pay-an-Agent locks never ask for a code either way.'
+            : '⚠️ Anyone who gets into this console can move money while MFA is off — consider turning it back on when you finish. Every change is written to the audit log (MFA_POLICY).'}
+        </p>
       </div>
 
       {enabled === null && (

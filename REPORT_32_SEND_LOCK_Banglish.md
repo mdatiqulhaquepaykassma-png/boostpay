@@ -197,3 +197,58 @@ RESULT 21 pass / 0 fail
 
 ## ⚠️ ছোট নোট
 * এই কাজের টেস্টের সময় লোকাল ওয়ার্কস্পেসের ডেভ-ডেটাবেস (`data/boostpay_db.json`) টেস্ট ইউজার দিয়ে বদলে গিয়েছিল (ফাইলটা gitignored, রিপোতে যায় না)। **প্রোডাকশন ডেটাবেস কিছুই হয়নি** — সেখানে কোনো লেখা/টেস্ট চালানো হয়নি।
+
+---
+
+# ৯. 🆕 MFA — পুরোটা OFF / ON করার সুইচ
+
+আপনার নির্দেশ: **"mfa fully disable / enable er system"**। এখন কনসোলের ভেতরেই একটা মাস্টার সুইচ — এক ট্যাপে MFA পুরো বন্ধ, আরেক ট্যাপে আবার চালু।
+
+## কোথায়
+**Admin → Admins → Two-Factor Authentication (MFA)** কার্ডের সবচেয়ে উপরে নতুন ব্লক — **"MFA for the whole console"**:
+* সবুজ পিল = **MFA ON** → ট্রেজারি credit/debit, freeze, delete, backup restore, DB Studio write — সব ৬ ডিজিটের কোড চায় (আগের মতোই)।
+* লাল পিল = **MFA OFF** → কোনো কোড চায় না; শুধু লগইন করা অ্যাডমিন সেশন দিয়েই সব কাজ। বাটন: **"Turn MFA OFF (no codes anywhere)"**।
+* **MFA OFF অবস্থায় পুরো কনসোলের উপরে একটা লাল ব্যানার** থাকে — *"🔓 MFA is OFF — treasury, freeze, delete and DB writes run without a code"* + এক ট্যাপে Admins ট্যাবে নিয়ে যায়। যাতে ভুলে না যান।
+
+## কীভাবে কাজ করে
+| অবস্থা | কী হয় |
+|---|---|
+| **ON** (ডিফল্ট) | treasury, freeze, delete, backup restore, DB Studio → ৬ ডিজিটের কোড / ৫ মিনিটের unlock বাধ্যতামূলক |
+| **OFF** | এগুলোর কিছুই কোড চায় না — শুধু SUPERADMIN সেশন |
+| **সবসময়** | Send Money Lock ও Pay an Agent Lock — কোনোটাতেই কোড লাগে না (আগের নির্দেশ মতো) |
+
+* **বন্ধ করার সময় একটা সুরক্ষা:** আপনার ট্রুথেন্টিকেটর সেট থাকলে **একটা চলমান ৬-ডিজিটের কোড লাগবে** (অথবা ৫ মিনিটের unlock টোকেন)। কারণটা পরিষ্কার — কেউ আপনার অ্যাডমিন সেশন চুরি করলেও চুপচাপ 2FA বন্ধ করতে পারবে না। অথেন্টিকেটর সেট না থাকলে কিছু প্রমাণ করার নেই, তাই সোজা বন্ধ হয়ে যায়।
+* **চালু করার সময় কোড লাগে না** (বন্ধ থাকা অবস্থায় দাবি করার কিছু নেই)। তবে চালু করার সময় অথেন্টিকেটর সেট না থাকলে কনসোল বলে দেবে *"no authenticator is set up yet — scan the QR below"*।
+* **পুরোনো ডেটাবেস নিরাপদ:** ফিল্ডটা না থাকলে ডিফল্ট = **ON**। অর্থাৎ কোনো ডেটাবেস আপডেট ছাড়াই MFA আগের মতোই কড়া থাকে।
+* 🔒 প্রতিটা বদল **audit log**-এ: `MFA_POLICY → "Global MFA DISABLED/ENABLED by <email>"`।
+* অ্যাডমিন ছাড়া কেউ এই সুইচ ছুঁতে পারে না — রোল SUPERADMIN, আর মফা সুইচে ইউজার টোকেন দিলে **401**।
+* **ফোন হারালে কী করবেন?** কোড ছাড়া বন্ধ করা যাবে না — তখন VPS-এ `/home/user/.../data/.admin-mfa.json` ফাইলটা সরিয়ে দিলে সিক্রেট মুছে যায় (অথবা Admins → *Generate new secret* দিয়ে নতুন QR)। এই কারণেই অন্য কোনো তালা এখানে নেই।
+
+## যাচাই — **১৬/১৬ PASS** (`/tmp/mfa_switch_test.cjs`)
+
+```
+PASS  default policy = MFA ON (পুরোনো কড়া আচরণ অটুট)
+PASS  treasury blocked before setup (428)
+PASS  authenticator set up (codeSample issued)
+PASS  switching OFF without a code is refused (401 + mfaCodeRequired)
+PASS  wrong code refused
+PASS  switching OFF with the right code works
+PASS  status reports globalEnabled=false
+PASS  treasury credit works with NO code (was 428)
+PASS  freeze works with NO code
+PASS  config write works with NO code
+PASS  DB Studio rows read works with NO code
+PASS  a normal user still cannot touch the policy (401)
+PASS  send-money lock still needs no MFA (unchanged)
+PASS  switching ON needs no code
+PASS  treasury is guarded again (401 without a code)
+PASS  right code lets treasury through again
+RESULT 16 pass / 0 fail
+```
+আগের সব স্যুটও আবার চালানো হয়েছে — **২১/২১** (agent-lock), **২০/২০** (send-lock), **৯/৯** (MFA-মুক্ত লক)।
+
+## প্রযুক্তিগত
+* ফ্ল্যাগ: `db.config.mfaEnabled` (`false` = বন্ধ)। `adminMfaGlobalEnabled()` সব `requireMfa` গেটের শুরুতে চেক হয় — বন্ধ থাকলে `next()`; ভেতরের কোনো লজিক বদলায়নি।
+* নতুন রুট: `GET /api/admin/mfa/policy` (যেকোনো লগইন করা অ্যাডমিন, শুধু পড়া) এবং `POST /api/admin/mfa/policy` (`requireSuperAdmin`, body `{globalEnabled, mfaCode?}`)।
+* `GET /api/admin/mfa/status`-এ নতুন `globalEnabled` ও `guardsActive` ফিল্ড (পুরোনো ফিল্ড আগের মতোই আছে, তাই আগের UI ভাঙে না)।
+* store: `adminMfaPolicy()`, `adminSetMfaPolicy(enabled, code?)`; `adminAuthHeaders()` আগের মতোই কোড/টোকেন পাঠায়।

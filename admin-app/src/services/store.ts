@@ -922,14 +922,62 @@ export class BoostPayStore {
    * must not claim "not set up" in that case, it used to mislead admins into
    * rotating a working secret.
    */
-  static async adminMfaStatus(): Promise<{ enabled: boolean | null; email: string; legacy: boolean; error?: string }> {
+  static async adminMfaStatus(): Promise<{ enabled: boolean | null; email: string; legacy: boolean; globalEnabled: boolean; error?: string }> {
     try {
       const res = await fetch('/api/admin/mfa/status', { headers: this.adminAuthHeaders() });
       const data = await res.json().catch(() => ({}));
-      if (res.ok) return { enabled: !!data.enabled, email: String(data.email || ''), legacy: !!data.legacy };
-      return { enabled: null, email: '', legacy: false, error: data.error || `Status check failed (${res.status})` };
+      if (res.ok) {
+        return {
+          enabled: !!data.enabled,
+          email: String(data.email || ''),
+          legacy: !!data.legacy,
+          // Master switch: false → the console asks for no code at all.
+          globalEnabled: data.globalEnabled !== false
+        };
+      }
+      return { enabled: null, email: '', legacy: false, globalEnabled: true, error: data.error || `Status check failed (${res.status})` };
     } catch (e: any) {
-      return { enabled: null, email: '', legacy: false, error: String(e?.message || 'Network error') };
+      return { enabled: null, email: '', legacy: false, globalEnabled: true, error: String(e?.message || 'Network error') };
+    }
+  }
+
+  /** Global MFA switch state (any signed-in admin may read it). */
+  static async adminMfaPolicy(): Promise<{ globalEnabled: boolean; adminHasSecret: boolean; error?: string }> {
+    try {
+      const res = await fetch('/api/admin/mfa/policy', { headers: this.adminAuthHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return { globalEnabled: true, adminHasSecret: false, error: data.error || `Could not read MFA policy (${res.status})` };
+      return { globalEnabled: data.globalEnabled !== false, adminHasSecret: !!data.adminHasSecret };
+    } catch (e: any) {
+      return { globalEnabled: true, adminHasSecret: false, error: String(e?.message || 'Network error') };
+    }
+  }
+
+  /**
+   * Turns MFA fully OFF / ON for the whole console (SUPERADMIN).
+   * Switching it off while an authenticator exists needs the current 6-digit code.
+   */
+  static async adminSetMfaPolicy(
+    globalEnabled: boolean,
+    code?: string
+  ): Promise<{ success: boolean; globalEnabled?: boolean; needsSetup?: boolean; mfaCodeRequired?: boolean; error?: string }> {
+    try {
+      const res = await fetch('/api/admin/mfa/policy', {
+        method: 'POST',
+        headers: this.adminAuthHeaders(),
+        body: JSON.stringify({ globalEnabled, ...(code ? { mfaCode: code } : {}) })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return {
+          success: false,
+          mfaCodeRequired: !!data.mfaCodeRequired,
+          error: data.error || `Could not change MFA policy (${res.status})`
+        };
+      }
+      return { success: true, globalEnabled: data.globalEnabled !== false, needsSetup: !!data.needsSetup };
+    } catch (e: any) {
+      return { success: false, error: String(e?.message || 'Network error') };
     }
   }
 

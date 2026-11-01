@@ -5807,11 +5807,94 @@ async function startServer() {
     try {
       const email = String(req.authAdmin||'').toLowerCase();
       const secret = adminMfaSecrets.get(email) || (readDb().admins||[]).find((a:any)=> a.email===email)?.mfaSecret;
-      res.json({ success:true, email, enabled: !!secret, legacy: !!secret && isLegacyMfaSecret(String(secret)) });
+      res.json({
+        success: true,
+        email,
+        enabled: !!secret,
+        legacy: !!secret && isLegacyMfaSecret(String(secret)),
+        globalEnabled: adminMfaGlobalEnabled(),
+        guardsActive: adminMfaGlobalEnabled() && !!secret
+      });
     } catch (err:any) { res.status(500).json({ error: err.message }); }
   });
 
+
+  // Global MFA policy — any signed-in admin can read it, only a SUPERADMIN can change it.
+  app.get('/api/admin/mfa/policy', requireAdmin, (req:any,res)=>{
+    try {
+      const db:any = readDb();
+      const email = String(req.authAdmin||'').toLowerCase();
+      const secret = adminMfaSecrets.get(email) || (db.admins||[]).find((a:any)=> a.email===email)?.mfaSecret;
+      res.json({ success:true, email, globalEnabled: adminMfaGlobalEnabled(db), adminHasSecret: !!secret });
+    } catch (err:any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /**
+   * Turn MFA FULLY OFF or FULLY ON for the whole console.
+   *   off → treasury / freeze / delete / restore / DB Studio need only the admin
+   *         session (everything is still audit-logged)
+   *   on  → the strict TOTP behaviour comes back (5-minute unlock)
+   * Turning it OFF while this admin has an authenticator requires a current 6-digit
+   * code (or a live unlock token) so a hijacked session cannot silently disable 2FA.
+   * With no authenticator set up there is nothing to prove, so it just switches off.
+   */
+  app.post('/api/admin/mfa/policy', requireSuperAdmin, (req:any,res)=>{
+    try {
+      const body:any = req.body || {};
+      const db:any = readDb();
+      const email = String(req.authAdmin||'').toLowerCase();
+      const secret = adminMfaSecrets.get(email) || (db.admins||[]).find((a:any)=> a.email===email)?.mfaSecret;
+      const currently = adminMfaGlobalEnabled(db);
+      const target = body.globalEnabled === undefined ? !currently : !!body.globalEnabled;
+
+      if (target === false && currently && secret) {
+        const token = String(req.headers['x-mfa-token'] || body.mfaToken || '').trim();
+        const code = String(req.headers['x-mfa-code'] || body.mfaCode || '').trim();
+        let proven = false;
+        if (token) {
+          for (const w of [0,-1,1]) {
+            const expected = crypto.createHmac('sha256', API_SECRET).update(email+':'+String(Math.floor(Date.now()/300000)+w)).digest('hex').slice(0,16);
+            if (expected === token) { proven = true; break; }
+          }
+        }
+        if (!proven && verifyMfaCode(String(secret||''), code)) proven = true;
+        if (!proven) {
+          return res.status(401).json({
+            error: 'Enter your current 6-digit authenticator code to switch MFA off.',
+            mfaCodeRequired: true
+          });
+        }
+      }
+
+      if (!db.config) db.config = {} as any;
+      (db.config as any).mfaEnabled = target;
+      recordAuditLog(db, 'MFA_POLICY', email, `Global MFA ${target ? 'ENABLED' : 'DISABLED'} by ${email}`, 'system');
+      writeDb(db);
+      res.json({
+        success: true,
+        globalEnabled: target,
+        adminHasSecret: !!secret,
+        // When MFA is back on but no authenticator exists, the console must show setup.
+        needsSetup: target && !secret
+      });
+    } catch (err:any) { res.status(500).json({ error: err.message }); }
+  });
+
+  /**
+   * GLOBAL MFA SWITCH (owner request 2026-11-01).
+   * db.config.mfaEnabled === false  → every MFA gate in the console is off: treasury
+   * adjust, freeze, delete, backup restore and DB Studio writes run on the admin
+   * session alone. Anything else (missing / true) keeps the current mandatory TOTP
+   * behaviour, so an old database without the field stays locked down by default.
+   */
+  function adminMfaGlobalEnabled(db?: any): boolean {
+    const d = db || readDb();
+    return !(d && d.config && (d.config as any).mfaEnabled === false);
+  }
+
   function requireMfa(req:any,res:any,next:any){
+    // Master switch off → nothing to ask for. Every action is still audit-logged.
+    if (!adminMfaGlobalEnabled()) return next();
     const mfaCode = String(req.headers['x-mfa-code']|| req.body?.mfaCode || req.query?.mfaCode || '').trim();
     const mfaToken = String(req.headers['x-mfa-token']|| req.body?.mfaToken || '').trim();
     const email = String(req.authAdmin||'').toLowerCase();

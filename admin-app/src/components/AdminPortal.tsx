@@ -199,6 +199,19 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   // 2. Admin Portal Views
   const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'SMTP' | 'SETTINGS' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS' | 'AGENTS'>('OVERVIEW');
 
+  // MFA master switch (read once, refreshed when the tab changes) — drives the banner.
+  const [mfaOff, setMfaOff] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const pull = async () => {
+      const r = await BoostPayStore.adminMfaPolicy();
+      if (alive) setMfaOff(!r.globalEnabled);
+    };
+    if (BoostPayStore.getAdminSession()) void pull();
+    const t = setInterval(() => { if (BoostPayStore.getAdminSession()) void pull(); }, 60000);
+    return () => { alive = false; clearInterval(t); };
+  }, [activeTab]);
+
   // 3. Database Storage & Diagnostics State
   const [storageProbe, setStorageProbe] = useState<any>(null);
   const [isProbing, setIsProbing] = useState(false);
@@ -1292,6 +1305,16 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
       {/* Main Admin Content Body — polished spacing + max-width */}
       <style>{` .admin-tab-active { background: #f59e0b; color: #09090b; font-weight: 700; box-shadow: 0 4px 12px rgba(245,158,11,0.25); } `}</style>
       <main className="w-full max-w-7xl mx-auto p-3 sm:p-6 lg:p-8 space-y-4 sm:space-y-6 safe-pb pb-36 lg:pb-8">
+        {/* MFA master switch is OFF → say it on every page, not just in Settings */}
+        {mfaOff && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-300">
+            <span className="min-w-0">🔓 MFA is OFF — treasury, freeze, delete and DB writes run without a code. Turn it back on in <b>Admins → Two-Factor</b>.</span>
+            <button
+              onClick={() => setActiveTab('ADMINS')}
+              className="shrink-0 rounded-lg border border-red-500/50 px-2.5 py-1 text-[10px] font-bold text-red-200 hover:bg-red-500/20 cursor-pointer"
+            >Open</button>
+          </div>
+        )}
         {activeTab === 'AGENTS' && <AgentAdminView />}
         {activeTab === 'ANALYTICS' && <AnalyticsDashboard />}
         {activeTab === 'BROADCAST' && <BroadcastView />}
