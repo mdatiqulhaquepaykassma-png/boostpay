@@ -75,6 +75,9 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // Shown ONLY after the user taps Pay and an admin agent-payment hold blocks it
+  // (owner request: no standing notice anywhere else in the app).
+  const [lockNotice, setLockNotice] = useState('');
   const [receipt, setReceipt] = useState<{ amount: number; fee: number; total: number; agentId: string; txId: string; claimCode: string; payoutId: string; expiresAt: number; cancelled?: boolean } | null>(null);
   const [pending, setPending] = useState<Array<{ id: string; agentId: string; amount: number; fee: number; total: number; claimCode: string; expiresAt: number }>>([]);
   const [nowTs, setNowTs] = useState(Date.now());
@@ -193,6 +196,9 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
     return list.filter((a) => `${a.id} ${a.name || ''}`.toLowerCase().includes(query));
   }, [data, query]);
 
+  // Typing a new amount / picking another agent clears the previous lock notice.
+  useEffect(() => { setLockNotice(''); }, [amount, agentId, isOpen]);
+
   if (!isOpen) return null;
 
   const submit = async (e: React.FormEvent) => {
@@ -202,14 +208,15 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
     if (!/^\d+(\.\d{1,2})?$/.test(amount.trim())) { setError('Enter an amount with at most 2 decimals.'); return; }
     if (data && numAmount < data.minUserSend) { setError(`Minimum payment is ${data.minUserSend}.`); return; }
     if (data && numAmount > data.maxUserSend) { setError(`Maximum payment is ${data.maxUserSend}.`); return; }
+    setLockNotice('');
     if (agentFull) {
-      setError(agentCause === 'agent'
+      setLockNotice(agentCause === 'agent'
         ? 'Payments to an agent are temporarily locked on your account by support. Please contact support.'
         : 'Sending money is temporarily locked on your account by support. Please contact support.');
       return;
     }
     if (agentCap !== null && total > agentCap) {
-      setError(agentCause === 'agent'
+      setLockNotice(agentCause === 'agent'
         ? `$${agentHeld.toFixed(2)} of your balance is temporarily held for agent payments. You can still pay an agent up to $${agentCap.toFixed(2)}.`
         : `Only $${agentCap.toFixed(2)} of your balance can go to an agent right now — the rest is temporarily held by support.`);
       return;
@@ -556,27 +563,6 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                   </button>
                 ) : null}
 
-                {/* Admin temporary hold — same notice as the wallet, shown where the money leaves */}
-                {((agentFull || agentHeld > 0) && agentCause === 'agent') ? (
-                  <div className="rounded-2xl border border-orange-500/30 bg-orange-500/10 px-3 py-2.5">
-                    <div className="flex items-start gap-2">
-                      <span className="mt-0.5 text-[13px] leading-none">🔒</span>
-                      <div className="min-w-0">
-                        <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-orange-300">
-                          {agentFull ? 'Agent payments locked' : 'Agent payments held by support'}
-                        </div>
-                        <div className="mt-0.5 text-[10px] leading-relaxed text-orange-200/90">
-                          {agentFull
-                            ? 'You cannot pay an agent right now. Receiving money still works — contact support for details.'
-                            : `$${agentHeld.toFixed(2)} of your balance is held for agent payments. ${(agentCap ?? 0) > 0
-                                ? `You can still pay an agent up to $${(agentCap ?? 0).toFixed(2)} (boost rules still apply).`
-                                : 'That covers your whole balance, so agent payments are blocked — contact support.'}`}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-
                 {/* Available Boosted Withdraw — only boost-earned dollars can go out via an agent */}
                 <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5">
                   <div className="flex items-start justify-between gap-2">
@@ -640,6 +626,13 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                   <div className="flex items-start gap-2 rounded-2xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-[10px] text-zinc-400">
                     <AlertTriangle className="mt-0.5 w-3.5 h-3.5 shrink-0 text-amber-400" />
                     <span>Agent receives the full ${numAmount.toFixed(2)}. The ${fee.toFixed(2)} fee is charged to you. Ask the agent for the cash handover before confirming.</span>
+                  </div>
+                ) : null}
+
+                {lockNotice ? (
+                  <div className="flex items-start gap-2 rounded-2xl border border-orange-500/40 bg-orange-500/10 px-3 py-2.5 text-[11px] font-semibold text-orange-200">
+                    <span className="mt-[1px] text-[13px] leading-none">🔒</span>
+                    <span className="min-w-0 break-words">{lockNotice}</span>
                   </div>
                 ) : null}
 

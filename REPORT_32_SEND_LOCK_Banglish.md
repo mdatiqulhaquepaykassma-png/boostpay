@@ -336,3 +336,28 @@ RESULT 11 pass / 0 fail
 
 ## মনে রাখবেন (সেমান্টিক্স)
 Hold $10 মানে — **ওই $10 আটকে থাকবে, বাকিটা যাবে**। অর্থাৎ ব্যালেন্স $100 হলে ইউজার $90 পর্যন্ত পাঠাতে পারবে, আর $10 পাঠানো স্বাভাবিকভাবেই **অনুমোদিত**। যদি চান hold-এর সমান বা তার বেশি কোনো পাঠানোই না হোক (অর্থাৎ "$10 hold মানে $10 পাঠানো বন্ধ" — আলাদা হিসাব), বলবেন, সেটাও করে দেব।
+
+---
+
+# ১২. 🎯 Pay an Agent Lock-এর নোটিশ এখন শুধু **Pay চাপলে**
+
+আপনার নির্দেশ: *"pay an agent lock er only pay te click korle notice asbe, baki sob jaygar notice remove kore dan."* — করা হয়েছে।
+
+## কী সরানো হয়েছে
+* **Wallet / Available Balance-এর নিচের গোলাপি নোটিশ** (agent hold) — সম্পূর্ণ বাদ। ওই কম্পোনেন্ট থেকে `agentLock` প্রপ ও কোড মুছে দেওয়া হয়েছে, তাই আর কোথাও ওই লাইন আসতে পারে না।
+* **Pay an Agent স্ক্রিনে খোলার সাথে সাথে দেখানো কমলা ব্যানার** — বাদ।
+
+## এখন কী হবে
+1. ইউজার **Pay an Agent** খুলবে → কোনো নোটিশ নেই, স্বাভাবিক স্ক্রিন।
+2. এজেন্ট বেছে অ্যামাউন্ট লিখে **"Pay $X to agent"** চাপবে →
+   * লক থাকলে বাটনের ঠিক উপরে কমলা নোটিশ আসবে:
+     * *"$10.00 of your balance is temporarily held for agent payments. You can still pay an agent up to $X."*
+     * full lock হলে: *"Payments to an agent are temporarily locked on your account by support. Please contact support."*
+     * Sent Money hold-এর কারণে হলে: *"Only $X of your balance can go to an agent right now — the rest is temporarily held by support."*
+   * পেমেন্ট যাবে না (সার্ভারেও ব্লক — অ্যাপ বাইপাস অসম্ভব)।
+3. অ্যামাউন্ট বদলালে বা অন্য এজেন্ট বাছলে নোটিশটা নিজে থেকেই মুছে যায়।
+
+> ⚠️ **Sent Money Lock-এর নোটিশ অপরিবর্তিত** — ওটা wallet-এ আগের মতোই থাকে (আপনি শুধু pay-an-agent-এর নোটিশ সরাতে বলেছিলেন)। চাইলে ওটাও একইভাবে সরিয়ে দিতে পারি।
+
+* ব্যাকএন্ডে কোনো পরিবর্তন নেই — এনফোর্সমেন্ট আগের মতোই (`/api/user/send-to-agent`)। শুধু ইউজার-ইন্টারফেসের নোটিশের জায়গা বদলেছে।
+* `tsc` + `vite build` ক্লিন।
