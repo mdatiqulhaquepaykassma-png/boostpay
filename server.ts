@@ -1480,9 +1480,26 @@ function verifyToken(token: unknown): { sub: string; role: string; exp: number; 
   }
 }
 
+/**
+ * Cloudflare in front of us (2026-11-02 prep): once `boostpay.online` is proxied,
+ * every request reaches the origin from a Cloudflare edge IP, so `req.ip` is the
+ * edge, not the user. Antifraud auto-block and login-spam counters are per-IP —
+ * with all users sharing a handful of edge IPs a single abuser would block the
+ * whole country. `cf-connecting-ip` carries the real client IP; Cloudflare strips
+ * any client-supplied copy, so it is safe to trust **only when the operator turns
+ * this on** (TRUST_CF_IP=1, set when the proxy is live). Default OFF = today's
+ * behaviour, byte for byte.
+ */
+const TRUST_CF_IP = ['1', 'true', 'yes'].includes(String(process.env.TRUST_CF_IP || '').toLowerCase());
+const IP_LIKE = /^[0-9a-fA-F:.]{3,45}$/;
+
 function clientIp(req: any): string {
   // Behind trusted proxy (app.set trust proxy 1) Express populates req.ip correctly
   // Fallback to x-forwarded-for only if we trust proxy, otherwise socket IP
+  if (TRUST_CF_IP) {
+    const cf = req.headers && (req.headers['cf-connecting-ip'] || req.headers['true-client-ip']);
+    if (typeof cf === 'string' && IP_LIKE.test(cf.trim())) return cf.trim();
+  }
   try {
     const trustedIp = (req as any).ip;
     if (trustedIp && typeof trustedIp === 'string' && trustedIp !== '::1' && trustedIp !== '127.0.0.1') return trustedIp;
