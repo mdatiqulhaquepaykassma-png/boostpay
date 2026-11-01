@@ -568,7 +568,9 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                         <div className="mt-0.5 text-[10px] leading-relaxed text-orange-200/90">
                           {agentFull
                             ? 'You cannot pay an agent right now. Receiving money still works — contact support for details.'
-                            : `$${agentHeld.toFixed(2)} of your balance is held for agent payments. You can still pay an agent up to $${(agentCap ?? 0).toFixed(2)} (boost rules still apply).`}
+                            : `$${agentHeld.toFixed(2)} of your balance is held for agent payments. ${(agentCap ?? 0) > 0
+                                ? `You can still pay an agent up to $${(agentCap ?? 0).toFixed(2)} (boost rules still apply).`
+                                : 'That covers your whole balance, so agent payments are blocked — contact support.'}`}
                         </div>
                       </div>
                     </div>

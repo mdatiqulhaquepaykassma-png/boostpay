@@ -2007,6 +2007,8 @@ function containsSpamLink(text: string): boolean {
  * Receiving, boosting and admin adjustments are never blocked.
  */
 const lockMoney = (n: any) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+/** Upper bound for a temporary hold — guards against typos / absurd values. */
+const MAX_LOCK_AMOUNT = 1e9;
 
 /**
  * Two INDEPENDENT temporary holds an admin can put on one user:
@@ -2025,7 +2027,10 @@ function lockOf(u: any, key: LockKey): LockView {
   const balance = lockMoney(Number(u && u.balance) || 0);
   if (mode === 'full') return { full: true, amount: balance, note: String(raw.note || ''), setAt: Number(raw.setAt) || 0 };
   if (mode === 'amount') {
-    const amount = lockMoney(Math.max(0, Math.min(Number(raw.amount) || 0, balance)));
+    // The hold is NOT capped at the current balance: an admin can park e.g. $50 on an
+    // account that holds $0 today so nothing can leave as soon as money arrives
+    // (owner request 2026-11-01). sendable = max(0, balance - amount).
+    const amount = lockMoney(Math.max(0, Math.min(Number(raw.amount) || 0, MAX_LOCK_AMOUNT)));
     if (amount > 0) return { full: false, amount, note: String(raw.note || ''), setAt: Number(raw.setAt) || 0 };
   }
   return { full: false, amount: 0, note: '', setAt: 0 };
@@ -2067,6 +2072,7 @@ function sendLockError(u: any): string {
   const lock = sendLockOf(u);
   if (lock.full) return 'Sending money is temporarily locked on this account by administration. Please contact support.';
   const left = sendableBalance(u);
+  if (left <= 0) return `$${lock.amount.toFixed(2)} is temporarily held on this account by administration, which currently covers your whole balance. You cannot send money right now. Please contact support.`;
   return `$${lock.amount.toFixed(2)} of your balance is temporarily held by administration. You can send up to $${left.toFixed(2)} right now.`;
 }
 
@@ -2076,6 +2082,7 @@ function agentLockError(u: any): string {
   const lock = agentLockOf(u);
   if (info.cause === 'agent') {
     if (lock.full) return 'Payments to an agent are temporarily locked on this account by administration. Please contact support.';
+    if (info.cap <= 0) return `$${lock.amount.toFixed(2)} is temporarily held for agent payments on this account, which currently covers your whole balance. You cannot pay an agent right now. Please contact support.`;
     return `$${lock.amount.toFixed(2)} of your balance is temporarily held for agent payments. You can still pay an agent up to $${info.cap.toFixed(2)}.`;
   }
   if (info.full) return 'Sending money is temporarily locked on this account by administration. Please contact support.';
@@ -6124,9 +6131,9 @@ async function startServer() {
       } else {
         const amount = round2(Number(body.amount) || 0);
         if (!(amount > 0)) return res.status(400).json({ error: 'Enter a lock amount greater than 0.' });
-        if (amount > round2(Number(user.balance) || 0)) {
-          return res.status(400).json({ error: `Lock amount cannot exceed the user's balance ($${round2(Number(user.balance) || 0).toFixed(2)}).` });
-        }
+        if (amount > MAX_LOCK_AMOUNT) return res.status(400).json({ error: 'Lock amount is too large.' });
+        // Allowed even when the balance is smaller (e.g. $0 today): the held amount
+        // simply keeps everything blocked until the balance grows past it.
         user.sendLock = {
           mode: 'amount',
           amount,
@@ -6190,9 +6197,8 @@ async function startServer() {
       } else {
         const amount = round2(Number(body.amount) || 0);
         if (!(amount > 0)) return res.status(400).json({ error: 'Enter a lock amount greater than 0.' });
-        if (amount > round2(Number(user.balance) || 0)) {
-          return res.status(400).json({ error: `Lock amount cannot exceed the user's balance ($${round2(Number(user.balance) || 0).toFixed(2)}).` });
-        }
+        if (amount > MAX_LOCK_AMOUNT) return res.status(400).json({ error: 'Lock amount is too large.' });
+        // A hold above the current balance is allowed on purpose (see the send lock).
         user.agentLock = {
           mode: 'amount',
           amount,

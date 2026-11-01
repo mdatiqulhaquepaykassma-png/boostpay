@@ -2088,7 +2088,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     balance={Number(selectedUser.balance) || 0}
                     lock={(selectedUser as any).sendLock}
                     sendable={(selectedUser as any).sendableBalance}
-                    onChanged={() => { void refreshData(true); }}
+                    onChanged={(updated?: any) => {
+                      // Apply the server's copy instantly so the Manage sheet never
+                      // shows stale hold numbers, then refresh the list in background.
+                      if (updated) {
+                        setSelectedUser((curr: any) => (curr && String(curr.id) === String(updated.id) ? { ...curr, ...updated } : curr));
+                        setUsers((prev: any[]) => prev.map((u: any) => (String(u.id) === String(updated.id) ? { ...u, ...updated } : u)));
+                      }
+                      void refreshData(true);
+                    }}
                   />
 
                   {/* Operation 5: Pay an Agent Lock (independent temporary hold) */}
@@ -2099,7 +2107,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     balance={Number(selectedUser.balance) || 0}
                     lock={(selectedUser as any).agentLock}
                     sendable={(selectedUser as any).agentSendable}
-                    onChanged={() => { void refreshData(true); }}
+                    onChanged={(updated?: any) => {
+                      // Apply the server's copy instantly so the Manage sheet never
+                      // shows stale hold numbers, then refresh the list in background.
+                      if (updated) {
+                        setSelectedUser((curr: any) => (curr && String(curr.id) === String(updated.id) ? { ...curr, ...updated } : curr));
+                        setUsers((prev: any[]) => prev.map((u: any) => (String(u.id) === String(updated.id) ? { ...u, ...updated } : u)));
+                      }
+                      void refreshData(true);
+                    }}
                   />
                 </div>
               </div>
@@ -2180,7 +2196,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           balance={Number(selectedUser.balance) || 0}
                           lock={(selectedUser as any).sendLock}
                           sendable={(selectedUser as any).sendableBalance}
-                          onChanged={() => { void refreshData(true); }}
+                          onChanged={(updated?: any) => {
+                      // Apply the server's copy instantly so the Manage sheet never
+                      // shows stale hold numbers, then refresh the list in background.
+                      if (updated) {
+                        setSelectedUser((curr: any) => (curr && String(curr.id) === String(updated.id) ? { ...curr, ...updated } : curr));
+                        setUsers((prev: any[]) => prev.map((u: any) => (String(u.id) === String(updated.id) ? { ...u, ...updated } : u)));
+                      }
+                      void refreshData(true);
+                    }}
                         />
                         <SendLockCard
                           key={`agentlock-mobile-${selectedUser.id}`}
@@ -2189,7 +2213,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           balance={Number(selectedUser.balance) || 0}
                           lock={(selectedUser as any).agentLock}
                           sendable={(selectedUser as any).agentSendable}
-                          onChanged={() => { void refreshData(true); }}
+                          onChanged={(updated?: any) => {
+                      // Apply the server's copy instantly so the Manage sheet never
+                      // shows stale hold numbers, then refresh the list in background.
+                      if (updated) {
+                        setSelectedUser((curr: any) => (curr && String(curr.id) === String(updated.id) ? { ...curr, ...updated } : curr));
+                        setUsers((prev: any[]) => prev.map((u: any) => (String(u.id) === String(updated.id) ? { ...u, ...updated } : u)));
+                      }
+                      void refreshData(true);
+                    }}
                         />
                         <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
                           <div className="text-xs font-bold text-white mb-2 flex items-center gap-2"><PlusCircle className="w-4 h-4 text-emerald-400" /> Treasury — Credit / Debit</div>

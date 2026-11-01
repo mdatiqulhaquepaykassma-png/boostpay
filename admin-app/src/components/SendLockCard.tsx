@@ -28,7 +28,8 @@ export function SendLockCard({
   lock?: { mode: LockMode; amount: number; note?: string; setAt?: number };
   sendable?: number;
   kind?: 'send' | 'agent';
-  onChanged?: () => void;
+  /** Called with the server's own copy of the user after every change. */
+  onChanged?: (updatedUser?: any) => void;
 }) {
   const isAgent = kind === 'agent';
   const title = isAgent ? 'Pay an Agent Lock' : 'Sent Money Lock';
@@ -40,10 +41,23 @@ export function SendLockCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [ok, setOk] = useState('');
+  // The server's answer for this user — the card shows these numbers instead of the
+  // (possibly stale) row the parent passed in, so "did it work?" is always visible.
+  const [serverLock, setServerLock] = useState<{ mode: LockMode; amount: number; note?: string; setAt?: number } | null>(null);
+  const [serverSendable, setServerSendable] = useState<number | null>(null);
 
-  const current: LockMode = (lock && lock.mode) || 'off';
-  const held = current === 'off' ? 0 : Number(lock?.amount || 0);
-  const canSend = typeof sendable === 'number' ? sendable : Math.max(0, (Number(balance) || 0) - held);
+  // Whichever copy is newer wins (the server's answer right after a change, the
+  // parent's row after a list refresh).
+  const live = (serverLock && (!lock || (Number(serverLock.setAt) || 0) >= (Number(lock.setAt) || 0))) ? serverLock : lock;
+  const current: LockMode = (live && live.mode) || 'off';
+  const held = current === 'off' ? 0 : Number(live?.amount || 0);
+  const canSend = Math.max(
+    0,
+    typeof serverSendable === 'number'
+      ? serverSendable
+      : (typeof sendable === 'number' ? sendable : (Number(balance) || 0) - held)
+  );
+  const balanceTooLow = held > (Number(balance) || 0);
 
   useEffect(() => {
     setAmount('');
@@ -51,6 +65,8 @@ export function SendLockCard({
     setError('');
     setOk('');
     setMode('amount');
+    setServerLock(null);
+    setServerSendable(null);
   }, [userId, kind]);
 
   const post = async (payload: Record<string, any>, okText: string) => {
@@ -62,10 +78,21 @@ export function SendLockCard({
         ? await BoostPayStore.adminSetAgentLock(userId, payload as any)
         : await BoostPayStore.adminSetSendLock(userId, payload as any);
       if (!res.success) throw new Error(res.error || 'Could not save the lock.');
-      setOk(okText);
+      // Show the server's own numbers immediately (parent refresh may lag behind).
+      const updated: any = (res as any).user || null;
+      const saved: any = (updated && (isAgent ? updated.agentLock : updated.sendLock)) || (res as any).sendLock || (res as any).agentLock || null;
+      if (saved) setServerLock({ mode: saved.mode, amount: Number(saved.amount) || 0, note: saved.note, setAt: Number(saved.setAt) || Date.now() });
+      const cap = (updated ? (isAgent ? updated.agentSendable : updated.sendableBalance) : null) ?? (res as any).sendableBalance ?? (res as any).agentSendable;
+      if (typeof cap === 'number') setServerSendable(cap);
+      // Say what the SERVER now holds, so a hold can never look like it "did nothing".
+      setOk(
+        saved && typeof cap === 'number'
+          ? `${okText} Server confirms: held $${(Number(saved.amount) || 0).toFixed(2)} · can still ${isAgent ? 'pay an agent' : 'send'} $${Number(cap).toFixed(2)}.`
+          : okText
+      );
       setAmount('');
       setNote('');
-      onChanged?.();
+      onChanged?.(updated);
     } catch (e: any) {
       setError(e?.message || 'Could not save the lock.');
     } finally {
@@ -80,11 +107,14 @@ export function SendLockCard({
       setError('Enter a lock amount greater than 0.');
       return;
     }
-    if (value > (Number(balance) || 0)) {
-      setError(`Lock amount cannot exceed the balance ($${(Number(balance) || 0).toFixed(2)}).`);
-      return;
-    }
-    return post({ mode: 'amount', amount: value, note }, `$${value.toFixed(2)} held — the rest can still go out (${channel}).`);
+    // A hold larger than the balance is allowed on purpose: it keeps the account
+    // blocked until the balance grows past the held amount.
+    return post(
+      { mode: 'amount', amount: value, note },
+      value > (Number(balance) || 0)
+        ? `$${value.toFixed(2)} held — that is more than the current balance ($${(Number(balance) || 0).toFixed(2)}), so nothing can ${channel} until the balance grows past it.`
+        : `$${value.toFixed(2)} held — the rest can still go out (${channel}).`
+    );
   };
 
   return (
@@ -107,6 +137,11 @@ export function SendLockCard({
           <span>Can still {isAgent ? 'pay an agent' : 'send'}</span>
           <span className={canSend > 0 ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>${canSend.toFixed(2)}</span>
         </div>
+        {current !== 'off' && balanceTooLow && (
+          <div className="text-[10px] text-amber-300 break-words">
+            Hold is larger than the balance — everything stays blocked until the balance grows past ${held.toFixed(2)}.
+          </div>
+        )}
         {current !== 'off' && (
           <div className="flex justify-between text-zinc-500">
             <span>Status</span>
@@ -150,7 +185,8 @@ export function SendLockCard({
             className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 font-mono focus:border-orange-500 focus:outline-none"
           />
           <p className="mt-1 text-[10px] text-zinc-500">
-            Only this amount is blocked — the remaining ${Math.max(0, (Number(balance) || 0) - (Number(amount) || 0)).toFixed(2)} can still be used to {channel}.
+            Only this amount is blocked. With a balance of ${(Number(balance) || 0).toFixed(2)} the user could still ${channel}
+            ${Math.max(0, (Number(balance) || 0) - (Number(amount) || 0)).toFixed(2)} — a bigger hold simply blocks everything.
           </p>
         </div>
       )}

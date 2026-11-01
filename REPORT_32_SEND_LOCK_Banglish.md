@@ -252,3 +252,46 @@ RESULT 16 pass / 0 fail
 * নতুন রুট: `GET /api/admin/mfa/policy` (যেকোনো লগইন করা অ্যাডমিন, শুধু পড়া) এবং `POST /api/admin/mfa/policy` (`requireSuperAdmin`, body `{globalEnabled, mfaCode?}`)।
 * `GET /api/admin/mfa/status`-এ নতুন `globalEnabled` ও `guardsActive` ফিল্ড (পুরোনো ফিল্ড আগের মতোই আছে, তাই আগের UI ভাঙে না)।
 * store: `adminMfaPolicy()`, `adminSetMfaPolicy(enabled, code?)`; `adminAuthHeaders()` আগের মতোই কোড/টোকেন পাঠায়।
+
+---
+
+# ১০. 🔧 ফিক্স — "amount hold কাজ করছে না" + ব্যালেন্স না থাকলেও hold
+
+## কারণ ১ (আসল সমস্যা): ব্যালেন্সের চেয়ে বড় hold দিলে সার্ভার **শুরু থেকেই বাতিল** করত
+আগের কোডে ছিল `amount > balance` হলে **400 "Lock amount cannot exceed the user's balance"**। অর্থাৎ যাদের ব্যালেন্স কম বা $0, তাদের ওপর hold বসাতেই যেত না — তাই মনে হয়েছে "hold কাজ করছে না"। এখন **যেকোনো অ্যামাউন্ট hold করা যাবে**, ব্যালেন্স যতই হোক।
+
+## কারণ ২ (ভুল ধারণা তৈরি করত): কার্ডের সংখ্যা আপডেট হচ্ছিল না
+hold বসানোর পরে `Manage` শিটে **Held / Can still send** পুরোনো সংখ্যা দেখাত (পেছনের লিস্ট রিফ্রেশ হলেও খোলা শিটটা হচ্ছিল না)। ফলে মনে হতো কিছুই হয়নি। এখন:
+* সার্ভারের দেওয়া উত্তর দিয়েই কার্ড সাথে সাথে আপডেট হয় (Held / Can still send / Status)।
+* সফল মেসেজেও এখন সার্ভারের নিশ্চয়তা লেখা থাকে — **"Server confirms: held $50.00 · can still send $0.00."**
+
+## নতুন নিয়ম
+| ইনপুট | আগে | এখন |
+|---|---|---|
+| Hold $50, ব্যালেন্স $0 | ❌ 400 বাতিল | ✅ সেভ হয়, `Can still send $0` — টাকা ঢুকলেও hold পার না হওয়া পর্যন্ত যাবে না |
+| Hold $50, ব্যালেন্স $200 | ✅ | ✅ (আগের মতোই) |
+| Hold $50, পরে ব্যালেন্স $60 হয় | — | ✅ ইউজার সর্বোচ্চ **$10** পাঠাতে পারবে |
+| Hold $0 / ঋণাত্মক | ❌ বাতিল | ❌ বাতিল (আগের মতোই) |
+| Hold 1,000,000,000+ (ভুল টাইপ) | — | ❌ "Lock amount is too large." |
+
+* `held` এখন **ঠিক আপনি যত দিয়েছেন** ততই দেখায় (আগে ব্যালেন্সে ক্ল্যাম্প হয়ে $0 হয়ে যেত — এটাও একটা কারণ ছিল)।
+* hold পুরো ব্যালেন্স ঢেকে দিলে ইউজার মেসেজ পায়: *"$50.00 is temporarily held on this account by administration, which currently covers your whole balance. You cannot send money right now."* — agent lock-এও একই ভাষায়।
+* একই নিয়ম **Pay an Agent Lock**-এও।
+
+## যাচাই — **১৭/১৭ PASS** (নতুন স্যুট `/tmp/hold_any_test.cjs`, U1-এর ব্যালেন্স $0 দিয়ে শুরু)
+
+```
+PASS  hold $50 on a $0 balance is accepted (no more "cannot exceed balance")
+PASS  held amount is stored as asked ($50, not clamped to $0)
+PASS  sendable is $0 · admin row shows the hold + sendable 0
+PASS  user payload carries the hold {full:false, amount:50, sendable:0}
+PASS  transfer refused: "$50.00 is temporarily held on this account… You cannot send money right now."
+PASS  U1 funded ($8) with a $50 hold in place → sendable stays $0, sending still blocked
+PASS  hold lowered to $5 → sendable $3
+PASS  $2 (inside the remainder) now goes through (200)
+PASS  agent hold $500 on a small balance is accepted → agentSendable $0
+PASS  pay an agent blocked by the oversized hold (403)
+PASS  releases work · amount 0 refused · absurd amount refused
+RESULT 17 pass / 0 fail
+```
+রিগ্রেশন: **২০/২০** (send-lock), **২১/২১** (agent-lock), **৯/৯** (MFA-মুক্ত), **১৬/১৬** (MFA সুইচ) — সব সবুজ।

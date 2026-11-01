@@ -183,7 +183,9 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
                 ? 'Paying an agent is temporarily locked by support.'
                 : `$${(Number(agentLock.amount) || 0).toFixed(2)} is held for agent payments.`}
               {typeof agentLock.sendable === 'number' && !agentLock.full
-                ? ` You can still pay an agent up to $${Number(agentLock.sendable).toFixed(2)}.`
+                ? (Number(agentLock.sendable) > 0
+                    ? ` You can still pay an agent up to $${Number(agentLock.sendable).toFixed(2)}.`
+                    : ' That covers your whole balance, so agent payments are blocked — contact support.')
                 : ''}
             </span>
           </div>
@@ -198,7 +200,9 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
                 ? 'Sending money is temporarily locked by support.'
                 : `$${(Number(sendLock.amount) || 0).toFixed(2)} of your balance is temporarily held by support.`}
               {typeof sendLock.sendable === 'number' && !sendLock.full
-                ? ` You can send up to $${Number(sendLock.sendable).toFixed(2)}.`
+                ? (Number(sendLock.sendable) > 0
+                    ? ` You can send up to $${Number(sendLock.sendable).toFixed(2)}.`
+                    : ' That currently covers your whole balance, so sending is blocked — contact support.')
                 : ''}
             </span>
           </div>
