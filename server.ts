@@ -3071,14 +3071,74 @@ async function startServer() {
       if (mine) myConvIds.add(String(c.id));
       return mine;
     });
+
+    /**
+     * SLIM BOOTSTRAP (2026-11-02): the phone used to download its ENTIRE history
+     * (every transaction, notification and chat message it ever had) on every app
+     * open — ~200 KB gzipped, seconds on mobile data. With `?slim=1` it gets the
+     * newest window plus cursors; anything newer is fetched incrementally with
+     * `?slim=1&since=<cursor>`. The client merges (never deletes), so older rows
+     * that stay in local storage are still shown.
+     * Without `slim` the full payload is returned exactly as before, so older
+     * installed apps keep working unchanged.
+     */
+    const slimMode = ['1', 'true', 'yes'].includes(String(req.query?.slim || '').toLowerCase());
+    // `only=users`  → just the directory (background refreshes)
+    // `only=stream` → just the new activity (incremental polls): no users, no config
+    const onlyParam = String(req.query?.only || '');
+    const onlyUsers = onlyParam === 'users';
+    const onlyStream = onlyParam === 'stream';
+    const sinceTs = Math.max(0, Number(req.query?.since) || 0);
+    const SLIM_TX = Math.max(20, Number(process.env.SLIM_TX_LIMIT || 120));
+    const SLIM_NOTIF = Math.max(20, Number(process.env.SLIM_NOTIF_LIMIT || 120));
+    const SLIM_MSG = Math.max(50, Number(process.env.SLIM_MSG_LIMIT || 300));
+    // Overlap window for the incremental cursor (see cursors{} below).
+    const SLIM_SLACK = Math.max(0, Number(process.env.SLIM_CURSOR_SLACK_MS || 60_000));
+
+    const allMyTxs = (db.transactions || []).filter((t: any) => String(t.userId) === me || String(t.recipientId) === me);
+    const allMyNotifs = (db.notifications || []).filter((n: any) => String(n.userId) === me);
+    const allMyMsgs = (db.messages || []).filter((m: any) => myConvIds.has(String(m.conversationId)));
+    const newestTs = (rows: any[]) => rows.reduce((max: number, r: any) => Math.max(max, Number(r && r.timestamp) || 0), 0);
+
+    const myTransactions = onlyUsers ? [] : !slimMode ? allMyTxs
+      : (sinceTs ? allMyTxs.filter((t: any) => (Number(t.timestamp) || 0) > sinceTs).sort((a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0))
+                 : allMyTxs.slice(0, SLIM_TX));
+    const myNotifications = onlyUsers ? [] : !slimMode ? allMyNotifs
+      : (sinceTs ? allMyNotifs.filter((n: any) => (Number(n.timestamp) || 0) > sinceTs).sort((a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0))
+                 : allMyNotifs.slice(0, SLIM_NOTIF));
+    const myMessages = onlyUsers ? [] : !slimMode ? allMyMsgs
+      : (sinceTs ? allMyMsgs.filter((m: any) => (Number(m.timestamp) || 0) > sinceTs).sort((a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0))
+                 : allMyMsgs.slice(-SLIM_MSG));
     const payload = {
-      users: (db.users || []).map((u: any) => (String(u.id) === me ? publicUser(u) : directoryEntry(u))),
+      users: onlyStream ? [] : (db.users || []).map((u: any) => (String(u.id) === me ? publicUser(u) : directoryEntry(u))),
       unread: unreadForMe,
-      config: db.config,
-      transactions: (db.transactions || []).filter((t: any) => String(t.userId) === me || String(t.recipientId) === me),
+      config: onlyStream ? undefined : db.config,
+      transactions: myTransactions,
       conversations: myConversations,
-      messages: (db.messages || []).filter((m: any) => myConvIds.has(String(m.conversationId))),
-      notifications: (db.notifications || []).filter((n: any) => String(n.userId) === me)
+      messages: myMessages,
+      notifications: myNotifications,
+      ...(slimMode ? {
+        slim: true,
+        since: sinceTs,
+        // `directory: false` tells the app "this reply has no user list — do NOT
+        // reconcile/self-heal accounts from it". Without the flag a stream-only poll
+        // (users: []) made the app think every account had vanished and it POSTed
+        // /api/users/register once per user (140 calls, caught by the test).
+        directory: !onlyStream,
+        ...(onlyStream ? { me: publicUser((db.users || []).find((u: any) => String(u.id) === me) || {}) } : {}),
+        serverTime: Date.now(),
+        // Highest timestamp the client now holds per stream; send it back as ?since=
+        // to receive only what is new. We step the cursor back by a small overlap
+        // window (default 60 s) so a row that was written on another device *while*
+        // this request was being served (its timestamp can sit just under the newest
+        // row we saw) is re-sent on the next poll instead of being lost forever.
+        // Re-sending is harmless: the client merges by id.
+        cursors: {
+          transactions: Math.max(0, Math.max(sinceTs, newestTs(myTransactions)) - SLIM_SLACK),
+          notifications: Math.max(0, Math.max(sinceTs, newestTs(myNotifications)) - SLIM_SLACK),
+          messages: Math.max(0, Math.max(sinceTs, newestTs(myMessages)) - SLIM_SLACK)
+        }
+      } : {})
     };
 
     // PERF: gzip on the wire (≈10:1 for JSON — the payload is mostly repeated keys).

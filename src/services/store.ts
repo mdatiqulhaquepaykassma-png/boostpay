@@ -122,14 +122,40 @@ export class BoostPayStore {
    * Initialize and smart-merge with server database
    * Never overwrites or logs out the local user!
    */
+  // Startup loaded twice (App.tsx calls initSync in two effects) → two full /api/db
+  // downloads on every open. One shared promise fixes that.
+  private static initSyncInFlight: Promise<void> | null = null;
+  /** Users we already tried to re-create after a redeploy (one attempt per id). */
+  private static selfHealTried = new Set<string>();
+
   static async initSync(): Promise<void> {
+    if (this.initSyncInFlight) return this.initSyncInFlight;
+    this.initSyncInFlight = this.runInitSync().finally(() => { this.initSyncInFlight = null; });
+    return this.initSyncInFlight;
+  }
+
+  /**
+   * SLIM BOOTSTRAP (2026-11-02): ask the server for the newest window only
+   * (`?slim=1`, then `?slim=1&since=<cursor>` for later opens) instead of the whole
+   * history, and merge it into what the phone already has. Nothing is ever deleted.
+   */
+  private static async runInitSync(): Promise<void> {
     try {
-      const res = await fetch('/api/db', { headers: this.authHeaders() });
+      const lastCursor = (() => {
+        try { return Number(localStorage.getItem('boostpay_sync_cursor_v1') || 0) || 0; } catch { return 0; }
+      })();
+      // First open of the session: window + directory. Later opens: only what is new.
+      const url = '/api/db?slim=1' + (lastCursor > 0 ? '&since=' + lastCursor + '&only=stream' : '');
+      const res = await fetch(url, { headers: this.authHeaders() });
       if (res.ok) {
         const data = await res.json();
         
-        // Smart non-destructive merge users
-        if (data.users && Array.isArray(data.users)) {
+        // Smart non-destructive merge users.
+        // A stream-only poll (data.directory === false) carries no user list — merging
+        // from it would look like every account vanished and fire a register() per
+        // user (that is exactly what the bootstrap test caught).
+        const hasDirectory = data.directory !== false && Array.isArray(data.users) && data.users.length > 0;
+        if (hasDirectory) {
           const localUsers = this.getUsers();
           const mergedMap = new Map<string, User>();
 
@@ -156,8 +182,10 @@ export class BoostPayStore {
                   : (serverU.boostState || localU.boostState)
               };
               mergedMap.set(localU.id, mergedUser);
-            } else {
-              // Local user missing on server (e.g. after container redeploy): self-heal without secrets
+            } else if (!this.selfHealTried.has(String(localU.id))) {
+              // Local user missing on server (e.g. after container redeploy): self-heal
+              // without secrets — once per id per session.
+              this.selfHealTried.add(String(localU.id));
               const { password: _lp2, phrase: _lph2, passwordPlain: _lpp2, ...cleanLocal } = localU as any;
               mergedMap.set(localU.id, cleanLocal as any);
               needsPushToServer = true;
@@ -172,6 +200,9 @@ export class BoostPayStore {
                   createdAt: cleanLocal.createdAt
                 })
               }).catch(() => {});
+            } else {
+              // Already attempted this session — keep the local copy, no more requests.
+              mergedMap.set(localU.id, localU as any);
             }
           }
 
@@ -184,19 +215,18 @@ export class BoostPayStore {
           }
         }
 
-        // Smart merge transactions
+        // Smart merge transactions — union by id (a slim window must never delete history)
         if (data.transactions && Array.isArray(data.transactions)) {
           const localTxs = this.getTransactions();
-          const mergedTxs = [...data.transactions];
+          const seen = new Set(localTxs.map(t => t.id));
+          const fresh = (data.transactions as any[]).filter(t => t && !seen.has(t.id));
           let addedTxs = false;
-          for (const ltx of localTxs) {
-            if (!mergedTxs.some(t => t.id === ltx.id)) {
-              mergedTxs.push(ltx);
-              addedTxs = true;
-            }
+          if (fresh.length) {
+            const mergedTxs = [...fresh, ...localTxs].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
+            localStorage.setItem(STORAGE_TRANSACTIONS, JSON.stringify(mergedTxs));
+            this.txCached = null; // direct write — drop the memo
+            addedTxs = true;
           }
-          localStorage.setItem(STORAGE_TRANSACTIONS, JSON.stringify(mergedTxs));
-          this.txCached = null; // direct write — drop the memo
           if (addedTxs) {
             setTimeout(() => this.pushToServer(), 500);
           }
@@ -207,7 +237,17 @@ export class BoostPayStore {
         }
 
         if (data.messages && Array.isArray(data.messages)) {
-          localStorage.setItem(STORAGE_MESSAGES, JSON.stringify(data.messages));
+          // Merge by id: a slim window carries only the newest messages, the rest of
+          // the chat history stays in local storage.
+          const localMsgs: any[] = (() => {
+            try { const raw = localStorage.getItem(STORAGE_MESSAGES); const list = raw ? JSON.parse(raw) : []; return Array.isArray(list) ? list : []; } catch { return []; }
+          })();
+          const seenMsg = new Set(localMsgs.map((m: any) => String(m && m.id)));
+          const freshMsgs = (data.messages as any[]).filter((m: any) => m && m.id && !seenMsg.has(String(m.id)));
+          if (freshMsgs.length) {
+            const mergedMsgs = [...localMsgs, ...freshMsgs].sort((a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0));
+            localStorage.setItem(STORAGE_MESSAGES, JSON.stringify(mergedMsgs));
+          }
         }
 
         if (data.notifications && Array.isArray(data.notifications)) {
@@ -236,6 +276,26 @@ export class BoostPayStore {
 
         if (data.config) {
           localStorage.setItem(STORAGE_CONFIG, JSON.stringify(data.config));
+        }
+        if (data.me && data.me.id) {
+          // Stream polls skip the directory, so my own record rides along.
+          const users = this.getUsers();
+          const idx = users.findIndex(u => String(u.id) === String(data.me.id));
+          if (idx >= 0) {
+            users[idx] = { ...users[idx], ...data.me };
+            localStorage.setItem(STORAGE_USERS, JSON.stringify(users));
+            this.setCurrentUser({ ...(this.getCurrentUser() || ({} as any)), ...data.me } as any);
+          }
+        }
+
+        // Remember how far we have synced so the next open only asks for the delta.
+        if (data.slim && data.cursors) {
+          const cursor = Math.max(
+            Number(data.cursors.transactions) || 0,
+            Number(data.cursors.notifications) || 0,
+            Number(data.cursors.messages) || 0
+          );
+          try { if (cursor > 0) localStorage.setItem('boostpay_sync_cursor_v1', String(cursor)); } catch { /* ignore */ }
         }
 
         // Refresh current user session from merged data without resetting
@@ -335,7 +395,9 @@ export class BoostPayStore {
    */
   static async syncAllUsers(): Promise<User[]> {
     try {
-      const res = await fetch('/api/db', { headers: this.authHeaders() });
+      // Only the user directory is needed here — ask for the slim window so a
+      // background directory refresh does not drag the whole history along.
+      const res = await fetch('/api/db?slim=1&only=users', { headers: this.authHeaders() });
       if (res.ok) {
         const data = await res.json();
         if (data.users && Array.isArray(data.users)) {

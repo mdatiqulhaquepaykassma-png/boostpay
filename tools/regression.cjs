@@ -62,9 +62,17 @@ const ck = (name, ok, extra = '') => {
   ck('held amount stored as asked', held.d && Number(held.d.sendLock.amount) === 10, `held=$${held.d && held.d.sendLock.amount}`);
   u1 = await login1();
   ck('user sees the hold', u1.user.sendLock && u1.user.sendLock.amount === 10, JSON.stringify(u1.user.sendLock));
-  const blocked = await transfer(10);
-  ck('sending the whole balance is refused', blocked.s === 403, `${blocked.s}`);
-  ck('refusal explains the hold', /held/.test(String(blocked.d && blocked.d.error)));
+  // Hold semantics (user-confirmed): a $10 hold on a $100 balance leaves $90
+  // sendable — small sends still work, anything above the sendable cap is refused.
+  const sendableNow = Number(u1.user.sendLock && u1.user.sendLock.sendable);
+  ck('the hold reduces the sendable cap by exactly the held amount',
+    sendableNow === Math.max(0, Math.round((Number(u1.user.balance) - 10) * 100) / 100),
+    `sendable=$${sendableNow} balance=$${u1.user.balance}`);
+  const smallSendOk = await transfer(1);
+  ck('a send below the cap still works with a hold in place', smallSendOk.s === 200, `${smallSendOk.s}`);
+  const blocked = await transfer(sendableNow + 5);
+  ck('sending above the sendable cap is refused', blocked.s === 403, `${blocked.s}`);
+  ck('refusal explains the hold', /held/.test(String(blocked.d && blocked.d.error)), String(blocked.d && blocked.d.error));
 
   // ── 2. /api/sync must never wipe the hold (the reported bug) ───────────────
   console.log('\n[2] app sync cannot delete or forge a hold');
@@ -74,7 +82,8 @@ const ck = (name, ok, extra = '') => {
   await sync({ sendLock: { mode: 'off', amount: 0 }, agentLock: { mode: 'off', amount: 0 }, boostProfitWithdrawn: 0 });
   u1 = await login1();
   ck('forged sync cannot clear the hold', u1.user.sendLock && u1.user.sendLock.amount === 10);
-  const stillBlocked = await transfer(10);
+  const capAfter = Number(u1.user.sendLock && u1.user.sendLock.sendable);
+  const stillBlocked = await transfer(capAfter + 5);
   ck('sending still refused after the forged sync', stillBlocked.s === 403, `${stillBlocked.s}`);
 
   // ── 3. Full lock ───────────────────────────────────────────────────────────
