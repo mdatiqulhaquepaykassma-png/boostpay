@@ -99,3 +99,20 @@ Google-এর পাবলিক DNS-এ `management.boostpay.online` এখন�
 যাচাই: `curl -L` দিয়ে এন্ড-টু-এন্ড — ৩০১ অনুসরণ করে শেষে **২০০ + `<title>BoostPay Management</title>`**। canonical হোস্টের `/api/*`, বান্ডল — সব আগের মতোই।
 
 `admin.boostpay.online` ও `db.boostpay.online` — এদের sslip ঠিকানায় রিডাইরেক্ট **দেওয়া হয়নি** (আপনি শুধু management-এর জন্য বলেছিলেন)। চাইলে ওই দুটোতেও একই নিয়ম দেওয়া যাবে — বললেই হবে।
+
+---
+
+## ৯. "`management.agent.boostpay.online` এখনো খুলছে না" — আসল কারণ ও সমাধান
+
+**কারণ (মাপা):** অ্যাপ/সার্ভার ঠিকই ছিল — সমস্যা ছিল **DNS negative cache**-এ।
+- Cloudflare-এর দুটি authoritative nameserver (`tiffany`, `nile`) **দুটোই** `rcode=0, answer=1` দিচ্ছিল ✅
+- কিন্তু **Google-এর রিজলভার** পুরোনো "এই নাম নেই" (NXDOMAIN) ক্যাশ ধরে রেখেছিল — ৪টি বাংলাদেশি ISP সাবনেটে টেস্ট করলে ৩টিতেই `NXDOMAIN`, একটিতে ঠিকঠাক
+- আর `management.agent…` → `management.boostpay.online` রিডাইরেক্ট হওয়ায় ইউজারের ব্রাউজার শেষে সেই **ক্যাশে-আটকে-থাকা নামে** গিয়ে ব্যর্থ হচ্ছিল
+
+**যা করলাম:** ৩০১ রিডাইরেক্টগুলো **আপাতত বন্ধ** (`/root/boostpay-canonical-redirects.yml.off`, কপি রিপোতে) — এখন তিনটি ঠিকানা সরাসরি অ্যাপ সার্ভ করে (রিডাইরেক্ট নেই, তাই DNS ক্যাশের উপর নির্ভরতা নেই)।
+Cloudflare-এর SOA অনুযায়ী negative TTL **১৮০০ সেকেন্ড (৩০ মিনিট)**।
+
+**৫ মিনিটের মনিটরিং (Google DoH, প্রতি ৩০ সেকেন্ড):** শেষ ৮টি স্যাম্পলে `management` = `NOERROR`, `management.agent` = সব সময়ে `NOERROR` — অর্থাৎ ক্যাশ পরিষ্কার হয়ে গেছে।
+**যাচাই:** তিনটি ঠিকানাই **২০০ + `<title>BoostPay Management</title>`**।
+
+**পরের ধাপ:** আপনি নিশ্চিত করুন যে খুলছে — তারপর canonical রিডাইরেক্ট আবার চালু করব (কপি তৈরি আছে)। ব্রাউজার/ফোনে এখনো না খুললে একবার DNS ক্যাশ পরিষ্কার করুন (ফোনে এয়ারপ্লেন মোড ১০ সেকেন্ড, বা ব্রাউজারে `chrome://net-internals/#dns` → Clear host cache), অথবা নিশ্চিত ফলব্যাক: `https://management.72-60-42-18.sslip.io/`।
