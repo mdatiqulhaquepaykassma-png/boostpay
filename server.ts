@@ -5961,7 +5961,11 @@ async function startServer() {
    * 'amount' -> only (balance - amount) can be sent
    * 'off'    -> release the hold
    */
-  app.post('/api/admin/users/send-lock', requireSuperAdmin, requireMfa, (req: any, res) => {
+  // Owner request 2026-11-01: the send lock is used often while dealing with
+  // support cases, so it is NOT gated behind the 5-minute MFA unlock (treasury,
+  // freeze and delete still are). Only a signed-in SUPERADMIN can call it and
+  // every change is written to the audit log.
+  app.post('/api/admin/users/send-lock', requireSuperAdmin, (req: any, res) => {
     try {
       const body: any = req.body || {};
       const userId = String(body.userId || '').trim();
@@ -8506,6 +8510,10 @@ async function startServer() {
         }
         if (round2(user.balance || 0) < total) {
           return { status: 400, body: { error: `Insufficient balance. Amount ${parsed.value.toFixed(2)} + fee ${fee.toFixed(2)} = ${total.toFixed(2)} required.` } };
+        }
+        // ── Admin "sent money" hold: the held part cannot leave through an agent either.
+        if (sendableNow < total) {
+          return { status: 403, body: { error: sendLockError(user), sendLocked: sendLockOf(user), sendable: sendableNow } };
         }
         // ── OWNER RULE: only boosted dollars can be withdrawn through an agent.
         const withdrawable = boostWithdrawable(user);

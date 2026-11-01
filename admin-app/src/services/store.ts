@@ -1034,7 +1034,7 @@ export class BoostPayStore {
           return {
             success: false,
             mfaRequired: true,
-            error: 'Unlock admin actions first: Admin → MFA Security → enter your authenticator code (valid 5 minutes).'
+            error: 'Admin sign-in required. Please reload the console and sign in again.'
           };
         }
         return { success: false, error: data.error || `Could not save the lock (${res.status})` };

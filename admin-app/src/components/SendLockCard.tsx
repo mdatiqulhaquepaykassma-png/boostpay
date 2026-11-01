@@ -179,7 +179,7 @@ export function SendLockCard({
 
       <p className="text-[10px] leading-relaxed text-zinc-500 flex items-start gap-1.5">
         <ShieldAlert className="w-3 h-3 mt-0.5 shrink-0 text-zinc-600" />
-        Blocks outbound money only (P2P transfer and Pay-an-Agent). Receiving, boosting and admin adjustments keep working. The user sees that the amount is held, not the admin note.
+        Blocks outbound money only — P2P transfer, Pay-an-Agent and support withdrawals. Receiving, boosting and admin adjustments keep working. The user sees the held amount, not the admin note. No MFA prompt needed.
       </p>
     </div>
   );

@@ -54,13 +54,19 @@ RESULT 20 pass / 0 fail
 ```
 `tsc` + `vite build` (user ও admin app) ক্লিন।
 
-## ৪. ⚠️ একটা জরুরি কথা — MFA
+## ৪. ✅ MFA (আপনার নির্দেশে সরানো হয়েছে)
 
-অ্যাডমিন কনসোলে **টাকা-সংক্রান্ত সব অ্যাকশন MFA দিয়ে সুরক্ষিত** (treasury credit/debit, freeze, delete — সব)। এই নতুন লকও একই নিয়মে চলে (নিরাপত্তার জন্য ইচ্ছাকৃতভাবে একই লেভেল)।
+**এই নির্দিষ্ট অ্যাকশনটা এখন MFA-মুক্ত** (আপনার অনুরোধে): শুধু লগইন করা SUPERADMIN হলেই লক দেওয়া/তোলা যাবে, কোনো ৬ ডিজিট কোড/৫ মিনিট আনলক লাগবে না।
 
-* প্রথমবার ব্যবহারে: **Admin → MFA Security** → *Set up authenticator* (QR স্ক্যান) → ৬ ডিজিটের কোড দিন → ৫ মিনিটের জন্য কনসোল "আনলক" থাকবে। ওই সময়ে লক কার্ড কাজ করবে।
-* MFA সেট না থাকলে কার্ডে মেসেজ আসবে: *"Unlock admin actions first: Admin → MFA Security → enter your authenticator code (valid 5 minutes)."* — কিছুই ভাঙবে না।
-* চাইলে বলুন, এই নির্দিষ্ট অ্যাকশনটা MFA-মুক্ত করে দিতে পারি (তবে সুপারিশ করি না — যেকোনো অ্যাডমিন সেশন হ্যাক হলে ইউজারের সেন্ডিং আটকে দেওয়া বা খুলে দেওয়া যায়)।
+🔒 **বাকি টাকা-সংক্রান্ত অ্যাকশনগুলো আগের মতোই MFA-সুরক্ষিত** — treasury Credit/Debit, Freeze, Delete, Backup restore। (যাচাই করা: `/api/admin/adjust` এখনো `428 MFA setup required` দেয়।) প্রতিটি লক-পরিবর্তন **audit log**-এ (`USER_SEND_LOCK`) লেখা থাকে — কে, কখন, কত আটকেছে।
+
+## ৪ক. Pay an Agent-এও একই লক
+
+* সার্ভারে `POST /api/user/send-to-agent`-এ লক আগেই চেক হতো; এখন **boost-নীতির আগেই** চেক হয়, তাই বার্তাটা সঠিক কারণ দেখায়:
+  * `$60.00 of your balance is temporarily held by administration. You can send up to $40.00 right now.`
+  * full lock: `Sending money is temporarily locked on this account by administration. Please contact support.`
+* ইউজারের **Pay an Agent স্ক্রিনেও** এখন কমলা ব্যানার: `🔒 Temporarily held by support — $x held, you can still send up to $y` (বা full lock-এ *"Sending locked by support"*), আর অ্যামাউন্ট লিখে Submit চাপলে একই ভাষায় ব্লক হয়।
+* boost-এর নিয়ম (শুধু boost-প্রফিট তোলা যাবে) আগের মতোই অপরিবর্তিত — লক তার **উপরে** কাজ করে।
 
 ## ৫. কোড
 
@@ -106,3 +112,21 @@ RESULT 20 pass / 0 fail
 2. **Hostinger DNS-এ একটা A রেকর্ড যোগ করুন** — `admin` → `72.60.42.18` (boostpay.online জোনে)। বলুন, তারপর আমি `admin.boostpay.online` Dokploy-তে যোগ করে Let's Encrypt সার্টিফিকেট নিয়ে দেব — তখন আর sslip.io লিংক লাগবে না।
 3. **`binanceusdtpay.io` আর ফেরত আনার চেষ্টা না করাই ভালো** — নামেই "binance" থাকায় এটা বারবার কমপ্লেইনের লক্ষ্য হবে। Hostinger-কে একবার জিজ্ঞেস করতে পারেন `client hold` কেন (তারা নোটিশ/ইমেইল পাঠিয়ে থাকে, abuse@ inbox-এ উত্তর দিলে কখনো কখনো ছাড়ে), কিন্তু নতুন দরকারি হোস্টনেম হিসেবে `admin.boostpay.online`-ই ব্যবহার করুন।
 4. মনে রাখুন: `boostpay.online` (মূল ডোমেইন) সম্পূর্ণ স্বাভাবিক — ইউজার, এজেন্ট, ম্যানেজমেন্ট, সাপোর্ট চ্যাট সবই চলছে।
+
+---
+
+## ৭. ২য় রাউন্ডের যাচাই — **৯/৯ PASS** (MFA-মুক্ত + Pay-an-Agent)
+
+```
+PASS  send lock works with NO MFA code/token                 status=200
+PASS  response reports the hold + what is still sendable     held=$60 sendable=$40
+PASS  Pay-an-Agent blocked when the amount eats into the held part
+      → 403 "$60.00 of your balance is temporarily held by administration. You can send up to $40.00 right now."
+PASS  a payment inside the sendable part still works         (200)
+PASS  full lock blocks Pay-an-Agent                          → 403 "Sending money is temporarily locked…"
+PASS  treasury adjust still requires MFA (nothing else loosened)   428
+PASS  normal user still cannot lock (401)
+PASS  release restores Pay-an-Agent (boost rules unchanged)   (200)
+RESULT 9 pass / 0 fail
+```
+আগের পূর্ণ স্যুটও আবার চালানো হয়েছে — **২০/২০ PASS**।
