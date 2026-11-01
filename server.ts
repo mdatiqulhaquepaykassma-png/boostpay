@@ -1481,32 +1481,141 @@ function verifyToken(token: unknown): { sub: string; role: string; exp: number; 
 }
 
 /**
- * Cloudflare in front of us (2026-11-02 prep): once `boostpay.online` is proxied,
- * every request reaches the origin from a Cloudflare edge IP, so `req.ip` is the
- * edge, not the user. Antifraud auto-block and login-spam counters are per-IP —
- * with all users sharing a handful of edge IPs a single abuser would block the
- * whole country. `cf-connecting-ip` carries the real client IP; Cloudflare strips
- * any client-supplied copy, so it is safe to trust **only when the operator turns
- * this on** (TRUST_CF_IP=1, set when the proxy is live). Default OFF = today's
- * behaviour, byte for byte.
+ * Real client IP behind Cloudflare (2026-11-02, live).
+ *
+ * Evidence measured on production: through Cloudflare the origin sees the
+ * Cloudflare EDGE address (172.71.151.36) as the last proxy hop, while a direct
+ * hit — even with a forged `x-forwarded-for` — is correctly resolved to the real
+ * caller (Traefik appends the peer address, it does not preserve a spoofed one).
+ *
+ * => We may trust `cf-connecting-ip` ONLY when the hop that reached Traefik is a
+ *    published Cloudflare address. A direct-to-origin attacker cannot fake that,
+ *    because his own address is what lands in the last hop.
+ *
+ * TRUST_CF_IP=1 forces the old behaviour (always trust the header),
+ * TRUST_CF_IP=0 disables the Cloudflare path entirely.
  */
-const TRUST_CF_IP = ['1', 'true', 'yes'].includes(String(process.env.TRUST_CF_IP || '').toLowerCase());
+const TRUST_CF_IP = String(process.env.TRUST_CF_IP || 'auto').toLowerCase();
 const IP_LIKE = /^[0-9a-fA-F:.]{3,45}$/;
 
+// Cloudflare's published ranges — https://www.cloudflare.com/ips-v4 (bundled
+// fallback; refreshed from the public API at boot when the network allows).
+const CF_V4_FALLBACK = [
+  '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+  '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+  '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+  '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'
+];
+const CF_V6_FALLBACK = [
+  '2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+  '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32'
+];
+let cfRanges: { v4: [number, number][]; v6: [string, number][] } = { v4: [], v6: [] };
+
+function ipToInt(ip: string): number {
+  const p = ip.split('.');
+  if (p.length !== 4) return -1;
+  let n = 0;
+  for (const part of p) {
+    const b = Number(part);
+    if (!Number.isInteger(b) || b < 0 || b > 255) return -1;
+    n = (n * 256) + b;
+  }
+  return n;
+}
+
+function buildCfRanges(v4: string[], v6: string[]) {
+  const out: { v4: [number, number][]; v6: [string, number][] } = { v4: [], v6: [] };
+  for (const cidr of v4) {
+    const [base, bitsRaw] = cidr.split('/');
+    const bits = Number(bitsRaw);
+    const start = ipToInt(base);
+    if (start < 0 || !(bits >= 0 && bits <= 32)) continue;
+    const size = Math.pow(2, 32 - bits);
+    out.v4.push([start, start + size - 1]);
+  }
+  for (const cidr of v6) {
+    const [base, bitsRaw] = cidr.split('/');
+    const bits = Number(bitsRaw);
+    if (!base || !(bits >= 0 && bits <= 128)) continue;
+    out.v6.push([base.toLowerCase(), bits]);
+  }
+  return out;
+}
+
+function ipv6Prefix(ip: string): string {
+  // Expand a compressed v6 address to 32 hex digits (no '::' left).
+  const [head, tail] = ip.split('::');
+  const h = head ? head.split(':').filter(Boolean) : [];
+  const t = tail !== undefined ? (tail ? tail.split(':').filter(Boolean) : []) : null;
+  let groups: string[];
+  if (t === null) groups = h;
+  else groups = [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t];
+  return groups.map(g => g.padStart(4, '0')).join('').toLowerCase();
+}
+
+function isCloudflareIp(ipRaw: string): boolean {
+  const ip = String(ipRaw || '').trim().replace(/^\[|\]$/g, '');
+  if (!ip) return false;
+  if (cfRanges.v4.length === 0 && cfRanges.v6.length === 0) cfRanges = buildCfRanges(CF_V4_FALLBACK, CF_V6_FALLBACK);
+  if (ip.includes(':')) {
+    const bitsPrefix = ipv6Prefix(ip);
+    return cfRanges.v6.some(([base, bits]) => {
+      const full = ipv6Prefix(base);
+      return bitsPrefix.slice(0, Math.floor(bits / 4)) === full.slice(0, Math.floor(bits / 4));
+    });
+  }
+  const n = ipToInt(ip);
+  if (n < 0) return false;
+  return cfRanges.v4.some(([lo, hi]) => n >= lo && n <= hi);
+}
+
+/** The address that actually reached Traefik: last hop of x-forwarded-for. */
+function peerHop(req: any): string {
+  const xff = req.headers && req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.trim()) {
+    const parts = xff.split(',').map((s: string) => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
+  return (req.socket && req.socket.remoteAddress) || '';
+}
+
+// Refresh the ranges once at boot (non-blocking, best effort) and every 12 h.
+async function refreshCfRanges(): Promise<void> {
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    const r = await fetch('https://api.cloudflare.com/client/v4/ips', { signal: ctl.signal });
+    clearTimeout(timer);
+    const j: any = await r.json();
+    const v4: string[] = (j && j.result && j.result.ipv4_cidrs) || [];
+    const v6: string[] = (j && j.result && j.result.ipv6_cidrs) || [];
+    if (v4.length) {
+      cfRanges = buildCfRanges(v4, v6.length ? v6 : CF_V6_FALLBACK);
+      console.log(`[cf-ip] refreshed ${v4.length} v4 + ${v6.length} v6 Cloudflare ranges`);
+    }
+  } catch { /* keep the bundled list */ }
+}
+cfRanges = buildCfRanges(CF_V4_FALLBACK, CF_V6_FALLBACK);
+setTimeout(() => { void refreshCfRanges(); }, 3000);
+setInterval(() => { void refreshCfRanges(); }, 12 * 60 * 60 * 1000).unref?.();
+
 function clientIp(req: any): string {
+  const hop = peerHop(req);
+  const cfHeader = req.headers && (req.headers['cf-connecting-ip'] || req.headers['true-client-ip']);
+  if (TRUST_CF_IP !== '0' && typeof cfHeader === 'string' && IP_LIKE.test(cfHeader.trim())) {
+    const useIt = TRUST_CF_IP === '1' || TRUST_CF_IP === 'true' || TRUST_CF_IP === 'yes'
+      || isCloudflareIp(hop);
+    if (useIt) return cfHeader.trim();
+  }
   // Behind trusted proxy (app.set trust proxy 1) Express populates req.ip correctly
   // Fallback to x-forwarded-for only if we trust proxy, otherwise socket IP
-  if (TRUST_CF_IP) {
-    const cf = req.headers && (req.headers['cf-connecting-ip'] || req.headers['true-client-ip']);
-    if (typeof cf === 'string' && IP_LIKE.test(cf.trim())) return cf.trim();
-  }
   try {
     const trustedIp = (req as any).ip;
     if (trustedIp && typeof trustedIp === 'string' && trustedIp !== '::1' && trustedIp !== '127.0.0.1') return trustedIp;
-  } catch {}
+  } catch { /* ignore */ }
   const fwd = req.headers && (req.headers['x-forwarded-for'] || req.headers['x-real-ip']);
   if (typeof fwd === 'string' && fwd.trim()) {
-    // Take first IP, validate IPv4/IPv6-ish
     const cand = fwd.split(',')[0].trim();
     if (/^[a-fA-F0-9:.]+$/.test(cand)) return cand;
   }
