@@ -295,3 +295,44 @@ PASS  releases work · amount 0 refused · absurd amount refused
 RESULT 17 pass / 0 fail
 ```
 রিগ্রেশন: **২০/২০** (send-lock), **২১/২১** (agent-lock), **৯/৯** (MFA-মুক্ত), **১৬/১৬** (MFA সুইচ) — সব সবুজ।
+
+---
+
+# ১১. 🐞 আসল বাগ — "amount 10 locked, তবু 10 sent হয়ে যাচ্ছে"
+
+## কারণ (নিশ্চিত হয়ে ধরা পড়েছে)
+আপনার অ্যাপ নিজের রেকর্ড নিয়মিত সার্ভারে পুশ করে — `POST /api/sync` (লগইন, ট্রান্সফার, boost tick ইত্যাদির পরে)। সার্ভারের merge-এ লেখা ছিল:
+
+```js
+mergedUsers[idx] = { ...incUser, balance: serverUser.balance, isFrozen: …, … }
+```
+
+`...incUser` = **ক্লায়েন্টের** কপি (যেখানে `sendLock` ফিল্ডই নেই)। ফলে ওই spread অ্যাডমিনের বসানো `sendLock` **মুছে দিত** — hold বসানোর কয়েক সেকেন্ড পরেই। তাই লক দেখতে পেতেন, কিন্তু ইউজার টাকা পাঠাতে পারত। (`agentLock`-ও একইভাবে মুছে যেত।)
+
+## ফিক্স
+`/api/sync`-এ এখন **সার্ভার-মালিকানার ফিল্ডগুলো ক্লায়েন্ট কপি থেকে নেওয়াই হয় না** — সবসময় সার্ভারের মানই থাকে:
+
+`sendLock` · `agentLock` · `boostProfitWithdrawn` (agent দিয়ে তোলা প্রফিটের হিসাব — ডাবল-উইথড্র গার্ড) · `frozenReason` · `frozenUntil` · `isTempFreeze` · `isPermanentFreeze` · `adminNote`
+
+* ইউজারের অ্যাপ যা-ই পুশ করুক, hold টিকে থাকবে।
+* **জালিয়াতি করেও তোলা যাবে না:** কেউ চাইলে `sendLock:{mode:'off'}` পাঠিয়ে লক মোছার চেষ্টা করলেও সার্ভার তা উপেক্ষা করে (টেস্টে প্রমাণিত)।
+* ক্লায়েন্ট এখনো ব্যালেন্স/ফ্রিজ/boost টাইমিং বদলাতে পারে না — আগের নিয়মই অটুট।
+
+## যাচাই — **১১/১১ PASS** (`/tmp/sync_wipe_test.cjs`, ঠিক আপনার কেস: ব্যালেন্স $10, hold $10)
+
+```
+PASS  hold $10 on a $10 balance applied          → sendable $0
+PASS  a normal app sync is accepted              (200)
+PASS  the hold SURVIVES the app sync             {full:false, amount:10, sendable:0}
+PASS  sending $10 is refused                     → 403 "$10.00 is temporarily held… You cannot send money right now."
+PASS  forged sync cannot clear the hold          (sendLock:{mode:'off'} উপেক্ষিত)
+PASS  sending still refused after the forged sync → 403
+PASS  agent hold also survives the sync
+PASS  client still cannot rewrite the balance    → $10
+PASS  after release the user can send again      → sendable $10, transfer 200
+RESULT 11 pass / 0 fail
+```
+রিগ্রেশন (সব সবুজ): ২০/২০ send-lock · ২১/২১ agent-lock · ৯/৯ MFA-মুক্ত · ১৬/১৬ MFA সুইচ · ১৭/১৭ hold-above-balance।
+
+## মনে রাখবেন (সেমান্টিক্স)
+Hold $10 মানে — **ওই $10 আটকে থাকবে, বাকিটা যাবে**। অর্থাৎ ব্যালেন্স $100 হলে ইউজার $90 পর্যন্ত পাঠাতে পারবে, আর $10 পাঠানো স্বাভাবিকভাবেই **অনুমোদিত**। যদি চান hold-এর সমান বা তার বেশি কোনো পাঠানোই না হোক (অর্থাৎ "$10 hold মানে $10 পাঠানো বন্ধ" — আলাদা হিসাব), বলবেন, সেটাও করে দেব।

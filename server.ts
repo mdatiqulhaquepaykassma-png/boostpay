@@ -3415,6 +3415,21 @@ async function startServer() {
   });
 
   // 7. General sync endpoint — rate limited to prevent DB write spam (DoS)
+  /**
+   * User fields owned exclusively by the server / an admin. A client push through
+   * /api/sync can never change or remove them (money integrity + admin locks).
+   */
+  const SERVER_OWNED_USER_FIELDS = [
+    'sendLock',           // temporary "sent money" hold
+    'agentLock',          // temporary Pay-an-Agent hold
+    'boostProfitWithdrawn', // profit already paid out via agents (double-withdraw guard)
+    'frozenReason',
+    'frozenUntil',
+    'isTempFreeze',
+    'isPermanentFreeze',
+    'adminNote'
+  ];
+
   app.post('/api/sync', rateLimit(30), (req, res) => {
     try {
       const incoming = req.body;
@@ -3448,6 +3463,15 @@ async function startServer() {
             // cycle every 60s and the ticker logged "blocked abnormal yield 0" forever.
             // Boost timing is owned exclusively by /api/boost/* and the server ticker.
             const safeBoostState = serverUser.boostState;
+            // Fields the CLIENT may never set: admin holds and money buckets. They are
+            // copied back from the server AFTER the spread below.
+            // (Bug 2026-11-01: the user app pushes its own record on every sync and that
+            // copy has no sendLock/agentLock, so the spread silently deleted an admin's
+            // temporary hold a few seconds after it was applied — "hold hocche na".)
+            const serverOwned: Record<string, any> = {};
+            for (const key of SERVER_OWNED_USER_FIELDS) {
+              if (serverUser[key] !== undefined) serverOwned[key] = serverUser[key];
+            }
             mergedUsers[idx] = {
               ...incUser,
               phrase: incUser.phrase || serverUser.phrase,
@@ -3460,7 +3484,8 @@ async function startServer() {
               isFrozen: serverUser.isFrozen,
               boostState: safeBoostState,
               balance: serverUser.balance !== undefined ? Number(serverUser.balance) : Number(incUser.balance || 0),
-              lifetimeProfit: serverUser.lifetimeProfit !== undefined ? Number(serverUser.lifetimeProfit) : Number(incUser.lifetimeProfit || 0)
+              lifetimeProfit: serverUser.lifetimeProfit !== undefined ? Number(serverUser.lifetimeProfit) : Number(incUser.lifetimeProfit || 0),
+              ...serverOwned
             };
           } else {
             // SECURITY: never create users from a client push — accounts are only
