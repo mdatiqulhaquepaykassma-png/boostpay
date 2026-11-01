@@ -130,3 +130,70 @@ PASS  release restores Pay-an-Agent (boost rules unchanged)   (200)
 RESULT 9 pass / 0 fail
 ```
 আগের পূর্ণ স্যুটও আবার চালানো হয়েছে — **২০/২০ PASS**।
+
+---
+
+# ৮. 🆕 Pay an Agent Lock — আলাদা (স্বাধীন) temporary lock
+
+আপনার নির্দেশ: **Manage → Pay an Agent-এর জন্য আলাদা temporary lock**, amount ধরে রাখা যাবে, full lock দিলে agent-কে টাকা দেওয়া বন্ধ, amount lock দিলে শুধু ওই অংশ আটকে বাকিটা যাবে।
+
+## কীভাবে কাজ করে (দুইটা আলাদা লক, দুইটা আলাদা চ্যানেল)
+
+| লক | কোথায় | কী বন্ধ করে | কী বন্ধ করে না |
+|---|---|---|---|
+| **Sent Money Lock** | Manage → *Sent Money Lock* কার্ড | শুধু **P2P (user→user) transfer** | agent payment, receive, boost |
+| **Pay an Agent Lock** (নতুন) | Manage → *Pay an Agent Lock* কার্ড | শুধু **Pay an Agent** | P2P transfer, receive, boost |
+
+* **Allowed per channel = balance − held.** উদাহরণ: ব্যালেন্স $100, agent lock $60 → ইউজার agent-কে সর্বোচ্চ **$40** দিতে পারবে, বাকি $60 আটকে থাকবে।
+* **Full agent lock** → agent-কে এক পয়সাও দেওয়া যাবে না (`Payments to an agent are temporarily locked on this account by administration.`), কিন্তু P2P send আগের মতোই চলবে।
+* দুইটাই **স্বাধীন** — একটা দেওয়া/তোলা করলে অন্যটা বদলায় না (টেস্টে প্রমাণিত)।
+* 🔒 **নিরাপত্তার ওভারল্যাপ (জেনে রাখুন):** একটা **Sent Money** hold সক্রিয় থাকলে সেটা agent payment-কেও ক্যাপ করে (কারণ ওটা সাধারণ "বাইরে যাওয়া টাকা" ধরে রাখা)। তখন ইউজার যে মেসেজ দেখবে সেটা বলবে কোন লক) কারণে আটকেছে (`cause: "send"` vs `"agent"`)। চাইলে এই ওভারল্যাপটা পুরো বাদ দিয়ে দুইটাকে ১০০% আলাদা করে দিতে পারি — শুধু বলবেন।
+
+## অ্যাডমিন কনসোলে
+
+* **Manage → Money** (মোবাইল) এবং ডেস্কটপ Manage প্যানেলে এখন **দুইটা কার্ড**: *Sent Money Lock* + *Pay an Agent Lock*। দুইটাতেই — Balance / Held / Can still pay an agent, *Hold an amount*, *Full lock*, *Apply hold*, *Release*, আর internal note (ইউজার এই নোট দেখে না)।
+* **User list**-এ এখন দুইটা চিপ: `🔒 HOLD $30.00` / `🔒 SEND LOCKED` (orange) এবং `🔒 AGENT HOLD $60.00` / `🔒 AGENT LOCKED` (magenta)।
+* **MFA লাগে না** (আপনার আগের নির্দেশ মতো)। শুধু লগইন করা SUPERADMIN; প্রতিটি পরিবর্তন audit log-এ `USER_AGENT_LOCK` নামে লেখা হয়।
+
+## ইউজারের অ্যাপে
+
+* **Pay an Agent** স্ক্রিনে গোলাপি/ম্যাজেন্টা ব্যানার: *"Agent payments held by support — $60.00 is held for agent payments. You can still pay an agent up to $40.00."* (full lock হলে *"Agent payments locked"*)।
+* ভুল অ্যামাউন্ট দিলে সাবমিটেই একই ভাষায় ব্লক, আর **Max** বাটন now hold-এর পরের সঠিক সংখ্যাটাই বসায়।
+* Wallet-এও একটা ছোট গোলাপি লাইন যোগ হয়েছে (Send hold-এর নিচে)।
+* boost-এর নিয়ম (শুধু boost-প্রফিট তোলা যাবে) অপরিবর্তিত — লক তার উপরে কাজ করে; Boost Pause নিয়মও আগের মতো।
+
+## যাচাই — **২১/২১ PASS** (নতুন স্যুট, `/tmp/agent_lock_test.cjs`)
+
+```
+PASS  baseline: pay an agent works
+PASS  agent lock applied with NO MFA code/token
+PASS  card numbers: held $60, remainder = balance - 60  ($94.90 - 60 → $34.90)
+PASS  paying more than the allowed part is refused (403)
+      → "$60.00 of your balance is temporarily held for agent payments. You can still pay an agent up to $34.90."
+PASS  refusal names the agent hold + the real remainder
+PASS  refusal says which lock caused it (cause=agent)
+PASS  a smaller agent payment inside the allowed part works
+PASS  P2P transfer is UNAFFECTED by the agent lock            ← স্বাধীনতার প্রমাণ
+PASS  user payload exposes agentLock {full,amount,sendable,cause}
+PASS  full agent lock blocks Pay an Agent                    → 403
+PASS  P2P still works under a full agent lock
+PASS  release restores Pay an Agent
+PASS  sent-money hold caps P2P (80 > 50.70 refused)          → 403
+PASS  under the sent-money hold the payload reports cause=send
+PASS  small agent payment still allowed under a $30 send hold
+PASS  amount 0 / amount > balance / bad mode / unknown user / normal user  → 400/400/400/404/401
+PASS  admin user list carries agentLock + agentSendable
+RESULT 21 pass / 0 fail
+```
+পুরোনো স্যুটও আবার চালানো হয়েছে — **৯/৯** (MFA-মুক্ত + Pay an Agent) এবং **২০/২০** (সেন্ড-লক)।
+
+## প্রযুক্তিগত বিবরণ (deploy-এর জন্য)
+
+* `user.agentLock = { mode:'amount'|'full'|'off', amount, note, setBy, setAt }` — `user.sendLock`-এর পাশে আলাদা ফিল্ড, তাই পুরোনো ডেটা/মাইগ্রেশন লাগে না।
+* নতুন রুট: `POST /api/admin/users/agent-lock` (`requireSuperAdmin`, MFA-মুক্ত) — body `{userId, mode, amount?, note?}`। ভুল মোড/০/ব্যালেন্সের বেশি → 400, অজানা ইউজার → 404, সাধারণ ইউজার → 401।
+* এনফোর্সমেন্ট: `POST /api/user/send-to-agent` (amount + fee মিলিয়ে চেক)। `agentPayInfo()` দুই লকের মধ্যে **যেটা ছোট সেটাই** ক্যাপ হিসেবে ধরে, আর `cause` দেয় (`send` / `agent`) যাতে মেসেজ সঠিক হয়।
+* `publicUser` এখন `agentLock: { full, amount, sendable, cause }` পাঠায় (sendable = এখন সত্যিই agent-কে দেওয়া যাবে এমন সর্বোচ্চ); `adminUserView`-এ `agentLock` + `agentSendable` যোগ হয়েছে।
+* `SendLockCard.tsx` এখন `kind="send" | "agent"` নেয় — একই কম্পোনেন্ট দুই লকের জন্য (ডুপ্লিকেট কোড নেই)।
+
+## ⚠️ ছোট নোট
+* এই কাজের টেস্টের সময় লোকাল ওয়ার্কস্পেসের ডেভ-ডেটাবেস (`data/boostpay_db.json`) টেস্ট ইউজার দিয়ে বদলে গিয়েছিল (ফাইলটা gitignored, রিপোতে যায় না)। **প্রোডাকশন ডেটাবেস কিছুই হয়নি** — সেখানে কোনো লেখা/টেস্ট চালানো হয়নি।

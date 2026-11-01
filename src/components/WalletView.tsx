@@ -36,6 +36,7 @@ interface BalanceCardProps {
   onOpenQR?: () => void;
   onOpenAgentPay?: () => void;
   sendLock?: { full?: boolean; amount?: number; sendable?: number } | null;
+  agentLock?: { full?: boolean; amount?: number; sendable?: number; cause?: string } | null;
 }
 
 const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
@@ -47,7 +48,8 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   onOpenSendMoney,
   onOpenQR,
   onOpenAgentPay,
-  sendLock
+  sendLock,
+  agentLock
 }) => {
   const isRunning = boostState.isActive && !boostState.isPaused;
   const [liveAccrued, setLiveAccrued] = useState(0);
@@ -171,6 +173,21 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
             decColor="text-amber-400"
           />
         </div>
+
+        {/* Admin temporary agent-payment hold — shown next to the send hold */}
+        {agentLock && agentLock.cause === 'agent' && ((Number(agentLock.amount) || 0) > 0 || agentLock.full) ? (
+          <div className="mt-2 flex items-start gap-1.5 rounded-xl border border-fuchsia-500/30 bg-fuchsia-500/10 px-2.5 py-1.5 text-[10px] font-semibold text-fuchsia-300">
+            <span className="mt-[1px]">🔒</span>
+            <span>
+              {agentLock.full
+                ? 'Paying an agent is temporarily locked by support.'
+                : `$${(Number(agentLock.amount) || 0).toFixed(2)} is held for agent payments.`}
+              {typeof agentLock.sendable === 'number' && !agentLock.full
+                ? ` You can still pay an agent up to $${Number(agentLock.sendable).toFixed(2)}.`
+                : ''}
+            </span>
+          </div>
+        ) : null}
 
         {/* Admin temporary "sent money" hold — the user must see why a send fails */}
         {sendLock && ((Number(sendLock.amount) || 0) > 0 || sendLock.full) ? (
@@ -614,6 +631,7 @@ export const WalletView: FC<Props> = ({
         onOpenQR={onOpenQR}
         onOpenAgentPay={onOpenAgentPay}
         sendLock={(user as any).sendLock || null}
+        agentLock={(user as any).agentLock || null}
       />
 
       {/* 3. ISOLATED DYNAMIC COMPOUNDING CARD */}

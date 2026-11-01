@@ -1018,12 +1018,28 @@ export class BoostPayStore {
    *   mode 'off'    -> release
    * Enforced server-side on /api/transfer and /api/user/send-to-agent.
    */
+  /** Admin → Manage → "Pay an Agent Lock" (independent from the sent-money lock). */
+  static async adminSetAgentLock(
+    userId: string,
+    payload: { mode: 'amount' | 'full' | 'off'; amount?: number; note?: string }
+  ): Promise<{ success: boolean; user?: User; agentLock?: any; agentSendable?: number; error?: string }> {
+    return this.adminSetTemporaryLock('/api/admin/users/agent-lock', userId, payload);
+  }
+
   static async adminSetSendLock(
     userId: string,
     payload: { mode: 'amount' | 'full' | 'off'; amount?: number; note?: string }
   ): Promise<{ success: boolean; user?: User; sendLock?: any; sendableBalance?: number; error?: string; mfaRequired?: boolean }> {
+    return this.adminSetTemporaryLock('/api/admin/users/send-lock', userId, payload) as any;
+  }
+
+  private static async adminSetTemporaryLock(
+    path: string,
+    userId: string,
+    payload: { mode: 'amount' | 'full' | 'off'; amount?: number; note?: string }
+  ): Promise<{ success: boolean; user?: User; sendLock?: any; sendableBalance?: number; agentLock?: any; agentSendable?: number; error?: string; mfaRequired?: boolean }> {
     try {
-      const res = await fetch('/api/admin/users/send-lock', {
+      const res = await fetch(path, {
         method: 'POST',
         headers: this.adminAuthHeaders(),
         body: JSON.stringify({ userId, ...payload })
@@ -1039,7 +1055,7 @@ export class BoostPayStore {
         }
         return { success: false, error: data.error || `Could not save the lock (${res.status})` };
       }
-      return { success: true, user: data.user, sendLock: data.sendLock, sendableBalance: data.sendableBalance };
+      return { success: true, user: data.user, sendLock: data.sendLock, sendableBalance: data.sendableBalance, agentLock: data.agentLock, agentSendable: data.agentSendable };
     } catch (e: any) {
       return { success: false, error: e?.message || 'Network error.' };
     }

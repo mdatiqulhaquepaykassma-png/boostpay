@@ -1892,12 +1892,15 @@ function publicUser(u: any): any {
   // `Date.now() - startedAt`. A phone whose clock is a few minutes off used to show 0 s / 0.0 %
   // (or jump straight to 100 %) while the server compounded normally.
   const lock = sendLockOf(u);
+  const agentLock = agentLockOf(u);
+  const pay = agentPayInfo(u);
   return {
     ...rest,
     boostState: liveBoostState(u),
     serverTime: Date.now(),
-    // The user sees their own hold (the admin note stays internal).
-    sendLock: { full: lock.full, amount: lock.amount, sendable: sendableBalance(u) }
+    // The user sees their own holds (the admin note stays internal).
+    sendLock: { full: lock.full, amount: lock.amount, sendable: sendableBalance(u) },
+    agentLock: { full: pay.full, amount: agentLock.amount, sendable: pay.cap, cause: pay.cause }
   };
 }
 
@@ -2005,8 +2008,19 @@ function containsSpamLink(text: string): boolean {
  */
 const lockMoney = (n: any) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
-function sendLockOf(u: any): { full: boolean; amount: number; note: string; setAt: number } {
-  const raw = u && u.sendLock;
+/**
+ * Two INDEPENDENT temporary holds an admin can put on one user:
+ *   sendLock  → outgoing P2P transfers        (/api/transfer)
+ *   agentLock → outgoing payments to an agent (/api/user/send-to-agent)
+ * Shape: { mode: 'amount' | 'full' | 'off', amount, note, setBy, setAt }
+ * A hold only ever blocks OUTGOING money. Receiving, boosting, admin
+ * adjustments and chat are never affected.
+ */
+type LockKey = 'sendLock' | 'agentLock';
+type LockView = { full: boolean; amount: number; note: string; setAt: number };
+
+function lockOf(u: any, key: LockKey): LockView {
+  const raw = u && u[key];
   const mode = String((raw && raw.mode) || 'off');
   const balance = lockMoney(Number(u && u.balance) || 0);
   if (mode === 'full') return { full: true, amount: balance, note: String(raw.note || ''), setAt: Number(raw.setAt) || 0 };
@@ -2017,15 +2031,38 @@ function sendLockOf(u: any): { full: boolean; amount: number; note: string; setA
   return { full: false, amount: 0, note: '', setAt: 0 };
 }
 
-/** Balance the user is actually allowed to send right now. */
-function sendableBalance(u: any): number {
-  const lock = sendLockOf(u);
+function sendLockOf(u: any): LockView { return lockOf(u, 'sendLock'); }
+function agentLockOf(u: any): LockView { return lockOf(u, 'agentLock'); }
+
+function sendableWith(u: any, lock: LockView): number {
   const balance = lockMoney(Number(u && u.balance) || 0);
   if (lock.full) return 0;
   return lockMoney(Math.max(0, balance - lock.amount));
 }
 
-/** Standard refusal used by every outgoing-money path. */
+/** Balance the user may transfer out right now (P2P only). */
+function sendableBalance(u: any): number { return sendableWith(u, sendLockOf(u)); }
+
+/**
+ * What is still payable to an agent. The agent lock and the general "sent
+ * money" lock both cap it — whichever is tighter wins — and `cause` says which
+ * one produced the number so the refusal message can name the real reason.
+ */
+function agentPayInfo(u: any): { cap: number; full: boolean; cause: 'none' | 'send' | 'agent' } {
+  const sendLock = sendLockOf(u);
+  const agentLock = agentLockOf(u);
+  const s = sendableWith(u, sendLock);
+  const a = sendableWith(u, agentLock);
+  const cap = Math.min(s, a);
+  let cause: 'none' | 'send' | 'agent' = 'none';
+  if (a < s) cause = 'agent';
+  else if (s < a) cause = 'send';
+  else if (agentLock.full || agentLock.amount > 0) cause = 'agent';
+  else if (sendLock.full || sendLock.amount > 0) cause = 'send';
+  return { cap, full: !!(agentLock.full || sendLock.full), cause };
+}
+
+/** Refusal for an outgoing P2P transfer. */
 function sendLockError(u: any): string {
   const lock = sendLockOf(u);
   if (lock.full) return 'Sending money is temporarily locked on this account by administration. Please contact support.';
@@ -2033,15 +2070,30 @@ function sendLockError(u: any): string {
   return `$${lock.amount.toFixed(2)} of your balance is temporarily held by administration. You can send up to $${left.toFixed(2)} right now.`;
 }
 
+/** Refusal for an outgoing payment to an agent (names whichever hold binds). */
+function agentLockError(u: any): string {
+  const info = agentPayInfo(u);
+  const lock = agentLockOf(u);
+  if (info.cause === 'agent') {
+    if (lock.full) return 'Payments to an agent are temporarily locked on this account by administration. Please contact support.';
+    return `$${lock.amount.toFixed(2)} of your balance is temporarily held for agent payments. You can still pay an agent up to $${info.cap.toFixed(2)}.`;
+  }
+  if (info.full) return 'Sending money is temporarily locked on this account by administration. Please contact support.';
+  return `Only $${info.cap.toFixed(2)} of your balance can go to an agent right now — the rest is temporarily held by administration.`;
+}
+
 function adminUserView(u: any): any {
   if (!u || typeof u !== 'object') return u;
   const lock = sendLockOf(u);
+  const agent = agentLockOf(u);
   return {
     ...u,
     boostState: liveBoostState(u),
     hasPassword: !!u.password,
     sendLock: { mode: lock.full ? 'full' : (lock.amount > 0 ? 'amount' : 'off'), amount: lock.amount, note: lock.note, setAt: lock.setAt },
-    sendableBalance: sendableBalance(u)
+    sendableBalance: sendableBalance(u),
+    agentLock: { mode: agent.full ? 'full' : (agent.amount > 0 ? 'amount' : 'off'), amount: agent.amount, note: agent.note, setAt: agent.setAt },
+    agentSendable: agentPayInfo(u).cap
   };
 }
 
@@ -6023,6 +6075,72 @@ async function startServer() {
     }
   });
 
+  /**
+   * Admin → Manage → "Pay an Agent Lock" (temporary hold).
+   * Independent from the sent-money lock: it only gates payments to an agent.
+   *   full   → the user cannot pay any agent
+   *   amount → only (balance - amount) can go to an agent
+   * No MFA gate (owner request, same as the sent-money lock); SUPERADMIN only and
+   * every change is audit-logged.
+   */
+  app.post('/api/admin/users/agent-lock', requireSuperAdmin, (req: any, res) => {
+    try {
+      const body: any = req.body || {};
+      const userId = String(body.userId || '').trim();
+      const mode = String(body.mode || '').trim().toLowerCase();
+      if (!userId) return res.status(400).json({ error: 'userId is required.' });
+      if (!['amount', 'full', 'off'].includes(mode)) return res.status(400).json({ error: "mode must be 'amount', 'full' or 'off'." });
+      const db = readDb();
+      const user = (db.users || []).find((u: any) => String(u.id) === userId);
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+
+      if (mode === 'off') {
+        user.agentLock = { mode: 'off', amount: 0, note: '', setBy: String(req.authAdmin || ''), setAt: Date.now() };
+      } else if (mode === 'full') {
+        user.agentLock = {
+          mode: 'full',
+          amount: round2(Number(user.balance) || 0),
+          note: sanitizeText(body.note, 160) || 'Agent payments temporarily locked',
+          setBy: String(req.authAdmin || ''),
+          setAt: Date.now()
+        };
+      } else {
+        const amount = round2(Number(body.amount) || 0);
+        if (!(amount > 0)) return res.status(400).json({ error: 'Enter a lock amount greater than 0.' });
+        if (amount > round2(Number(user.balance) || 0)) {
+          return res.status(400).json({ error: `Lock amount cannot exceed the user's balance ($${round2(Number(user.balance) || 0).toFixed(2)}).` });
+        }
+        user.agentLock = {
+          mode: 'amount',
+          amount,
+          note: sanitizeText(body.note, 160) || 'Temporary agent-payment hold',
+          setBy: String(req.authAdmin || ''),
+          setAt: Date.now()
+        };
+      }
+      const lock = agentLockOf(user);
+      writeDb(db);
+      try {
+        recordAuditLog(
+          db,
+          'USER_AGENT_LOCK',
+          String(req.authAdmin || 'admin'),
+          `User #${user.id} agent-pay lock -> ${mode === 'off' ? 'released' : (mode === 'full' ? 'FULL lock' : `$${lock.amount.toFixed(2)} held`)}${user.agentLock.note ? ` (${user.agentLock.note})` : ''}`,
+          String(user.id)
+        );
+      } catch { /* audit must not break the action */ }
+      try { broadcastUserUpdate(db, String(user.id)); } catch { /* ignore */ }
+      res.json({
+        success: true,
+        user: adminUserView(user),
+        agentLock: { mode: user.agentLock.mode, amount: lock.amount, note: lock.note },
+        agentSendable: agentPayInfo(user).cap
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/admin/users/freeze', requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const { userId, isFrozen, reason, adminEmail } = req.body;
@@ -8503,17 +8621,24 @@ async function startServer() {
         }
         const fee = pctOf(parsed.value, s.feePercentOnUserSend);
         const total = round2(parsed.value + fee);
-        // Admin "sent money" lock (temporary hold) — applies to amount + fee.
-        const sendableNow = sendableBalance(user);
+        // ── Admin temporary holds (agent lock + general "sent money" lock).
+        //    Both cap what can leave through an agent; the tighter one wins.
+        const agentPay = agentPayInfo(user);
+        const sendableNow = agentPay.cap;
         if (total > sendableNow) {
-          return { status: 403, body: { error: sendLockError(user), sendLocked: sendLockOf(user), sendable: sendableNow } };
+          return {
+            status: 403,
+            body: {
+              error: agentLockError(user),
+              agentLocked: agentLockOf(user),
+              sendLocked: sendLockOf(user),
+              sendable: sendableNow,
+              cause: agentPay.cause
+            }
+          };
         }
         if (round2(user.balance || 0) < total) {
           return { status: 400, body: { error: `Insufficient balance. Amount ${parsed.value.toFixed(2)} + fee ${fee.toFixed(2)} = ${total.toFixed(2)} required.` } };
-        }
-        // ── Admin "sent money" hold: the held part cannot leave through an agent either.
-        if (sendableNow < total) {
-          return { status: 403, body: { error: sendLockError(user), sendLocked: sendLockOf(user), sendable: sendableNow } };
         }
         // ── OWNER RULE: only boosted dollars can be withdrawn through an agent.
         const withdrawable = boostWithdrawable(user);

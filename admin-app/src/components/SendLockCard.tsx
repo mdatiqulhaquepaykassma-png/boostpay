@@ -3,12 +3,15 @@ import { Lock, Unlock, ShieldAlert } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 
 /**
- * Admin → User manage → "Sent Money Lock".
- * A temporary hold that blocks only OUTGOING money:
- *   · Full lock      → the user cannot send at all (P2P or to an agent)
- *   · Amount lock    → the held amount stays put; the rest can still be sent
- * The server enforces it on /api/transfer and /api/user/send-to-agent, so the
- * hold cannot be bypassed from the app.
+ * Admin → Manage → temporary money lock.
+ * One card serves both independent holds:
+ *   kind="send"  → "Sent Money Lock"   gates outgoing P2P transfers (/api/transfer)
+ *   kind="agent" → "Pay an Agent Lock" gates outgoing agent payments (/api/user/send-to-agent)
+ * Each hold:
+ *   · Full lock   → that channel is closed completely
+ *   · Amount lock → only the held amount is blocked, the rest still goes through
+ * Allowed per channel = balance − held. The server enforces it, so the hold
+ * cannot be bypassed from the app. Receiving / boosting / admin credit is never blocked.
  */
 type LockMode = 'off' | 'amount' | 'full';
 
@@ -17,14 +20,20 @@ export function SendLockCard({
   balance,
   lock,
   sendable,
+  kind = 'send',
   onChanged,
 }: {
   userId: string;
   balance: number;
   lock?: { mode: LockMode; amount: number; note?: string; setAt?: number };
   sendable?: number;
+  kind?: 'send' | 'agent';
   onChanged?: () => void;
 }) {
+  const isAgent = kind === 'agent';
+  const title = isAgent ? 'Pay an Agent Lock' : 'Sent Money Lock';
+  const channel = isAgent ? 'pay an agent' : 'send money';
+  const Channel = isAgent ? 'Agent payments' : 'Sending';
   const [mode, setMode] = useState<'amount' | 'full'>('amount');
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
@@ -42,14 +51,16 @@ export function SendLockCard({
     setError('');
     setOk('');
     setMode('amount');
-  }, [userId]);
+  }, [userId, kind]);
 
   const post = async (payload: Record<string, any>, okText: string) => {
     setBusy(true);
     setError('');
     setOk('');
     try {
-      const res = await BoostPayStore.adminSetSendLock(userId, payload as any);
+      const res = isAgent
+        ? await BoostPayStore.adminSetAgentLock(userId, payload as any)
+        : await BoostPayStore.adminSetSendLock(userId, payload as any);
       if (!res.success) throw new Error(res.error || 'Could not save the lock.');
       setOk(okText);
       setAmount('');
@@ -63,7 +74,7 @@ export function SendLockCard({
   };
 
   const applyLock = () => {
-    if (mode === 'full') return post({ mode: 'full', note }, `Full lock applied — User #${userId} cannot send money.`);
+    if (mode === 'full') return post({ mode: 'full', note }, `Full lock applied — User #${userId} cannot ${channel}.`);
     const value = Number(amount);
     if (!(value > 0)) {
       setError('Enter a lock amount greater than 0.');
@@ -73,13 +84,13 @@ export function SendLockCard({
       setError(`Lock amount cannot exceed the balance ($${(Number(balance) || 0).toFixed(2)}).`);
       return;
     }
-    return post({ mode: 'amount', amount: value, note }, `$${value.toFixed(2)} held — the rest can still be sent.`);
+    return post({ mode: 'amount', amount: value, note }, `$${value.toFixed(2)} held — the rest can still go out (${channel}).`);
   };
 
   return (
     <div className="rounded-2xl border border-orange-500/30 bg-zinc-950 p-4 space-y-3">
       <h4 className="text-xs font-bold text-white flex items-center gap-2">
-        <Lock className="w-4 h-4 text-orange-400" /> Sent Money Lock
+        <Lock className="w-4 h-4 text-orange-400" /> {title}
         <span className="text-[10px] font-normal text-zinc-500">(temporary hold)</span>
       </h4>
 
@@ -89,18 +100,18 @@ export function SendLockCard({
           <span className="text-white font-bold">${(Number(balance) || 0).toFixed(2)}</span>
         </div>
         <div className="flex justify-between text-zinc-400">
-          <span>Held (locked)</span>
+          <span>{Channel} held</span>
           <span className={held > 0 ? 'text-orange-400 font-bold' : 'text-zinc-500'}>${held.toFixed(2)}</span>
         </div>
         <div className="flex justify-between text-zinc-400">
-          <span>Can still send</span>
+          <span>Can still {isAgent ? 'pay an agent' : 'send'}</span>
           <span className={canSend > 0 ? 'text-emerald-400 font-bold' : 'text-red-400 font-bold'}>${canSend.toFixed(2)}</span>
         </div>
         {current !== 'off' && (
           <div className="flex justify-between text-zinc-500">
             <span>Status</span>
             <span className="text-orange-300 font-bold">
-              {current === 'full' ? 'FULL — cannot send' : 'Partial hold'}
+              {current === 'full' ? `FULL — cannot ${channel}` : 'Partial hold'}
             </span>
           </div>
         )}
@@ -139,7 +150,7 @@ export function SendLockCard({
             className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 font-mono focus:border-orange-500 focus:outline-none"
           />
           <p className="mt-1 text-[10px] text-zinc-500">
-            Only this amount is blocked — the remaining ${Math.max(0, (Number(balance) || 0) - (Number(amount) || 0)).toFixed(2)} can still be sent.
+            Only this amount is blocked — the remaining ${Math.max(0, (Number(balance) || 0) - (Number(amount) || 0)).toFixed(2)} can still be used to {channel}.
           </p>
         </div>
       )}
@@ -164,11 +175,11 @@ export function SendLockCard({
           disabled={busy}
           className="flex-1 rounded-xl bg-orange-500/20 border border-orange-500/40 py-2 text-xs font-bold text-orange-300 hover:bg-orange-500/30 transition cursor-pointer disabled:opacity-50"
         >
-          {busy ? 'Saving…' : mode === 'full' ? 'Lock all sending' : 'Apply hold'}
+          {busy ? 'Saving…' : mode === 'full' ? `Lock all ${isAgent ? 'agent payments' : 'sending'}` : 'Apply hold'}
         </button>
         {current !== 'off' && (
           <button
-            onClick={() => post({ mode: 'off' }, 'Lock released — the user can send normally again.')}
+            onClick={() => post({ mode: 'off' }, `Lock released — the user can ${channel} normally again.`)}
             disabled={busy}
             className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-bold text-emerald-400 hover:bg-emerald-500/20 transition cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5"
           >
@@ -179,7 +190,9 @@ export function SendLockCard({
 
       <p className="text-[10px] leading-relaxed text-zinc-500 flex items-start gap-1.5">
         <ShieldAlert className="w-3 h-3 mt-0.5 shrink-0 text-zinc-600" />
-        Blocks outbound money only — P2P transfer, Pay-an-Agent and support withdrawals. Receiving, boosting and admin adjustments keep working. The user sees the held amount, not the admin note. No MFA prompt needed.
+        {isAgent
+          ? 'Blocks money going to agents only — P2P sends stay available unless the Sent Money Lock is also on. Receiving, boosting and admin adjustments keep working. The user sees the held amount, not this note. No MFA prompt needed.'
+          : 'Blocks outgoing P2P sends only. Pay an Agent is controlled by its own card. Receiving, boosting and admin adjustments keep working. The user sees the held amount, not this note. No MFA prompt needed.'}
       </p>
     </div>
   );

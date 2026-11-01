@@ -1597,6 +1597,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                                   🔒 {(u as any).sendLock.mode === 'full' ? 'SEND LOCKED' : `HOLD $${Number((u as any).sendLock.amount || 0).toFixed(2)}`}
                                 </span>
                               ) : null}
+                              {/* temporary "pay an agent" hold set from Manage */}
+                              {(u as any).agentLock && (u as any).agentLock.mode && (u as any).agentLock.mode !== 'off' ? (
+                                <span
+                                  className="rounded-full bg-fuchsia-500/15 px-2 py-0.5 text-[10px] font-bold text-fuchsia-300 border border-fuchsia-500/40"
+                                  title={(u as any).agentLock.mode === 'full' ? 'Pay an Agent: fully locked' : `Agent payments held: $${Number((u as any).agentLock.amount || 0).toFixed(2)}`}
+                                >
+                                  🔒 {(u as any).agentLock.mode === 'full' ? 'AGENT LOCKED' : `AGENT HOLD $${Number((u as any).agentLock.amount || 0).toFixed(2)}`}
+                                </span>
+                              ) : null}
                             </div>
                           </td>
                           <td className="px-4 py-3">
@@ -2058,6 +2067,17 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     sendable={(selectedUser as any).sendableBalance}
                     onChanged={() => { void refreshData(true); }}
                   />
+
+                  {/* Operation 5: Pay an Agent Lock (independent temporary hold) */}
+                  <SendLockCard
+                    key={`agentlock-desktop-${selectedUser.id}`}
+                    kind="agent"
+                    userId={String(selectedUser.id)}
+                    balance={Number(selectedUser.balance) || 0}
+                    lock={(selectedUser as any).agentLock}
+                    sendable={(selectedUser as any).agentSendable}
+                    onChanged={() => { void refreshData(true); }}
+                  />
                 </div>
               </div>
             )}
@@ -2137,6 +2157,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           balance={Number(selectedUser.balance) || 0}
                           lock={(selectedUser as any).sendLock}
                           sendable={(selectedUser as any).sendableBalance}
+                          onChanged={() => { void refreshData(true); }}
+                        />
+                        <SendLockCard
+                          key={`agentlock-mobile-${selectedUser.id}`}
+                          kind="agent"
+                          userId={String(selectedUser.id)}
+                          balance={Number(selectedUser.balance) || 0}
+                          lock={(selectedUser as any).agentLock}
+                          sendable={(selectedUser as any).agentSendable}
                           onChanged={() => { void refreshData(true); }}
                         />
                         <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">

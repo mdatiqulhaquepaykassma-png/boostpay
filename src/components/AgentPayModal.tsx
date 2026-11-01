@@ -170,13 +170,18 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   const feePercent = Number(data?.feePercent || 0);
   // "Available Boosted Withdraw" — the server-calculated cap (never trust the client).
   const maxWithdraw = Number(data?.maxWithdraw ?? currentUser.balance ?? 0);
-  // Admin "sent money" temporary hold (see WalletView): the held part cannot leave
-  // through an agent either, so it also caps what can be sent here.
-  const sendLock = ((currentUser as any)?.sendLock || null) as
-    | { full?: boolean; amount?: number; sendable?: number }
+  // Admin temporary holds. `agentLock` is the agent-payment hold (its `sendable`
+  // already accounts for a general "sent money" hold too); `cause` says which one
+  // produced the cap so the wording matches what the server will answer.
+  const agentLock = ((currentUser as any)?.agentLock || null) as
+    | { full?: boolean; amount?: number; sendable?: number; cause?: 'none' | 'send' | 'agent' }
     | null;
-  const sendLockHeld = Number(sendLock?.amount || 0);
-  const sendLockFull = !!sendLock?.full;
+  const agentHeld = Number(agentLock?.amount || 0);
+  const agentFull = !!agentLock?.full;
+  const agentCause = agentLock?.cause || 'none';
+  const agentCap = typeof agentLock?.sendable === 'number' ? agentLock.sendable : null;
+  // The most that can be typed in right now (boost rules AND the admin hold).
+  const effectiveMax = agentCap === null ? maxWithdraw : Math.min(maxWithdraw, agentCap);
   const numAmount = Number(amount || 0);
   const fee = useMemo(() => Math.round(numAmount * feePercent) / 100, [numAmount, feePercent]);
   const total = useMemo(() => Math.round((numAmount + fee) * 100) / 100, [numAmount, fee]);
@@ -197,20 +202,21 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
     if (!/^\d+(\.\d{1,2})?$/.test(amount.trim())) { setError('Enter an amount with at most 2 decimals.'); return; }
     if (data && numAmount < data.minUserSend) { setError(`Minimum payment is ${data.minUserSend}.`); return; }
     if (data && numAmount > data.maxUserSend) { setError(`Maximum payment is ${data.maxUserSend}.`); return; }
-    if (sendLockFull) {
-      setError('Sending money is temporarily locked on your account by support. Please contact support.');
+    if (agentFull) {
+      setError(agentCause === 'agent'
+        ? 'Payments to an agent are temporarily locked on your account by support. Please contact support.'
+        : 'Sending money is temporarily locked on your account by support. Please contact support.');
+      return;
+    }
+    if (agentCap !== null && total > agentCap) {
+      setError(agentCause === 'agent'
+        ? `$${agentHeld.toFixed(2)} of your balance is temporarily held for agent payments. You can still pay an agent up to $${agentCap.toFixed(2)}.`
+        : `Only $${agentCap.toFixed(2)} of your balance can go to an agent right now — the rest is temporarily held by support.`);
       return;
     }
     if (numAmount > maxWithdraw) {
       setError(`Only boosted dollars can be withdrawn through an agent. Available boosted withdraw amount: $${maxWithdraw.toFixed(2)}.`);
       return;
-    }
-    if (sendLockHeld > 0) {
-      const sendable = typeof sendLock?.sendable === 'number' ? sendLock.sendable : Math.max(0, Number(currentUser.balance || 0) - sendLockHeld);
-      if (total > sendable) {
-        setError(`$${sendLockHeld.toFixed(2)} of your balance is temporarily held by support. You can send up to $${sendable.toFixed(2)} right now.`);
-        return;
-      }
     }
     if (total > Number(currentUser.balance || 0)) { setError(`Insufficient balance. You need ${total.toFixed(2)} (amount + fee).`); return; }
     setBusy(true);
@@ -551,20 +557,18 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                 ) : null}
 
                 {/* Admin temporary hold — same notice as the wallet, shown where the money leaves */}
-                {(sendLockFull || sendLockHeld > 0) ? (
+                {((agentFull || agentHeld > 0) && agentCause === 'agent') ? (
                   <div className="rounded-2xl border border-orange-500/30 bg-orange-500/10 px-3 py-2.5">
                     <div className="flex items-start gap-2">
                       <span className="mt-0.5 text-[13px] leading-none">🔒</span>
                       <div className="min-w-0">
                         <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-orange-300">
-                          {sendLockFull ? 'Sending locked by support' : 'Temporarily held by support'}
+                          {agentFull ? 'Agent payments locked' : 'Agent payments held by support'}
                         </div>
                         <div className="mt-0.5 text-[10px] leading-relaxed text-orange-200/90">
-                          {sendLockFull
-                            ? 'You cannot send money right now. Receiving money still works — contact support for details.'
-                            : `$${sendLockHeld.toFixed(2)} of your balance is held. You can still send up to $${
-                                (typeof sendLock?.sendable === 'number' ? sendLock.sendable : Math.max(0, Number(currentUser.balance || 0) - sendLockHeld)).toFixed(2)
-                              } (boost rules still apply).`}
+                          {agentFull
+                            ? 'You cannot pay an agent right now. Receiving money still works — contact support for details.'
+                            : `$${agentHeld.toFixed(2)} of your balance is held for agent payments. You can still pay an agent up to $${(agentCap ?? 0).toFixed(2)} (boost rules still apply).`}
                         </div>
                       </div>
                     </div>
@@ -588,8 +592,8 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                     </div>
                     <button
                       type="button"
-                      onClick={() => setAmount(maxWithdraw > 0 ? maxWithdraw.toFixed(2) : '')}
-                      disabled={maxWithdraw <= 0}
+                      onClick={() => setAmount(effectiveMax > 0 ? effectiveMax.toFixed(2) : '')}
+                      disabled={effectiveMax <= 0}
                       className="shrink-0 rounded-xl border border-emerald-500/40 bg-zinc-950/40 px-2.5 py-1.5 text-[10px] font-bold text-emerald-300 disabled:opacity-40 cursor-pointer"
                     >
                       Max
