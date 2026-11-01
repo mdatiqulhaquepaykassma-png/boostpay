@@ -35,6 +35,7 @@ interface BalanceCardProps {
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
   onOpenAgentPay?: () => void;
+  sendLock?: { full?: boolean; amount?: number; sendable?: number } | null;
 }
 
 const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
@@ -45,7 +46,8 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   minuteRatePercent,
   onOpenSendMoney,
   onOpenQR,
-  onOpenAgentPay
+  onOpenAgentPay,
+  sendLock
 }) => {
   const isRunning = boostState.isActive && !boostState.isPaused;
   const [liveAccrued, setLiveAccrued] = useState(0);
@@ -169,6 +171,21 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
             decColor="text-amber-400"
           />
         </div>
+
+        {/* Admin temporary "sent money" hold — the user must see why a send fails */}
+        {sendLock && ((Number(sendLock.amount) || 0) > 0 || sendLock.full) ? (
+          <div className="mt-2 flex items-start gap-1.5 rounded-xl border border-orange-500/30 bg-orange-500/10 px-2.5 py-1.5 text-[10px] font-semibold text-orange-300">
+            <span className="mt-[1px]">🔒</span>
+            <span>
+              {sendLock.full
+                ? 'Sending money is temporarily locked by support.'
+                : `$${(Number(sendLock.amount) || 0).toFixed(2)} of your balance is temporarily held by support.`}
+              {typeof sendLock.sendable === 'number' && !sendLock.full
+                ? ` You can send up to $${Number(sendLock.sendable).toFixed(2)}.`
+                : ''}
+            </span>
+          </div>
+        ) : null}
 
         <div className="mt-2 flex items-center gap-2 min-h-[24px] flex-wrap">
           {boostState.isActive && (
@@ -596,6 +613,7 @@ export const WalletView: FC<Props> = ({
         onOpenSendMoney={onOpenSendMoney}
         onOpenQR={onOpenQR}
         onOpenAgentPay={onOpenAgentPay}
+        sendLock={(user as any).sendLock || null}
       />
 
       {/* 3. ISOLATED DYNAMIC COMPOUNDING CARD */}

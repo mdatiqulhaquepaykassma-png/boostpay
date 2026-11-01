@@ -1,4 +1,5 @@
 import { FC, useState, useEffect, useRef } from 'react';
+import { SendLockCard } from './SendLockCard';
 import { PushBell } from '../push/PushBell';
 import {
   ShieldCheck,
@@ -1587,6 +1588,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                                   ACTIVE
                                 </span>
                               )}
+                              {/* temporary "sent money" hold set from Manage */}
+                              {(u as any).sendLock && (u as any).sendLock.mode && (u as any).sendLock.mode !== 'off' ? (
+                                <span
+                                  className="rounded-full bg-orange-500/15 px-2 py-0.5 text-[10px] font-bold text-orange-300 border border-orange-500/40"
+                                  title={(u as any).sendLock.mode === 'full' ? 'Sending money: fully locked' : `Held: $${Number((u as any).sendLock.amount || 0).toFixed(2)}`}
+                                >
+                                  🔒 {(u as any).sendLock.mode === 'full' ? 'SEND LOCKED' : `HOLD $${Number((u as any).sendLock.amount || 0).toFixed(2)}`}
+                                </span>
+                              ) : null}
                             </div>
                           </td>
                           <td className="px-4 py-3">
@@ -2038,6 +2048,16 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       Update Password
                     </button>
                   </div>
+
+                  {/* Operation 4: Sent Money Lock (temporary hold) */}
+                  <SendLockCard
+                    key={`lock-desktop-${selectedUser.id}`}
+                    userId={String(selectedUser.id)}
+                    balance={Number(selectedUser.balance) || 0}
+                    lock={(selectedUser as any).sendLock}
+                    sendable={(selectedUser as any).sendableBalance}
+                    onChanged={() => { void refreshData(true); }}
+                  />
                 </div>
               </div>
             )}
@@ -2111,6 +2131,14 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     )}
                     {mobileUserTab==='MONEY' && (
                       <div className="space-y-3">
+                        <SendLockCard
+                          key={`lock-mobile-${selectedUser.id}`}
+                          userId={String(selectedUser.id)}
+                          balance={Number(selectedUser.balance) || 0}
+                          lock={(selectedUser as any).sendLock}
+                          sendable={(selectedUser as any).sendableBalance}
+                          onChanged={() => { void refreshData(true); }}
+                        />
                         <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
                           <div className="text-xs font-bold text-white mb-2 flex items-center gap-2"><PlusCircle className="w-4 h-4 text-emerald-400" /> Treasury — Credit / Debit</div>
                           <label className="text-[11px] text-zinc-400">Amount ($)</label>

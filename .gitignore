@@ -16,3 +16,6 @@ data/boostpay_db.json
 data/backups/
 data/*.tmp
 data/uploads/
+
+# Admin MFA secrets must never be committed
+data/.admin-mfa.json

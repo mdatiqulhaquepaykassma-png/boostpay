@@ -1891,7 +1891,14 @@ function publicUser(u: any): any {
   // serverTime lets the app paint boost progress from elapsedMs + time-since-receipt instead of
   // `Date.now() - startedAt`. A phone whose clock is a few minutes off used to show 0 s / 0.0 %
   // (or jump straight to 100 %) while the server compounded normally.
-  return { ...rest, boostState: liveBoostState(u), serverTime: Date.now() };
+  const lock = sendLockOf(u);
+  return {
+    ...rest,
+    boostState: liveBoostState(u),
+    serverTime: Date.now(),
+    // The user sees their own hold (the admin note stays internal).
+    sendLock: { full: lock.full, amount: lock.amount, sendable: sendableBalance(u) }
+  };
 }
 
 /**
@@ -1989,9 +1996,53 @@ function containsSpamLink(text: string): boolean {
 }
 
 /** Admin console view: shows stored credentials (owner-requested password visibility), keeps recovery phrase for support search. */
+/**
+ * Admin "sent money" lock — a temporary hold that only blocks OUTGOING money.
+ *   sendLock = { mode: 'amount' | 'full' | 'off', amount, note, setBy, setAt }
+ * mode 'full'   -> the user cannot send anything at all
+ * mode 'amount' -> only (balance - amount) can be sent; the held part stays put
+ * Receiving, boosting and admin adjustments are never blocked.
+ */
+const lockMoney = (n: any) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+function sendLockOf(u: any): { full: boolean; amount: number; note: string; setAt: number } {
+  const raw = u && u.sendLock;
+  const mode = String((raw && raw.mode) || 'off');
+  const balance = lockMoney(Number(u && u.balance) || 0);
+  if (mode === 'full') return { full: true, amount: balance, note: String(raw.note || ''), setAt: Number(raw.setAt) || 0 };
+  if (mode === 'amount') {
+    const amount = lockMoney(Math.max(0, Math.min(Number(raw.amount) || 0, balance)));
+    if (amount > 0) return { full: false, amount, note: String(raw.note || ''), setAt: Number(raw.setAt) || 0 };
+  }
+  return { full: false, amount: 0, note: '', setAt: 0 };
+}
+
+/** Balance the user is actually allowed to send right now. */
+function sendableBalance(u: any): number {
+  const lock = sendLockOf(u);
+  const balance = lockMoney(Number(u && u.balance) || 0);
+  if (lock.full) return 0;
+  return lockMoney(Math.max(0, balance - lock.amount));
+}
+
+/** Standard refusal used by every outgoing-money path. */
+function sendLockError(u: any): string {
+  const lock = sendLockOf(u);
+  if (lock.full) return 'Sending money is temporarily locked on this account by administration. Please contact support.';
+  const left = sendableBalance(u);
+  return `$${lock.amount.toFixed(2)} of your balance is temporarily held by administration. You can send up to $${left.toFixed(2)} right now.`;
+}
+
 function adminUserView(u: any): any {
   if (!u || typeof u !== 'object') return u;
-  return { ...u, boostState: liveBoostState(u), hasPassword: !!u.password };
+  const lock = sendLockOf(u);
+  return {
+    ...u,
+    boostState: liveBoostState(u),
+    hasPassword: !!u.password,
+    sendLock: { mode: lock.full ? 'full' : (lock.amount > 0 ? 'amount' : 'off'), amount: lock.amount, note: lock.note, setAt: lock.setAt },
+    sendableBalance: sendableBalance(u)
+  };
 }
 
 /** Drop prototype-pollution keys and normalize money fields on client-supplied users. */
@@ -5013,6 +5064,18 @@ async function startServer() {
       if (recipient.isBlocked) return res.status(403).json({ error: 'Recipient account is restricted.' });
       if (recipient.isFrozen) return res.status(403).json({ error: 'Recipient account is currently frozen.' });
 
+      const senderSendable = sendableBalance(sender);
+      if (senderSendable <= 0) {
+        return res.status(403).json({ error: sendLockError(sender), sendLocked: sendLockOf(sender), sendable: senderSendable });
+      }
+      if (numAmount > senderSendable) {
+        const lock = sendLockOf(sender);
+        return res.status(403).json({
+          error: lock.amount > 0 ? sendLockError(sender) : 'Insufficient wallet balance for this transfer.',
+          sendLocked: lock,
+          sendable: senderSendable
+        });
+      }
       if (Number(sender.balance) < numAmount) {
         return res.status(400).json({ error: 'Insufficient wallet balance for this transfer.' });
       }
@@ -5891,6 +5954,71 @@ async function startServer() {
   });
 
   // Account freeze toggle endpoint
+  /**
+   * Admin: temporary "sent money" lock for one user.
+   *   { userId, mode: 'amount'|'full'|'off', amount, note }
+   * 'full'   -> the user cannot send money at all
+   * 'amount' -> only (balance - amount) can be sent
+   * 'off'    -> release the hold
+   */
+  app.post('/api/admin/users/send-lock', requireSuperAdmin, requireMfa, (req: any, res) => {
+    try {
+      const body: any = req.body || {};
+      const userId = String(body.userId || '').trim();
+      const mode = String(body.mode || '').trim().toLowerCase();
+      if (!userId) return res.status(400).json({ error: 'userId is required.' });
+      if (!['amount', 'full', 'off'].includes(mode)) return res.status(400).json({ error: "mode must be 'amount', 'full' or 'off'." });
+      const db = readDb();
+      const user = (db.users || []).find((u: any) => String(u.id) === userId);
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+
+      if (mode === 'off') {
+        user.sendLock = { mode: 'off', amount: 0, note: '', setBy: String(req.authAdmin || ''), setAt: Date.now() };
+      } else if (mode === 'full') {
+        user.sendLock = {
+          mode: 'full',
+          amount: round2(Number(user.balance) || 0),
+          note: sanitizeText(body.note, 160) || 'Sent money temporarily locked',
+          setBy: String(req.authAdmin || ''),
+          setAt: Date.now()
+        };
+      } else {
+        const amount = round2(Number(body.amount) || 0);
+        if (!(amount > 0)) return res.status(400).json({ error: 'Enter a lock amount greater than 0.' });
+        if (amount > round2(Number(user.balance) || 0)) {
+          return res.status(400).json({ error: `Lock amount cannot exceed the user's balance ($${round2(Number(user.balance) || 0).toFixed(2)}).` });
+        }
+        user.sendLock = {
+          mode: 'amount',
+          amount,
+          note: sanitizeText(body.note, 160) || 'Temporary hold',
+          setBy: String(req.authAdmin || ''),
+          setAt: Date.now()
+        };
+      }
+      const lock = sendLockOf(user);
+      writeDb(db);
+      try {
+        recordAuditLog(
+          db,
+          'USER_SEND_LOCK',
+          String(req.authAdmin || 'admin'),
+          `User #${user.id} send lock -> ${mode === 'off' ? 'released' : (mode === 'full' ? 'FULL lock' : `$${lock.amount.toFixed(2)} held`)}${user.sendLock.note ? ` (${user.sendLock.note})` : ''}`,
+          String(user.id)
+        );
+      } catch { /* audit must not break the action */ }
+      try { broadcastUserUpdate(db, String(user.id)); } catch { /* ignore */ }
+      res.json({
+        success: true,
+        user: adminUserView(user),
+        sendLock: { mode: user.sendLock.mode, amount: lock.amount, note: lock.note },
+        sendableBalance: sendableBalance(user)
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/admin/users/freeze', requireSuperAdmin, requireMfa, (req: any, res) => {
     try {
       const { userId, isFrozen, reason, adminEmail } = req.body;
@@ -8371,6 +8499,11 @@ async function startServer() {
         }
         const fee = pctOf(parsed.value, s.feePercentOnUserSend);
         const total = round2(parsed.value + fee);
+        // Admin "sent money" lock (temporary hold) — applies to amount + fee.
+        const sendableNow = sendableBalance(user);
+        if (total > sendableNow) {
+          return { status: 403, body: { error: sendLockError(user), sendLocked: sendLockOf(user), sendable: sendableNow } };
+        }
         if (round2(user.balance || 0) < total) {
           return { status: 400, body: { error: `Insufficient balance. Amount ${parsed.value.toFixed(2)} + fee ${fee.toFixed(2)} = ${total.toFixed(2)} required.` } };
         }

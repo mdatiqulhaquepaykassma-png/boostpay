@@ -1011,6 +1011,40 @@ export class BoostPayStore {
   /**
    * Toggle account freeze status (Admin security control)
    */
+  /**
+   * Admin: temporary "sent money" lock on one user.
+   *   mode 'amount' -> only (balance - amount) can be sent
+   *   mode 'full'   -> nothing can be sent
+   *   mode 'off'    -> release
+   * Enforced server-side on /api/transfer and /api/user/send-to-agent.
+   */
+  static async adminSetSendLock(
+    userId: string,
+    payload: { mode: 'amount' | 'full' | 'off'; amount?: number; note?: string }
+  ): Promise<{ success: boolean; user?: User; sendLock?: any; sendableBalance?: number; error?: string; mfaRequired?: boolean }> {
+    try {
+      const res = await fetch('/api/admin/users/send-lock', {
+        method: 'POST',
+        headers: this.adminAuthHeaders(),
+        body: JSON.stringify({ userId, ...payload })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (data.mfaRequired) {
+          return {
+            success: false,
+            mfaRequired: true,
+            error: 'Unlock admin actions first: Admin → MFA Security → enter your authenticator code (valid 5 minutes).'
+          };
+        }
+        return { success: false, error: data.error || `Could not save the lock (${res.status})` };
+      }
+      return { success: true, user: data.user, sendLock: data.sendLock, sendableBalance: data.sendableBalance };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Network error.' };
+    }
+  }
+
   static async adminToggleFreezeUser(
     userId: string,
     isFrozen: boolean,
