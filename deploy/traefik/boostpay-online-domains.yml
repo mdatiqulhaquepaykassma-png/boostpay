@@ -1,0 +1,66 @@
+# BoostPay — public hostnames on boostpay.online (added 2026-11-02)
+# Wildcard sub-domains were missing: management/admin/db only answered on the
+# sslip.io fallback hosts. Routers here point at the SAME containers Dokploy
+# already manages; nothing inside the apps changes (each sub-app proxies /api
+# to the main API itself, so the browser stays same-origin).
+http:
+  routers:
+    bp2-management-online-web:
+      rule: Host(`management.boostpay.online`)
+      service: bp2-management-online-svc
+      middlewares:
+        - redirect-to-https
+      entryPoints:
+        - web
+    bp2-management-online-secure:
+      rule: Host(`management.boostpay.online`)
+      service: bp2-management-online-svc
+      middlewares: []
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+    bp2-admin-online-web:
+      rule: Host(`admin.boostpay.online`)
+      service: bp2-admin-online-svc
+      middlewares:
+        - redirect-to-https
+      entryPoints:
+        - web
+    bp2-admin-online-secure:
+      rule: Host(`admin.boostpay.online`)
+      service: bp2-admin-online-svc
+      middlewares: []
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+    bp2-studio-online-web:
+      rule: Host(`db.boostpay.online`)
+      service: bp2-studio-online-svc
+      middlewares:
+        - redirect-to-https
+      entryPoints:
+        - web
+    bp2-studio-online-secure:
+      rule: Host(`db.boostpay.online`)
+      service: bp2-studio-online-svc
+      middlewares: []
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+  services:
+    bp2-management-online-svc:
+      loadBalancer:
+        servers:
+          - url: http://boostpay-management-app-qtxmlm:3000
+    bp2-admin-online-svc:
+      loadBalancer:
+        servers:
+          - url: http://boostpay-admin-a7uowo:3000
+    bp2-studio-online-svc:
+      loadBalancer:
+        servers:
+          - url: http://boostpay-studio-8n0fyq:3000
+
