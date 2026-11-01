@@ -2834,6 +2834,20 @@ async function startServer() {
     res.on('close',()=> clearTimeout(to));
     next();
   });
+  // PERF: log any API call slower than 800 ms (method, route, status, duration).
+  // Cheap (one timestamp per request) and it turns "server seems slow" into data.
+  if ((process.env.SLOW_LOG || 'on').toLowerCase() !== 'off') {
+    app.use('/api', (req: any, res: any, next: any) => {
+      const started = process.hrtime.bigint();
+      res.on('finish', () => {
+        const ms = Number(process.hrtime.bigint() - started) / 1e6;
+        if (ms >= Number(process.env.SLOW_LOG_MS || 800)) {
+          console.warn(`[slow] ${req.method} ${String(req.originalUrl).split('?')[0]} ${res.statusCode} ${ms.toFixed(0)}ms`);
+        }
+      });
+      next();
+    });
+  }
   app.use(checkBlacklist);
   app.use('/api', rateLimit(200));
 
@@ -3670,8 +3684,22 @@ async function startServer() {
       for (const t of (current.transactions || [])) {
         if (t && t.id !== undefined) txMap.set(String(t.id), t);
       }
+      // PERF/ROBUSTNESS (2026-11-02): an old client used to upload its whole history
+      // (1 MB+) and the server answered 413 — so those syncs failed for ever and the
+      // app kept retrying on every action ("sending money takes ages"). Now the newest
+      // 5000 rows are kept (the merge is a union, so nothing is lost) and the reply says
+      // `truncated: true`. Only a genuinely abusive payload (> 8 MB of rows) is refused.
+      let syncTruncated = false;
       if (Array.isArray(incoming.transactions)) {
-        if (incoming.transactions.length > 5000) return res.status(413).json({ error: 'Sync payload too large (transactions cap 5000).' });
+        if (incoming.transactions.length > 40000) {
+          return res.status(413).json({ error: 'Sync payload too large.' });
+        }
+        if (incoming.transactions.length > 5000) {
+          syncTruncated = true;
+          incoming.transactions = [...incoming.transactions]
+            .sort((a: any, b: any) => (Number(b && b.timestamp) || 0) - (Number(a && a.timestamp) || 0))
+            .slice(0, 5000);
+        }
         for (const t of incoming.transactions) {
           if (t && t.id !== undefined) {
             // Block server-only types from client push
@@ -3771,7 +3799,7 @@ async function startServer() {
       };
 
       writeDb(updatedDb);
-      res.json({ success: true, count: mergedUsers.length });
+      res.json({ success: true, count: mergedUsers.length, ...(syncTruncated ? { truncated: true, note: 'Only the newest 5000 transactions were stored; the rest stay on the device.' } : {}) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -10091,6 +10119,56 @@ async function startServer() {
       }
     });
   } else {
+    /**
+     * PERF (2026-11-02): the built bundle was served WITHOUT compression and with
+     * `cache-control: max-age=0`, so every app open re-downloaded ~400 KB of JS and
+     * every screen change felt slow on mobile data. Hashed files under /assets are
+     * now gzipped once and served `immutable` for a year; only the entry files
+     * (index.html, sw.js, manifest) stay revalidated so deploys still roll out.
+     */
+    const staticGzipCache = new Map<string, { mtimeMs: number; buf: Buffer }>();
+    app.use((req: any, res: any, next: any) => {
+      try {
+        if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+        const clean = String(req.path || '');
+        if (!/\.(js|mjs|css|svg|json|map|txt|woff2?)$/i.test(clean)) return next();
+        if (!String(req.headers['accept-encoding'] || '').includes('gzip')) return next();
+        const filePath = path.join(__dirname, 'dist', clean);
+        if (!filePath.startsWith(path.join(__dirname, 'dist'))) return next();
+        const st = fs.statSync(filePath, { throwIfNoEntry: false } as any) as any;
+        if (!st || !st.isFile()) return next();
+        const cacheKey = filePath;
+        const hit = staticGzipCache.get(cacheKey);
+        let buf: Buffer;
+        if (hit && hit.mtimeMs === st.mtimeMs) {
+          buf = hit.buf;
+        } else {
+          buf = zlib.gzipSync(fs.readFileSync(filePath), { level: 6 });
+          if (staticGzipCache.size > 60) staticGzipCache.clear();
+          staticGzipCache.set(cacheKey, { mtimeMs: st.mtimeMs, buf });
+        }
+        const ext = path.extname(clean).toLowerCase();
+        const type = ext === '.js' || ext === '.mjs' ? 'application/javascript'
+          : ext === '.css' ? 'text/css'
+          : ext === '.svg' ? 'image/svg+xml'
+          : ext === '.json' || ext === '.map' ? 'application/json'
+          : ext === '.woff2' ? 'font/woff2'
+          : ext === '.woff' ? 'font/woff'
+          : 'text/plain';
+        res.setHeader('Content-Type', type + '; charset=utf-8');
+        res.setHeader('Content-Encoding', 'gzip');
+        res.setHeader('Vary', 'Accept-Encoding');
+        const hashed = clean.startsWith('/assets/') || /[-.][A-Za-z0-9_-]{8,}\.(js|css)$/.test(clean);
+        res.setHeader('Cache-Control', hashed ? 'public, max-age=31536000, immutable' : 'no-cache');
+        res.setHeader('ETag', 'W/"' + Math.round(st.mtimeMs).toString(36) + '-' + st.size.toString(36) + '"');
+        res.setHeader('Content-Length', String(buf.length));
+        if (req.method === 'HEAD') return res.status(200).end();
+        return res.status(200).end(buf);
+      } catch {
+        return next();
+      }
+    });
+
     app.use(express.static(path.join(__dirname, 'dist'), {
       setHeaders: (res, filePath) => {
         // The service worker & manifest must always be revalidated so updates roll out
@@ -10102,6 +10180,9 @@ async function startServer() {
           filePath.endsWith('index.html')
         ) {
           res.setHeader('Cache-Control', 'no-cache');
+        } else if (/[\\/]assets[\\/]/.test(filePath)) {
+          // Vite hashes the file name — it can never change under the same URL.
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
         }
       }
     }));

@@ -121,6 +121,23 @@ const ck = (name, ok, extra = '') => {
   ck('treasury is guarded again', (await adjust()).s === 401);
   ck('code lets treasury through again', (await adjust({ mfaCode: setup.d.codeSample })).s === 200);
 
+  // ── 6b. Sync payload handling (perf/robustness) ───────────────────────────
+  console.log('\n[6b] sync payload is trimmed, not rejected');
+  const bigTx = Array.from({ length: 6263 }, (_, i) => ({ id: 'TX-big-' + i, userId: 'U1', type: 'TRANSFER_SENT', amount: 1, timestamp: Date.now() - i * 1000 }));
+  const bigNotif = Array.from({ length: 5000 }, (_, i) => ({ id: 'N-big-' + i, userId: 'U1', type: 'TRANSFER_SENT', title: 'x', message: 'm', timestamp: Date.now() - i }));
+  const t0 = Date.now();
+  const big = await req('/api/sync', { users: [{ id: 'U1', email: USER1.email }], transactions: bigTx, notifications: bigNotif, messages: [], conversations: [] }, t1());
+  const bigMs = Date.now() - t0;
+  ck('a 1 MB legacy sync is accepted (was 413)', big.s === 200, `status=${big.s}`);
+  ck('it reports the truncation instead of failing silently', !!big.d && big.d.truncated === true, JSON.stringify(big.d && big.d.truncated));
+  ck('it stays fast under a prod-sized document', bigMs < 3000, `${bigMs} ms`);
+  const small = await req('/api/sync', {
+    users: [{ id: 'U1', email: USER1.email }],
+    transactions: Array.from({ length: 300 }, (_, i) => ({ id: 'TX-s-' + i, userId: 'U1', type: 'TRANSFER_SENT', amount: 1, timestamp: Date.now() - i })),
+    notifications: [], messages: [], conversations: []
+  }, t1());
+  ck('the new trimmed payload works normally', small.s === 200 && !small.d.truncated, `status=${small.s}`);
+
   // ── 7. Mobile host endpoints ──────────────────────────────────────────────
   console.log('\n[7] mobile host list + watchdog');
   const hosts = await req('/api/mobile/hosts');
