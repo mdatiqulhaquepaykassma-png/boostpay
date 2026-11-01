@@ -82,3 +82,20 @@ Google-এর পাবলিক DNS-এ `management.boostpay.online` এখন�
 
 ⚠️ **একটা জরুরি কথা:** ব্রাউজারে প্রতিটি হোস্ট আলাদা `localStorage` — তাই এক ঠিকানায় লগইন করলে অন্য ঠিকানায় লগইন থাকে না। বিভ্রান্তি এড়াতে **একটাই ঠিকানা সবাইকে দিন** (`management.boostpay.online`)।
 চাইলে বাকি দুটোকে ৩০১-রিডাইরেক্ট করে দিতে পারি — বললে Traefik-এ ২ মিনিটের কাজ; তখন শুধু ওই এক ঠিকানাতেই সবাই ঢুকবে।
+
+---
+
+## ৮. Canonical হোস্ট — বাকি দুটো এখন ৩০১ রিডাইরেক্ট (আপনার পছন্দ অনুযায়ী)
+
+`deploy/traefik/boostpay-canonical-redirects.yml` (সার্ভারে `/etc/dokploy/traefik/dynamic/`) — priority 1000 দিয়ে Dokploy-র রাউটারের ওপরে বসানো `redirectRegex`, permanent (301):
+
+| রিকোয়েস্ট | ফল |
+|---|---|
+| `https://management.boostpay.online/…` | **২০০** (একমাত্র ঠিকানা, লগইন সেশন এখানেই) |
+| `https://management.agent.boostpay.online/…` | **301 → https://management.boostpay.online/…** (path + query অক্ষত) |
+| `https://management.72-60-42-18.sslip.io/…` | **301 → https://management.boostpay.online/…** |
+| `http://…` (যেকোনো) | ৩০১ → canonical https |
+
+যাচাই: `curl -L` দিয়ে এন্ড-টু-এন্ড — ৩০১ অনুসরণ করে শেষে **২০০ + `<title>BoostPay Management</title>`**। canonical হোস্টের `/api/*`, বান্ডল — সব আগের মতোই।
+
+`admin.boostpay.online` ও `db.boostpay.online` — এদের sslip ঠিকানায় রিডাইরেক্ট **দেওয়া হয়নি** (আপনি শুধু management-এর জন্য বলেছিলেন)। চাইলে ওই দুটোতেও একই নিয়ম দেওয়া যাবে — বললেই হবে।

@@ -1,0 +1,29 @@
+# BoostPay — one canonical hostname per console (2026-11-02)
+# Each browser origin has its own localStorage, so three URLs for the management
+# console meant three separate logins. These routers sit ABOVE the Dokploy-managed
+# ones (explicit priority 1000) and 301 everything to the canonical host.
+http:
+  middlewares:
+    bp-management-canonical:
+      redirectRegex:
+        regex: "^https?://(management\\.agent\\.boostpay\\.online|management\\.72-60-42-18\\.sslip\\.io)(/.*)?$"
+        replacement: "https://management.boostpay.online${2}"
+        permanent: true
+  routers:
+    bp-management-canonical-web:
+      rule: Host(`management.agent.boostpay.online`) || Host(`management.72-60-42-18.sslip.io`)
+      priority: 1000
+      service: bp2-management-online-svc
+      middlewares:
+        - bp-management-canonical
+      entryPoints:
+        - web
+    bp-management-canonical-secure:
+      rule: Host(`management.agent.boostpay.online`) || Host(`management.72-60-42-18.sslip.io`)
+      priority: 1000
+      service: bp2-management-online-svc
+      middlewares:
+        - bp-management-canonical
+      entryPoints:
+        - websecure
+      tls: {}
