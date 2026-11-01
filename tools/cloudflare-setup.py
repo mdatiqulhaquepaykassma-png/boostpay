@@ -188,7 +188,13 @@ def cmd_rules(zid):
 def cmd_verify():
     import urllib.request as u
     def head(url):
-        req = u.Request(url, method='GET', headers={'accept-encoding': 'gzip'})
+        # Cloudflare returns 403 to the bare "Python-urllib" signature, so identify
+        # like the apps do (browser UA) — the check is about caching, not bots.
+        req = u.Request(url, method='GET', headers={
+            'accept-encoding': 'gzip',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        })
         with u.urlopen(req, timeout=25) as r:
             return dict(r.headers), r.status
     for path in ('/', '/api/health', '/assets/index-BdMWRXmr.js'):
