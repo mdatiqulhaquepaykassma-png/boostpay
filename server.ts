@@ -2635,13 +2635,29 @@ async function startServer() {
   // Strict CORS — only allow official origins + localhost for dev
   app.use((req:any,res:any,next:any)=>{
     const allowed = [
+      // live domains
+      'https://boostpay.online',
+      'https://admin.boostpay.online',
+      'https://agent.boostpay.online',
+      'https://management.boostpay.online',
+      'https://supportchat.boostpay.online',
+      // fallback hostnames (Dokploy sslip.io)
       'https://boostpay.72-60-42-18.sslip.io',
+      'https://admin.72-60-42-18.sslip.io',
+      'https://agent.72-60-42-18.sslip.io',
+      'https://management.72-60-42-18.sslip.io',
+      'https://db.72-60-42-18.sslip.io',
       'https://boostpay-admin.72-60-42-18.sslip.io',
       'https://boostpay-studio.72-60-42-18.sslip.io',
+      // legacy domain (suspended) — harmless to keep, will disappear on its own
       'https://boostpay.binanceusdtpay.io',
       'https://admin.boostpay.binanceusdtpay.io',
       'https://studio.boostpay.binanceusdtpay.io',
       'https://boostpay-studio.binanceusdtpay.io',
+      // Android app (Capacitor bundles the UI and runs it on this origin)
+      'https://localhost',
+      'capacitor://localhost',
+      // dev
       'http://localhost:3000','http://localhost:5173','http://localhost:5174','http://localhost:3001'
     ];
     const origin = String(req.headers.origin||'');
@@ -2654,6 +2670,26 @@ async function startServer() {
     }
     if (req.method==='OPTIONS') return res.sendStatus(204);
     next();
+  });
+
+  /**
+   * Which API hosts the Android app / PWA should try, in order.
+   * Lets us move the app to a new domain WITHOUT shipping a new APK: the app calls
+   * this on boot, and falls back to the list baked into public/api-base.js.
+   * Public on purpose (no secrets — it is the same list the browser already uses).
+   */
+  app.get('/api/mobile/hosts', (req: any, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.json({
+      hosts: [
+        'https://boostpay.online',
+        'https://app.boostpay.online',
+        'https://72-60-42-18.sslip.io',
+        'https://boostpay.72-60-42-18.sslip.io'
+      ],
+      appId: 'com.boostpay.app',
+      updatedAt: 0
+    });
   });
 
   // Global API throttle — 200 req/min per IP+user (DDoS sponge absorbs burst, then 429)

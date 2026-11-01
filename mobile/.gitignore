@@ -1,0 +1,11 @@
+# Android build output / IDE state — never commit
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/release/
+android/app/boostpay-release.keystore
+android/.idea/
+.idea/
+*.iml
+# node_modules is ignored by the root .gitignore too
