@@ -115,4 +115,4 @@ Cloudflare-এর SOA অনুযায়ী negative TTL **১৮০০ স�
 **৫ মিনিটের মনিটরিং (Google DoH, প্রতি ৩০ সেকেন্ড):** শেষ ৮টি স্যাম্পলে `management` = `NOERROR`, `management.agent` = সব সময়ে `NOERROR` — অর্থাৎ ক্যাশ পরিষ্কার হয়ে গেছে।
 **যাচাই:** তিনটি ঠিকানাই **২০০ + `<title>BoostPay Management</title>`**।
 
-**পরের ধাপ:** আপনি নিশ্চিত করুন যে খুলছে — তারপর canonical রিডাইরেক্ট আবার চালু করব (কপি তৈরি আছে)। ব্রাউজার/ফোনে এখনো না খুললে একবার DNS ক্যাশ পরিষ্কার করুন (ফোনে এয়ারপ্লেন মোড ১০ সেকেন্ড, বা ব্রাউজারে `chrome://net-internals/#dns` → Clear host cache), অথবা নিশ্চিত ফলব্যাক: `https://management.72-60-42-18.sslip.io/`।
+**হালনাগাদ:** সব BD ISP সাবনেটে (Google DoH) তিনটি নামই `NOERROR` হয়ে গেছে — তাই canonical রিডাইরেক্ট **আবার চালু** করা হয়েছে ✅ (agent ও sslip → ৩০১ → `management.boostpay.online`, এন্ড-টু-এন্ড ২০০)। ব্রাউজার/ফোনে এখনো না খুললে একবার DNS ক্যাশ পরিষ্কার করুন (ফোনে এয়ারপ্লেন মোড ১০ সেকেন্ড, বা ব্রাউজারে `chrome://net-internals/#dns` → Clear host cache), অথবা নিশ্চিত ফলব্যাক: `https://management.72-60-42-18.sslip.io/`।
