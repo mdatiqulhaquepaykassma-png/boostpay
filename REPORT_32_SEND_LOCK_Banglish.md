@@ -73,3 +73,36 @@ RESULT 20 pass / 0 fail
 | `src/components/WalletView.tsx` | ইউজারের Wallet-এ "temporarily held" নোটিশ |
 
 **টাকার হিসাব, boost, commission — কোনো লজিক বদলানো হয়নি**; শুধু সেন্ডের আগে একটা চেক যোগ হয়েছে।
+
+---
+
+## ৬. 🚨 জরুরি — deploy যাচাই করতে গিয়ে ধরা পড়ল: `binanceusdtpay.io` domain এখন **suspend**
+
+| প্রমাণ (read-only, RDAP + DNS) | মান |
+|---|---|
+| ডোমেইন | `binanceusdtpay.io` (registrar: **HOSTINGER**) |
+| **status** | **`client hold`** + `client transfer prohibited` |
+| শেষ পরিবর্তন | **2026-11-01 00:51 UTC** |
+| মেয়াদ | 2027-10-20 (**মেয়াদ শেষ নয়**) |
+| DNS | apex ও sub — দুটোই **NXDOMAIN** (কোনো রেকর্ড নেই) |
+
+`client hold` = registrar নিজেই ডোমেইনটি DNS থেকে সরিয়ে দিয়েছে (সাধারণত abuse/ট্রেডমার্ক কমপ্লেইনের কারণে)। REPORT 31-এ যে ঝুঁকি লিখেছিলাম (§১ — নামে "binance" থাকা), ঠিক সেটাই ঘটেছে।
+
+**তবে অ্যাডমিন কনসোল DOWN নেই** — প্রতিটি অ্যাপের একটা করে ফলব্যাক হোস্টনেম আছে:
+
+| অ্যাপ | ✅ এখন কাজ করছে এমন লিংক | ❌ বন্ধ |
+|---|---|---|
+| **Admin** | **`https://admin.72-60-42-18.sslip.io`** | `admin.boostpay.binanceusdtpay.io` |
+| Agent | `https://agent.72-60-42-18.sslip.io` | — |
+| Management | `https://management.72-60-42-18.sslip.io` | — |
+| DB Studio | `https://db.72-60-42-18.sslip.io` | — |
+| User | `https://boostpay.online` | — |
+| Support chat | `https://supportchat.boostpay.online` | — |
+
+যাচাই: `admin.72-60-42-18.sslip.io` → **200**, `/api/health` → `v1.2.1793546017`, নতুন Send-Lock কার্ড ও `/api/admin/users/send-lock` বান্ডলে আছে, unauth কল **401** ✓ · ৭টি Swarm সার্ভিস **1/1**।
+
+### স্থায়ী সমাধান (আপনার ২ মিনিট লাগবে)
+1. **প্রথমে নতুন লিংকে অ্যাডমিন প্যানেল ব্যবহার করুন:** `https://admin.72-60-42-18.sslip.io` (সব ফিচার একই)।
+2. **Hostinger DNS-এ একটা A রেকর্ড যোগ করুন** — `admin` → `72.60.42.18` (boostpay.online জোনে)। বলুন, তারপর আমি `admin.boostpay.online` Dokploy-তে যোগ করে Let's Encrypt সার্টিফিকেট নিয়ে দেব — তখন আর sslip.io লিংক লাগবে না।
+3. **`binanceusdtpay.io` আর ফেরত আনার চেষ্টা না করাই ভালো** — নামেই "binance" থাকায় এটা বারবার কমপ্লেইনের লক্ষ্য হবে। Hostinger-কে একবার জিজ্ঞেস করতে পারেন `client hold` কেন (তারা নোটিশ/ইমেইল পাঠিয়ে থাকে, abuse@ inbox-এ উত্তর দিলে কখনো কখনো ছাড়ে), কিন্তু নতুন দরকারি হোস্টনেম হিসেবে `admin.boostpay.online`-ই ব্যবহার করুন।
+4. মনে রাখুন: `boostpay.online` (মূল ডোমেইন) সম্পূর্ণ স্বাভাবিক — ইউজার, এজেন্ট, ম্যানেজমেন্ট, সাপোর্ট চ্যাট সবই চলছে।
