@@ -1,11 +1,12 @@
 name: Android APK
 
-# Builds the BoostPay Android app (Capacitor) without needing Android Studio.
-#   · every push to main that touches the app/mobile code → debug APK artifact
-#   · manual run (Actions → Android APK → Run workflow) → choose which app to build
+# Builds the BoostPay Android apps (Capacitor) without needing Android Studio.
 #
-# The APK is attached to the run as a downloadable artifact (and to the Release
-# when you push a tag like v1.0.0).
+#   · Manual run  → choose "all" (default) or a single app
+#   · Push to main that touches the app/mobile code → all four apps
+#
+# Artifacts: boostpay-<app>-apk (debug, installable on any phone).
+# Tag push (v1.0.0) also attaches the APKs to the GitHub Release.
 
 on:
   push:
@@ -23,17 +24,37 @@ on:
       app:
         description: 'Which app to build'
         required: true
-        default: 'user'
+        default: 'all'
         type: choice
-        options: [user, agent, management, admin]
+        options: [all, user, agent, management, admin]
 
 jobs:
-  apk:
-    name: Build ${{ github.event.inputs.app || 'user' }} APK
+  plan:
+    name: Plan
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    env:
-      APP: ${{ github.event.inputs.app || 'user' }}
+    outputs:
+      apps: ${{ steps.matrix.outputs.apps }}
+    steps:
+      - id: matrix
+        run: |
+          APP="${{ github.event.inputs.app || 'all' }}"
+          if [ "$APP" = "all" ]; then
+            echo 'apps=["user","agent","management","admin"]' >> $GITHUB_OUTPUT
+          else
+            echo "apps=[\"$APP\"]" >> $GITHUB_OUTPUT
+          fi
+
+  apk:
+    name: ${{ matrix.app }} APK
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # One failing app must not stop the other three.
+    continue-on-error: false
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.plan.outputs.apps) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +69,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Only the web deps (no server needed) — keeps the four builds quick.
       - name: Install web dependencies
         run: npm ci --legacy-peer-deps || npm install --legacy-peer-deps
 
@@ -57,10 +79,14 @@ jobs:
 
       - name: Build web bundle + copy into the Android shell
         working-directory: mobile
+        env:
+          APP: ${{ matrix.app }}
         run: node scripts/prepare.mjs "$APP"
 
       - name: Brand the launcher icon / splash
         working-directory: mobile
+        env:
+          APP: ${{ matrix.app }}
         run: node scripts/icons.mjs "$APP"
 
       - name: Capacitor sync
@@ -71,13 +97,21 @@ jobs:
         working-directory: mobile/android
         run: chmod +x gradlew
 
-      # Debug APK — installable on any phone, no Play Store, no signing setup.
+      - name: Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('mobile/android/**/*.gradle*', 'mobile/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
       - name: Build debug APK
         working-directory: mobile/android
         run: ./gradlew assembleDebug --no-daemon
 
-      # Release APK — only when the signing secrets exist (see mobile/README.md §6).
-      - name: Decode keystore (optional)
+      # ── Signed release APK — only when the keystore secrets exist (mobile/README §6)
+      - name: Decode keystore
         id: keystore
         if: ${{ env.KEYSTORE_BASE64 != '' }}
         working-directory: mobile/android
@@ -102,6 +136,8 @@ jobs:
             -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
 
       - name: Collect APKs
+        env:
+          APP: ${{ matrix.app }}
         run: |
           mkdir -p out
           find mobile/android/app/build/outputs/apk -name '*.apk' -exec cp {} out/ \;
@@ -113,9 +149,10 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: boostpay-${{ env.APP }}-apk
+          name: boostpay-${{ matrix.app }}-apk
           path: out/*.apk
           retention-days: 30
+          if-no-files-found: error
 
       - name: Attach to release (tags only)
         if: startsWith(github.ref, 'refs/tags/')

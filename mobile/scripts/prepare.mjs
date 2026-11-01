@@ -40,6 +40,14 @@ const appDir = path.resolve(repoRoot, app.dir);
 const dist = path.join(appDir, 'dist');
 const www = path.join(mobileDir, 'www');
 
+// Each app is its own npm project. CI installs the root + mobile deps only, so make
+// sure the target app has what it needs before building (no-op when present).
+const appHasDeps = fs.existsSync(path.join(appDir, 'node_modules'));
+if (app.dir !== '.' && !appHasDeps) {
+  console.log(`[0/4] installing ${app.dir} dependencies (first run) …`);
+  execSync('npm install --legacy-peer-deps --no-audit --no-fund', { cwd: appDir, stdio: 'inherit' });
+}
+
 console.log(`[1/4] building ${which} app (${app.dir}) …`);
 execSync('npm run build', { cwd: appDir, stdio: 'inherit' });
 

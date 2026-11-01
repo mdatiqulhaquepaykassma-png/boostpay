@@ -97,3 +97,64 @@ RESULT 9 pass / 0 fail
 2. **সব ৪টি অ্যাপের APK একসাথে** বিল্ড করে artifact হিসেবে দেওয়া (CI-তে এক ক্লিকে)।
 3. **Uptime watchdog + অটো হোস্ট সুইচ** — প্রাইমারি ডোমেইন পড়ে গেলে সার্ভার নিজেই হোস্ট লিস্ট বদলে দেবে।
 4. **admin.boostpay.online** সেটআপ (DNS রেকর্ড আপনার দিক থেকে)।
+
+---
+
+# ৭. 🆕 দ্বিতীয় রাউন্ড — চার অ্যাপের APK একসাথে + সার্ভার-সাইড অটো-সুইচ ওয়াচডগ
+
+commit: `4xxx` (দেখুন `git log`) · API: নতুন ভার্সন deploy হয়েছে
+
+## (খ) চার অ্যাপের APK — এক ক্লিকে, CI-তে
+
+`.github/workflows/android-apk.yml` এখন **matrix build**:
+
+| app | artifact | package id |
+|---|---|---|
+| user | `boostpay-user-apk` | `com.boostpay.app` |
+| agent | `boostpay-agent-apk` | `com.boostpay.agent` |
+| management | `boostpay-management-apk` | `com.boostpay.management` |
+| admin | `boostpay-admin-apk` | `com.boostpay.admin` |
+
+* `main`-এ পুশ (অ্যাপ/মোবাইল কোড ছুঁলে) → **চারটাই** বিল্ড। হাতে চালালে `all` বা একটা অ্যাপ বেছে নেওয়া যায়।
+* `fail-fast: false` — একটা ফেল করলেও বাকিগুলো তৈরি হয়; Gradle cache যোগ করা হয়েছে (বিল্ড দ্রুত)।
+* `prepare.mjs` এখন ওই অ্যাপের npm ডিপেন্ডেন্সি নিজেই ইনস্টল করে, তাই CI-তে আলাদা স্টেপ লাগে না।
+* চারটা আলাদা package id — **এক ফোনে চারটাই** ইনস্টল থাকতে পারে।
+* ট্যাগ দিলে চারটা APK Release-এ যুক্ত হয়; keystore সিক্রেট থাকলে signed release APK।
+
+**লোকাল যাচাই (চারটাই সত্যিই বিল্ড হয়েছে):**
+```
+user        appId=com.boostpay.app         label=BoostPay             pkg=com.boostpay.app
+agent       appId=com.boostpay.agent       label=BoostPay Agent       pkg=com.boostpay.agent
+management  appId=com.boostpay.management  label=BoostPay Management  pkg=com.boostpay.management
+admin       appId=com.boostpay.admin       label=BoostPay Admin       pkg=com.boostpay.admin
+প্রতিটার www/ আলাদা বান্ডল + build.json (কোন অ্যাপ, কবে, কোন commit)
+```
+
+## (গ) সার্ভার নিজেই হোস্ট-লিস্ট বদলায় (auto-switch watchdog)
+
+**কীভাবে:** সার্ভার প্রতি **৬০ সেকেন্ডে** (`HOST_PROBE_INTERVAL_MS`) প্রতিটা কনফিগারড হোস্টের
+`/api/health` চেক করে (৪ সেকেন্ড টাইমআউট), ফলাফল মনে রাখে, আর `GET /api/mobile/hosts` তখন
+**সচল হোস্টগুলো আগে** দেয় — মৃত হোস্ট লিস্টের শেষে চলে যায়।
+
+* প্রাইমারি ডোমেইন পড়ে গেলে: কনসোলে ওয়ার্নিং + **audit log `MOBILE_HOST_FAILOVER`**; ফিরে এলে **`MOBILE_HOST_RECOVERED`**।
+* অ্যাপ চালু হওয়ার সময় এই রুট থেকেই ক্রমটা নেয় → **নতুন APK ছাড়াই** ডোমেইন বদলানো যায়।
+* অ্যাডমিন প্যানেল থেকে দেখার রুট: `GET /api/mobile/hosts/status` (লগইন লাগে) — প্রতি হোস্টের `ok / latencyMs / checkedAt / fails / error`।
+* হোস্ট লিস্ট কোড না ছুঁয়ে বদলাতে: `db.config.mobileHosts = [...]`। বন্ধ করতে: env `HOST_WATCHDOG=off`।
+
+**যাচাই (লোকাল, একটি মৃত প্রাইমারি হোস্ট দিয়ে):**
+```
+seeded: mobileHosts = [dead-primary.invalid, boostpay.online, boostpay.72-60-42-18.sslip.io]
+প্রথমে:  hosts = [boostpay.online, dead-primary.invalid, boostpay.72-60-42-18.sslip.io]   ← মৃতটা শেষে
+লগ:      [host-watchdog] primary https://dead-primary.invalid is DOWN — clients will be sent to https://boostpay.online
+audit:   MOBILE_HOST_FAILOVER | Primary host https://dead-primary.invalid unreachable (fetch failed); clients switched to …
+status:  primaryDown: true · dead=ok:false(6ms) · boostpay.online=ok:true(496ms)
+anon →   /api/mobile/hosts/status = 401
+```
+
+## রিগ্রেশন — ৩৬/৩৬ PASS (`tools/regression.cjs`, রিপোতে কমিট করা)
+লক (amount/full/release + ব্যালেন্সের বেশি hold) · `/api/sync` লক মোছেনা/জালিয়াতিও ব্যর্থ · pay-an-agent স্বাধীন ·
+ইনপুট ভ্যালিডেশন 400/404/401 · MFA সুইচ (কোড ছাড়া বন্ধ হয় না, চালু হয়) · হোস্ট API + ওয়াচডগ স্ট্যাটাস।
+
+## এখনো বাকি
+* **Firebase push** (অ্যাপ বন্ধ থাকলেও নোটিফিকেশন) — `google-services.json` দরকার।
+* Play Store প্রকাশ / iOS — আগের রিপোর্টের মতোই।

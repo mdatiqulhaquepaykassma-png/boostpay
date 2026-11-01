@@ -17,10 +17,11 @@
  * Nothing secret is stored here.
  * ===================================================================== */
 (function () {
+  // Every entry MUST answer <host>/api/health (a dead entry only costs a 3s probe).
+  // Keep in sync with MOBILE_HOSTS_DEFAULT in server.ts; the server can also change
+  // this list remotely via GET /api/mobile/hosts.
   var HOSTS = [
     'https://boostpay.online',
-    'https://app.boostpay.online',
-    'https://72-60-42-18.sslip.io',
     'https://boostpay.72-60-42-18.sslip.io'
   ];
 
@@ -113,8 +114,31 @@
     }, Promise.resolve(null));
   }
 
+  /**
+   * Ask the server for the current host order (it watches the hosts and puts the
+   * healthy ones first). Falls back to the baked-in list when offline.
+   */
+  function refreshHostsFromServer() {
+    return originalFetch(HOSTS[0] + '/api/mobile/hosts', { method: 'GET' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (data && Array.isArray(data.hosts) && data.hosts.length) {
+          HOSTS = data.hosts.filter(function (h) { return /^https:\/\//.test(h); });
+          window.__BP_API_HOSTS__ = HOSTS.slice();
+        }
+        return HOSTS;
+      })
+      .catch(function () { return HOSTS; });
+  }
+
   // Pick a host while the splash is still up, but never block the first paint.
-  window.__BP_READY__ = pick();
+  window.__BP_READY__ = pick().then(function (host) { return host; });
+  // Refresh the list in the background (a moved/blocked domain reaches the phone
+  // without a new APK).
+  pick().then(refreshHostsFromServer).then(function (list) {
+    // If the host we picked is no longer in the server's list, re-probe next launch.
+    if (current && list && list.indexOf(current) < 0) current = null;
+  });
 
   window.fetch = function (input, init) {
     var url = typeof input === 'string' ? input : (input && input.url);

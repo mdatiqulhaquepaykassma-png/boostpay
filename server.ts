@@ -2672,6 +2672,130 @@ async function startServer() {
     next();
   });
 
+  // ── Mobile host watchdog ────────────────────────────────────────────────
+  // The Android app (and any client reading /api/mobile/hosts) must know which
+  // hostnames are actually alive. Every HOST_PROBE_INTERVAL_MS we fetch
+  // <host>/api/health for each configured host, and the API then hands out the
+  // healthy ones FIRST. So when a registrar suspends the primary domain, clients
+  // that still have it cached move to the next host after one probe cycle —
+  // without a new APK and without anyone touching DNS.
+  const MOBILE_HOSTS_DEFAULT = [
+    'https://boostpay.online',
+    'https://boostpay.72-60-42-18.sslip.io'
+  ];
+  const HOST_PROBE_INTERVAL_MS = Math.max(5000, Number(process.env.HOST_PROBE_INTERVAL_MS || 60000));
+  const HOST_PROBE_TIMEOUT_MS = Math.max(1000, Number(process.env.HOST_PROBE_TIMEOUT_MS || 4000));
+  type HostState = { ok: boolean | null; latencyMs: number; checkedAt: number; fails: number; error?: string };
+  const mobileHostState = new Map<string, HostState>();
+  let hostStateCheckedAt = 0;
+  let hostStatePrimaryWasDown = false;
+
+  /** Hosts configured by an admin (db.config.mobileHosts) or the built-in list. */
+  function configuredMobileHosts(): string[] {
+    try {
+      const list = (readDb() as any)?.config?.mobileHosts;
+      if (Array.isArray(list)) {
+        const clean = list.map((h: any) => String(h || '').trim().replace(/\/+$/, '')).filter((h: string) => /^https?:\/\/[^\s]+$/.test(h));
+        if (clean.length) return clean;
+      }
+    } catch { /* fall back to defaults */ }
+    return MOBILE_HOSTS_DEFAULT.slice();
+  }
+
+  async function probeOneHost(host: string): Promise<HostState> {
+    const started = Date.now();
+    const prev = mobileHostState.get(host);
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), HOST_PROBE_TIMEOUT_MS);
+      const r = await fetch(host + '/api/health', { method: 'GET', signal: ctrl.signal });
+      clearTimeout(timer);
+      const ok = r.ok;
+      return {
+        ok,
+        latencyMs: Date.now() - started,
+        checkedAt: Date.now(),
+        fails: ok ? 0 : ((prev?.fails || 0) + 1),
+        error: ok ? undefined : `HTTP ${r.status}`
+      };
+    } catch (err: any) {
+      return {
+        ok: false,
+        latencyMs: Date.now() - started,
+        checkedAt: Date.now(),
+        fails: (prev?.fails || 0) + 1,
+        error: String(err?.message || 'unreachable').slice(0, 120)
+      };
+    }
+  }
+
+  async function probeAllMobileHosts(): Promise<void> {
+    const hosts = configuredMobileHosts();
+    // Forget hosts that were removed from the config.
+    for (const key of Array.from(mobileHostState.keys())) if (!hosts.includes(key)) mobileHostState.delete(key);
+    const results = await Promise.all(hosts.map(async (h) => [h, await probeOneHost(h)] as const));
+    for (const [h, st] of results) mobileHostState.set(h, st);
+    hostStateCheckedAt = Date.now();
+
+    const primary = hosts[0];
+    const primaryOk = mobileHostState.get(primary)?.ok !== false;
+    if (!primaryOk && !hostStatePrimaryWasDown) {
+      hostStatePrimaryWasDown = true;
+      const next = hosts.find((h) => mobileHostState.get(h)?.ok === true) || '(none)';
+      console.warn(`[host-watchdog] primary ${primary} is DOWN — clients will be sent to ${next}`);
+      try {
+        const db = readDb();
+        recordAuditLog(db, 'MOBILE_HOST_FAILOVER', 'host-watchdog', `Primary host ${primary} unreachable (${mobileHostState.get(primary)?.error || 'error'}); clients switched to ${next}`, 'system');
+        writeDb(db);
+      } catch { /* never let the watchdog break the server */ }
+    } else if (primaryOk && hostStatePrimaryWasDown) {
+      hostStatePrimaryWasDown = false;
+      console.log(`[host-watchdog] primary ${primary} is healthy again`);
+      try {
+        const db = readDb();
+        recordAuditLog(db, 'MOBILE_HOST_RECOVERED', 'host-watchdog', `Primary host ${primary} is reachable again`, 'system');
+        writeDb(db);
+      } catch { /* ignore */ }
+    }
+  }
+
+  /** Configured hosts re-ordered: healthy → unknown → failing (stable inside groups). */
+  function orderedMobileHosts(): string[] {
+    const hosts = configuredMobileHosts();
+    const rank = (h: string) => {
+      const st = mobileHostState.get(h);
+      if (!st || st.ok === null) return 1;   // never probed yet
+      return st.ok ? 0 : 2;
+    };
+    return hosts
+      .map((h, i) => ({ h, i, r: rank(h) }))
+      .sort((a, b) => (a.r - b.r) || (a.i - b.i))
+      .map((x) => x.h);
+  }
+
+  function mobileHostHealth() {
+    const hosts = configuredMobileHosts();
+    const status: Record<string, any> = {};
+    for (const h of hosts) {
+      const st = mobileHostState.get(h);
+      status[h] = st ? { ok: st.ok, latencyMs: st.latencyMs, checkedAt: st.checkedAt, fails: st.fails, error: st.error } : { ok: null, latencyMs: 0, checkedAt: 0, fails: 0 };
+    }
+    const primary = hosts[0];
+    return {
+      status,
+      checkedAt: hostStateCheckedAt,
+      primaryDown: mobileHostState.get(primary)?.ok === false,
+      intervalMs: HOST_PROBE_INTERVAL_MS
+    };
+  }
+
+  if ((process.env.HOST_WATCHDOG || '').toLowerCase() !== 'off') {
+    const boot = () => { probeAllMobileHosts().catch(() => { /* ignore */ }); };
+    setTimeout(boot, 5000);
+    const iv = setInterval(boot, HOST_PROBE_INTERVAL_MS);
+    if (typeof (iv as any).unref === 'function') (iv as any).unref();
+  }
+
   /**
    * Which API hosts the Android app / PWA should try, in order.
    * Lets us move the app to a new domain WITHOUT shipping a new APK: the app calls
@@ -2679,17 +2803,24 @@ async function startServer() {
    * Public on purpose (no secrets — it is the same list the browser already uses).
    */
   app.get('/api/mobile/hosts', (req: any, res) => {
-    res.setHeader('Cache-Control', 'public, max-age=300');
+    // tiny cache so a laptop/phone re-launching does not hammer this route, but a
+    // failover still reaches clients quickly
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    const health = mobileHostHealth();
     res.json({
-      hosts: [
-        'https://boostpay.online',
-        'https://app.boostpay.online',
-        'https://72-60-42-18.sslip.io',
-        'https://boostpay.72-60-42-18.sslip.io'
-      ],
+      // healthy hosts first, in configured priority order; dead ones last
+      hosts: orderedMobileHosts(),
+      status: health.status,
+      checkedAt: health.checkedAt,
+      primaryDown: health.primaryDown,
       appId: 'com.boostpay.app',
-      updatedAt: 0
+      updatedAt: health.checkedAt
     });
+  });
+
+  /** Public, human-readable view of the watchdog (used by the admin console too). */
+  app.get('/api/mobile/hosts/status', requireAdmin, (req: any, res) => {
+    res.json({ ...mobileHostHealth(), hosts: orderedMobileHosts(), configured: configuredMobileHosts() });
   });
 
   // Global API throttle — 200 req/min per IP+user (DDoS sponge absorbs burst, then 429)

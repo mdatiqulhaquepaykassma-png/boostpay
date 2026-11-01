@@ -57,10 +57,13 @@ cd mobile/android && ./gradlew assembleDebug
 # → app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### (গ) GitHub Actions দিয়ে (লোকাল Android SDK ছাড়াই — **সুপারিশ**)
-* `main`-এ পুশ হলেই Actions → **Android APK** → artifact **`boostpay-user-apk`** ডাউনলোড।
-* হাতে চালাতে: Actions → Android APK → *Run workflow* → app বেছে নিন (`user`/`agent`/`management`/`admin`)।
-* ট্যাগ দিলে (`git tag v1.0.0 && git push --tags`) APK Release-এও যুক্ত হয়।
+### (গ) GitHub Actions — **চারটা অ্যাপ একসাথে** (লোকাল Android SDK ছাড়াই — সুপারিশ)
+* `main`-এ পুশ হলেই Actions → **Android APK** → একটা **matrix build** চলে এবং **চারটা APK একসাথে** তৈরি হয়।
+* প্রতিটা অ্যাপের আলাদা artifact: **`boostpay-user-apk`**, **`boostpay-agent-apk`**, **`boostpay-management-apk`**, **`boostpay-admin-apk`**।
+* একটা অ্যাপ ফেল করলেও বাকিগুলো বিল্ড হয় (`fail-fast: false`)।
+* হাতে চালাতে: Actions → Android APK → *Run workflow* → `all` (ডিফল্ট) বা একটা অ্যাপ বেছে নিন।
+* ট্যাগ দিলে (`git tag v1.0.0 && git push --tags`) চারটা APK Release-এও যুক্ত হয়।
+* `prepare.mjs` নিজেই ওই অ্যাপের npm ডিপেন্ডেন্সি ইনস্টল করে নেয় — CI-তে আলাদা কিছু লাগে না।
 
 ---
 
@@ -76,13 +79,29 @@ cd mobile/android && ./gradlew assembleDebug
 
 ---
 
-## ৫. হোস্ট ফলব্যাক কীভাবে কাজ করে (`public/api-base.js`)
+## ৫ক. সার্ভার-সাইড **ওয়াচডগ** (auto-switch)
+
+সার্ভার নিজেই প্রতি **৬০ সেকেন্ডে** প্রতিটা হোস্টের `/api/health` দেখে (`HOST_PROBE_TIMEOUT_MS` = ৪ সেকেন্ড)।
+তারপর:
+
+* `GET /api/mobile/hosts` → **সচল হোস্টগুলো আগে**, মৃতগুলো শেষে (ক্রম অটো বদলায়)।
+* প্রাইমারি হোস্ট পড়ে গেলে কনসোলে ওয়ার্নিং + **audit log** (`MOBILE_HOST_FAILOVER`), ফিরে এলে (`MOBILE_HOST_RECOVERED`)।
+* অ্যাপ চালু হওয়ার সময় এই রুট থেকেই লিস্ট নেয় — তাই **নতুন APK ছাড়াই** ডোমেইন বদলানো যায়।
+* অ্যাডমিন দেখতে পায়: `GET /api/mobile/hosts/status` (লগইন লাগে) — প্রতি হোস্টের `ok / latencyMs / checkedAt / fails`।
+* হোস্ট লিস্ট বদলাতে চাইলে `db.config.mobileHosts = ["https://…", "…"]` (admin config) — কোড ছাড়াই।
+* বন্ধ করতে চাইলে সার্ভারে `HOST_WATCHDOG=off`; ফ্রিকোয়েন্সি বদলাতে `HOST_PROBE_INTERVAL_MS=30000`।
+
+## ৫খ. হোস্ট ফলব্যাক কীভাবে কাজ করে (`public/api-base.js`)
 
 1. অ্যাপ চালু হলে `/api/health` দিয়ে হোস্ট লিস্ট পরীক্ষা করে (প্রথমটা আগে, ৩ সেকেন্ড টাইমআউট)।
 2. যে হোস্ট সাড়া দেয় সেটা `localStorage`-এ রাখে — পরেরবার সাথে সাথে চালু।
 3. সব `fetch('/api/...')` ওই হোস্টে যায়। কোনো কল নেটওয়ার্ক-এররে ব্যর্থ হলে
    **বাকি হোস্টগুলো একে একে পরীক্ষা করে** পরেরটায় গিয়ে একবার রিট্রাই করে।
-4. সাধারণ ব্রাউজারে (PWA) এই ফাইলটা **কিছুই করে না** — same-origin-ই থাকে।
+4. চালু হওয়ার সময় সার্ভারের `/api/mobile/hosts` থেকে **সর্বশেষ ক্রম** নিয়ে নেয়।
+5. সাধারণ ব্রাউজারে (PWA) এই ফাইলটা **কিছুই করে না** — same-origin-ই থাকে।
+
+> ⚠️ হোস্ট লিস্টে শুধু সেই হোস্ট রাখুন যেগুলো সত্যিই `/api/health` দেয়। এখানে এখন:
+> `https://boostpay.online` এবং `https://boostpay.72-60-42-18.sslip.io`।
 
 হোস্ট বদলাতে: `public/api-base.js`-এর `HOSTS` + সার্ভারের `/api/mobile/hosts` দুটোই
 (একই লিস্ট রাখুন)। টেস্ট: `node /tmp/api_base_test.mjs` ধরনের সিমুলেশন — ৯/৯ পাস করা আছে।
@@ -116,6 +135,16 @@ GitHub → Settings → Secrets → Actions-এ যোগ করুন:
 > বিষয় — সেটার সমাধান পরিষ্কার ব্র্যান্ড, স্বচ্ছ শর্ত ও দ্রুত সাপোর্ট (দেখুন `REPORT_33`)।
 
 ---
+
+## ৭ক. রিগ্রেশন টেস্ট (কোড ছোঁয়ার আগে/পরে)
+
+```bash
+python3 tools/seed-local-db.py 10          # লোকাল ডেভ-ডেটাবেস (প্রোডাকশন নয়)
+ADMIN_EMAIL=admin@boostpay.local ADMIN_PASSWORD=AdminPass123 PORT=3901 \
+API_SECRET=test-secret NODE_ENV=production DATABASE_URL= HOST_WATCHDOG=off \
+./node_modules/.bin/tsx server.ts &
+node tools/regression.cjs                   # লক + MFA সুইচ + হোস্ট API — ৩৬টি চেক
+```
 
 ## ৮. দ্রুত চেকলিস্ট (প্রথম APK)
 
