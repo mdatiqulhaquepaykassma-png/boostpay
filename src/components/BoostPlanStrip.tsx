@@ -149,7 +149,7 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
               <div className="font-mono text-[11px] font-bold text-zinc-200">
                 {t.cyclesDone}<span className="text-zinc-500">/{t.cyclesPossible}</span>
               </div>
-              <div className="text-[9px] text-zinc-500">{t.cyclesRemaining} left</div>
+              <div className="text-[9px] text-zinc-500">{paused ? 'paused' : `${t.cyclesRemaining} left`}</div>
             </div>
           </div>
 
@@ -163,9 +163,11 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
                 {money(t.earned)}<span className="text-zinc-500">/{money(t.projectedTotal)}</span>
               </div>
               <div className="text-[9px] text-zinc-500 truncate">
-                {plan.cycle.endsAfterMidnight
-                  ? `after 12am ${money(plan.cycle.remainingIncome)}`
-                  : `today · ${money(t.remainingIncome)} to go`}
+                {paused
+                  ? `paused · ${money(plan.cycle.remainingIncome)} held`
+                  : plan.cycle.endsAfterMidnight
+                    ? `after 12am ${money(plan.cycle.remainingIncome)}`
+                    : `today · ${money(t.remainingIncome)} to go`}
               </div>
             </div>
           </div>

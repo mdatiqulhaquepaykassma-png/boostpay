@@ -436,7 +436,11 @@ export default function App() {
         </div>
       ) : (
         /* 3. LOGGED-IN MAIN USER INTERFACE */
-        <div className={`flex-1 min-h-0 flex flex-col max-w-md w-full mx-auto ${activeTab === 'MESSENGER' ? 'h-[100dvh] max-h-screen overflow-hidden pb-[calc(58px+env(safe-area-inset-bottom))]' : 'pb-[calc(7rem+env(safe-area-inset-bottom))]'}`}>
+        /* The bottom nav is fixed, so its clearance belongs INSIDE the scroll area.
+           When it lived here (7rem of padding around <main>) the app painted a
+           fixed-looking dark band between the last card and the nav, and the boost
+           button ended up under that band on phones with a safe-area inset. */
+        <div className={`flex-1 min-h-0 flex flex-col max-w-md w-full mx-auto ${activeTab === 'MESSENGER' ? 'h-[100dvh] max-h-screen overflow-hidden pb-[calc(58px+env(safe-area-inset-bottom))]' : ''}`}>
           {/* Gentle new-version prompt */}
           {updateAvailable && (
             <div className="mx-4 mt-2 flex items-center justify-between gap-3 rounded-2xl border border-sky-500/30 bg-sky-950/50 px-4 py-2.5">
@@ -502,7 +506,7 @@ export default function App() {
             </div>
           )}
 
-          <main ref={mainScrollRef} className={`flex-1 min-h-0 ${activeTab === 'MESSENGER' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto overscroll-contain'}`}>
+          <main ref={mainScrollRef} className={`flex-1 min-h-0 ${activeTab === 'MESSENGER' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto overscroll-contain pb-[calc(4.75rem+env(safe-area-inset-bottom))]'}`}>
             {activeTab === 'WALLET' && (
               isInitialSyncing ? (
                 <WalletSkeleton />
