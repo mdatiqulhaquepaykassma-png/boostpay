@@ -329,11 +329,23 @@ t1, me1 = login(U1)
 if not t1:
     ck('team tree needs a signed-in user', False, 'login failed', 'HIGH', 'Could not sign in for the team test.')
 
+_RUN_TAG = str(int(time.time()))[-6:]
+
+
 def signup_child(email, referrer):
+    """Unique e-mail per run — the local DB keeps members between runs, so a
+    fixed address would collide on the second run and break the tree counts."""
+    local, _, domain = email.partition('@')
+    email = f'{local}-{_RUN_TAG}@{domain or "gmail.com"}'
     s2, j2 = req('/api/users/register', {'email': email, 'password': 'Staging123!', 'referralCode': referrer}, ip_addr=ip())
     return s2, str(((j2.get('user') or {}).get('id')) or ''), j2
 
-# a 3-level chain under U1: two direct, one under each of them
+# a 3-level chain under U1: two direct, one under each of them. Counts are
+# measured as a DELTA, because the local DB keeps members from earlier runs.
+t_base, base_summ = req('/api/user/team/summary', token=t1, ip_addr=ip())
+base_total = int((base_summ or {}).get('total') or 0)
+base_direct = int((base_summ or {}).get('direct') or 0)
+base_boost = int((base_summ or {}).get('boostActive') or 0)
 ok_ids = []
 for email in ('tree-a@gmail.com', 'tree-b@gmail.com'):
     s2, cid, _ = signup_child(email, 'U1')
@@ -361,12 +373,13 @@ bl = summ.get('byLevel') or []
 expected_total = len(ok_ids) + len(grand) + len(deep)
 ck('the team summary loads', s == 200 and isinstance(summ.get('total'), int), f"{s} total={summ.get('total')}", 'HIGH',
    'The Refer page cannot show a team total.')
-ck('total team counts every level', summ.get('total') == expected_total,
-   f"total={summ.get('total')} expected={expected_total}", 'HIGH',
+ck('total team counts every level', summ.get('total') == base_total + expected_total,
+   f"total={summ.get('total')} (was {base_total}) expected +{expected_total}", 'HIGH',
    'The total team number does not include every level under the user.')
 ck('per-level counts add up to the total', sum(int(l.get('count') or 0) for l in bl) == summ.get('total'),
    f"levels={bl} total={summ.get('total')}", 'HIGH', 'The level breakdown disagrees with the team total.')
-ck('direct count is level 1 only', summ.get('direct') == len(ok_ids), f"direct={summ.get('direct')}", 'MEDIUM',
+ck('direct count is level 1 only', summ.get('direct') == base_direct + len(ok_ids),
+   f"direct={summ.get('direct')} (was {base_direct})", 'MEDIUM',
    'Direct referrals and total team are mixed up.')
 ck('depth reports the real tree depth', summ.get('depth') == 3, f"depth={summ.get('depth')}", 'MEDIUM',
    'The tree stops counting after the first level.')
@@ -376,8 +389,8 @@ ck('team numbers carry no names or emails',
 
 s, kids = req('/api/user/team/children?parentId=U1', token=t1, ip_addr=ip())
 kids = kids.get('children') or []
-ck('my direct members open as rows', s == 200 and len(kids) == len(ok_ids), f"{s} rows={len(kids)}", 'HIGH',
-   'The first level of the tree does not open.')
+ck('my direct members open as rows', s == 200 and all(str(i) in {str(k.get('id')) for k in kids} for i in ok_ids),
+   f"{s} rows={len(kids)}", 'HIGH', 'The first level of the tree does not open.')
 byid = {str(k.get('id')): k for k in kids}
 if ok_ids and ok_ids[0] in byid:
     ck('each row says how many people sit under that member', byid[ok_ids[0]].get('teamSize') == len(grand[:1]) + len(deep),
