@@ -1,6 +1,7 @@
 import { FC, useEffect, useState } from 'react';
 import { Gift, Users, Copy, Check, TrendingUp, Zap, Share2, Award, Clock, DollarSign, Activity, MessageCircle } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
+import { ReferralTree } from './ReferralTree';
 import { formatPrecisionAmount } from '../utils/format';
 
 function formatDuration(ms: number): string {
@@ -192,6 +193,9 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
         </div>
         <span className="h-8 w-8 rounded-xl bg-emerald-500/20 flex items-center justify-center text-emerald-400 font-mono text-xs font-bold">{referrals.filter((r:any)=> r.boostActive).length}</span>
       </div>
+
+      {/* Whole team, unlimited levels */}
+      <ReferralTree onMessageUser={onMessageUser} />
 
       {/* Live boosting of referrals */}
       <div className="rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 shadow-xl">

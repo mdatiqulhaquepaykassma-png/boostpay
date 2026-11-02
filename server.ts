@@ -901,6 +901,93 @@ function getReferralsCount(db: any, referrerId: string): number {
   return (db.referrals || []).filter((r:any)=>String(r.referrerId)===String(referrerId)).length;
 }
 
+// ── Team tree (unlimited downline) ───────────────────────────────────────────
+// A user's team is every account that joined under them, at ANY depth. The tree
+// is derived from db.referrals ({referrerId → referredId}) — it is never stored
+// a second time, so it can never drift from the commission logic.
+const TEAM_TREE_MAX_NODES = 50000;
+const TEAM_TREE_MAX_DEPTH = 500;
+
+function buildReferralIndex(db: any): Map<string, any[]> {
+  const index = new Map<string, any[]>();
+  for (const r of (db.referrals || [])) {
+    if (!r || r.referrerId == null || r.referredId == null) continue;
+    if (String(r.referrerId) === String(r.referredId)) continue; // self-link = corrupt, skip
+    const parent = String(r.referrerId);
+    const entry = { id: String(r.referredId), joinedAt: Number(r.createdAt) || 0 };
+    const list = index.get(parent);
+    if (list) list.push(entry); else index.set(parent, [entry]);
+  }
+  return index;
+}
+
+function walkTeam(index: Map<string, any[]>, rootId: string) {
+  // BFS from the root: level per member, per-level counts, then subtree sizes
+  // bottom-up. `seen` makes a corrupt cyclic link harmless instead of an
+  // infinite loop, and the node cap keeps a runaway team from hanging the server.
+  const childrenOf = (id: string) => index.get(String(id)) || [];
+  const root = String(rootId);
+  const level = new Map<string, number>();
+  const levelCounts: number[] = [];
+  const seen = new Set<string>([root]);
+  let frontier = [root];
+  let depth = 0;
+  let visited = 0;
+  let truncated = false;
+  while (frontier.length) {
+    if (depth >= TEAM_TREE_MAX_DEPTH) { truncated = true; break; }
+    const next: string[] = [];
+    for (const parent of frontier) {
+      for (const child of childrenOf(parent)) {
+        if (seen.has(child.id)) continue;
+        if (visited >= TEAM_TREE_MAX_NODES) { truncated = true; break; }
+        seen.add(child.id);
+        visited += 1;
+        level.set(child.id, depth + 1);
+        levelCounts[depth] = (levelCounts[depth] || 0) + 1;
+        next.push(child.id);
+      }
+      if (truncated) break;
+    }
+    if (truncated) break;
+    if (!next.length) break;
+    depth += 1;
+    frontier = next;
+  }
+  const subtree = new Map<string, number>();
+  for (const id of level.keys()) subtree.set(id, 0);
+  const byDepthDesc = Array.from(level.keys()).sort((a, b) => (level.get(b) as number) - (level.get(a) as number));
+  for (const id of byDepthDesc) {
+    let size = 0;
+    for (const child of childrenOf(id)) {
+      if (!level.has(child.id)) continue;
+      size += 1 + (subtree.get(child.id) || 0);
+    }
+    subtree.set(id, size);
+  }
+  return {
+    level,
+    subtree,
+    levelCounts: Array.from({ length: depth }, (_, i) => levelCounts[i] || 0),
+    depth,
+    total: visited,
+    truncated,
+    childrenOf
+  };
+}
+
+function teamMemberLive(db: any, id: string) {
+  const u = (db.users || []).find((x: any) => String(x.id) === String(id));
+  if (!u) return { exists: false, boostActive: false, boostPaused: false };
+  let live: any = null;
+  try { live = liveBoostState(u); } catch { live = u.boostState; }
+  return {
+    exists: true,
+    boostActive: !!(live && live.isActive && !live.isPaused),
+    boostPaused: !!(live && live.isActive && live.isPaused)
+  };
+}
+
 const LEGACY_USER_ID_MAP: Record<string, string> = {
   '849201': '1',
   '223344': '2'
@@ -8003,6 +8090,96 @@ async function startServer() {
       res.status(500).json({ error: 'Failed to load referral data', detail: String(e?.message||e).slice(0,200) });
     }
   });
+  // ---- Team tree: how many people joined under me, at every level -----------
+  // Summary only (counts, no member list) so the Refer page can show "Team 37"
+  // instantly without shipping a big payload to a phone.
+  app.get('/api/user/team/summary', requireUser, (req:any,res)=>{
+    try {
+      const db = readDb();
+      const uid = String(req.authUserId);
+      const index = buildReferralIndex(db);
+      const walk = walkTeam(index, uid);
+      const dayStart = Math.floor(Date.now() / 86400000) * 86400000;
+      let active = 0, paused = 0, joinedToday = 0, newestAt = 0;
+      for (const [id] of walk.level) {
+        const m = teamMemberLive(db, id);
+        if (m.boostActive) active += 1;
+        else if (m.boostPaused) paused += 1;
+      }
+      for (const child of (index.get(uid) || [])) {
+        if (child.joinedAt >= dayStart) joinedToday += 1;
+      }
+      // newest join anywhere in the team — cheap second pass, no extra storage
+      for (const id of walk.level.keys()) {
+        for (const child of (index.get(String(id)) || [])) {
+          if (child.joinedAt > newestAt) newestAt = child.joinedAt;
+        }
+      }
+      const directJoined = (index.get(uid) || []).map((c: any) => c.joinedAt);
+      for (const t of directJoined) if (t > newestAt) newestAt = t;
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        userId: uid,
+        total: walk.total,
+        direct: (index.get(uid) || []).length,
+        depth: walk.depth,
+        byLevel: walk.levelCounts.map((count, i) => ({ level: i + 1, count })),
+        boostActive: active,
+        boostPaused: paused,
+        joinedToday,
+        newestJoinAt: newestAt || null,
+        truncated: walk.truncated
+      });
+    } catch (e: any) {
+      console.error('[team/summary] error:', e?.message || e);
+      res.status(500).json({ error: 'Could not build your team tree.' });
+    }
+  });
+
+  // One level at a time: the app asks for the children of a node the user taps,
+  // so unlimited depth costs nothing until it is opened. Every call re-checks
+  // that the requested node really is inside the caller's own team.
+  app.get('/api/user/team/children', requireUser, (req:any,res)=>{
+    try {
+      const db = readDb();
+      const uid = String(req.authUserId);
+      const parentId = String(req.query.parentId || uid);
+      const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const index = buildReferralIndex(db);
+      const walk = walkTeam(index, uid);
+      if (parentId !== uid && !walk.level.has(parentId)) {
+        return res.status(403).json({ error: 'That member is not in your team.' });
+      }
+      const rows = index.get(parentId) || [];
+      const page = rows.slice(offset, offset + limit).map((c: any) => {
+        const m = teamMemberLive(db, c.id);
+        return {
+          id: c.id,
+          joinedAt: c.joinedAt || null,
+          level: walk.level.get(c.id) || null,
+          teamSize: walk.subtree.get(c.id) || 0,
+          directCount: (index.get(c.id) || []).length,
+          boostActive: m.boostActive,
+          boostPaused: m.boostPaused,
+          exists: m.exists
+        };
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        parentId,
+        level: walk.level.get(parentId) || 0,
+        children: page,
+        childCount: rows.length,
+        hasMore: offset + page.length < rows.length,
+        truncated: walk.truncated
+      });
+    } catch (e: any) {
+      console.error('[team/children] error:', e?.message || e);
+      res.status(500).json({ error: 'Could not load this part of the tree.' });
+    }
+  });
+
   app.get('/api/refer/code', requireUser, (req:any,res)=>{
     const uid=String(req.authUserId||'');
     res.json({ referCode: uid, referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${uid}` });

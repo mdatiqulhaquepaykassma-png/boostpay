@@ -2163,6 +2163,25 @@ export class BoostPayStore {
     if (res.status === 401) msg = 'Session expired — please re-login';
     throw new Error(msg);
   }
+  /** Whole team (every level under me): counts only — the tree is fetched lazily. */
+  static async getTeamSummary(): Promise<any | null> {
+    const res = await fetch('/api/user/team/summary', { headers: this.authHeaders() });
+    if (res.ok) return await res.json();
+    let msg = `HTTP ${res.status}`;
+    try { const j = await res.json(); if (j?.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
+  /** Direct members of one node in my team, so unlimited depth costs nothing until tapped. */
+  static async getTeamChildren(parentId: string, opts?: { offset?: number; limit?: number }): Promise<any | null> {
+    const q = new URLSearchParams({ parentId: String(parentId) });
+    if (opts?.offset) q.set('offset', String(opts.offset));
+    if (opts?.limit) q.set('limit', String(opts.limit));
+    const res = await fetch(`/api/user/team/children?${q.toString()}`, { headers: this.authHeaders() });
+    if (res.ok) return await res.json();
+    let msg = `HTTP ${res.status}`;
+    try { const j = await res.json(); if (j?.error) msg = j.error; } catch {}
+    throw new Error(msg);
+  }
   static async getReferCode(): Promise<{ referCode:string, referLink:string } | null> {
     try {
       const res = await fetch('/api/refer/code', { headers: this.authHeaders() });

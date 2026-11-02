@@ -323,6 +323,84 @@ for i in range(9):
 ck('failed attempts do not eat the send quota', 429 not in statuses, f"statuses={statuses}", 'MEDIUM',
    f'A user who taps Send wrong {len(statuses)} times in a minute is blocked with 429, even though no money moved.')
 
+# ── 11. team tree (unlimited levels) ─────────────────────────────────────────
+section('11. my team tree — how many joined under me, at every level')
+t1, me1 = login(U1)
+if not t1:
+    ck('team tree needs a signed-in user', False, 'login failed', 'HIGH', 'Could not sign in for the team test.')
+
+def signup_child(email, referrer):
+    s2, j2 = req('/api/users/register', {'email': email, 'password': 'Staging123!', 'referralCode': referrer}, ip_addr=ip())
+    return s2, str(((j2.get('user') or {}).get('id')) or ''), j2
+
+# a 3-level chain under U1: two direct, one under each of them
+ok_ids = []
+for email in ('tree-a@gmail.com', 'tree-b@gmail.com'):
+    s2, cid, _ = signup_child(email, 'U1')
+    ck(f'{email} joins under me', s2 == 200 and bool(cid), f"{s2} id={cid}", 'HIGH', 'Signup with a refer code failed.')
+    ok_ids.append(cid)
+grand = []
+if ok_ids[0]:
+    s2, gid, _ = signup_child('tree-a1@gmail.com', ok_ids[0])
+    ck('a referral of my referral joins (level 2)', s2 == 200 and bool(gid), f"{s2} id={gid}", 'HIGH',
+       'Level 2+ joins do not register, so the tree can never go deeper than one level.')
+    grand.append(gid)
+if ok_ids[1]:
+    s2, gid2, _ = signup_child('tree-b1@gmail.com', ok_ids[1])
+    grand.append(gid2)
+deep = []
+if grand:
+    s2, did, _ = signup_child('tree-a1x@gmail.com', grand[0])
+    ck('a level 3 join works too (unlimited depth)', s2 == 200 and bool(did), f"{s2} id={did}", 'MEDIUM',
+       'Depth beyond 2 is not recorded.')
+    deep.append(did)
+
+t1, _ = login(U1)
+s, summ = req('/api/user/team/summary', token=t1, ip_addr=ip())
+bl = summ.get('byLevel') or []
+expected_total = len(ok_ids) + len(grand) + len(deep)
+ck('the team summary loads', s == 200 and isinstance(summ.get('total'), int), f"{s} total={summ.get('total')}", 'HIGH',
+   'The Refer page cannot show a team total.')
+ck('total team counts every level', summ.get('total') == expected_total,
+   f"total={summ.get('total')} expected={expected_total}", 'HIGH',
+   'The total team number does not include every level under the user.')
+ck('per-level counts add up to the total', sum(int(l.get('count') or 0) for l in bl) == summ.get('total'),
+   f"levels={bl} total={summ.get('total')}", 'HIGH', 'The level breakdown disagrees with the team total.')
+ck('direct count is level 1 only', summ.get('direct') == len(ok_ids), f"direct={summ.get('direct')}", 'MEDIUM',
+   'Direct referrals and total team are mixed up.')
+ck('depth reports the real tree depth', summ.get('depth') == 3, f"depth={summ.get('depth')}", 'MEDIUM',
+   'The tree stops counting after the first level.')
+ck('team numbers carry no names or emails',
+   not re.search(r'@|"email"|"name"', json.dumps(summ)), 'counts/ids only', 'CRITICAL',
+   'The team summary leaks user identities to the referrer.')
+
+s, kids = req('/api/user/team/children?parentId=U1', token=t1, ip_addr=ip())
+kids = kids.get('children') or []
+ck('my direct members open as rows', s == 200 and len(kids) == len(ok_ids), f"{s} rows={len(kids)}", 'HIGH',
+   'The first level of the tree does not open.')
+byid = {str(k.get('id')): k for k in kids}
+if ok_ids and ok_ids[0] in byid:
+    ck('each row says how many people sit under that member', byid[ok_ids[0]].get('teamSize') == len(grand[:1]) + len(deep),
+       f"teamSize={byid[ok_ids[0]].get('teamSize')} expected={len(grand[:1]) + len(deep)}", 'HIGH',
+       'A member row shows the wrong team size, so the tree looks flat.')
+    ck('each row carries its level', byid[ok_ids[0]].get('level') == 1, f"level={byid[ok_ids[0]].get('level')}", 'MEDIUM',
+       'Level labels are missing from the tree rows.')
+s, kids2 = req(f'/api/user/team/children?parentId={ok_ids[0]}', token=t1, ip_addr=ip())
+rows2 = kids2.get('children') or []
+ck('opening a member shows their own team', s == 200 and len(rows2) == 1 and rows2[0].get('level') == 2,
+   f"{s} rows={len(rows2)} level={(rows2[0] or {}).get('level') if rows2 else None}", 'HIGH',
+   'The tree cannot be expanded past level 1.')
+ck('no emails in the tree rows', not re.search(r'@', json.dumps(rows2)), 'ids only', 'CRITICAL',
+   'Tree rows expose member emails.')
+# a branch that is not mine must be refused
+s, j = req('/api/user/team/children?parentId=U3', token=t1, ip_addr=ip())
+ck('somebody else’s branch is refused', s == 403, f"{s}", 'CRITICAL', 'A user can read a team that is not under them.')
+s, j = req('/api/user/team/summary', ip_addr=ip())
+ck('the team tree needs a signed-in user', s == 401, f"{s}", 'HIGH', 'Anonymous callers can read a team tree.')
+agent_tok, _ = login(AGENT, ip_addr=ip())
+s, j = req('/api/user/team/summary', token=agent_tok, ip_addr=ip())
+ck('an agent token cannot read a user team tree', s == 401, f"{s}", 'HIGH', 'Agent tokens are accepted by the team endpoints.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
