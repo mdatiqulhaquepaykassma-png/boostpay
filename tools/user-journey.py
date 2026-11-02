@@ -76,6 +76,13 @@ def ck(name, ok, detail='', sev='MEDIUM', problem=None):
             PROBLEMS.append({'sev': sev, 'title': name, 'detail': problem})
 
 
+def num(v, default=0.0):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def section(t):
     print(f"\n[{t}]")
 
@@ -164,6 +171,45 @@ ck('resume works', s == 200, f"{s}", 'MEDIUM', 'Resume does nothing.')
 s, j = req('/api/boost/start', {'userId': 'U2'}, t1, ip_addr=ip())
 ck('a user cannot boost somebody else’s account', s == 403, f"{s}", 'CRITICAL', 'Cross-account money control.')
 req('/api/boost/pause', {'userId': 'U1'}, t1, ip_addr=ip())
+
+# ── 4b. the compact "today" strip ────────────────────────────────────────────
+section('4b. the today strip on the dashboard')
+s, plan = req('/api/user/boost-plan?tz=360', token=t1, ip_addr=ip())
+raw = json.dumps(plan)
+cyc = plan.get('cycle') or {}
+td = plan.get('today') or {}
+ck('the strip gets its numbers', s == 200 and 'today' in plan and 'cycle' in plan, f"{s} keys={sorted(plan)[:6]}",
+   'HIGH', 'The dashboard strip cannot load, so the user sees nothing about today.')
+ck('the paused cycle keeps its checkpoint', cyc.get('paused') is True and num(cyc.get('elapsedMs')) > 0,
+   f"paused={cyc.get('paused')} elapsed={cyc.get('elapsedMs')}ms", 'MEDIUM',
+   'A paused cycle shows as idle in the strip (looks like the earnings vanished).')
+ck('the cycle money adds up', abs(num(cyc.get('projectedIncome')) - (num(cyc.get('accruedIncome')) + num(cyc.get('remainingIncome')))) < 1e-12,
+   f"{cyc.get('accruedIncome')} + {cyc.get('remainingIncome')} vs {cyc.get('projectedIncome')}", 'HIGH',
+   'Accrued + remaining does not equal the cycle total — the strip would show money that does not exist.')
+ck('today adds up', abs(num(td.get('projectedTotal')) - (num(td.get('earned')) + num(td.get('remainingIncome')))) < 1e-12
+   and num(td.get('cyclesPossible')) == num(td.get('cyclesDone')) + num(td.get('cyclesRemaining')),
+   f"earned {td.get('earned')} + toGo {td.get('remainingIncome')} = {td.get('projectedTotal')}; cycles {td.get('cyclesDone')}/{td.get('cyclesPossible')}",
+   'HIGH', "Today's earned + still-to-come does not match the day total the strip prints.")
+ck('the compounding rate never leaves the server',
+   not re.search(r'rate(Per|Percent|per|Percent)|minuteRate|hourlyRate', raw, re.I),
+   'response has no rate field', 'CRITICAL',
+   'The strip endpoint leaks the secret compounding rate to the phone.')
+s2, idle = req('/api/user/boost-plan?tz=360', token=login(U2)[0], ip_addr=ip())
+ck('an idle user sees the duration the next tap would really get',
+   s2 == 200 and (idle.get('cycle') or {}).get('durationMs') == (idle.get('nextCycle') or {}).get('durationMs'),
+   f"cycle {(idle.get('cycle') or {}).get('durationMs')}ms vs next {(idle.get('nextCycle') or {}).get('durationMs')}ms",
+   'MEDIUM', 'A finished cycle leaves a stale duration behind, so an idle user is shown a false cycle length.')
+s3, plan2 = req('/api/user/boost-plan?tz=0', token=login(U1)[0], ip_addr=ip())
+ck('the day follows the phone, not the server clock',
+   s3 == 200 and num(plan2.get('dayStart')) == num(plan.get('dayStart')) + 360 * 60000,
+   f"dayStart {plan.get('dayStart')} (tz=+360) vs {plan2.get('dayStart')} (UTC)", 'MEDIUM',
+   "'Today' is anchored to UTC, so a Dhaka user's day flips at 6 am.")
+s4, j4 = req('/api/user/boost-plan?tz=360', ip_addr=ip())
+ck('the strip needs a signed-in user', s4 == 401, f"{s4}", 'HIGH', 'Anonymous callers can read a user boost plan.')
+agent_tok, _ = login(AGENT, ip_addr=ip())
+s5, j5 = req('/api/user/boost-plan?tz=360', token=agent_tok, ip_addr=ip())
+ck('an agent cannot read a user plan with their own token', s5 == 401, f"{s5}", 'HIGH',
+   'Agent tokens are accepted by the user-only strip endpoint.')
 
 # ── 5. chat ──────────────────────────────────────────────────────────────────
 section('5. chat')

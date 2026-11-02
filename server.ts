@@ -3664,6 +3664,122 @@ async function startServer() {
   // user's next start was swallowed). Double-clicks are already absorbed by the
   // "already active" check inside withBoostLock, and there is no harm in re-starting.
   function boostIdemKey(uid:string, body:any){ const h=String(body?.idempotencyKey||body?.boostKey||'').trim(); return h ? `boost:${uid}:${h}` : ''; }
+  /**
+   * GET /api/user/boost-plan — the numbers behind the compact "today" strip on the
+   * dashboard. One request returns durations, counts and money only: the compounding
+   * rate itself never leaves the server, and there is exactly one place where the
+   * projection maths lives (this handler), so the phone cannot drift from the ledger.
+   *
+   *   ?tz=<minutes east of UTC>   anchors "today" to the phone's own midnight
+   *                               (Dhaka = 360). Missing/invalid falls back to UTC.
+   *
+   * Everything is a projection built from the live cycle + the same
+   * calculateDynamicDuration() the ticker uses; nothing is persisted.
+   */
+  app.get('/api/user/boost-plan', requireUser, (req: any, res: any) => {
+    try {
+      const db = readDb();
+      const uid = String(req.authUserId);
+      const user = (db.users || []).find((u: any) => String(u.id) === uid);
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      const config = db.config || INITIAL_DB.config;
+      const minuteRate = config.minuteRatePercent !== undefined
+        ? config.minuteRatePercent
+        : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605);
+      const ratePerMs = (minuteRate / 100) / 60000;
+      const yieldFor = (startBal: number, ms: number) => {
+        const b = Number(startBal) || 0;
+        if (b <= 0 || ms <= 0 || ratePerMs <= 0) return 0;
+        return ms * ratePerMs < 1e-5 ? b * ms * ratePerMs : b * Math.expm1(ms * Math.log1p(ratePerMs));
+      };
+
+      const tzRaw = Number(req.query.tz);
+      const tzMin = isFinite(tzRaw) ? Math.max(-840, Math.min(840, Math.trunc(tzRaw))) : 0;
+      const now = Date.now();
+      const dayStart = Math.floor((now + tzMin * 60000) / 86400000) * 86400000 - tzMin * 60000;
+      const dayEnd = dayStart + 86400000;
+
+      const rewardsToday = (db.transactions || []).filter((t: any) =>
+        String(t.userId) === uid && t.type === 'REWARD' &&
+        Number(t.timestamp) >= dayStart && Number(t.timestamp) < dayEnd);
+      const earnedToday = rewardsToday.reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
+
+      const live: any = liveBoostState(user) || {};
+      const running = !!(live.isActive && !live.isPaused);
+      const paused = !!(live.isActive && live.isPaused);
+      const active = running || paused;
+      // A finished cycle leaves its old targetDurationMs behind, and that number
+      // can be wildly stale (a 1 min cycle from when the balance was tiny). So the
+      // idle strip must show the duration a fresh tap would actually get.
+      const freshCycleMs = calculateDynamicDuration(Number(user.balance) || 0, db.users, config);
+      const cycleMs = active ? (Number(live.targetDurationMs) || freshCycleMs) : freshCycleMs;
+      const elapsed = active ? Math.max(0, Math.min(Number(live.elapsedMs) || 0, cycleMs)) : 0;
+      const remainingMs = active ? Math.max(0, cycleMs - elapsed) : 0;
+      const startBal = active ? (Number(live.startingBalance ?? user.balance) || 0) : (Number(user.balance) || 0);
+      const cycleProjected = yieldFor(startBal, cycleMs);
+      const cycleAccrued = active ? (Number(live.accumulatedYield) || 0) : 0;
+      const cycleRemaining = Math.max(0, cycleProjected - cycleAccrued);
+      const cycleEndAt = active ? now + remainingMs : 0;
+      // "Today" is the phone's own calendar day, so a cycle that finishes after
+      // midnight is NOT today's income — it is flagged instead of silently added.
+      const endsAfterMidnight = active && cycleEndAt > dayEnd;
+
+      // What the REST of today can still pay, assuming the user keeps tapping Boost
+      // (one cycle per tap, the product rule) and every cycle runs back to back.
+      let bal = Number(user.balance) || 0;
+      let cursor = now;
+      let futureCycles = 0;
+      let futureIncome = 0;
+      if (running && remainingMs > 0) {
+        cursor += remainingMs;
+        if (cursor <= dayEnd) {
+          futureIncome += cycleRemaining;
+          bal += cycleRemaining;
+          futureCycles += 1;
+        }
+      }
+      let nextCycleMs = calculateDynamicDuration(bal, db.users, config);
+      let guard = 0;
+      while (cursor + nextCycleMs <= dayEnd && guard < 2000) {
+        const inc = yieldFor(bal, nextCycleMs);
+        if (!(inc > 0)) break;
+        futureIncome += inc;
+        bal += inc;
+        cursor += nextCycleMs;
+        futureCycles += 1;
+        guard += 1;
+        nextCycleMs = calculateDynamicDuration(bal, db.users, config);
+      }
+      const freshNextMs = freshCycleMs;
+
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({
+        serverTime: now,
+        tz: tzMin,
+        dayStart, dayEnd,
+        minutesLeftToday: Math.max(0, Math.round((dayEnd - now) / 60000)),
+        balance: Number(user.balance) || 0,
+        cycle: {
+          running, paused,
+          durationMs: cycleMs, elapsedMs: elapsed, remainingMs,
+          projectedIncome: cycleProjected, accruedIncome: cycleAccrued, remainingIncome: cycleRemaining,
+          startBal, endAt: cycleEndAt, endsAfterMidnight
+        },
+        nextCycle: { durationMs: freshNextMs, estimatedIncome: yieldFor(Number(user.balance) || 0, freshNextMs) },
+        today: {
+          cyclesDone: rewardsToday.length,
+          cyclesRemaining: futureCycles,
+          cyclesPossible: rewardsToday.length + futureCycles,
+          earned: earnedToday,
+          remainingIncome: futureIncome,
+          projectedTotal: earnedToday + futureIncome
+        }
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Could not build the boost plan.' });
+    }
+  });
+
   app.post('/api/boost/start', async (req: any, res) => {
     const uid = String(req.body?.userId||'');
     if (String(uid) !== String(req.authUserId)) return res.status(403).json({ error: 'You can only manage your own boost.' });

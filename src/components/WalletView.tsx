@@ -1,6 +1,7 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
 import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut, Settings, Store
 } from 'lucide-react';
+import { BoostPlanStrip } from './BoostPlanStrip';
 import { BoostPayStore } from '../services/store';
 import { User, BoostState, SystemConfig } from '../types';
 import { RecentTransactionsSection } from './RecentTransactionsSection';
@@ -596,6 +597,11 @@ export const WalletView: FC<Props> = ({
         onOpenSendMoney={onOpenSendMoney}
         onOpenQR={onOpenQR}
         onOpenAgentPay={onOpenAgentPay}
+      />
+
+      {/* Compact "today" strip: cycle countdown + income projection in one row */}
+      <BoostPlanStrip
+        refreshKey={`${user.boostState.isActive}-${user.boostState.isPaused}-${user.boostState.startedAt}-${user.balance.toFixed(4)}`}
       />
 
       {/* 3. ISOLATED DYNAMIC COMPOUNDING CARD */}
