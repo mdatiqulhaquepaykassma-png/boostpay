@@ -414,6 +414,47 @@ agent_tok, _ = login(AGENT, ip_addr=ip())
 s, j = req('/api/user/team/summary', token=agent_tok, ip_addr=ip())
 ck('an agent token cannot read a user team tree', s == 401, f"{s}", 'HIGH', 'Agent tokens are accepted by the team endpoints.')
 
+# ── 12. money flow tree (admin) ──────────────────────────────────────────────
+section('12. admin: tk kar theke kar kache gelo, ekhon kar kache ache')
+sa, ja = req('/api/admin/login', ADMIN, ip_addr=ip())
+atok = ja.get('token') or ''
+ck('admin signs in for the money view', sa == 200 and bool(atok), f"{sa}", 'HIGH', 'Admin login broke.')
+s, summ = req('/api/admin/money-tree/summary', token=atok, ip_addr=ip())
+ck('the holdings summary loads', s == 200 and isinstance(summ.get('users'), dict) and isinstance(summ.get('agents'), dict),
+   f"{s} atRest={(summ.get('recon') or {}).get('atRest')}", 'HIGH', 'Admin cannot see where the money sits.')
+ck('holdings are split per account type',
+   all(k in summ for k in ('users', 'agents', 'management', 'inTransit')),
+   f"keys={sorted(summ)[:8]}", 'HIGH', 'The holdings summary misses an account type.')
+tot = (num((summ.get('users') or {}).get('balance')) + num((summ.get('agents') or {}).get('balance'))
+       + num((summ.get('management') or {}).get('balance')) + num((summ.get('inTransit') or {}).get('total')))
+ck('total at rest equals the four holdings added up', abs(tot - num((summ.get('recon') or {}).get('atRest'))) < 0.011,
+   f"sum={round(tot,2)} summary={((summ.get('recon') or {}).get('atRest'))}", 'HIGH',
+   'The "at rest" total does not match the wallets it claims to add up.')
+s, tree = req('/api/admin/money-tree?node=U1', token=atok, ip_addr=ip())
+ck('an account trail opens', s == 200 and isinstance(tree.get('in'), list) and isinstance(tree.get('out'), list),
+   f"{s} in={len(tree.get('in') or [])} out={len(tree.get('out') or [])}", 'HIGH',
+   'The money tree cannot open an account.')
+ck('the trail says where that account stands now', isinstance((tree.get('node') or {}).get('balance'), (int, float)),
+   f"balance={((tree.get('node') or {}).get('balance'))}", 'HIGH', 'The account balance is missing from the trail.')
+if tree.get('out'):
+    e0 = tree['out'][0]
+    ck('every counterparty edge names who and how much',
+       bool(e0.get('id')) and num(e0.get('amount')) > 0 and bool(e0.get('kind')),
+       f"{e0.get('id')} {e0.get('kind')} {e0.get('amount')}", 'HIGH',
+       'A money edge has no counterparty, kind or amount.')
+s, ag = req('/api/admin/money-tree?node=AGT-1', token=atok, ip_addr=ip())
+ck('an agent wallet can be traced too', s in (200, 404), f"{s}", 'MEDIUM', 'Agent wallets are not traceable.')
+s, j = req('/api/admin/money-tree/summary', ip_addr=ip())
+ck('the money view needs an admin session', s == 401, f"{s}", 'CRITICAL', 'Anonymous callers can read the money tree.')
+t1b, _ = login(U1)
+s, j = req('/api/admin/money-tree/summary', token=t1b, ip_addr=ip())
+ck('a normal user token is refused', s in (401, 403), f"{s}", 'CRITICAL', 'A user token opened the admin money tree.')
+agent_tok2, _ = login(AGENT, ip_addr=ip())
+s, j = req('/api/admin/money-tree?node=U1', token=agent_tok2, ip_addr=ip())
+ck('an agent token is refused', s in (401, 403), f"{s}", 'CRITICAL', 'An agent token opened the money tree.')
+s, j = req('/api/admin/money-tree?node=NOPE-999', token=atok, ip_addr=ip())
+ck('an unknown account is reported, not guessed', s == 404, f"{s}", 'MEDIUM', 'Unknown accounts return data.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

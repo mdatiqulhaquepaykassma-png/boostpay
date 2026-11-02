@@ -6180,6 +6180,237 @@ async function startServer() {
   });
 
   // --- Admin account management (SUPERADMIN only) ---
+  /* ── MONEY FLOW (admin) ─────────────────────────────────────────────────────
+   * "tk kar theke kar kache gelo, ar ekhon kar kache ache" — one read-only view
+   * built from the ledgers that already exist:
+   *   transactions   TRANSFER_SENT / AGENT_TRANSFER_SENT / REWARD /
+   *                  REFERRAL_COMMISSION / ADMIN_CREDIT / ADMIN_DEBIT
+   *   agentLedger    MGMT_CREDIT (management → agent) / MGMT_DEBIT (agent → mgmt)
+   *   mgmtLedger     ADMIN_CREDIT / ADMIN_DEBIT on a management wallet
+   *   agentPayouts   PENDING claim codes = money that left the user but has not
+   *                  reached an agent yet ("in transit")
+   *
+   * HONEST LIMIT: a balance is a single number, so the database cannot say "this
+   * exact dollar came from user 7". What it CAN say is who moved how much to
+   * whom, and where the money is sitting right now — which is what this view
+   * shows (and it says so on screen).
+   */
+  function moneyAccountType(db: any, id: any): string {
+    const s = String(id == null ? '' : id);
+    if (!s) return 'SYSTEM';
+    if (s === 'ADMIN' || s === 'SYSTEM' || s === 'BOOST_ENGINE') return 'SYSTEM';
+    if ((db.agents || []).some((a: any) => String(a.id) === s)) return 'AGENT';
+    if ((db.management || []).some((m: any) => String(m.id) === s)) return 'MANAGEMENT';
+    if ((db.users || []).some((u: any) => String(u.id) === s)) return 'USER';
+    return 'UNKNOWN';
+  }
+
+  function moneyAccountBalance(db: any, id: any) {
+    const s = String(id == null ? '' : id);
+    const t = moneyAccountType(db, s);
+    if (t === 'USER') {
+      const u = (db.users || []).find((x: any) => String(x.id) === s);
+      return { balance: round2(Number(u && u.balance) || 0), frozen: !!(u && u.isFrozen), blocked: !!(u && u.isBlocked) };
+    }
+    if (t === 'AGENT') {
+      const a = (db.agents || []).find((x: any) => String(x.id) === s);
+      return { balance: round2(Number(a && a.balance) || 0), frozen: false, blocked: !!(a && a.isActive === false) };
+    }
+    if (t === 'MANAGEMENT') {
+      const m = (db.management || []).find((x: any) => String(x.id) === s);
+      return { balance: round2(Number(m && m.balance) || 0), frozen: false, blocked: !!(m && m.isActive === false) };
+    }
+    return { balance: 0, frozen: false, blocked: false };
+  }
+
+  /** Every money movement in the database, as {from, to, amount, kind}. */
+  function collectMoneyEdges(db: any) {
+    const edges: any[] = [];
+    for (const t of (db.transactions || [])) {
+      const amt = Number(t.amount) || 0;
+      if (!(amt > 0)) continue;
+      const at = Number(t.timestamp) || 0;
+      if (t.type === 'TRANSFER_SENT') {
+        edges.push({ from: String(t.userId), to: String(t.recipientId || ''), amount: amt, kind: 'P2P', at, ref: t.id, note: t.notes || '' });
+      } else if (t.type === 'AGENT_TRANSFER_SENT') {
+        edges.push({
+          from: String(t.userId), to: String(t.agentId || t.recipientId || ''),
+          amount: amt, fee: round2(Number(t.fee) || 0), kind: 'AGENT_PAY', at, ref: t.id,
+          status: t.payoutStatus || '', note: t.notes || ''
+        });
+      } else if (t.type === 'REWARD') {
+        edges.push({ from: 'BOOST_ENGINE', to: String(t.userId), amount: amt, kind: 'BOOST_REWARD', at, ref: t.id, note: t.notes || '' });
+      } else if (t.type === 'REFERRAL_COMMISSION') {
+        edges.push({
+          from: String((t.metadata && t.metadata.referredId) || 'BOOST_ENGINE'), to: String(t.userId),
+          amount: amt, kind: 'REFERRAL', at, ref: t.id, note: t.notes || ''
+        });
+      } else if (t.type === 'ADMIN_CREDIT') {
+        edges.push({ from: 'ADMIN', to: String(t.userId), amount: amt, kind: 'ADMIN', at, ref: t.id, note: t.notes || '' });
+      } else if (t.type === 'ADMIN_DEBIT') {
+        edges.push({ from: String(t.userId), to: 'ADMIN', amount: amt, kind: 'ADMIN', at, ref: t.id, note: t.notes || '' });
+      }
+    }
+    for (const e of (db.agentLedger || [])) {
+      const amt = Number(e.amount) || 0;
+      if (!(amt > 0)) continue;
+      if (e.type === 'MGMT_CREDIT') {
+        edges.push({ from: String(e.managementId || 'MANAGEMENT'), to: String(e.agentId), amount: amt, kind: 'MGMT_FUND', at: Number(e.at) || 0, ref: e.id, note: e.note || '' });
+      } else if (e.type === 'MGMT_DEBIT') {
+        edges.push({ from: String(e.agentId), to: String(e.managementId || 'MANAGEMENT'), amount: amt, kind: 'MGMT_COLLECT', at: Number(e.at) || 0, ref: e.id, note: e.note || '' });
+      }
+    }
+    for (const e of (db.managementLedger || [])) {
+      const amt = Number(e.amount) || 0;
+      if (!(amt > 0)) continue;
+      if (e.type === 'ADMIN_CREDIT') {
+        edges.push({ from: 'ADMIN', to: String(e.managementId), amount: amt, kind: 'ADMIN', at: Number(e.at) || 0, ref: e.id, note: e.note || '' });
+      } else if (e.type === 'ADMIN_DEBIT') {
+        edges.push({ from: String(e.managementId), to: 'ADMIN', amount: amt, kind: 'ADMIN', at: Number(e.at) || 0, ref: e.id, note: e.note || '' });
+      }
+    }
+    return edges;
+  }
+
+  function pendingPayouts(db: any) {
+    return (db.agentPayouts || []).filter((p: any) => String(p.status) === 'PENDING');
+  }
+
+  app.get('/api/admin/money-tree/summary', requireAdmin, (_req: any, res: any) => {
+    try {
+      const db = readDb();
+      const users = db.users || [];
+      const agents = db.agents || [];
+      const mgmt = db.management || [];
+      const userBalance = round2(users.reduce((a: number, u: any) => a + (Number(u.balance) || 0), 0));
+      const agentBalance = round2(agents.reduce((a: number, m: any) => a + (Number(m.balance) || 0), 0));
+      const mgmtBalance = round2(mgmt.reduce((a: number, m: any) => a + (Number(m.balance) || 0), 0));
+      const pending = pendingPayouts(db);
+      const inTransitTotal = round2(pending.reduce((a: number, p: any) => a + (Number(p.total) || (Number(p.amount) || 0) + (Number(p.fee) || 0)), 0));
+      let rewards = 0, commissions = 0, p2p = 0, agentPaid = 0, adminCredit = 0, adminDebit = 0;
+      for (const t of (db.transactions || [])) {
+        const amt = Number(t.amount) || 0;
+        if (t.type === 'REWARD') rewards += amt;
+        else if (t.type === 'REFERRAL_COMMISSION') commissions += amt;
+        else if (t.type === 'TRANSFER_SENT') p2p += amt;
+        else if (t.type === 'AGENT_TRANSFER_SENT') agentPaid += amt;
+        else if (t.type === 'ADMIN_CREDIT') adminCredit += amt;
+        else if (t.type === 'ADMIN_DEBIT') adminDebit += amt;
+      }
+      const inflow = round2(rewards + adminCredit);
+      const outflow = round2(adminDebit);
+      const atRest = round2(userBalance + agentBalance + mgmtBalance + inTransitTotal);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        at: Date.now(),
+        users: { count: users.length, balance: userBalance, boosting: users.filter((u: any) => u.boostState && u.boostState.isActive).length },
+        agents: {
+          count: agents.length, balance: agentBalance,
+          list: agents
+            .map((a: any) => ({
+              id: String(a.id), balance: round2(Number(a.balance) || 0),
+              active: a.isActive !== false,
+              pendingIn: round2(pending.filter((p: any) => String(p.agentId) === String(a.id)).reduce((x: number, p: any) => x + (Number(p.total) || 0), 0))
+            }))
+            .sort((a: any, b: any) => b.balance - a.balance).slice(0, 25)
+        },
+        management: {
+          count: mgmt.length, balance: mgmtBalance,
+          list: mgmt.map((m: any) => ({ id: String(m.id), balance: round2(Number(m.balance) || 0), active: m.isActive !== false }))
+            .sort((a: any, b: any) => b.balance - a.balance).slice(0, 25)
+        },
+        topUsers: users
+          .map((u: any) => ({ id: String(u.id), balance: round2(Number(u.balance) || 0) }))
+          .sort((a: any, b: any) => b.balance - a.balance).slice(0, 10),
+        inTransit: { count: pending.length, total: inTransitTotal },
+        lifetime: {
+          rewardsMinted: round2(rewards), commissionsPaid: round2(commissions),
+          p2pVolume: round2(p2p), agentPaid: round2(agentPaid),
+          adminCredits: round2(adminCredit), adminDebits: round2(adminDebit)
+        },
+        recon: {
+          inflow, outflow, atRest,
+          delta: round2(inflow - outflow - atRest),
+          note: 'Minting (boost rewards) puts money in; only admin debits take it out. A non-zero delta is normal on a database with legacy, seeded or imported rows — read it as a hint, not an audit total.'
+        },
+        note: 'Balance is a single number per account, so the database cannot tag an individual dollar. This view shows who moved how much to whom and where the money sits now.'
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: 'Could not build the money summary.', detail: String(e?.message || e).slice(0, 200) });
+    }
+  });
+
+  app.get('/api/admin/money-tree', requireAdmin, (req: any, res: any) => {
+    try {
+      const db = readDb();
+      const nodeId = String(req.query.node || '').trim();
+      if (!nodeId) return res.status(400).json({ error: 'Pick an account: a user ID, an AGT-… agent or an MGT-… management wallet.' });
+      const nodeType = moneyAccountType(db, nodeId);
+      if (nodeType === 'UNKNOWN') return res.status(404).json({ error: 'No account with that ID.' });
+      const limit = Math.max(10, Math.min(500, Number(req.query.limit) || 100));
+
+      const edges = collectMoneyEdges(db);
+      const inMap = new Map<string, any>();
+      const outMap = new Map<string, any>();
+      const bump = (map: Map<string, any>, rawKey: string, edge: any, side: 'in' | 'out') => {
+        const key = rawKey || 'UNKNOWN';
+        const cur = map.get(key);
+        if (cur) {
+          cur.amount = round2(cur.amount + edge.amount);
+          cur.count += 1;
+          if (edge.at > cur.lastAt) cur.lastAt = edge.at;
+          if (edge.kind === 'AGENT_PAY') cur.fee = round2((cur.fee || 0) + (Number(edge.fee) || 0));
+          if (edge.status) cur.status = edge.status;
+        } else {
+          map.set(key, {
+            id: key, kind: edge.kind, amount: round2(edge.amount),
+            fee: edge.kind === 'AGENT_PAY' ? round2(Number(edge.fee) || 0) : 0,
+            count: 1, lastAt: edge.at, firstAt: edge.at, status: edge.status || '',
+            type: side === 'in' ? moneyAccountType(db, key) : moneyAccountType(db, key),
+            balance: moneyAccountBalance(db, key).balance
+          });
+        }
+      };
+      const events: any[] = [];
+      for (const e of edges) {
+        if (e.to === nodeId) {
+          bump(inMap, e.from, e, 'in');
+          events.push({ at: e.at, kind: e.kind, from: e.from, to: e.to, amount: round2(e.amount), ref: e.ref, status: e.status || '', note: e.note || '' });
+        }
+        if (e.from === nodeId) {
+          bump(outMap, e.to, e, 'out');
+          events.push({ at: e.at, kind: e.kind, from: e.from, to: e.to, amount: round2(e.amount), ref: e.ref, status: e.status || '', note: e.note || '' });
+        }
+      }
+      // in transit: claim codes that left the user but no agent has claimed yet
+      const pending = pendingPayouts(db);
+      const transitOut = pending.filter((p: any) => String(p.userId) === nodeId)
+        .map((p: any) => ({ to: String(p.agentId), amount: round2(Number(p.total) || 0), amountOnly: round2(Number(p.amount) || 0), fee: round2(Number(p.fee) || 0), code: String(p.code || '').toUpperCase(), createdAt: p.createdAt, expiresAt: p.expiresAt, id: p.id }));
+      const transitIn = pending.filter((p: any) => String(p.agentId) === nodeId)
+        .map((p: any) => ({ from: String(p.userId), amount: round2(Number(p.total) || 0), createdAt: p.createdAt, expiresAt: p.expiresAt, id: p.id }));
+
+      const inList = Array.from(inMap.values()).sort((a, b) => b.amount - a.amount).slice(0, limit);
+      const outList = Array.from(outMap.values()).sort((a, b) => b.amount - a.amount).slice(0, limit);
+      const totalsIn = round2(inList.reduce((a: number, x: any) => a + x.amount, 0));
+      const totalsOut = round2(outList.reduce((a: number, x: any) => a + x.amount, 0));
+      const acc = moneyAccountBalance(db, nodeId);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        node: {
+          id: nodeId, type: nodeType, balance: acc.balance, frozen: acc.frozen, blocked: acc.blocked,
+          label: nodeType === 'USER' ? `User #${nodeId}` : nodeType === 'AGENT' ? `Agent ${nodeId}` : nodeType === 'MANAGEMENT' ? `Management ${nodeId}` : nodeId
+        },
+        in: inList,
+        out: outList,
+        inTransit: { out: transitOut, in: transitIn, outTotal: round2(transitOut.reduce((a: number, x: any) => a + x.amount, 0)), inTotal: round2(transitIn.reduce((a: number, x: any) => a + x.amount, 0)) },
+        totals: { in: totalsIn, out: totalsOut, net: round2(totalsIn - totalsOut), events: events.length },
+        events: events.sort((a, b) => b.at - a.at).slice(0, 60)
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: 'Could not build the money tree.', detail: String(e?.message || e).slice(0, 200) });
+    }
+  });
+
   app.get('/api/admin/accounts', requireAdmin, requireSuperAdmin, (req: any, res) => {
     const db = readDb();
     const admins = ensureAdminAccounts(db);

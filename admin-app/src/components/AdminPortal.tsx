@@ -1,5 +1,6 @@
 import { FC, useState, useEffect, useRef } from 'react';
 import { SendLockCard } from './SendLockCard';
+import { MoneyFlowView } from './MoneyFlowView';
 import { PushBell } from '../push/PushBell';
 import {
   ShieldCheck,
@@ -44,7 +45,8 @@ import {
   Play,
   Pause,
   X,
-  Mail
+  Mail,
+  Network,
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { AgentAdminView } from './AgentAdminView';
@@ -128,6 +130,7 @@ const MobileBottomNav: FC<{ activeTab: string; setActiveTab: (t: any) => void; u
     { id: 'ENGINE', label: 'Engine', icon: Zap },
     { id: 'ADMINS', label: 'Admins', icon: Users2 },
     { id: 'AGENTS', label: 'Agents', icon: Building2 },
+    { id: 'MONEY', label: 'Money Flow', icon: Network },
   ];
   return (
     <>
@@ -197,7 +200,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // 2. Admin Portal Views
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'SMTP' | 'SETTINGS' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS' | 'AGENTS'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'SMTP' | 'SETTINGS' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS' | 'AGENTS' | 'MONEY'>('OVERVIEW');
 
   // MFA master switch (read once, refreshed when the tab changes) — drives the banner.
   const [mfaOff, setMfaOff] = useState(false);
@@ -1228,6 +1231,18 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           </button>
 
           <button
+            onClick={() => setActiveTab('MONEY')}
+            className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
+              activeTab === 'MONEY'
+                ? 'bg-amber-500 text-zinc-950 font-bold shadow-md'
+                : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/50'
+            }`}
+          >
+            <Network className="w-4 h-4" />
+            <span>Money Flow</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('BROADCAST')}
             className={`flex items-center gap-1.5 sm:gap-2 rounded-xl px-3 sm:px-3.5 py-2 text-[11px] sm:text-xs font-semibold transition cursor-pointer shrink-0 snap-start whitespace-nowrap ${
               activeTab === 'BROADCAST'
@@ -1316,6 +1331,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
           </div>
         )}
         {activeTab === 'AGENTS' && <AgentAdminView />}
+        {activeTab === 'MONEY' && <MoneyFlowView />}
         {activeTab === 'ANALYTICS' && <AnalyticsDashboard />}
         {activeTab === 'BROADCAST' && <BroadcastView />}
         {activeTab === 'FRAUD' && <FraudView />}
