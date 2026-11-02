@@ -3726,17 +3726,18 @@ async function startServer() {
 
       // What the REST of today can still pay, assuming the user keeps tapping Boost
       // (one cycle per tap, the product rule) and every cycle runs back to back.
+      // The cycle that is already running always counts: its money is coming, and
+      // when it lands after midnight the phone labels it "after 12am" instead of
+      // hiding it. Cycles that could only START and finish tomorrow do not count.
       let bal = Number(user.balance) || 0;
       let cursor = now;
       let futureCycles = 0;
       let futureIncome = 0;
       if (running && remainingMs > 0) {
+        futureIncome += cycleRemaining;
+        bal += cycleRemaining;
         cursor += remainingMs;
-        if (cursor <= dayEnd) {
-          futureIncome += cycleRemaining;
-          bal += cycleRemaining;
-          futureCycles += 1;
-        }
+        futureCycles += 1;
       }
       let nextCycleMs = calculateDynamicDuration(bal, db.users, config);
       let guard = 0;
