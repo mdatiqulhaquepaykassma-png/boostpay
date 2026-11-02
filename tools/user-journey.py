@@ -234,14 +234,19 @@ if atk:
 section('8. wrong passwords: who gets locked out?')
 victim_ip = ip()
 codes = [req('/api/users/login', {'email': U2[0], 'password': 'wrong%d' % i}, ip_addr=victim_ip)[0] for i in range(10)]
-real = req('/api/users/login', {'email': U2[0], 'password': U2[1]}, ip_addr=victim_ip)[0]
+immediate = req('/api/users/login', {'email': U2[0], 'password': U2[1]}, ip_addr=victim_ip)[0]
 bystander = req('/api/users/login', {'email': U3[0], 'password': U3[1]}, ip_addr=victim_ip)[0]
 ck('guessing is stopped', any(c == 429 for c in codes), f"statuses={codes}", 'HIGH', 'Nothing stops password guessing.')
-ck('the victim can log in again right after (no self-lockout)', real == 200, f"{real}", 'HIGH',
-   'A few wrong taps locked the real user out of their own account.')
 ck('an innocent user on the same network is NOT locked out', bystander == 200, f"{bystander}", 'HIGH',
-   'After 8 wrong passwords every account behind that IP is blocked for 10 minutes — with carrier NAT '
-   'one attacker can lock out a whole city.')
+   'After 8 wrong passwords every account behind that IP is blocked — with carrier NAT one attacker can '
+   'lock out a whole city.')
+ck('the blocked owner only waits a short cool-off', immediate == 429, f"{immediate} (expected a short 429)", 'HIGH',
+   'Lockout is instantaneous-but-not-limited, or not applied at all.')
+print('  … waiting out the 60 s first cool-off …')
+time.sleep(62)
+real = req('/api/users/login', {'email': U2[0], 'password': U2[1]}, ip_addr=victim_ip)[0]
+ck('after the cool-off the real owner can log in again', real == 200, f"{real}", 'HIGH',
+   'The account stays locked for 30 minutes after a few typos.')
 
 # ── 9. privileges & sessions ─────────────────────────────────────────────────
 section('9. privilege and session handling')

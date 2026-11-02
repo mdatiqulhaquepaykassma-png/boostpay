@@ -3,53 +3,102 @@
 # sslip.io fallback hosts. Routers here point at the SAME containers Dokploy
 # already manages; nothing inside the apps changes (each sub-app proxies /api
 # to the main API itself, so the browser stays same-origin).
+#
+# 2026-11-02 (later): security headers were missing on every console app. Instead
+# of touching the Dokploy-managed routers (Dokploy rewrites those files), the
+# console hosts are re-declared here with an explicit priority and the
+# `bp-security-headers` middleware. CSP is intentionally NOT added — the console
+# bundles ship inline bootstrap code and a wrong policy would break the login
+# screen; HSTS/XFO/nosniff/Referrer are safe wins.
 http:
+  middlewares:
+    bp-security-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        contentTypeNosniff: true
+        frameDeny: false
+        customFrameOptionsValue: SAMEORIGIN
+        referrerPolicy: strict-origin-when-cross-origin
+        permissionsPolicy: "camera=(self), microphone=(self), geolocation=(self)"
   routers:
-    bp2-management-online-web:
+    # ── management ──
+    bp-management-online-web:
       rule: Host(`management.boostpay.online`)
+      priority: 200
       service: bp2-management-online-svc
       middlewares:
         - redirect-to-https
       entryPoints:
         - web
-    bp2-management-online-secure:
+    bp-management-online-secure:
       rule: Host(`management.boostpay.online`)
+      priority: 200
       service: bp2-management-online-svc
-      middlewares: []
+      middlewares:
+        - bp-security-headers
       entryPoints:
         - websecure
       tls:
         certResolver: letsencrypt
-    bp2-admin-online-web:
+    # ── admin console ──
+    bp-admin-online-web:
       rule: Host(`admin.boostpay.online`)
+      priority: 200
       service: bp2-admin-online-svc
       middlewares:
         - redirect-to-https
       entryPoints:
         - web
-    bp2-admin-online-secure:
+    bp-admin-online-secure:
       rule: Host(`admin.boostpay.online`)
+      priority: 200
       service: bp2-admin-online-svc
-      middlewares: []
+      middlewares:
+        - bp-security-headers
       entryPoints:
         - websecure
       tls:
         certResolver: letsencrypt
-    bp2-studio-online-web:
+    # ── DB Studio ──
+    bp-studio-online-web:
       rule: Host(`db.boostpay.online`)
+      priority: 200
       service: bp2-studio-online-svc
       middlewares:
         - redirect-to-https
       entryPoints:
         - web
-    bp2-studio-online-secure:
+    bp-studio-online-secure:
       rule: Host(`db.boostpay.online`)
+      priority: 200
       service: bp2-studio-online-svc
-      middlewares: []
+      middlewares:
+        - bp-security-headers
       entryPoints:
         - websecure
       tls:
         certResolver: letsencrypt
+    # ── agent app (Dokploy owns the plain router; this one only adds headers) ──
+    bp-agent-online-secure:
+      rule: Host(`agent.boostpay.online`)
+      priority: 200
+      service: boostpay-agent-app-rlf77e-service-19
+      middlewares:
+        - bp-security-headers
+      entryPoints:
+        - websecure
+      tls: {}
+    # ── support chat ──
+    bp-support-online-secure:
+      rule: Host(`supportchat.boostpay.online`)
+      priority: 200
+      service: boostpay-supportchat-memsqg-service-23
+      middlewares:
+        - bp-security-headers
+      entryPoints:
+        - websecure
+      tls: {}
   services:
     bp2-management-online-svc:
       loadBalancer:
@@ -63,4 +112,3 @@ http:
       loadBalancer:
         servers:
           - url: http://boostpay-studio-8n0fyq:3000
-

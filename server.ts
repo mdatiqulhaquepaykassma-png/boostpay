@@ -2252,6 +2252,21 @@ function sanitizeIncomingUser(u: any): any | null {
 
 // --- Hardened in-memory rate limiter (brute-force + spam + DDoS) ---
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+/**
+ * Give a rate-limit token back when the request was rejected before it did any
+ * work (bad amount, wrong recipient, own-account transfer…). Without this, a user
+ * who fumbles the Send form a few times hits "too many requests" even though no
+ * money ever moved. Only call it on *validation* failures, never on success.
+ */
+function refundRateLimit(req: any) {
+  try {
+    const ip = clientIp(req);
+    const uid = (req.authUserId || req.authAdmin || req.body?.userId || req.body?.email || '') as string;
+    const bucket = rateBuckets.get(`${ip}|${uid}|${req.path}`);
+    if (bucket && bucket.count > 0) bucket.count -= 1;
+  } catch { /* never let bookkeeping break a response */ }
+}
+
 function rateLimit(maxPerMinute: number) {
   return (req: any, res: any, next: any) => {
     const ip = clientIp(req);
@@ -3078,9 +3093,14 @@ async function startServer() {
   // looked exactly like "rings but never connects".
   app.use('/api/chat/call-signal', rateLimit(300));
   // Progressive fail block: after 8 failed logins in 10m, IP blocked 30m (fix: credential stuffing)
+  // Block key = IP **and** the account being guessed at (2026-11-02). Blocking the
+  // bare IP meant one attacker — or one user fat-fingering their own password 8
+  // times — locked out every other account behind the same NAT (mobile carriers
+  // put thousands of subscribers on one IP). Per-account abuse is still stopped,
+  // and the account-level temp freeze is unchanged.
   const failedLogins = new Map<string,{count:number, firstAt:number, blockedUntil?:number}>();
   app.use('/api/users/login', (req:any,res:any,next:any)=>{
-    const ip=clientIp(req); const rec=failedLogins.get(ip);
+    const ip=clientIp(req); const acctKey=(ip+'|'+String((req.body&&req.body.email)||'').toLowerCase().trim()).slice(0,120); const rec=failedLogins.get(acctKey);
     if(rec?.blockedUntil && rec.blockedUntil>Date.now()){
       const sec=Math.ceil((rec.blockedUntil-Date.now())/1000);
       res.setHeader('Retry-After', String(sec));
@@ -3090,12 +3110,21 @@ async function startServer() {
     const origJson=res.json.bind(res);
     res.json=(body:any)=>{
       if(body?.error && /invalid|credentials|password/i.test(String(body.error))){
-        const now=Date.now(); let r=failedLogins.get(ip);
+        const now=Date.now(); let r=failedLogins.get(acctKey);
         if(!r || now - r.firstAt > 10*60*1000) r={count:0, firstAt:now};
-        r.count++; if(r.count>=8) r.blockedUntil=now+30*60*1000;
-        failedLogins.set(ip,r);
+        r.count++;
+        if(r.count>=8){
+          // Progressive, short first: an owner who fat-fingers their password waits
+          // a minute, a repeat offender waits 5 then 30 minutes. The account-level
+          // anti-fraud freeze still guards against sustained guessing.
+          const lvl = Math.min(2, Math.floor((r.count-8)/8));
+          const waitMs = [60_000, 5*60_000, 30*60_000][lvl];
+          r.blockedUntil = now + waitMs;
+          r.count = 8 + lvl*8; // keep counting up so the next round escalates
+        }
+        failedLogins.set(acctKey,r);
       } else if(body?.success || body?.token){
-        failedLogins.delete(ip); // success resets
+        failedLogins.delete(acctKey); // success resets
       }
       return origJson(body);
     };
@@ -4065,10 +4094,21 @@ async function startServer() {
     });
   });
 
+  // A 5 000-character blob used to be accepted and then rode along in every sync.
+  // 4 000 characters is ~3 screens of text — far beyond a normal chat message.
+  const CHAT_TEXT_MAX = 4000;
   app.post('/api/chat/send', (req: any, res) => {
     try {
       // Per-conversation spam: 20 msg/min per conversation (prevents flood)
       // (global 60/min already via middleware, this is tighter per chat)
+      const rawText = (req.body as any).text;
+      if (typeof rawText === 'string' && rawText.length > CHAT_TEXT_MAX) {
+        refundRateLimit(req);
+        return res.status(400).json({
+          error: `Message is too long (${rawText.length} characters). Keep it under ${CHAT_TEXT_MAX} — send the rest as a second message or a voice note.`,
+          maxLength: CHAT_TEXT_MAX, length: rawText.length
+        });
+      }
       const convIdForLimit = String((req.body as any).conversationId || (req.body as any).recipientId || 'unknown');
       const perConvKey = `${clientIp(req)}|${(req as any).authUserId||'anon'}|chat:${convIdForLimit}`;
       let b = rateBuckets.get(perConvKey);
@@ -5497,22 +5537,27 @@ async function startServer() {
     let rawAmount = req.body?.amount;
     // Reject client trying to set balance directly
     if (req.body?.balance !== undefined || req.body?.creditAmount !== undefined || req.body?.lifetimeProfit !== undefined) {
+      refundRateLimit(req);
       return res.status(400).json({ error: 'Direct balance modification is not allowed.' });
     }
     try {
       const { senderId, recipientId } = req.body as any;
       const numAmount = Number(rawAmount);
       if (!isFinite(numAmount) || isNaN(numAmount) || numAmount < 0.1 || numAmount > 100000) {
+        refundRateLimit(req);
         return res.status(400).json({ error: 'Minimum transfer is 0.1 — enter 0.1 ≤ x ≤ 100,000.' });
       }
       // Prevent float precision abuse — max 2 decimals (BigDecimal policy)
       if (!/^\d+(\.\d{1,2})?$/.test(String(rawAmount).trim())) {
+        refundRateLimit(req);
         return res.status(400).json({ error: 'Amount must have at most 2 decimal places.' });
       }
       if (String(senderId) === String(recipientId)) {
+        refundRateLimit(req);
         return res.status(400).json({ error: 'Recipient must be different from the sender.' });
       }
       if (String(senderId) !== String(req.authUserId)) {
+        refundRateLimit(req);
         return res.status(403).json({ error: 'You can only send money from your own account.' });
       }
       // Race condition / Double-spend prevention: lock sender account for entire ledger write
@@ -5522,7 +5567,7 @@ async function startServer() {
       const recipient = db.users.find((u: any) => u.id === recipientId);
 
       if (!sender) return res.status(404).json({ error: 'Sender user not found.' });
-      if (!recipient) return res.status(404).json({ error: `Recipient User ID #${recipientId} was not found.` });
+      if (!recipient) { refundRateLimit(req); return res.status(404).json({ error: `Recipient User ID #${recipientId} was not found.` }); }
 
       if (sender.isBlocked) return res.status(403).json({ error: 'Your account is suspended.' });
       if (sender.isFrozen) return res.status(403).json({ error: 'Your account is currently frozen by administration. Transfers are locked.' });
@@ -6549,7 +6594,6 @@ async function startServer() {
         };
       }
       const lock = sendLockOf(user);
-      writeDb(db);
       try {
         recordAuditLog(
           db,
@@ -6559,6 +6603,7 @@ async function startServer() {
           String(user.id)
         );
       } catch { /* audit must not break the action */ }
+      writeDb(db);
       try { broadcastUserUpdate(db, String(user.id)); } catch { /* ignore */ }
       res.json({
         success: true,
@@ -6614,7 +6659,6 @@ async function startServer() {
         };
       }
       const lock = agentLockOf(user);
-      writeDb(db);
       try {
         recordAuditLog(
           db,
@@ -6624,6 +6668,7 @@ async function startServer() {
           String(user.id)
         );
       } catch { /* audit must not break the action */ }
+      writeDb(db);
       try { broadcastUserUpdate(db, String(user.id)); } catch { /* ignore */ }
       res.json({
         success: true,
@@ -7900,8 +7945,8 @@ async function startServer() {
     if (b.maxRatePercent!==undefined) { const v=parseFloat(b.maxRatePercent); if (!isNaN(v)&&v>=1&&v<=100) db.config.referral.maxRatePercent=v; }
     if (b.dailyTierEnabled!==undefined) db.config.referral.dailyTierEnabled=!!b.dailyTierEnabled;
     if (b.commissionOnCompounding!==undefined) db.config.referral.commissionOnCompounding=!!b.commissionOnCompounding;
-    writeDb(db);
     recordAuditLog(db,'REFERRAL_CONFIG_UPDATE', String(req.authAdmin), `Refer config updated: ${JSON.stringify(db.config.referral)}`);
+    writeDb(db);
     res.json({ success:true, config: db.config.referral });
   });
   app.get('/api/admin/antifraud/logs', requireAdmin, (req:any,res)=>{
@@ -7944,8 +7989,8 @@ async function startServer() {
         db.config.antifraud.features[k] = !!b.features[k];
       }
     }
-    writeDb(db);
     recordAuditLog(db,'ANTIFRAUD_CONFIG_UPDATE', String(req.authAdmin), `Antifraud config updated: ${JSON.stringify(db.config.antifraud)}`);
+    writeDb(db);
     res.json({ success:true, config: db.config.antifraud });
   });
   app.post('/api/admin/antifraud/unfreeze', requireSuperAdmin, (req:any,res)=>{
@@ -7953,8 +7998,8 @@ async function startServer() {
     const u=(db.users||[]).find((x:any)=> String(x.id)===String(userId));
     if (!u) return res.status(404).json({error:'User not found'});
     u.isFrozen=false; (u as any).isTempFreeze=false; (u as any).frozenUntil=undefined; u.frozenReason=undefined;
-    writeDb(db); broadcastUserUpdate(db, String(u.id));
     recordAuditLog(db,'FRAUD_MANUAL_UNFREEZE', String(req.authAdmin), `Manually unfroze User #${userId} (antifraud)`, userId);
+    writeDb(db); broadcastUserUpdate(db, String(u.id));
     res.json({success:true});
   });
   // === IP BLOCK management (persistent, on/off edit) ===
@@ -7987,8 +8032,8 @@ async function startServer() {
     // also push to in-memory for instant effect (forever if no until)
     if (!entry.until) ipBlacklist.set(ip, Date.now()+ 365*24*3600000);
     else ipBlacklist.set(ip, Number(entry.until));
-    writeDb(db);
     recordAuditLog(db,'IP_BLOCK_ADD', String(req.authAdmin), `Blocked IP ${ip} reason: ${reason}${entry.until ? ' until '+new Date(entry.until).toLocaleString():''}`);
+    writeDb(db);
     res.json({ success:true, blockedIps: af.blockedIps });
   });
   app.put('/api/admin/antifraud/ip-blocks/:ip', requireAdmin, requireSuperAdmin, (req:any,res)=>{
@@ -8012,8 +8057,8 @@ async function startServer() {
     if (entry.enabled===false) ipBlacklist.delete(ip);
     else if (entry.until) ipBlacklist.set(ip, Number(entry.until));
     else ipBlacklist.set(ip, Date.now()+365*24*3600000);
-    writeDb(db);
     recordAuditLog(db,'IP_BLOCK_UPDATE', String(req.authAdmin), `Updated IP block ${ip} enabled=${entry.enabled}`);
+    writeDb(db);
     res.json({ success:true, entry });
   });
   app.delete('/api/admin/antifraud/ip-blocks/:ip', requireAdmin, requireSuperAdmin, (req:any,res)=>{
@@ -8025,8 +8070,8 @@ async function startServer() {
     if (idx<0) return res.status(404).json({error:'IP not found'});
     af.blockedIps.splice(idx,1);
     ipBlacklist.delete(ip);
-    writeDb(db);
     recordAuditLog(db,'IP_BLOCK_REMOVE', String(req.authAdmin), `Unblocked IP ${ip}`);
+    writeDb(db);
     res.json({ success:true });
   });
   app.post('/api/admin/antifraud/ip-blocks/toggle-enabled', requireAdmin, requireSuperAdmin, (req:any,res)=>{
@@ -8034,8 +8079,8 @@ async function startServer() {
     const db=readDb();
     const af:any=(db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
     af.ipBlockEnabled=enabled;
-    writeDb(db);
     recordAuditLog(db,'IP_BLOCK_TOGGLE', String(req.authAdmin), `IP block master ${enabled ? 'ON':'OFF'}`);
+    writeDb(db);
     res.json({ success:true, ipBlockEnabled: enabled });
   });
   // === AUDIT CORRECTION: fix inflated compounding balances/profits (admin only, MFA + audit-logged) ===
@@ -8066,8 +8111,8 @@ async function startServer() {
           u.boostState.startingBalance=Number(f.startingBalance);
         }
       }
-      if(patched>0) writeDb(db);
       recordAuditLog(db,'AUDIT_BALANCE_CORRECTION', String(req.authAdmin), `Audit correction applied to ${fixes.length} users: ${JSON.stringify(fixes).slice(0,500)}`);
+      if(patched>0) writeDb(db);
       res.json({success:true, patched, users: db.users.filter((x:any)=> fixes.some((f:any)=> String(f.userId)===String(x.id))).map((u:any)=> ({id:u.id, balance:u.balance, lifetimeProfit:u.lifetimeProfit, startingBalance:u.boostState?.startingBalance}))});
     }catch(e:any){ res.status(500).json({error:e.message}); }
   });
@@ -8111,8 +8156,8 @@ async function startServer() {
     const today=smtpDayKey();
     const acct={ id:'smtp-'+Math.floor(100000+Math.random()*900000), email, appPassword: appPassword.replace(/\s+/g,''), host, port, secure: port===465, label: label||email.split('@')[0], enabled:true, dailyCount:0, totalSent:0, failedCount:0, lastError:'', lastSentAt:0, dayKey: today, createdAt: Date.now() };
     smtp.accounts.push(acct);
-    writeDb(db);
     recordAuditLog(db,'SMTP_ACCOUNT_ADD', String(req.authAdmin), `Added SMTP ${email} (${label})`);
+    writeDb(db);
     res.json({ success:true, account: acct, total: smtp.accounts.length });
   });
   app.put('/api/admin/smtp/accounts/:id', requireSuperAdmin, (req:any,res)=>{
@@ -8129,8 +8174,8 @@ async function startServer() {
     if(b.label!==undefined) acc.label=String(b.label).trim().slice(0,60);
     if(b.enabled!==undefined) acc.enabled=!!b.enabled;
     if(b.resetDaily) { acc.dailyCount=0; acc.dayKey=smtpDayKey(); }
-    writeDb(db);
     recordAuditLog(db,'SMTP_ACCOUNT_UPDATE', String(req.authAdmin), `Updated SMTP ${acc.email} enabled=${acc.enabled}`);
+    writeDb(db);
     res.json({ success:true, account: acc });
   });
   app.delete('/api/admin/smtp/accounts/:id', requireSuperAdmin, (req:any,res)=>{
@@ -8141,8 +8186,8 @@ async function startServer() {
     if(idx<0) return res.status(404).json({error:'Not found'});
     const removed=smtp.accounts.splice(idx,1)[0];
     _smtpTransporters.delete(String(id));
-    writeDb(db);
     recordAuditLog(db,'SMTP_ACCOUNT_REMOVE', String(req.authAdmin), `Removed SMTP ${removed.email}`);
+    writeDb(db);
     res.json({ success:true, removed: removed.email });
   });
   app.post('/api/admin/smtp/test', requireSuperAdmin, async (req:any,res)=>{
@@ -8177,8 +8222,8 @@ async function startServer() {
     if(b.strategy!==undefined && ['round-robin','failover'].includes(String(b.strategy))) smtp.config.strategy=String(b.strategy);
     if(b.enabled!==undefined) smtp.config.enabled=!!b.enabled;
     if(b.fallbackToInbox!==undefined) smtp.config.fallbackToInbox=!!b.fallbackToInbox;
-    writeDb(db);
     recordAuditLog(db,'SMTP_CONFIG_UPDATE', String(req.authAdmin), `SMTP config updated: ${JSON.stringify(smtp.config)}`);
+    writeDb(db);
     res.json({ success:true, config: smtp.config });
   });
   app.get('/api/admin/smtp/logs', requireAdmin, (req:any,res)=>{
@@ -8269,7 +8314,6 @@ async function startServer() {
     user.passwordPlain = newPassword;
     delete user.resetToken;
     delete user.resetExpires;
-    writeDb(db);
     recordAuditLog(db, 'USER_PASSWORD_RESET', email, `Password reset via email code for User #${user.id}`, String(user.id));
     writeDb(db);
     pushNotification(db, { id:'NOTIF-'+Date.now(), userId: user.id, type:'SECURITY_ALERT', title:'Password Reset Successful', message:'Your password has been updated. Please sign in with your new password.', timestamp: Date.now(), isRead:false });
@@ -8314,8 +8358,8 @@ async function startServer() {
     user.emailVerified = true;
     delete user.emailVerificationCode;
     delete user.emailVerificationExpires;
-    writeDb(db);
     recordAuditLog(db,'USER_EMAIL_VERIFIED', user.email||user.id, `User #${user.id} verified email ${user.email}`, String(user.id));
+    writeDb(db);
     writeDb(db);
     pushNotification(db,{ id:'NOTIF-'+Date.now(), userId:user.id, type:'SECURITY_ALERT', title:'Email Verified ✅', message:'Your email has been verified. Security level upgraded.', timestamp:Date.now(), isRead:false});
     writeDb(db);
@@ -8691,9 +8735,9 @@ async function startServer() {
       if (needsRehash(agent.passwordHash)) agent.passwordHash = hashPassword(password);
       agent.lastLoginAt = Date.now();
       const sess = createSession(db, String(agent.id), 'AGENT' as any, clientIp(req), String(req.headers['user-agent'] || ''));
-      writeDb(db);
       try { recordAuditLog(db, 'AGENT_LOGIN', agent.email, `Agent ${agent.id} signed in`); } catch { /* ignore */ }
       res.json({ success: true, token: issueToken(String(agent.id), 'AGENT' as any, sess.id), sessionId: sess.id, agent: publicAgent(agent) });
+      writeDb(db);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -10372,6 +10416,12 @@ async function startServer() {
         }
       }
     }));
+    // An unknown API route must never fall through to the SPA: the app would get
+    // HTTP 200 + HTML where it expects JSON (and a typo'd endpoint looks healthy).
+    app.all('/api/*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(404).json({ error: 'Unknown API endpoint.', code: 'API_NOT_FOUND' });
+    });
     app.get('*', (_req, res) => {
       res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(__dirname, 'dist', 'index.html'));
