@@ -192,13 +192,13 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
           </span>
           {Number(t.missedIncome) > 0 && (
             <span className="whitespace-nowrap rounded-full bg-rose-500/10 px-1.5 py-[3px] font-bold text-rose-300">
-              ≈{money(t.missedIncome)} lost
+              ≈{money(t.missedIncome)} profit miss
             </span>
           )}
           {life && (
             <span className="whitespace-nowrap rounded-full bg-zinc-800/70 px-1.5 py-[3px] text-zinc-400">
               life <span className="font-bold text-emerald-300">{money(life.income)}</span> in
-              {Number(life.missedIncome) > 0 && <span className="font-bold text-rose-400"> · ≈{money(life.missedIncome)} lost</span>}
+              {Number(life.missedIncome) > 0 && <span className="font-bold text-rose-400"> · ≈{money(life.missedIncome)} profit miss</span>}
             </span>
           )}
         </div>
@@ -240,7 +240,7 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
             strong
           />
           <Row
-            label="Missed today"
+            label="Profit missed today"
             value={`${t.missed ?? 0} ${(t.missed ?? 0) === 1 ? 'cycle' : 'cycles'} → ≈${money(t.missedIncome ?? 0)}`}
           />
           {life && (
@@ -251,7 +251,7 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
                 strong
               />
               <Row
-                label="Missed lifetime"
+                label="Profit missed lifetime"
                 value={`${life.missed} ${life.missed === 1 ? 'cycle' : 'cycles'} → ≈${money(life.missedIncome)}`}
               />
             </>
