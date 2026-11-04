@@ -523,6 +523,43 @@ if s == 200:
         ck('the earner never pays commission to themselves', not weird, f"rows={len(weird)}", 'CRITICAL',
            'A user earned commission from their own cycle.')
 
+# ── 14. income shown on the tree ─────────────────────────────────────────────
+section('14. tree-e dhukle income — kon member theke koto pelam')
+tu1, _ = login(U1)
+s, summ = req('/api/user/team/summary', token=tu1, ip_addr=ip())
+inc = (summ or {}).get('income') or {}
+ck('the team summary carries an income total', s == 200 and isinstance(inc.get('total'), (int, float)),
+   f"{s} total={inc.get('total')} last24h={inc.get('last24h')}", 'HIGH',
+   'The team card cannot show how much the team has earned.')
+s, kids = req('/api/user/team/children?parentId=U1', token=tu1, ip_addr=ip())
+rows = (kids or {}).get('children') or []
+ck('every member row carries its own income split',
+   bool(rows) and all(isinstance(r.get('incomeSelf'), (int, float)) and isinstance(r.get('incomeTeam'), (int, float)) for r in rows),
+   f"rows={len(rows)}", 'HIGH', 'Tree rows do not say how much income came through that member.')
+# Each direct child carries the income earned through its whole subtree, and those
+# subtrees are disjoint — so their sum must equal the team total.
+ck('the income through my level-1 members adds up to the team total',
+   abs(sum(num(r.get('incomeTeam')) for r in rows) - num(inc.get('total'))) <= max(1e-10, num(inc.get('total')) * 1e-4),
+   f"rows={round(sum(num(r.get('incomeTeam')) for r in rows),12)} total={inc.get('total')}", 'HIGH',
+   'The per-member income does not add up to the team total.')
+ck('income only appears on members of my own tree',
+   all(num(r.get('incomeTeam')) >= 0 for r in rows), 'non-negative', 'MEDIUM', 'A member shows negative income.')
+if len(rows) >= 2:
+    ck('a member with a deeper team shows income from that team',
+       any(num(r.get('incomeTeam')) >= num(r.get('incomeSelf')) for r in rows), 'team >= self', 'MEDIUM',
+       'Team income is smaller than the member’s own income, which cannot happen.')
+ck('income rows carry no names or emails', not re.search(r'@', json.dumps(kids)), 'ids and amounts only', 'CRITICAL',
+   'Income attribution leaks member identities.')
+# opening a member returns that member's income for the parent view
+s, kids2 = req(f'/api/user/team/children?parentId={rows[0]["id"]}', token=tu1, ip_addr=ip())
+if s == 200 and (rows[0].get('directCount') or 0) > 0:
+    node = kids2.get('node') or {}
+    ck('opening a member shows income earned through them', isinstance(node.get('incomeTeam'), (int, float)),
+       f"incomeTeam={node.get('incomeTeam')} incomeSelf={node.get('incomeSelf')}", 'HIGH',
+       'The expanded member has no income figures.')
+s, j = req('/api/user/team/summary', ip_addr=ip())
+ck('income is never readable without a session', s == 401, f"{s}", 'CRITICAL', 'Anonymous callers can read team income.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

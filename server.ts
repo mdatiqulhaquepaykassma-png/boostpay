@@ -976,6 +976,44 @@ function walkTeam(index: Map<string, any[]>, rootId: string) {
   };
 }
 
+/**
+ * Income map for a referrer's whole tree.
+ *
+ * Multi-level commission means the money a user earns from a member can come
+ * from that member's OWN cycles and from everyone under them. Given the caller's
+ * commissions (db.referCommissions) and the team graph we return two maps:
+ *   self[id] = commission earned from that member's own boosting
+ *   via[id]  = commission earned from that member AND everyone below them
+ * so a tree row can say "ei member theke/er team theke ami koto pelam".
+ * Legacy commission rows without a `level` field still work — attribution is
+ * done on the graph, not on the stored level.
+ */
+function referralIncomeMaps(db: any, uid: string, walk: any, index: Map<string, any[]>) {
+  const self = new Map<string, number>();
+  const via = new Map<string, number>();
+  const parentOf = new Map<string, string>();
+  for (const [parent, kids] of index) {
+    for (const k of kids) if (!parentOf.has(k.id)) parentOf.set(k.id, parent);
+  }
+  for (const c of (db.referCommissions || [])) {
+    if (String(c.referrerId) !== String(uid)) continue;
+    const rid = String(c.referredId);
+    const amt = Number(c.amount) || 0;
+    if (!(amt > 0)) continue;
+    if (rid === uid) continue;                       // never pay yourself
+    if (!walk.level.has(rid)) continue;              // not inside my tree (stale row)
+    self.set(rid, (self.get(rid) || 0) + amt);
+    let cur: string | undefined = rid;
+    let guard = 0;
+    while (cur && cur !== uid && guard < 500) {
+      via.set(cur, (via.get(cur) || 0) + amt);
+      cur = parentOf.get(cur);
+      guard += 1;
+    }
+  }
+  return { self, via };
+}
+
 function teamMemberLive(db: any, id: string) {
   const u = (db.users || []).find((x: any) => String(x.id) === String(id));
   if (!u) return { exists: false, boostActive: false, boostPaused: false };
@@ -8393,10 +8431,21 @@ async function startServer() {
       }
       const directJoined = (index.get(uid) || []).map((c: any) => c.joinedAt);
       for (const t of directJoined) if (t > newestAt) newestAt = t;
+      const income = referralIncomeMaps(db, uid, walk, index);
+      const incomeTotal = Math.round(Array.from(income.self.values()).reduce((a, b) => a + b, 0) * 1e12) / 1e12;
+      const incomeToday = Math.round((db.referCommissions || [])
+        .filter((c: any) => String(c.referrerId) === uid && Number(c.timestamp) >= Date.now() - 86400000)
+        .reduce((a: number, c: any) => a + (Number(c.amount) || 0), 0) * 1e12) / 1e12;
+      const topEarner = Array.from(income.via.entries()).sort((a, b) => b[1] - a[1])[0] || null;
       res.setHeader('Cache-Control', 'no-store');
       res.json({
         userId: uid,
         total: walk.total,
+        income: {
+          total: incomeTotal,
+          last24h: incomeToday,
+          topMember: topEarner ? { id: topEarner[0], amount: Math.round(topEarner[1] * 1e12) / 1e12 } : null
+        },
         direct: (index.get(uid) || []).length,
         depth: walk.depth,
         byLevel: walk.levelCounts.map((count, i) => ({ level: i + 1, count })),
@@ -8428,6 +8477,8 @@ async function startServer() {
         return res.status(403).json({ error: 'That member is not in your team.' });
       }
       const rows = index.get(parentId) || [];
+      const income = referralIncomeMaps(db, uid, walk, index);
+      const roundAmt = (n: number) => Math.round((Number(n) || 0) * 1e12) / 1e12;
       const page = rows.slice(offset, offset + limit).map((c: any) => {
         const m = teamMemberLive(db, c.id);
         return {
@@ -8438,7 +8489,10 @@ async function startServer() {
           directCount: (index.get(c.id) || []).length,
           boostActive: m.boostActive,
           boostPaused: m.boostPaused,
-          exists: m.exists
+          exists: m.exists,
+          // income this caller earned THROUGH this member
+          incomeSelf: roundAmt(income.self.get(String(c.id)) || 0),
+          incomeTeam: roundAmt(income.via.get(String(c.id)) || 0)
         };
       });
       res.setHeader('Cache-Control', 'no-store');
@@ -8448,7 +8502,13 @@ async function startServer() {
         children: page,
         childCount: rows.length,
         hasMore: offset + page.length < rows.length,
-        truncated: walk.truncated
+        truncated: walk.truncated,
+        node: parentId === uid ? null : {
+          id: parentId,
+          incomeSelf: roundAmt(income.self.get(parentId) || 0),
+          incomeTeam: roundAmt(income.via.get(parentId) || 0)
+        },
+        incomeTotal: roundAmt(Array.from(income.self.values()).reduce((a, b) => a + b, 0))
       });
     } catch (e: any) {
       console.error('[team/children] error:', e?.message || e);

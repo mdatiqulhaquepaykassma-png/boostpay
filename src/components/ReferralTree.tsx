@@ -26,6 +26,7 @@ type Summary = {
   joinedToday: number;
   newestJoinAt: number | null;
   truncated?: boolean;
+  income?: { total: number; last24h: number; topMember: { id: string; amount: number } | null };
 };
 
 type Member = {
@@ -37,6 +38,20 @@ type Member = {
   boostActive: boolean;
   boostPaused: boolean;
   exists?: boolean;
+  /** commission earned from this member's own boosting */
+  incomeSelf?: number;
+  /** commission earned through this member AND everyone below them */
+  incomeTeam?: number;
+};
+
+const refMoney = (n: number | undefined): string => {
+  const v = Number(n) || 0;
+  if (v === 0) return '$0';
+  if (v < 0.0001) return '$' + v.toFixed(8);
+  if (v < 0.01) return '$' + v.toFixed(5);
+  if (v < 1) return '$' + v.toFixed(3);
+  if (v < 100) return '$' + v.toFixed(2);
+  return '$' + Math.round(v).toLocaleString();
 };
 
 const since = (ts: number | null | undefined): string => {
@@ -167,6 +182,11 @@ export const ReferralTree: FC<{ onMessageUser?: (id: string) => void }> = ({ onM
           <span className="font-mono text-[10px] text-zinc-400">
             {levels.map(l => `L${l.level} ${l.count}`).join(' · ') || 'no members yet'}
           </span>
+          {Number(summary.income?.total) > 0 && (
+            <span className="shrink-0 rounded-full bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[9px] font-bold text-emerald-300">
+              earned {refMoney(summary.income?.total)}
+            </span>
+          )}
           {summary.boostActive > 0 && (
             <span className="ml-auto shrink-0 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">
               {summary.boostActive} boosting
@@ -192,7 +212,10 @@ export const ReferralTree: FC<{ onMessageUser?: (id: string) => void }> = ({ onM
               <Layers className="h-4 w-4 text-amber-400" />
               <div className="min-w-0">
                 <div className="text-sm font-bold text-white">My Team Tree</div>
-                <div className="font-mono text-[10px] text-zinc-500">{summary.total} members · {summary.depth} levels</div>
+                <div className="font-mono text-[10px] text-zinc-500">
+                  {summary.total} members · {summary.depth} levels
+                  {Number(summary.income?.total) > 0 && <> · earned {refMoney(summary.income?.total)}</>}
+                </div>
               </div>
               <button
                 onClick={() => void loadSummary()}
@@ -319,6 +342,14 @@ const TreeNodeList: FC<{
                 L{m.level ?? '?'}
               </span>
               <span className="ml-auto flex items-center gap-1.5">
+                {Number(m.incomeTeam) > 0 && (
+                  <span
+                    className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[9px] font-bold text-emerald-300"
+                    title={`Income through this member: ${refMoney(m.incomeTeam)} (their own boosting ${refMoney(m.incomeSelf)})`}
+                  >
+                    +{refMoney(m.incomeTeam)}
+                  </span>
+                )}
                 {m.teamSize > 0 && (
                   <span className="rounded-full border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[9px] font-bold text-amber-300" title="people under this member">
                     team {m.teamSize}
@@ -336,6 +367,16 @@ const TreeNodeList: FC<{
                 )}
               </span>
             </div>
+            {isOpen && (Number(m.incomeTeam) > 0 || Number(m.incomeSelf) > 0) && (
+              <div className="mt-1 flex flex-wrap items-center gap-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2 py-1" style={{ marginLeft: indent + 14 }}>
+                <span className="text-[9px] font-semibold uppercase tracking-wider text-emerald-400">Income through #{m.id}</span>
+                <span className="rounded-md bg-zinc-950 px-1.5 py-0.5 font-mono text-[10px] font-bold text-emerald-300">{refMoney(m.incomeTeam)}</span>
+                <span className="font-mono text-[9px] text-zinc-500">
+                  their own boost {refMoney(m.incomeSelf)}
+                  {Number(m.incomeTeam) > Number(m.incomeSelf) ? ` · their team ${refMoney(Number(m.incomeTeam) - Number(m.incomeSelf))}` : ''}
+                </span>
+              </div>
+            )}
             {isOpen && canOpen && (
               <TreeNodeList
                 parentId={m.id}
