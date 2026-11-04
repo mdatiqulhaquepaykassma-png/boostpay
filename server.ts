@@ -2761,46 +2761,91 @@ setInterval(() => {
               balanceAfter: user.balance
             }
           } as any);
-          // ---- Referral commission on compounding (1-10% dynamic) ------------
+          // ---- Referral commission on compounding — MULTI-LEVEL ---------------
+          // OWNER RULE (2026-11-02): the whole downline earns, not just the
+          // direct referrer, and the rate halves at every level:
+          //   L1 = the referrer's normal daily tier (1-10%, unchanged)
+          //   L2 = L1 / 2, L3 = L1 / 4, … unlimited levels
+          // So a 10% tier pays 10 / 5 / 2.5 / 1.25 … The infinite sum is 2×L1
+          // (max 20% of a cycle's yield), which is why the per-cycle ceiling below
+          // is enforced on the TOTAL, not per level.
           try {
-            const refEntry = referralOf(String(user.id));
-            if (refEntry) {
-              const referrerId = String(refEntry.referrerId);
-              const referrer = userById(referrerId);
+            if (finalYield > 0 && rewardTxIdForRef) {
               const rcfg: any = (db.config || INITIAL_DB.config).referral;
-              // Referral commission: only blocked if referrer is frozen. Previously required boost ON, but that caused 12/27 to earn 0 while paused — fixed to solo solved (frozen check only).
-              const referrerCanEarn = referrer && !referrer.isFrozen;
               const commissionEnabled = (rcfg?.commissionOnCompounding !== false) && (rcfg?.commissionOnBoosting !== false);
-              if (referrerCanEarn && rcfg && rcfg.enabled !== false && commissionEnabled && finalYield > 0 && rewardTxIdForRef) {
-                const rate = getReferCommissionRate(db, referrerId, now);
-                if (rate > 0) {
-                  const commission = finalYield * (rate/100);
-                  // security: commission bounds 0 < commission <= finalYield*0.10+epsilon and finite, rate 1-10
-                  const maxComm = finalYield * 0.1001 + 1e-8;
-                  if (commission > 0 && isFinite(commission) && commission <= maxComm && rate>=1 && rate<=10) {
-                    const priorRefBal = Number(referrer.balance)||0;
-                    const expectedRefBal = priorRefBal + commission;
-                    referrer.balance = expectedRefBal;
-                    referrer.lifetimeProfit = (Number(referrer.lifetimeProfit)||0) + commission;
-                    if (Math.abs(Number(referrer.balance) - expectedRefBal) > 1e-6) referrer.balance = expectedRefBal;
-                    // update referrer boost duration based on new balance
-                    if (referrer.boostState) referrer.boostState.targetDurationMs = calculateDynamicDuration(referrer.balance, db.users, db.config);
-                    let commTxId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
-                    let ctries=0; while ((db.transactions||[]).some((t:any)=> t.id===commTxId) && ctries<5) { commTxId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000); ctries++; }
-                    if (!(db.transactions||[]).some((t:any)=> t.id===commTxId)) {
-                      const commTx = { id: commTxId, userId: referrerId, type: 'REFERRAL_COMMISSION', amount: commission, timestamp: now, notes: `Referral commission ${rate}% on User #${user.id} compounding $${formatAmount8(finalYield)}`, metadata: { referredId: user.id, sourceTxId: rewardTxIdForRef, rate }, balanceAfter: referrer.balance } as any;
-                      db.transactions.unshift(commTx);
-                      if (!db.referCommissions) db.referCommissions = [];
-                      let rcId = 'RC-'+Math.floor(10000000+Math.random()*90000000);
-                      let rcTries=0; while ((db.referCommissions||[]).some((c:any)=> c.id===rcId) && rcTries<5) { rcId = 'RC-'+Math.floor(10000000+Math.random()*90000000); rcTries++; }
-                      if (!(db.referCommissions||[]).some((c:any)=> c.id===rcId)) {
-                        db.referCommissions.unshift({ id: rcId, referrerId, referredId: String(user.id), amount: commission, rate, sourceTxId: rewardTxIdForRef, timestamp: now, dayKey: getDayKey(now), balanceAfter: referrer.balance } as any);
-                        if (db.referCommissions.length>5000) db.referCommissions.pop();
+              if (rcfg && rcfg.enabled !== false && commissionEnabled) {
+                // child -> parent index, built once so an unlimited upline walk is cheap
+                const parentOf = new Map<string, string>();
+                for (const r of (db.referrals || [])) {
+                  if (!r || r.referredId == null || r.referrerId == null) continue;
+                  const child = String(r.referredId);
+                  const parent = String(r.referrerId);
+                  if (child === parent || parentOf.has(child)) continue;
+                  parentOf.set(child, parent);
+                }
+                const visited = new Set<string>([String(user.id)]);
+                let uplineId = parentOf.get(String(user.id)) || '';
+                // The first upline sets the tier; every level after it halves.
+                const baseRate = uplineId ? getReferCommissionRate(db, uplineId, now) : 0;
+                let paidTotal = 0;
+                const totalCap = finalYield * 0.2001 + 1e-9;
+                let level = 0;
+                while (uplineId && level < 60 && visited.size <= 64) {
+                  level += 1;
+                  if (visited.has(uplineId)) break;          // corrupt cyclic link — stop
+                  visited.add(uplineId);
+                  const nextUpline = parentOf.get(uplineId) || '';
+                  const rateRaw = baseRate / Math.pow(2, level - 1);
+                  if (!(rateRaw > 0)) break;
+                  const referrer = userById(uplineId);
+                  // A frozen upline misses that level's share; higher levels still earn.
+                  const canEarn = referrer && !referrer.isFrozen && !referrer.isBlocked;
+                  if (canEarn) {
+                    const commission = finalYield * (rateRaw / 100);
+                    // dust guard: below 1e-8 the transfer is meaningless and would
+                    // just bloat the ledger on very deep trees
+                    if (commission >= 1e-8 && isFinite(commission) && paidTotal + commission <= totalCap) {
+                      const priorRefBal = Number(referrer.balance) || 0;
+                      const expectedRefBal = priorRefBal + commission;
+                      referrer.balance = expectedRefBal;
+                      referrer.lifetimeProfit = (Number(referrer.lifetimeProfit) || 0) + commission;
+                      if (Math.abs(Number(referrer.balance) - expectedRefBal) > 1e-6) referrer.balance = expectedRefBal;
+                      if (referrer.boostState) referrer.boostState.targetDurationMs = calculateDynamicDuration(referrer.balance, db.users, db.config);
+                      let commTxId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+                      let ctries = 0; while ((db.transactions || []).some((t: any) => t.id === commTxId) && ctries < 5) { commTxId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000); ctries++; }
+                      if (!(db.transactions || []).some((t: any) => t.id === commTxId)) {
+                        const rateShown = Math.round(rateRaw * 100) / 100;   // 2 decimals for the UI
+                        const commTx = {
+                          id: commTxId, userId: uplineId, type: 'REFERRAL_COMMISSION', amount: commission, timestamp: now,
+                          notes: `L${level} referral commission ${rateShown}% on User #${user.id} compounding $${formatAmount8(finalYield)}`,
+                          metadata: { referredId: user.id, sourceTxId: rewardTxIdForRef, rate: rateShown, level },
+                          balanceAfter: referrer.balance
+                        } as any;
+                        db.transactions.unshift(commTx);
+                        if (!db.referCommissions) db.referCommissions = [];
+                        let rcId = 'RC-' + Math.floor(10000000 + Math.random() * 90000000);
+                        let rcTries = 0; while ((db.referCommissions || []).some((c: any) => c.id === rcId) && rcTries < 5) { rcId = 'RC-' + Math.floor(10000000 + Math.random() * 90000000); rcTries++; }
+                        if (!(db.referCommissions || []).some((c: any) => c.id === rcId)) {
+                          db.referCommissions.unshift({
+                            id: rcId, referrerId: uplineId, referredId: String(user.id), amount: commission,
+                            rate: rateShown, level, sourceTxId: rewardTxIdForRef, timestamp: now,
+                            dayKey: getDayKey(now), balanceAfter: referrer.balance
+                          } as any);
+                          if (db.referCommissions.length > 5000) db.referCommissions.pop();
+                        }
+                        pushNotification(db, {
+                          id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000), userId: uplineId,
+                          type: 'REFERRAL_COMMISSION', title: 'BOOSTPAY-REFERRAL',
+                          message: `REFERRAL EARNED: +$${formatAmount8(commission)} (L${level} · ${rateShown}% of User #${user.id} yield $${formatAmount8(finalYield)}). Balance: $${formatAmount8(referrer.balance)}.`,
+                          amount: commission, referenceId: commTx.id, timestamp: now, isRead: false,
+                          metadata: { referredId: user.id, rate: rateShown, level, sourceYield: finalYield, balanceAfter: referrer.balance }
+                        } as any);
                       }
-                      pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: referrerId, type: 'REFERRAL_COMMISSION', title: 'BOOSTPAY-REFERRAL', message: `REFERRAL EARNED: +$${formatAmount8(commission)} (${rate}% of User #${user.id} yield $${formatAmount8(finalYield)}). Balance: $${formatAmount8(referrer.balance)}.`, amount: commission, referenceId: commTx.id, timestamp: now, isRead: false, metadata: { referredId: user.id, rate, sourceYield: finalYield, balanceAfter: referrer.balance } } as any);
+                      paidTotal += commission;
+                      broadcastUserUpdate(db, uplineId);
                     }
-                    broadcastUserUpdate(db, referrerId);
                   }
+                  uplineId = nextUpline;
                 }
               }
             }

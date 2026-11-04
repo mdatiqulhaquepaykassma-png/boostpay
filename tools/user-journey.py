@@ -455,6 +455,74 @@ ck('an agent token is refused', s in (401, 403), f"{s}", 'CRITICAL', 'An agent t
 s, j = req('/api/admin/money-tree?node=NOPE-999', token=atok, ip_addr=ip())
 ck('an unknown account is reported, not guessed', s == 404, f"{s}", 'MEDIUM', 'Unknown accounts return data.')
 
+# ── 13. multi-level referral commission (halving per level) ─────────────────
+section('13. commission goes down the whole team, halving at every level')
+# chain: U1 <- c1 <- c2 <- c3 ; c3 finishes a cycle and everyone above earns.
+# A fresh small balance gives the SHORTEST cycle (~2.5 min), so this section is
+# the slow one — it waits for a real ticker payout, nothing is faked.
+c1_s, c1, _ = signup_child('ml1@gmail.com', 'U1')
+c2_s, c2, _ = signup_child('ml2@gmail.com', c1 or 'X')
+c3_s, c3, _ = signup_child('ml3@gmail.com', c2 or 'X')
+ck('a 3-deep chain signs up', c1_s == 200 and c2_s == 200 and c3_s == 200 and all([c1, c2, c3]), f"{c1},{c2},{c3}", 'HIGH',
+   'Could not build the commission chain.')
+tu1, _ = login(U1)
+fund = req('/api/transfer', {'senderId': 'U1', 'recipientId': c3, 'amount': 0.1, 'idempotencyKey': 'mlfund' + _RUN_TAG}, tu1, ip_addr=ip())
+ck('the deepest member gets a small balance to boost with', fund[0] == 200, f"{fund[0]}", 'HIGH',
+   'Could not fund the test account, so commission cannot be exercised.')
+s, jl = req('/api/users/login', {'email': f'ml3-{_RUN_TAG}@gmail.com', 'password': 'Staging123!'}, ip_addr=ip())
+t3 = jl.get('token')
+s, j = req('/api/boost/start', {'userId': c3}, t3, ip_addr=ip())
+ck('the deepest member starts a cycle', s == 200, f"{s}", 'HIGH', 'The test cycle never started.')
+if s == 200:
+    closed = False
+    for _ in range(60):          # up to ~4 minutes
+        time.sleep(4)
+        s2, pl = req('/api/user/boost-plan?tz=360', token=t3, ip_addr=ip())
+        if s2 == 200 and (pl.get('cycle') or {}).get('running') is False:
+            closed = True
+            break
+    ck('the cycle finishes and pays a reward', closed, 'cycle closed' if closed else 'still running', 'MEDIUM',
+       'The cycle did not close inside four minutes, so commissions could not be checked.')
+    if closed:
+        rows = {}
+        for tag, email in (('L1', f'ml2-{_RUN_TAG}@gmail.com'), ('L2', f'ml1-{_RUN_TAG}@gmail.com'), ('L3', 'u1@gmail.com')):
+            s3, j3 = req('/api/users/login', {'email': email, 'password': 'Staging123!'}, ip_addr=ip())
+            tk = j3.get('token')
+            s4, d = req('/api/refer/my', token=tk, ip_addr=ip())
+            mine = [c for c in (d.get('recentCommissions') or []) if str(c.get('referredId')) == str(c3)]
+            rows[tag] = {'tier': d.get('rate'), 'rows': mine}
+            ck(f'level {tag} earns a commission from the new cycle',
+               s4 == 200 and len(mine) >= 1, f"{s4} rows={len(mine)}", 'HIGH',
+               f'Level {tag} of the team earned nothing from a level-1 cycle.')
+        l1 = rows['L1']['rows'][0] if rows['L1']['rows'] else None
+        l2 = rows['L2']['rows'][0] if rows['L2']['rows'] else None
+        l3 = rows['L3']['rows'][0] if rows['L3']['rows'] else None
+        if l1 and l2 and l3:
+            ck('level 1 keeps today’s tier rate', abs(num(l1.get('rate')) - num(rows['L1']['tier'])) < 0.011,
+               f"L1 {l1.get('rate')}% vs tier {rows['L1']['tier']}%", 'HIGH',
+               'Level 1 no longer pays the normal daily tier rate.')
+            ck('level 2 pays exactly half of level 1', abs(num(l2.get('rate')) - num(l1.get('rate')) / 2) < 0.011,
+               f"L1 {l1.get('rate')}% -> L2 {l2.get('rate')}%", 'HIGH', 'Level 2 is not half of level 1.')
+            ck('level 3 pays a quarter of level 1', abs(num(l3.get('rate')) - num(l1.get('rate')) / 4) < 0.011,
+               f"L1 {l1.get('rate')}% -> L3 {l3.get('rate')}%", 'HIGH', 'Level 3 is not a quarter of level 1.')
+            ck('the money halves with the rate',
+               abs(num(l2.get('amount')) - num(l1.get('amount')) / 2) <= max(1e-10, num(l1.get('amount')) * 0.01)
+               and abs(num(l3.get('amount')) - num(l1.get('amount')) / 4) <= max(1e-10, num(l1.get('amount')) * 0.02),
+               f"L1 {l1.get('amount'):.10f} L2 {l2.get('amount'):.10f} L3 {l3.get('amount'):.10f}", 'HIGH',
+               'The commission AMOUNT does not halve per level, only the label.')
+            ck('each row is stamped with its level',
+               int(l1.get('level') or 0) == 1 and int(l2.get('level') or 0) == 2 and int(l3.get('level') or 0) == 3,
+               f"{l1.get('level')}/{l2.get('level')}/{l3.get('level')}", 'MEDIUM',
+               'Commission rows do not say which level they belong to.')
+            ck('no level pays more than level 1',
+               num(l1.get('amount')) >= num(l2.get('amount')) >= num(l3.get('amount')), 'descending', 'HIGH',
+               'A deeper level earned more than a shallower one.')
+        s5, d5 = req('/api/users/login', {'email': f'ml3-{_RUN_TAG}@gmail.com', 'password': 'Staging123!'}, ip_addr=ip())
+        s6, outsider = req('/api/refer/my', token=d5.get('token'), ip_addr=ip())
+        weird = [c for c in (outsider.get('recentCommissions') or []) if str(c.get('referredId')) == str(c3)]
+        ck('the earner never pays commission to themselves', not weird, f"rows={len(weird)}", 'CRITICAL',
+           'A user earned commission from their own cycle.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

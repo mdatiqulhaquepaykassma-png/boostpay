@@ -97,7 +97,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
       <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
         <div>
           <h1 className="text-lg font-bold text-white flex items-center gap-2"><Gift className="w-5 h-5 text-amber-400"/> Refer & Earn</h1>
-          <p className="text-xs text-zinc-400 mt-0.5">Earn 1-10% on your referrals boosting — auto tier by daily joins</p>
+          <p className="text-xs text-zinc-400 mt-0.5">Earn 1-10% on level 1, then half at every level (L2 5%, L3 2.5% …, unlimited)</p>
         </div>
         <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-[11px] font-mono font-bold text-amber-300">{data.rate}% RATE</span>
       </div>
@@ -282,9 +282,13 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
               <button key={c.id} onClick={()=> setSelectedCommission(c)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 hover:border-amber-500/30 hover:bg-zinc-900 transition text-left cursor-pointer">
                 <div>
                   <div className="text-xs font-mono font-bold text-emerald-400">+${formatPrecisionAmount(c.amount,8)}</div>
-                  <div className="text-[10px] text-zinc-500">From #{c.referredId} @ {c.rate}% • {new Date(c.timestamp).toLocaleString()}</div>
+                  <div className="text-[10px] text-zinc-500">
+                    From #{c.referredId} @ {c.rate}%{Number(c.level) > 1 ? ` · L${c.level}` : ' · L1'} • {new Date(c.timestamp).toLocaleString()}
+                  </div>
                 </div>
-                <span className="rounded-full bg-amber-500/15 text-amber-400 px-2 py-1 text-[10px] font-mono font-bold">{c.rate}%</span>
+                <span className="rounded-full bg-amber-500/15 text-amber-400 px-2 py-1 text-[10px] font-mono font-bold">
+                  {Number(c.level) > 1 ? `L${c.level} ` : ''}{c.rate}%
+                </span>
               </button>
             ))}
           </div>
@@ -309,6 +313,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
             <div className="space-y-2 text-xs">
               <div className="flex justify-between gap-2"><span className="text-zinc-500 shrink-0">Commission ID</span><span className="font-mono text-[10px] text-zinc-400 break-all text-right">{selectedCommission.id}</span></div>
               <div className="flex justify-between"><span className="text-zinc-500">Amount</span><span className="font-mono font-bold text-emerald-400">+${formatPrecisionAmount(selectedCommission.amount,8)}</span></div>
+              <div className="flex justify-between"><span className="text-zinc-500">Level</span><span className="font-mono text-white">L{Number(selectedCommission.level) || 1}</span></div>
               <div className="flex justify-between"><span className="text-zinc-500">Rate</span><span className="font-mono text-amber-400">{selectedCommission.rate}%</span></div>
               <div className="flex justify-between"><span className="text-zinc-500">From User</span><span className="font-mono text-white">#{selectedCommission.referredId}</span></div>
               <div className="flex justify-between gap-2"><span className="text-zinc-500 shrink-0">Date &amp; Time</span><span className="text-zinc-300 text-right">{new Date(selectedCommission.timestamp).toLocaleString()}</span></div>
@@ -324,7 +329,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
 
       {/* Tier explainer */}
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3 text-[11px] leading-relaxed text-zinc-400">
-        <span className="font-bold text-zinc-200">How rate works — Global Ranking (24h UTC):</span> Each day your referral count is ranked vs everyone. Highest referrals get 10%, lowest 1% (linear). Single user = 10%. You earn that % of each referred user’s boosting reward. Resets at UTC midnight.
+        <span className="font-bold text-zinc-200">How rate works — Global Ranking (24h UTC) + multi-level:</span> Each day your referral count is ranked vs everyone. Highest referrals get 10%, lowest 1% (linear, single user = 10%). You earn that % of your <b>level 1</b> user’s boosting reward. <b>Every level deeper pays half:</b> L1 10% → L2 5% → L3 2.5% → L4 1.25% …, unlimited levels. Resets at UTC midnight.
       </div>
     </div>
   );
