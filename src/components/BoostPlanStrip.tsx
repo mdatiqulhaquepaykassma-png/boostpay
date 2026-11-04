@@ -28,7 +28,14 @@ type Plan = {
   nextCycle: { durationMs: number; estimatedIncome: number };
   today: {
     cyclesDone: number; cyclesRemaining: number; cyclesPossible: number;
+    cyclesPerDay?: number; missed?: number; missedIncome?: number; slotsSoFar?: number;
     earned: number; remainingIncome: number; projectedTotal: number;
+  };
+  lifetime?: {
+    estimated: boolean; cycles: number;
+    income: number; referralIncome: number; totalIncome: number;
+    avgCycleMs: number; avgIncomePerCycle: number;
+    slots: number; missed: number; missedIncome: number; sinceMs: number;
   };
 };
 
@@ -100,6 +107,8 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
+
+  const life = plan?.lifetime;
 
   const view = useMemo(() => {
     if (!plan) return null;
@@ -175,6 +184,25 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
           <ChevronDown className={`w-3.5 h-3.5 shrink-0 text-zinc-600 transition-transform ${open ? 'rotate-180' : ''}`} />
         </div>
 
+        {/* second thin line: missed cycles + what it cost — today and lifetime */}
+        <div className="mt-1.5 flex flex-wrap items-center gap-1 font-mono text-[9px] leading-none">
+          <span className="whitespace-nowrap rounded-full bg-zinc-800/70 px-1.5 py-[3px] text-zinc-400">
+            today <span className="font-bold text-zinc-200">{t.cyclesDone}/{t.cyclesPerDay ?? t.cyclesPossible}</span>
+            {Number(t.missed) > 0 && <span className="font-bold text-rose-400"> · {t.missed} missed</span>}
+          </span>
+          {Number(t.missedIncome) > 0 && (
+            <span className="whitespace-nowrap rounded-full bg-rose-500/10 px-1.5 py-[3px] font-bold text-rose-300">
+              ≈{money(t.missedIncome)} lost
+            </span>
+          )}
+          {life && (
+            <span className="whitespace-nowrap rounded-full bg-zinc-800/70 px-1.5 py-[3px] text-zinc-400">
+              life <span className="font-bold text-emerald-300">{money(life.income)}</span> in
+              {Number(life.missedIncome) > 0 && <span className="font-bold text-rose-400"> · ≈{money(life.missedIncome)} lost</span>}
+            </span>
+          )}
+        </div>
+
         {/* thin progress line — only while something is running */}
         {(running || paused) && (
           <div className="mt-2 h-[3px] w-full rounded-full bg-zinc-800 overflow-hidden">
@@ -211,6 +239,23 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
             value={`${money(t.earned)} earned · ${money(t.remainingIncome)} left · ${money(t.projectedTotal)} total`}
             strong
           />
+          <Row
+            label="Missed today"
+            value={`${t.missed ?? 0} ${(t.missed ?? 0) === 1 ? 'cycle' : 'cycles'} → ≈${money(t.missedIncome ?? 0)}`}
+          />
+          {life && (
+            <>
+              <Row
+                label="Lifetime income"
+                value={`${money(life.income)} boost${Number(life.referralIncome) > 0 ? ` + ${money(life.referralIncome)} referral` : ''} · ${life.cycles} cycles`}
+                strong
+              />
+              <Row
+                label="Missed lifetime"
+                value={`${life.missed} ${life.missed === 1 ? 'cycle' : 'cycles'} → ≈${money(life.missedIncome)}`}
+              />
+            </>
+          )}
           {onOpenBoosting && (
             <button
               type="button"

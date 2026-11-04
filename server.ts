@@ -3923,6 +3923,41 @@ async function startServer() {
       }
       const freshNextMs = freshCycleMs;
 
+      // ── Missed cycles (what the user DIDN'T collect) ──────────────────────
+      // A "slot" is one cycle-length of time. Today's slots so far = how many
+      // cycles could have finished since the phone's midnight at the CURRENT
+      // cycle length; whatever was not actually paid out is therefore missed.
+      // It is a projection, not a debt: one cycle per tap means the user has to
+      // press Boost for every single slot.
+      const cycleMsSafe = Math.max(60000, cycleMs);
+      const slotsSoFarToday = Math.floor((now - dayStart) / cycleMsSafe);
+      const cyclesPerDay = Math.max(0, Math.floor(86400000 / cycleMsSafe));
+      const doneToday = rewardsToday.length;
+      const missedToday = Math.max(0, slotsSoFarToday - doneToday);
+      const missedIncomeToday = missedToday * cycleProjected;
+
+      // ── Lifetime income and lifetime missed income ────────────────────────
+      // Boosting income = every REWARD this user has been paid. The missed side
+      // uses the AVERAGE length of the cycles they actually ran (falling back to
+      // today's length when there is no history yet), so a user whose cycle
+      // length changes over time is not judged by today's number alone.
+      const rewardsAll = (db.transactions || []).filter((t: any) =>
+        String(t.userId) === uid && t.type === 'REWARD');
+      const boostIncomeLifetime = rewardsAll.reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
+      const referralIncomeLifetime = (db.referCommissions || [])
+        .filter((c: any) => String(c.referrerId) === uid)
+        .reduce((sum: number, c: any) => sum + (Number(c.amount) || 0), 0);
+      const accountAgeMs = Math.max(0, now - (Number(user.createdAt) || now));
+      const pastDurations = rewardsAll.map((t: any) => Number(t.boostDurationMs) || 0).filter((d: number) => d > 0);
+      const avgCycleMs = pastDurations.length
+        ? pastDurations.reduce((a: number, b: number) => a + b, 0) / pastDurations.length
+        : cycleMsSafe;
+      const lifetimeSlots = Math.floor(accountAgeMs / Math.max(60000, avgCycleMs));
+      const missedLifetime = Math.max(0, lifetimeSlots - rewardsAll.length);
+      const avgIncomePerCycle = rewardsAll.length ? boostIncomeLifetime / rewardsAll.length : cycleProjected;
+      const missedIncomeLifetime = missedLifetime * avgIncomePerCycle;
+      const r8 = (n: number) => Math.round((Number(n) || 0) * 1e8) / 1e8;
+
       res.setHeader('Cache-Control', 'no-store');
       return res.json({
         serverTime: now,
@@ -3938,12 +3973,31 @@ async function startServer() {
         },
         nextCycle: { durationMs: freshNextMs, estimatedIncome: yieldFor(Number(user.balance) || 0, freshNextMs) },
         today: {
-          cyclesDone: rewardsToday.length,
+          cyclesDone: doneToday,
           cyclesRemaining: futureCycles,
-          cyclesPossible: rewardsToday.length + futureCycles,
+          cyclesPossible: doneToday + futureCycles,
+          cyclesPerDay,
+          missed: missedToday,
+          missedIncome: r8(missedIncomeToday),
+          slotsSoFar: Math.max(0, slotsSoFarToday),
           earned: earnedToday,
           remainingIncome: futureIncome,
           projectedTotal: earnedToday + futureIncome
+        },
+        lifetime: {
+          // NOTE: an estimate. The wallet is a single number, so "what you would
+          // have earned" is modelled from the cycles you actually ran.
+          estimated: true,
+          cycles: rewardsAll.length,
+          income: r8(boostIncomeLifetime),
+          referralIncome: r8(referralIncomeLifetime),
+          totalIncome: r8(boostIncomeLifetime + referralIncomeLifetime),
+          avgCycleMs: Math.round(avgCycleMs),
+          avgIncomePerCycle: r8(avgIncomePerCycle),
+          slots: Math.max(0, lifetimeSlots),
+          missed: missedLifetime,
+          missedIncome: r8(missedIncomeLifetime),
+          sinceMs: accountAgeMs
         }
       });
     } catch (err: any) {

@@ -210,6 +210,32 @@ agent_tok, _ = login(AGENT, ip_addr=ip())
 s5, j5 = req('/api/user/boost-plan?tz=360', token=agent_tok, ip_addr=ip())
 ck('an agent cannot read a user plan with their own token', s5 == 401, f"{s5}", 'HIGH',
    'Agent tokens are accepted by the user-only strip endpoint.')
+# missed cycles + lifetime income (the second strip line)
+t1, _ = login(U1)   # fresh session: the agent login above must not leak into this
+s, pl = req('/api/user/boost-plan?tz=360', token=t1, ip_addr=ip())
+td = pl.get('today') or {}
+lt = pl.get('lifetime') or {}
+ck('the strip reports how many cycles a day allows', isinstance(td.get('cyclesPerDay'), int) and td.get('cyclesPerDay') >= 0,
+   f"cyclesPerDay={td.get('cyclesPerDay')}", 'HIGH', 'The strip cannot say how many cycles fit in a day.')
+ck('done + missed equals the slots that have passed today',
+   int(td.get('cyclesDone') or 0) + int(td.get('missed') or 0) == int(td.get('slotsSoFar') or 0),
+   f"done={td.get('cyclesDone')} missed={td.get('missed')} slots={td.get('slotsSoFar')}", 'HIGH',
+   'Missed-cycle maths does not add up, so the strip would show a wrong number of missed boosts.')
+ck('missed income is never negative and never NaN', num(td.get('missedIncome')) >= 0,
+   f"missedIncome={td.get('missedIncome')}", 'HIGH', 'Missed income shows a broken value.')
+ck('lifetime income is reported and marked as an estimate',
+   isinstance(lt.get('income'), (int, float)) and lt.get('estimated') is True,
+   f"income={lt.get('income')} missedIncome={lt.get('missedIncome')} cycles={lt.get('cycles')}", 'HIGH',
+   'The strip has no lifetime income figure.')
+ck('lifetime missed never goes negative', num(lt.get('missed')) >= 0 and num(lt.get('missedIncome')) >= 0,
+   f"missed={lt.get('missed')}", 'HIGH', 'Lifetime missed is negative.')
+ck('lifetime counters are consistent with today',
+   num(lt.get('cycles')) >= num(td.get('cyclesDone')) and num(lt.get('slots')) >= num(td.get('slotsSoFar')),
+   f"cycles={lt.get('cycles')} today={td.get('cyclesDone')}", 'MEDIUM',
+   'Lifetime totals are smaller than today, which cannot happen.')
+ck('the strip never leaks the compounding rate',
+   not re.search(r'rate|ratePerMs|minuteRate', json.dumps(pl), re.I), 'no rate field', 'CRITICAL',
+   'The boost plan leaks the secret rate through the new fields.')
 
 # ── 5. chat ──────────────────────────────────────────────────────────────────
 section('5. chat')
