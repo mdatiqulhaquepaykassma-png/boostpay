@@ -4010,7 +4010,7 @@ async function startServer() {
           missedIncome: r8(missed * yieldFor(startBal, dayCycleMs)),
         });
       }
-      rows.reverse(); // oldest → newest, the way a statement reads
+      // Newest first — today on top, older days below (what the user asked for).
       const lifetimeMissed = rows.reduce((sum: number, r: any) => sum + r.missed, 0);
       const missedIncomeLifetime = rows.reduce((sum: number, r: any) => sum + r.missedIncome, 0);
       const lifetimeSlots = rows.reduce((sum: number, r: any) => sum + r.slots, 0);
@@ -4019,7 +4019,7 @@ async function startServer() {
         ? pastDurations.reduce((a: number, b: number) => a + b, 0) / pastDurations.length
         : cycleMsSafe;
       const avgIncomePerCycle = rewardsAll.length ? boostIncomeLifetime / rewardsAll.length : cycleProjected;
-      const todayRow = rows[rows.length - 1];
+      const todayRow = rows[0];
 
       res.setHeader('Cache-Control', 'no-store');
       return res.json({

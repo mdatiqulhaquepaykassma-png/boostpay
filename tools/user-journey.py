@@ -200,9 +200,18 @@ ck('an idle user sees the duration the next tap would really get',
    f"cycle {(idle.get('cycle') or {}).get('durationMs')}ms vs next {(idle.get('nextCycle') or {}).get('durationMs')}ms",
    'MEDIUM', 'A finished cycle leaves a stale duration behind, so an idle user is shown a false cycle length.')
 s3, plan2 = req('/api/user/boost-plan?tz=0', token=login(U1)[0], ip_addr=ip())
+# A local midnight must (a) be a whole local day, (b) contain "now", and (c) differ
+# from the UTC midnight. Comparing the two day-starts by a fixed +6h offset is wrong
+# once the UTC clock passes 18:00 (the offset legitimately becomes -18h).
+_ds_dhaka = num(plan.get('dayStart'))
+_ds_utc = num(plan2.get('dayStart'))
 ck('the day follows the phone, not the server clock',
-   s3 == 200 and num(plan2.get('dayStart')) == num(plan.get('dayStart')) + 360 * 60000,
-   f"dayStart {plan.get('dayStart')} (tz=+360) vs {plan2.get('dayStart')} (UTC)", 'MEDIUM',
+   s3 == 200
+   and (_ds_dhaka + 360 * 60000) % 86400000 == 0            # Dhaka local midnight
+   and _ds_utc % 86400000 == 0                              # UTC midnight
+   and _ds_dhaka <= num(plan.get('serverTime')) < _ds_dhaka + 86400000
+   and _ds_dhaka != _ds_utc,
+   f"dayStart {_ds_dhaka} (tz=+360) vs {_ds_utc} (UTC), now {plan.get('serverTime')}", 'MEDIUM',
    "'Today' is anchored to UTC, so a Dhaka user's day flips at 6 am.")
 s4, j4 = req('/api/user/boost-plan?tz=360', ip_addr=ip())
 ck('the strip needs a signed-in user', s4 == 401, f"{s4}", 'HIGH', 'Anonymous callers can read a user boost plan.')
@@ -242,11 +251,11 @@ ck('every day row has a starting balance and a cycle length',
    all(num(d.get('balance')) >= 0 and 60000 <= num(d.get('cycleMs')) <= 86400000 for d in series),
    f"balances={[d.get('balance') for d in series][:3]}", 'HIGH',
    'A day row has no balance or an impossible cycle length.')
-ck('day rows are in date order and the last one is today',
-   series == sorted(series, key=lambda d: d.get('ts')) and (not series or series[-1].get('day') ==
+ck('day rows are newest-first and the first row is today',
+   series == sorted(series, key=lambda d: d.get('ts'), reverse=True) and (not series or series[0].get('day') ==
    __import__('datetime').datetime.fromtimestamp((pl['serverTime'] + 360*60000)/1000, __import__('datetime').timezone.utc).strftime('%Y-%m-%d')),
-   f"first={series[0].get('day')} last={series[-1].get('day')}", 'MEDIUM',
-   'The day-by-day list is out of order or does not end today.')
+   f"top={series[0].get('day')} bottom={series[-1].get('day')}", 'MEDIUM',
+   'The day-by-day list is out of order: today must be the top row and older days below it.')
 ck('day rows sum to the lifetime totals',
    abs(sum(num(d.get('missed')) for d in series) - num(lt.get('missed'))) < 1e-9 and
    abs(sum(num(d.get('missedIncome')) for d in series) - num(lt.get('missedIncome'))) < max(1e-9, num(lt.get('missedIncome')) * 1e-6) and

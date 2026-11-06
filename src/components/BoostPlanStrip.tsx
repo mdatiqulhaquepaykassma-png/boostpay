@@ -263,7 +263,7 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
               {Array.isArray(life.series) && life.series.length > 0 && (
                 <div className="mt-1.5 rounded-lg border border-zinc-800/80 bg-zinc-950/60">
                   <div className="flex items-center justify-between px-2 py-1.5 font-mono text-[8px] uppercase tracking-wider text-zinc-500">
-                    <span>day by day · since {life.series[0]?.day}{life.truncated ? ' (last 1y)' : ''}</span>
+                    <span>day by day · since {life.series[life.series.length - 1]?.day}{life.truncated ? ' (last 1y)' : ''}</span>
                     <span className="text-zinc-600">sum = lifetime</span>
                   </div>
                   <div className="flex items-center gap-1.5 px-2 pb-1 font-mono text-[8px] uppercase tracking-wider text-zinc-600">
