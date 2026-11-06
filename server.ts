@@ -3936,27 +3936,90 @@ async function startServer() {
       const missedToday = Math.max(0, slotsSoFarToday - doneToday);
       const missedIncomeToday = missedToday * cycleProjected;
 
-      // ── Lifetime income and lifetime missed income ────────────────────────
-      // Boosting income = every REWARD this user has been paid. The missed side
-      // uses the AVERAGE length of the cycles they actually ran (falling back to
-      // today's length when there is no history yet), so a user whose cycle
-      // length changes over time is not judged by today's number alone.
-      const rewardsAll = (db.transactions || []).filter((t: any) =>
-        String(t.userId) === uid && t.type === 'REWARD');
+      // ── Lifetime = a real DAY-BY-DAY ledger, not an average ────────────────
+      // For every calendar day since the account was opened we show the balance
+      // that day started with, the profit it actually paid, and the profit it
+      // could no longer pay because no cycle was running. The "lifetime" figures
+      // are literally the sum of those rows, so tapping the strip explains where
+      // every cent of the lifetime number came from.
+      const r8 = (n: number) => Math.round((Number(n) || 0) * 1e8) / 1e8;
+      const DAY_MS = 86400000;
+      // Which transaction types move a wallet balance — needed to rebuild the
+      // balance each day started with (the ledger records amounts, not deltas).
+      const CREDIT_TYPES = new Set(['REWARD', 'YIELD_REWARD', 'TRANSFER_RECEIVED', 'REFERRAL_COMMISSION',
+        'ADMIN_CREDIT', 'AGENT_TRANSFER_RECEIVED', 'AGENT_PAYOUT_REFUND', 'OPENING_BALANCE',
+        'DEPOSIT', 'AGENT_TO_USER', 'AGENT_FUND', 'WITHDRAWAL_REFUND']);
+      const DEBIT_TYPES = new Set(['TRANSFER_SENT', 'AGENT_TRANSFER_SENT', 'USER_TO_AGENT',
+        'ADMIN_DEBIT', 'WITHDRAWAL', 'WITHDRAWAL_FEE', 'FEE']);
+      const signedDelta = (t: any) => {
+        const amt = Number(t.amount) || 0;
+        if (DEBIT_TYPES.has(t.type)) return -amt;
+        if (CREDIT_TYPES.has(t.type)) return amt;
+        return 0; // informational rows (alerts, joins, …) never moved money
+      };
+      const myTxs = (db.transactions || [])
+        .filter((t: any) => String(t.userId) === uid)
+        .sort((a: any, b: any) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0));
+      const rewardsAll = myTxs.filter((t: any) => t.type === 'REWARD');
       const boostIncomeLifetime = rewardsAll.reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
       const referralIncomeLifetime = (db.referCommissions || [])
         .filter((c: any) => String(c.referrerId) === uid)
         .reduce((sum: number, c: any) => sum + (Number(c.amount) || 0), 0);
       const accountAgeMs = Math.max(0, now - (Number(user.createdAt) || now));
-      const pastDurations = rewardsAll.map((t: any) => Number(t.boostDurationMs) || 0).filter((d: number) => d > 0);
+      const createdDayStart = Math.floor(((Number(user.createdAt) || now) + tzMin * 60000) / DAY_MS) * DAY_MS - tzMin * 60000;
+      const firstDay = Math.max(createdDayStart, dayStart - 366 * DAY_MS); // hard cap: one year of rows
+      const balanceNow = Number(user.balance) || 0;
+      const rows: any[] = [];
+      let netAfter = 0;      // Σ signedDelta of every tx at/after the day being read
+      let txIdx = myTxs.length - 1;
+      for (let d = dayStart; d >= firstDay; d -= DAY_MS) {
+        while (txIdx >= 0 && (Number(myTxs[txIdx].timestamp) || 0) >= d) {
+          netAfter += signedDelta(myTxs[txIdx]);
+          txIdx -= 1;
+        }
+        const dayEndTs = d + DAY_MS;
+        const startBal = Math.max(0, balanceNow - netAfter);
+        const dayCycleMs = Math.max(60000, calculateDynamicDuration(startBal, db.users, config));
+        // A day only counts from the moment the account existed up to "now", so
+        // the signup day is pro-rated and today stops at the current minute.
+        const dayRewards = myTxs.filter((t: any) => t.type === 'REWARD' &&
+          (Number(t.timestamp) || 0) >= d && (Number(t.timestamp) || 0) < dayEndTs);
+        const dayRef = myTxs.filter((t: any) => t.type === 'REFERRAL_COMMISSION' &&
+          (Number(t.timestamp) || 0) >= d && (Number(t.timestamp) || 0) < dayEndTs);
+        const windowStart = Math.max(d, Number(user.createdAt) || d);
+        const windowEnd = Math.min(dayEndTs, now);
+        // Slots = how many cycles fitted in the window. A cycle that really paid
+        // out always occupied a slot, so the count can never be below the paid
+        // cycles (the slot model uses the day-start balance, the ledger is truth).
+        const slots = Math.max(dayRewards.length,
+          Math.max(0, Math.floor(Math.max(0, windowEnd - windowStart) / dayCycleMs)));
+        const earned = dayRewards.reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
+        const referred = dayRef.reduce((sum: number, t: any) => sum + (Number(t.amount) || 0), 0);
+        const missed = Math.max(0, slots - dayRewards.length);
+        rows.push({
+          // label in the PHONE's calendar, not UTC (Dhaka midnight ≠ UTC midnight)
+          day: new Date(d + tzMin * 60000).toISOString().slice(0, 10),
+          ts: d,
+          balance: r8(startBal),
+          cycleMs: Math.round(dayCycleMs),
+          slots,
+          cycles: dayRewards.length,
+          earned: r8(earned),
+          referral: r8(referred),
+          missed,
+          missedIncome: r8(missed * yieldFor(startBal, dayCycleMs)),
+        });
+      }
+      rows.reverse(); // oldest → newest, the way a statement reads
+      const lifetimeMissed = rows.reduce((sum: number, r: any) => sum + r.missed, 0);
+      const missedIncomeLifetime = rows.reduce((sum: number, r: any) => sum + r.missedIncome, 0);
+      const lifetimeSlots = rows.reduce((sum: number, r: any) => sum + r.slots, 0);
+      const pastDurations = rewardsAll.map((t: any) => Number(t.boostDurationMs) || 0).filter((v: number) => v > 0);
       const avgCycleMs = pastDurations.length
         ? pastDurations.reduce((a: number, b: number) => a + b, 0) / pastDurations.length
         : cycleMsSafe;
-      const lifetimeSlots = Math.floor(accountAgeMs / Math.max(60000, avgCycleMs));
-      const missedLifetime = Math.max(0, lifetimeSlots - rewardsAll.length);
       const avgIncomePerCycle = rewardsAll.length ? boostIncomeLifetime / rewardsAll.length : cycleProjected;
-      const missedIncomeLifetime = missedLifetime * avgIncomePerCycle;
-      const r8 = (n: number) => Math.round((Number(n) || 0) * 1e8) / 1e8;
+      const todayRow = rows[rows.length - 1];
 
       res.setHeader('Cache-Control', 'no-store');
       return res.json({
@@ -3973,21 +4036,25 @@ async function startServer() {
         },
         nextCycle: { durationMs: freshNextMs, estimatedIncome: yieldFor(Number(user.balance) || 0, freshNextMs) },
         today: {
-          cyclesDone: doneToday,
+          cyclesDone: todayRow ? todayRow.cycles : doneToday,
           cyclesRemaining: futureCycles,
-          cyclesPossible: doneToday + futureCycles,
-          cyclesPerDay,
-          missed: missedToday,
-          missedIncome: r8(missedIncomeToday),
-          slotsSoFar: Math.max(0, slotsSoFarToday),
+          cyclesPossible: (todayRow ? todayRow.cycles : doneToday) + futureCycles,
+          cyclesPerDay: todayRow ? Math.max(0, Math.floor(DAY_MS / Math.max(60000, todayRow.cycleMs))) : cyclesPerDay,
+          missed: todayRow ? todayRow.missed : missedToday,
+          missedIncome: todayRow ? todayRow.missedIncome : r8(missedIncomeToday),
+          slotsSoFar: todayRow ? todayRow.slots : Math.max(0, slotsSoFarToday),
           earned: earnedToday,
           remainingIncome: futureIncome,
           projectedTotal: earnedToday + futureIncome
         },
         lifetime: {
-          // NOTE: an estimate. The wallet is a single number, so "what you would
-          // have earned" is modelled from the cycles you actually ran.
+          // Day-by-day: `days` rows, and every total below is the sum of them.
           estimated: true,
+          days: rows.length,
+          truncated: createdDayStart < firstDay, // very old account: only the last year is listed
+
+          since: (Number(user.createdAt) || now),
+          sinceMs: accountAgeMs,
           cycles: rewardsAll.length,
           income: r8(boostIncomeLifetime),
           referralIncome: r8(referralIncomeLifetime),
@@ -3995,9 +4062,9 @@ async function startServer() {
           avgCycleMs: Math.round(avgCycleMs),
           avgIncomePerCycle: r8(avgIncomePerCycle),
           slots: Math.max(0, lifetimeSlots),
-          missed: missedLifetime,
+          missed: lifetimeMissed,
           missedIncome: r8(missedIncomeLifetime),
-          sinceMs: accountAgeMs
+          series: rows
         }
       });
     } catch (err: any) {

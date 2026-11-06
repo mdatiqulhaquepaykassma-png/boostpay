@@ -36,6 +36,12 @@ type Plan = {
     income: number; referralIncome: number; totalIncome: number;
     avgCycleMs: number; avgIncomePerCycle: number;
     slots: number; missed: number; missedIncome: number; sinceMs: number;
+    days?: number; since?: number; truncated?: boolean;
+    series?: Array<{
+      day: string; ts: number; balance: number; cycleMs: number;
+      slots: number; cycles: number; earned: number; referral: number;
+      missed: number; missedIncome: number;
+    }>;
   };
 };
 
@@ -246,7 +252,7 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
           {life && (
             <>
               <Row
-                label="Lifetime income"
+                label={`Lifetime income · ${life.days ?? 0}d`}
                 value={`${money(life.income)} boost${Number(life.referralIncome) > 0 ? ` + ${money(life.referralIncome)} referral` : ''} · ${life.cycles} cycles`}
                 strong
               />
@@ -254,6 +260,36 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
                 label="Profit missed lifetime"
                 value={`${life.missed} ${life.missed === 1 ? 'cycle' : 'cycles'} → ≈${money(life.missedIncome)}`}
               />
+              {Array.isArray(life.series) && life.series.length > 0 && (
+                <div className="mt-1.5 rounded-lg border border-zinc-800/80 bg-zinc-950/60">
+                  <div className="flex items-center justify-between px-2 py-1.5 font-mono text-[8px] uppercase tracking-wider text-zinc-500">
+                    <span>day by day · since {life.series[0]?.day}{life.truncated ? ' (last 1y)' : ''}</span>
+                    <span className="text-zinc-600">sum = lifetime</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 px-2 pb-1 font-mono text-[8px] uppercase tracking-wider text-zinc-600">
+                    <span className="w-[46px] shrink-0">day</span>
+                    <span className="w-[52px] shrink-0">bal</span>
+                    <span className="w-[54px] shrink-0">profit</span>
+                    <span className="ml-auto shrink-0">missed</span>
+                    <span className="w-[26px] shrink-0 text-right">c/s</span>
+                  </div>
+                  <div className="max-h-[150px] overflow-y-auto overscroll-contain px-2 pb-1.5">
+                    {life.series.map((d) => (
+                      <div key={d.ts} className="flex items-center gap-1.5 border-t border-zinc-900/80 py-[5px] font-mono text-[9px] leading-none first:border-0">
+                        <span className="w-[46px] shrink-0 text-zinc-400">{d.day.slice(5)}</span>
+                        <span className="w-[52px] shrink-0 text-zinc-500">${d.balance.toFixed(2)}</span>
+                        <span className={`w-[54px] shrink-0 font-bold ${d.earned > 0 ? 'text-emerald-400' : 'text-zinc-600'}`}>
+                          +{money(d.earned)}
+                        </span>
+                        <span className={`ml-auto shrink-0 font-bold ${d.missedIncome > 0 ? 'text-rose-300' : 'text-zinc-600'}`}>
+                          {d.missed > 0 ? `≈${money(d.missedIncome)} miss` : 'no miss'}
+                        </span>
+                        <span className="w-[26px] shrink-0 text-right text-zinc-500">{d.cycles}/{d.slots}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </>
           )}
           {onOpenBoosting && (

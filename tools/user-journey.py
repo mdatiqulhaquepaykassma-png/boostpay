@@ -233,6 +233,29 @@ ck('lifetime counters are consistent with today',
    num(lt.get('cycles')) >= num(td.get('cyclesDone')) and num(lt.get('slots')) >= num(td.get('slotsSoFar')),
    f"cycles={lt.get('cycles')} today={td.get('cyclesDone')}", 'MEDIUM',
    'Lifetime totals are smaller than today, which cannot happen.')
+# day-by-day lifetime ledger
+series = lt.get('series') or []
+ck('lifetime comes with one row per day since signup', isinstance(series, list) and len(series) == int(lt.get('days') or -1) and len(series) >= 1,
+   f"rows={len(series)} days={lt.get('days')}", 'HIGH',
+   'The lifetime block cannot explain itself: no day-by-day rows.')
+ck('every day row has a starting balance and a cycle length',
+   all(num(d.get('balance')) >= 0 and 60000 <= num(d.get('cycleMs')) <= 86400000 for d in series),
+   f"balances={[d.get('balance') for d in series][:3]}", 'HIGH',
+   'A day row has no balance or an impossible cycle length.')
+ck('day rows are in date order and the last one is today',
+   series == sorted(series, key=lambda d: d.get('ts')) and (not series or series[-1].get('day') ==
+   __import__('datetime').datetime.fromtimestamp((pl['serverTime'] + 360*60000)/1000, __import__('datetime').timezone.utc).strftime('%Y-%m-%d')),
+   f"first={series[0].get('day')} last={series[-1].get('day')}", 'MEDIUM',
+   'The day-by-day list is out of order or does not end today.')
+ck('day rows sum to the lifetime totals',
+   abs(sum(num(d.get('missed')) for d in series) - num(lt.get('missed'))) < 1e-9 and
+   abs(sum(num(d.get('missedIncome')) for d in series) - num(lt.get('missedIncome'))) < max(1e-9, num(lt.get('missedIncome')) * 1e-6) and
+   abs(sum(num(d.get('earned')) for d in series) - num(lt.get('income'))) < max(1e-9, num(lt.get('income')) * 1e-6),
+   f"sumMissed={sum(num(d.get('missed')) for d in series)} lifetime={lt.get('missed')}", 'HIGH',
+   'The per-day rows do not add up to the lifetime figure shown above them.')
+ck('a day never reports more cycles than it had slots',
+   all(num(d.get('cycles')) <= num(d.get('slots')) for d in series), 'per-row ok', 'HIGH',
+   'A day claims more completed cycles than the day could hold.')
 ck('the strip never leaks the compounding rate',
    not re.search(r'rate|ratePerMs|minuteRate', json.dumps(pl), re.I), 'no rate field', 'CRITICAL',
    'The boost plan leaks the secret rate through the new fields.')
