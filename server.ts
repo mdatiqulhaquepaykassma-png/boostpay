@@ -980,9 +980,28 @@ function refCodeList(db: any, user: any): Array<{ code: string; primary: boolean
   return out;
 }
 
+/** Admin-tunable settings for vanity codes (Admin → Referral → Codes). */
+function refCodeSettings(db: any): { limit: number; enabled: boolean; maxLength: number } {
+  const cfg: any = (db.config || INITIAL_DB.config || {}).referral || {};
+  const raw = Number(cfg.codeLimit);
+  const limit = Number.isFinite(raw) && raw >= 0 && raw <= 50 ? Math.trunc(raw) : REF_CODE_MAX_CLAIMS;
+  return {
+    limit,
+    enabled: cfg.codesEnabled !== false,
+    maxLength: Math.min(24, Math.max(4, Number(cfg.codeMaxLength) || REF_CODE_MAX) as number),
+  };
+}
+
+/** How many custom codes THIS user may claim: the global limit + any admin grant. */
+function refCodeLimitFor(db: any, user: any): number {
+  const base = refCodeSettings(db).limit;
+  const extra = Math.max(0, Math.min(100, Number(user?.referCodeExtraClaims) || 0));
+  return base + extra;
+}
+
 function refCodeClaimsLeft(db: any, user: any): number {
   const used = (db.referCodes || []).filter((r: any) => String(r.userId) === String(user?.id)).length;
-  return Math.max(0, REF_CODE_MAX_CLAIMS - used);
+  return Math.max(0, refCodeLimitFor(db, user) - used);
 }
 
 
@@ -8606,7 +8625,7 @@ async function startServer() {
       customCode: String((me as any).referCodeCustom || '') || null,
       codes: refCodeList(db, me),
       codeClaimsLeft: refCodeClaimsLeft(db, me),
-      claimsLimit: REF_CODE_MAX_CLAIMS,
+      claimsLimit: refCodeLimitFor(db, me),
       claimsUsed: (db.referCodes || []).filter((r:any)=> String(r.userId)===uid).length,
       referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${myPrimaryCode}`,
       legacyReferLink: `${req.protocol}://${req.get('host')}/#/join-ref/${uid}`,
@@ -8741,7 +8760,7 @@ async function startServer() {
     const code=primaryRefCode(db, me);
     res.json({ referCode: code, customCode: (me && (me as any).referCodeCustom) || null,
       codes: refCodeList(db, me), codeClaimsLeft: me ? refCodeClaimsLeft(db, me) : 0,
-      claimsLimit: REF_CODE_MAX_CLAIMS, claimsUsed: (db.referCodes || []).filter((r:any)=> String(r.userId)===uid).length,
+      claimsLimit: me ? refCodeLimitFor(db, me) : REF_CODE_MAX_CLAIMS, claimsUsed: (db.referCodes || []).filter((r:any)=> String(r.userId)===uid).length,
       referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${code}` });
   });
 
@@ -8768,7 +8787,8 @@ async function startServer() {
         formatError: fmt.error||null,
         taken: !!owner.userId && !yours,
         yours,
-        available: fmt.ok && (!owner.userId || yours),
+        available: fmt.ok && (!owner.userId || yours) && refCodeSettings(db).enabled,
+        codesEnabled: refCodeSettings(db).enabled,
         resolves: !!owner.userId,
         // who a signup with this code would be linked to (ids only, never names)
         referrerId: owner.userId || null,
@@ -8784,6 +8804,8 @@ async function startServer() {
       const me=(db.users||[]).find((u:any)=> String(u.id)===uid);
       if (!me) return res.status(404).json({ error:'User not found.' });
       if (me.isFrozen) return res.status(403).json({ error:'Account is frozen.' });
+      const _set = refCodeSettings(db);
+      if (!_set.enabled) return res.status(403).json({ error:'Custom refer codes are turned off by the admin right now.' });
       const code=normalizeRefCode((req.body||{}).code);
       const fmt=validateRefCodeFormat(code);
       if (!fmt.ok) return res.status(400).json({ error: fmt.error });
@@ -8792,7 +8814,7 @@ async function startServer() {
       if (owner.userId && String(owner.userId)!==uid) return res.status(409).json({ error:'That code is already taken — try another one.' });
       if (String((me as any).referCodeCustom||'').toUpperCase()===code) return res.status(400).json({ error:'That is already your code.' });
       const left=refCodeClaimsLeft(db, me);
-      if (left<=0) return res.status(429).json({ error:`You have used all ${REF_CODE_MAX_CLAIMS} custom codes. Old codes keep working — contact support for a new one.` });
+      if (left<=0) return res.status(429).json({ error:`You have used all ${refCodeLimitFor(db, me)} custom codes. Old codes keep working — contact support for a new one.` });
       if (!db.referCodes) db.referCodes=[];
       db.referCodes.unshift({ code, userId: uid, createdAt: Date.now() });
       (me as any).referCodeCustom = code;
@@ -8804,7 +8826,7 @@ async function startServer() {
         referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${code}`,
         codes: refCodeList(db, me),
         codeClaimsLeft: refCodeClaimsLeft(db, me),
-        claimsLimit: REF_CODE_MAX_CLAIMS,
+        claimsLimit: refCodeLimitFor(db, me),
         claimsUsed: (db.referCodes || []).filter((r:any)=> String(r.userId)===uid).length,
       });
     } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not save that code.' }); }
@@ -8834,6 +8856,152 @@ async function startServer() {
     broadcastUserUpdate(db, uid);
     res.json({success:true, referredBy: String(referrer.id) });
   });
+  // ══ Admin → Referral → Codes ═══════════════════════════════════════════
+  // Everything about vanity codes is driven from the admin panel: the global
+  // limit, an on/off switch, per-user grants, and direct set/remove/make-primary
+  // for any account (audit-logged). The user app only ever reads the outcome.
+  app.get('/api/admin/refer-codes', requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    try {
+      const db=readDb();
+      const settings=refCodeSettings(db);
+      const q=String(req.query.q||'').trim().toUpperCase();
+      const rows=(db.referCodes||[]).slice().sort((a:any,b:any)=> (Number(b.createdAt)||0)-(Number(a.createdAt)||0));
+      const users=(db.users||[]);
+      const byUser=new Map<string,number>();
+      for (const r of rows) byUser.set(String(r.userId), (byUser.get(String(r.userId))||0)+1);
+      let list=rows.map((r:any)=>{
+        const u=users.find((x:any)=> String(x.id)===String(r.userId));
+        return {
+          code:String(r.code).toUpperCase(),
+          userId:String(r.userId),
+          createdAt:Number(r.createdAt)||0,
+          primary:(u && String((u as any).referCodeCustom||'').toUpperCase()===String(r.code).toUpperCase()) || false,
+          codesOnUser: byUser.get(String(r.userId))||0,
+          userExists: !!u,
+          userBalance: u ? Number(u.balance)||0 : 0,
+          userFrozen: !!(u && u.isFrozen),
+          extraClaims: u ? Number((u as any).referCodeExtraClaims)||0 : 0,
+          referrals: (db.referrals||[]).filter((x:any)=> String(x.referrerId)===String(r.userId)).length,
+        };
+      });
+      if (q) {
+        list=list.filter((r:any)=> r.code.includes(q) || r.userId.toUpperCase().includes(q));
+      }
+      const totalClaims=rows.length;
+      const owners=byUser.size;
+      const overLimit=[...byUser.entries()].filter(([,n])=> n>settings.limit).length;
+      res.setHeader('Cache-Control','no-store');
+      res.json({
+        settings,
+        stats:{ totalCodes:totalClaims, owners, usersWithoutCode: Math.max(0, users.filter((u:any)=>u.role!=='ADMIN').length-owners), overLimit },
+        codes:list.slice(0,500),
+        truncated: list.length>500,
+      });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not load refer codes.' }); }
+  });
+
+  app.post('/api/admin/refer-codes/settings', rateLimit(30), requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    try {
+      const db=readDb();
+      if (!db.config) db.config=(INITIAL_DB as any).config;
+      if (!db.config.referral) db.config.referral={};
+      const body=req.body||{};
+      if (body.limit !== undefined) {
+        const n=Number(body.limit);
+        if (!Number.isFinite(n) || n<0 || n>50) return res.status(400).json({ error:'Limit must be a whole number between 0 and 50.' });
+        db.config.referral.codeLimit=Math.trunc(n);
+      }
+      if (body.enabled !== undefined) db.config.referral.codesEnabled=!!body.enabled;
+      recordAuditLog(db,'REFERRAL_CODE_SETTINGS', String(req.authAdmin||'admin'),
+        `Custom refer codes: limit=${refCodeSettings(db).limit}, enabled=${refCodeSettings(db).enabled}`, 'ADMIN');
+      writeDb(db);
+      res.json({ success:true, settings: refCodeSettings(db) });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not save the settings.' }); }
+  });
+
+  // Admin sets / replaces any user's code. Bypasses the claim count (that is the
+  // point: a youtuber deal is decided by staff, not by the 3-claim cap).
+  app.post('/api/admin/refer-codes/set', rateLimit(60), requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    try {
+      const db=readDb();
+      const userId=String((req.body||{}).userId||'').replace(/^#/,'').trim();
+      const code=normalizeRefCode((req.body||{}).code);
+      if (!userId) return res.status(400).json({ error:'userId is required.' });
+      const user=(db.users||[]).find((u:any)=> String(u.id)===userId);
+      if (!user) return res.status(404).json({ error:`No user with id ${userId}.` });
+      const fmt=validateRefCodeFormat(code);
+      if (!fmt.ok) return res.status(400).json({ error: fmt.error });
+      const owner=resolveRefCode(db, code);
+      if (owner.userId && String(owner.userId)!==userId) {
+        return res.status(409).json({ error:`${code} already belongs to #${owner.userId}. Remove it there first.` });
+      }
+      if (!db.referCodes) db.referCodes=[];
+      const exists=(db.referCodes||[]).some((r:any)=> String(r.code).toUpperCase()===code);
+      if (!exists) db.referCodes.unshift({ code, userId, createdAt: Date.now(), setBy: String(req.authAdmin||'admin'), adminGranted: true });
+      (user as any).referCodeCustom=code;
+      recordAuditLog(db,'REFERRAL_CODE_SET_BY_ADMIN', String(req.authAdmin||'admin'),
+        `Admin set refer code ${code} for User #${userId}`, userId);
+      writeDb(db);
+      res.json({ success:true, code, userId, codes: refCodeList(db, user), claimsLimit: refCodeLimitFor(db, user) });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not set that code.' }); }
+  });
+
+  // Remove a code entirely (it stops resolving). The owner keeps every alias left.
+  app.post('/api/admin/refer-codes/remove', rateLimit(60), requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    try {
+      const db=readDb();
+      const code=normalizeRefCode((req.body||{}).code);
+      if (!code) return res.status(400).json({ error:'code is required.' });
+      const row=(db.referCodes||[]).find((r:any)=> String(r.code).toUpperCase()===code);
+      if (!row) return res.status(404).json({ error:`${code} is not a custom code.` });
+      db.referCodes=(db.referCodes||[]).filter((r:any)=> String(r.code).toUpperCase()!==code);
+      const user=(db.users||[]).find((u:any)=> String(u.id)===String(row.userId));
+      if (user && String((user as any).referCodeCustom||'').toUpperCase()===code) {
+        const next=(db.referCodes||[]).find((r:any)=> String(r.userId)===String(row.userId));
+        (user as any).referCodeCustom = next ? String(next.code).toUpperCase() : '';
+      }
+      recordAuditLog(db,'REFERRAL_CODE_REMOVED_BY_ADMIN', String(req.authAdmin||'admin'),
+        `Admin removed refer code ${code} from User #${row.userId}`, String(row.userId));
+      writeDb(db);
+      res.json({ success:true, code, userId:String(row.userId), primary: user ? ((user as any).referCodeCustom||null) : null });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not remove that code.' }); }
+  });
+
+  // Make one of a user's existing aliases the primary (share link) code.
+  app.post('/api/admin/refer-codes/primary', rateLimit(60), requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    try {
+      const db=readDb();
+      const code=normalizeRefCode((req.body||{}).code);
+      const row=(db.referCodes||[]).find((r:any)=> String(r.code).toUpperCase()===code);
+      if (!row) return res.status(404).json({ error:`${code} is not a custom code.` });
+      const user=(db.users||[]).find((u:any)=> String(u.id)===String(row.userId));
+      if (!user) return res.status(404).json({ error:'That code has no owner any more.' });
+      (user as any).referCodeCustom=String(row.code).toUpperCase();
+      recordAuditLog(db,'REFERRAL_CODE_PRIMARY_BY_ADMIN', String(req.authAdmin||'admin'),
+        `Admin made ${code} the primary refer code of User #${row.userId}`, String(row.userId));
+      writeDb(db);
+      res.json({ success:true, code:String(row.code).toUpperCase(), userId:String(row.userId) });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not switch that code.' }); }
+  });
+
+  // Grant (or take back) extra claims for one user.
+  app.post('/api/admin/refer-codes/grant', rateLimit(60), requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    try {
+      const db=readDb();
+      const userId=String((req.body||{}).userId||'').replace(/^#/,'').trim();
+      const extra=Number((req.body||{}).extra);
+      if (!userId) return res.status(400).json({ error:'userId is required.' });
+      if (!Number.isFinite(extra) || extra<0 || extra>100) return res.status(400).json({ error:'extra must be between 0 and 100.' });
+      const user=(db.users||[]).find((u:any)=> String(u.id)===userId);
+      if (!user) return res.status(404).json({ error:`No user with id ${userId}.` });
+      (user as any).referCodeExtraClaims=Math.trunc(extra);
+      recordAuditLog(db,'REFERRAL_CODE_GRANT', String(req.authAdmin||'admin'),
+        `Admin gave User #${userId} ${Math.trunc(extra)} extra code claim(s)`, userId);
+      writeDb(db);
+      res.json({ success:true, userId, extra:Math.trunc(extra), claimsLimit: refCodeLimitFor(db, user), codeClaimsLeft: refCodeClaimsLeft(db, user) });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not change the grant.' }); }
+  });
+
   app.get('/api/refer/leader', requireUserOrAdmin, (req:any,res)=>{
     const db=readDb();
     // rank referrers by daily count today

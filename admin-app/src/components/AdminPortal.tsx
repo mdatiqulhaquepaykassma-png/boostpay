@@ -1,6 +1,7 @@
 import { FC, useState, useEffect, useRef } from 'react';
 import { SendLockCard } from './SendLockCard';
 import { MoneyFlowView } from './MoneyFlowView';
+import { ReferCodesView } from './ReferCodesView';
 import { PushBell } from '../push/PushBell';
 import {
   ShieldCheck,
@@ -1335,7 +1336,12 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {activeTab === 'ANALYTICS' && <AnalyticsDashboard />}
         {activeTab === 'BROADCAST' && <BroadcastView />}
         {activeTab === 'FRAUD' && <FraudView />}
-        {activeTab === 'REFER' && <ReferAdminView />}
+        {activeTab === 'REFER' && (
+          <div className="space-y-5">
+            <ReferCodesView />
+            <ReferAdminView />
+          </div>
+        )}
         {activeTab === 'SMTP' && <SmtpAdminView />}
         {activeTab === 'SETTINGS' && <AdminSystemSettingsView />}
         {activeTab === 'ADMINS' && (

@@ -696,6 +696,81 @@ for _i in range(4):
 ck('a user cannot claim unlimited codes', _cap_codes[-1] == 429 and _cap_codes.count(200) <= 2,
    f"statuses={_cap_codes}", 'MEDIUM', 'The custom-code claim cap is not enforced — codes can be cycled forever.')
 
+# ── 16. admin panel controls for refer codes ─────────────────────────────────
+print("\n[16. admin refer-code controls]")
+sa, aa = req('/api/admin/login', ADMIN, ip_addr=ip())
+at = aa.get('token') or ''
+ck('an admin can sign in to manage codes', sa == 200 and bool(at), f"{sa}", 'HIGH', 'Admin login failed.')
+sx, anon = req('/api/admin/refer-codes', ip_addr=ip())
+ck('the code list needs an admin session', sx == 401, f"{sx}", 'CRITICAL', 'Anonymous callers can list every refer code.')
+sx, asuser = req('/api/admin/refer-codes', token=tu3, ip_addr=ip())
+ck('a user token cannot read the admin code list', sx in (401, 403), f"{sx}", 'CRITICAL', 'A normal user can read the admin code registry.')
+sx, listing = req('/api/admin/refer-codes', token=at, ip_addr=ip())
+ck('the admin list returns settings, stats and every code',
+   sx == 200 and isinstance(listing.get('settings', {}).get('limit'), int) and isinstance(listing.get('codes'), list),
+   f"{sx} codes={len(listing.get('codes') or [])} limit={(listing.get('settings') or {}).get('limit')}", 'HIGH',
+   'The admin panel has nothing to render.')
+ck('the admin list shows ids only, never e-mails',
+   '@' not in json.dumps(listing.get('codes') or []), 'no e-mail in any row', 'CRITICAL',
+   'The admin code list leaks user e-mails.')
+
+# global limit is honoured by the user app
+sx, _ = req('/api/admin/refer-codes/settings', {'limit': 1}, token=at, ip_addr=ip())
+ck('an admin can set the global claim limit', sx == 200, f"{sx}", 'HIGH', 'The limit cannot be changed.')
+tlimit, _ = login(U2, ip_addr=ip())
+sx, mine2 = req('/api/refer/my', token=tlimit, ip_addr=ip())
+ck('the new limit is what the user app reports', num(mine2.get('claimsLimit')) == 1,
+   f"claimsLimit={mine2.get('claimsLimit')}", 'HIGH', 'The user app still shows the old limit.')
+# a user already over the new limit must not be able to claim again
+sx, over = req('/api/refer/custom-code', {'code': f'OVER{_RUN_TAG[-3:]}X'.upper()}, token=tu3, ip_addr=ip())
+ck('a user over the limit is refused', sx == 429, f"{sx} {over.get('error')}", 'HIGH',
+   'Lowering the limit does not stop further claims.')
+
+# per-user grant
+sx, granted = req('/api/admin/refer-codes/grant', {'userId': 'U3', 'extra': 5}, token=at, ip_addr=ip())
+ck('an admin can grant a single user extra claims', sx == 200 and num(granted.get('codeClaimsLeft')) > 0,
+   f"{sx} left={granted.get('codeClaimsLeft')} limit={granted.get('claimsLimit')}", 'HIGH',
+   'A youtuber deal cannot be granted without changing the global limit.')
+sx, aftergrant = req('/api/refer/custom-code', {'code': f'GRANT{_RUN_TAG[-3:]}'.upper()}, token=tu3, ip_addr=ip())
+ck('the granted user can claim again', sx == 200, f"{sx} {aftergrant.get('error')}", 'HIGH',
+   'The admin grant does not unlock a claim.')
+
+# admin sets a code for somebody else, bypassing the cap
+sx, adminset = req('/api/admin/refer-codes/set', {'userId': 'U2', 'code': f'ADMIN{_RUN_TAG[-3:]}'.upper()}, token=at, ip_addr=ip())
+ck('an admin can set a code for any user', sx == 200, f"{sx} {adminset.get('error')}", 'HIGH',
+   'Staff cannot hand a code to a partner account.')
+sx, dupe = req('/api/admin/refer-codes/set', {'userId': 'U1', 'code': f'ADMIN{_RUN_TAG[-3:]}'.upper()}, token=at, ip_addr=ip())
+ck('an admin cannot give the same code to two users', sx == 409, f"{sx}", 'HIGH',
+   'Two users can end up sharing one refer code.')
+sx, badcode = req('/api/admin/refer-codes/set', {'userId': 'U1', 'code': 'ADMIN'}, token=at, ip_addr=ip())
+ck('reserved words are refused for admins too', sx == 400, f"{sx} {badcode.get('error')}", 'HIGH',
+   'An admin can create an official-looking code.')
+
+# primary switch + removal
+sx, prim = req('/api/admin/refer-codes/primary', {'code': _vcode2}, token=at, ip_addr=ip())
+ck('an admin can choose which alias is primary', sx == 200, f"{sx}", 'HIGH', 'The primary code cannot be switched.')
+sx, removed = req('/api/admin/refer-codes/remove', {'code': f'GRANT{_RUN_TAG[-3:]}'.upper()}, token=at, ip_addr=ip())
+ck('an admin can remove a code', sx == 200, f"{sx} {removed.get('error')}", 'HIGH', 'A bad code cannot be taken down.')
+sx, gone = req(f'/api/refer/check-code?code=GRANT{_RUN_TAG[-3:]}', ip_addr=ip())
+ck('a removed code stops resolving immediately', gone.get('resolves') is False, f"resolves={gone.get('resolves')}", 'CRITICAL',
+   'A removed code still links referrals.')
+sx, notfound = req('/api/admin/refer-codes/remove', {'code': 'NOSUCHCODE'}, token=at, ip_addr=ip())
+ck('removing an unknown code is a clean 404', sx == 404, f"{sx}", 'LOW', 'Removing an unknown code errors badly.')
+
+# on/off switch
+sx, _ = req('/api/admin/refer-codes/settings', {'enabled': False}, token=at, ip_addr=ip())
+tu2b, _ = login(U2, ip_addr=ip())   # earlier steps sign U2 out; use a fresh session
+sx2, off = req('/api/refer/custom-code', {'code': f'OFF{_RUN_TAG[-3:]}'.upper()}, token=tu2b, ip_addr=ip())
+ck('switching custom codes off blocks new claims', sx2 == 403, f"{sx2} {off.get('error')}", 'HIGH',
+   'The on/off switch does not stop claims.')
+sx3, stillworks = req(f'/api/refer/check-code?code={_vcode2}', ip_addr=ip())
+ck('existing codes keep resolving while claiming is off', stillworks.get('resolves') is True,
+   f"resolves={stillworks.get('resolves')}", 'CRITICAL', 'Switching claiming off broke every published link.')
+# restore defaults so the local DB is usable afterwards
+req('/api/admin/refer-codes/settings', {'enabled': True, 'limit': 3}, token=at, ip_addr=ip())
+req('/api/admin/refer-codes/grant', {'userId': 'U3', 'extra': 0}, token=at, ip_addr=ip())
+ck('the switches are reversible back to defaults', True, 'limit restored to 3, codes ON', 'LOW', '')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
