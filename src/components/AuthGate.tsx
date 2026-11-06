@@ -23,6 +23,9 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showSignupPassword, setShowSignupPassword] = useState(false);
   const [signupError, setSignupError] = useState('');
+  // live validation of the refer code field (public check-code endpoint)
+  const [refCheck, setRefCheck] = useState<any>(null);
+  const [refChecking, setRefChecking] = useState(false);
   const [isSigningUp, setIsSigningUp] = useState(false);
   const [showForgot, setShowForgot] = useState(false);
   const [forgotEmail, setForgotEmail] = useState('');
@@ -52,6 +55,20 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
   useEffect(()=>{
     if (referralCode) setTab('SIGNUP');
   },[]);
+
+  // Validate the code as the user types — a wrong code must not be a surprise
+  // after signup. Cosmetic only: an unknown code never blocks registration.
+  useEffect(() => {
+    const c = referralCode.trim().replace(/^#/, '').replace(/^REF-?/i, '');
+    if (!c) { setRefCheck(null); setRefChecking(false); return; }
+    let dead = false;
+    setRefChecking(true);
+    const t = setTimeout(async () => {
+      const r = await BoostPayStore.checkReferCode(c);
+      if (!dead) { setRefCheck(r); setRefChecking(false); }
+    }, 450);
+    return () => { dead = true; clearTimeout(t); };
+  }, [referralCode]);
 
   const cleanLocal = (v: string) => {
     let s = v.trim().toLowerCase().replace(/\s+/g,'');
@@ -348,13 +365,25 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                 <Users className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
                 <input
                   type="text"
-                  placeholder="Enter referrer User ID (e.g. 1 or #1)"
+                  placeholder="Enter refer code (e.g. MRBEAST or #12)"
                   value={referralCode}
-                  onChange={(e)=> setReferralCode(e.target.value)}
+                  onChange={(e)=> setReferralCode(e.target.value.toUpperCase().replace(/[^A-Za-z0-9_#-]/g, '').slice(0, 20))}
                   className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 pl-9 pr-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none font-mono"
                 />
               </div>
-              {referralCode && <p className="text-[10px] text-emerald-400/80 mt-1 font-mono">✓ You will be linked to User #{referralCode.replace(/^#/,'').replace(/^REF-?/i,'')} — they earn {1}–10% on your boosting rewards.</p>}
+              {referralCode && (
+                refChecking ? (
+                  <p className="text-[10px] text-zinc-500 mt-1 font-mono">checking code…</p>
+                ) : refCheck && refCheck.resolves ? (
+                  <p className="text-[10px] text-emerald-400/80 mt-1 font-mono">
+                    ✓ Code {refCheck.code} is valid{refCheck.referrerId ? ` — linked to User #${refCheck.referrerId}` : ''}
+                  </p>
+                ) : refCheck && !refCheck.resolves ? (
+                  <p className="text-[10px] text-rose-400/90 mt-1 font-mono">
+                    ✕ No user has the code {refCheck.code} — you can still sign up, but no referrer will be linked.
+                  </p>
+                ) : null
+              )}
             </div>
 
             {signupError && (

@@ -27,6 +27,13 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
   const [lastFetch, setLastFetch] = useState(Date.now());
   const [selectedCommission, setSelectedCommission] = useState<any>(null);
   const [recentPage, setRecentPage] = useState(0);
+  // custom (vanity) code creator
+  const [codeOpen, setCodeOpen] = useState(false);
+  const [codeDraft, setCodeDraft] = useState('');
+  const [codeCheck, setCodeCheck] = useState<any>(null);
+  const [codeBusy, setCodeBusy] = useState(false);
+  const [codeMsg, setCodeMsg] = useState('');
+  const [codeErr, setCodeErr] = useState('');
   const [referErr, setReferErr] = useState<string | null>(null);
   const recentPageSize = 5;
 
@@ -59,6 +66,29 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
     };
     tick(); const id=setInterval(tick,1000); return ()=> clearInterval(id);
   },[]);
+
+  // Availability check, debounced — the same public endpoint the signup form uses.
+  useEffect(() => {
+    const draft = codeDraft.trim();
+    if (!draft) { setCodeCheck(null); return; }
+    let dead = false;
+    const t = setTimeout(async () => {
+      const r = await BoostPayStore.checkReferCode(draft);
+      if (!dead) setCodeCheck(r);
+    }, 400);
+    return () => { dead = true; clearTimeout(t); };
+  }, [codeDraft]);
+
+  const saveCustomCode = async () => {
+    setCodeBusy(true); setCodeErr(''); setCodeMsg('');
+    const res = await BoostPayStore.setCustomReferCode(codeDraft.trim());
+    setCodeBusy(false);
+    if (!res.success) { setCodeErr(res.error || 'Could not save that code.'); return; }
+    setCodeMsg(`Saved! Your new code is ${res.referCode}`);
+    setCodeOpen(false); setCodeDraft(''); setCodeCheck(null);
+    await refresh();
+    setTimeout(() => setCodeMsg(''), 4000);
+  };
 
   const doCopy = async (text: string, which: 'code'|'link') => {
     const ok = await copyToClipboard(text);
@@ -118,6 +148,75 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
               </button>
             </div>
           </div>
+          {/* ── Custom (vanity) code ───────────────────────────────────── */}
+          <div className="mt-3 rounded-2xl border border-zinc-800/70 bg-zinc-950/50 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-zinc-400">Custom code</span>
+              <span className="rounded-full bg-zinc-900 px-2 py-0.5 font-mono text-[9px] text-zinc-500">
+                {Number(data.claimsUsed ?? 0)}/{Number(data.claimsLimit ?? 3)} used
+              </span>
+            </div>
+            <p className="mt-1 text-[10px] leading-relaxed text-zinc-500">
+              4–16 characters, letters/numbers/_. Great for a channel name (e.g. <span className="font-mono text-zinc-300">MRBEAST</span>).
+              Your older codes keep working, so old links still pay you.
+            </p>
+
+            {Array.isArray(data.codes) && data.codes.length > 1 && (
+              <div className="mt-2 flex flex-wrap items-center gap-1">
+                {data.codes.map((c: any) => (
+                  <span key={c.code} className={`rounded-full border px-2 py-0.5 font-mono text-[9px] ${c.primary ? 'border-amber-500/40 bg-amber-500/10 text-amber-300' : 'border-zinc-800 bg-zinc-900 text-zinc-400'}`}>
+                    {c.kind === 'id' ? '#' : ''}{c.code}{c.primary ? ' · active' : ''}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {codeMsg && <p className="mt-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 py-1.5 text-[10px] text-emerald-300">{codeMsg}</p>}
+
+            {!codeOpen ? (
+              <button
+                onClick={() => { setCodeOpen(true); setCodeErr(''); setCodeDraft(''); }}
+                disabled={Number(data.codeClaimsLeft ?? 1) <= 0}
+                className="mt-2 w-full rounded-xl bg-zinc-800 py-2 text-[11px] font-bold text-zinc-100 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 transition cursor-pointer"
+              >
+                {Number(data.codeClaimsLeft ?? 1) > 0 ? (data.customCode ? 'Change custom code' : 'Create custom code') : 'No custom codes left'}
+              </button>
+            ) : (
+              <div className="mt-2 space-y-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    autoFocus
+                    value={codeDraft}
+                    onChange={(e) => { setCodeDraft(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 16)); setCodeErr(''); }}
+                    placeholder="MRBEAST"
+                    className="flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-white placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
+                  />
+                  <button
+                    onClick={saveCustomCode}
+                    disabled={codeBusy || !codeCheck?.available}
+                    className="rounded-xl bg-amber-500 px-3 py-2 text-[11px] font-black text-zinc-950 hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-40 transition cursor-pointer"
+                  >
+                    {codeBusy ? 'Saving…' : 'Save'}
+                  </button>
+                </div>
+                {codeDraft.trim().length > 0 && (
+                  <p className={`font-mono text-[10px] ${codeCheck == null ? 'text-zinc-500' : codeCheck.formatOk && codeCheck.available ? 'text-emerald-400' : codeCheck.formatOk && codeCheck.yours ? 'text-sky-400' : 'text-rose-400'}`}>
+                    {codeCheck == null ? 'checking…'
+                      : !codeCheck.formatOk ? `✕ ${codeCheck.formatError}`
+                      : codeCheck.yours ? '• this is already one of your codes'
+                      : codeCheck.available ? `✓ ${codeCheck.code} is available`
+                      : `✕ ${codeCheck.code} is already taken`}
+                  </p>
+                )}
+                {codeErr && <p className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2 py-1.5 text-[10px] text-rose-300">{codeErr}</p>}
+                <button onClick={() => { setCodeOpen(false); setCodeDraft(''); setCodeCheck(null); setCodeErr(''); }}
+                  className="w-full rounded-xl border border-zinc-800 py-1.5 text-[10px] text-zinc-400 hover:text-white transition cursor-pointer">
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+
           <div className="mt-2 rounded-2xl border border-zinc-800/60 bg-zinc-950/60 px-3 py-2 flex items-center justify-between gap-2">
             <span className="text-[10px] font-mono text-zinc-500 truncate flex-1">{data.referLink}</span>
             <button onClick={()=> doCopy(data.referLink,'link')} className="shrink-0 rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-[11px] text-zinc-300 hover:text-white flex items-center gap-1 cursor-pointer">

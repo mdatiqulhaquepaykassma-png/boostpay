@@ -618,6 +618,84 @@ if s == 200 and (rows[0].get('directCount') or 0) > 0:
 s, j = req('/api/user/team/summary', ip_addr=ip())
 ck('income is never readable without a session', s == 401, f"{s}", 'CRITICAL', 'Anonymous callers can read team income.')
 
+# ── 15. custom (vanity) refer codes ──────────────────────────────────────────
+print("\n[15. custom refer codes]")
+tu3, _ = login(U3, ip_addr=ip())
+_vcode = f'JRNEY{_RUN_TAG[-4:]}'.upper()
+s, chk = req(f'/api/refer/check-code?code={_vcode}', ip_addr=ip())
+ck('a fresh code can be checked before claiming', s == 200 and chk.get('formatOk') is True and chk.get('available') is True,
+   f"{s} available={chk.get('available')} code={chk.get('code')}", 'HIGH',
+   'The custom-code availability check does not answer for a free code.')
+s, bad = req('/api/refer/check-code?code=ADMIN', ip_addr=ip())
+ck('reserved words cannot be claimed', bad.get('formatOk') is False, f"formatError={bad.get('formatError')}", 'HIGH',
+   'A reserved word can be used as a refer code, which impersonates staff.')
+s, numc = req('/api/refer/check-code?code=12345', ip_addr=ip())
+ck('an all-number code is rejected (it would collide with user ids)', numc.get('formatOk') is False,
+   f"formatError={numc.get('formatError')}", 'HIGH', 'A numeric code can shadow a user id.')
+s, short = req('/api/refer/check-code?code=AB', ip_addr=ip())
+ck('too-short codes are rejected', short.get('formatOk') is False, f"formatError={short.get('formatError')}", 'MEDIUM',
+   'A 2-letter code is accepted.')
+s, nocode = req('/api/refer/custom-code', {'code': _vcode}, ip_addr=ip())
+ck('a code cannot be claimed without a session', s == 401, f"{s}", 'CRITICAL', 'Anonymous callers can claim refer codes.')
+s, claimed = req('/api/refer/custom-code', {'code': _vcode.lower()}, token=tu3, ip_addr=ip())
+ck('a user can claim a custom code', s == 200 and claimed.get('referCode') == _vcode,
+   f"{s} code={claimed.get('referCode')}", 'HIGH', 'Claiming a custom code fails.')
+ck('claiming returns a link that carries the custom code',
+   _vcode.lower() in str(claimed.get('referLink') or '').lower(), f"{claimed.get('referLink')}", 'HIGH',
+   'The share link still uses the number id, so the custom code is useless.')
+ck('the claim is reported back as used', num(claimed.get('claimsUsed')) == 1 and num(claimed.get('codeClaimsLeft')) == num(claimed.get('claimsLimit')) - 1,
+   f"used={claimed.get('claimsUsed')} left={claimed.get('codeClaimsLeft')} limit={claimed.get('claimsLimit')}", 'MEDIUM',
+   'The claim counter does not move after claiming.')
+s, mine = req('/api/refer/my', token=tu3, ip_addr=ip())
+ck('/api/refer/my now advertises the custom code and its aliases',
+   (mine.get('referCode') == _vcode) and _vcode in [c.get('code') for c in (mine.get('codes') or [])],
+   f"referCode={mine.get('referCode')} codes={[c.get('code') for c in (mine.get('codes') or [])][:4]}", 'HIGH',
+   'The Refer page still shows only the number id.')
+ck('the number id stays listed as a working alias',
+   any(c.get('kind') == 'id' for c in (mine.get('codes') or [])), 'id alias present', 'MEDIUM',
+   'Old number-code links would stop working after a rename.')
+s, taken = req('/api/refer/check-code?code=' + _vcode, ip_addr=ip())
+ck('a claimed code shows as taken to everyone else', taken.get('taken') is True and taken.get('available') is False,
+   f"taken={taken.get('taken')}", 'HIGH', 'A claimed code still looks available, so two users could pick it.')
+# someone else cannot steal it
+tu2, _ = login(U2, ip_addr=ip())
+s, steal = req('/api/refer/custom-code', {'code': _vcode}, token=tu2, ip_addr=ip())
+ck('another user cannot take a claimed code', s == 409, f"{s} {steal.get('error')}", 'CRITICAL',
+   'A refer code can be stolen from its owner.')
+# signup with the custom code links the right referrer
+s, new_id, jnew = signup_child('refcustom@gmail.com', _vcode)
+ck('signup accepts a custom refer code', s == 200 and str((jnew.get('referral') or {}).get('referrerId')) == 'U3',
+   f"{s} referral={jnew.get('referral')}", 'CRITICAL', 'A new user cannot sign up with a vanity code.')
+ck('signup reports that the referral was applied',
+   (jnew.get('referral') or {}).get('applied') is True and (jnew.get('referral') or {}).get('via') == 'custom',
+   f"{jnew.get('referral')}", 'HIGH', 'The signup response does not say whether the code worked.')
+# an unknown code must not block the signup, but must say so
+s, unknown_id, junk = signup_child('refunknown@gmail.com', 'NOSUCHCODE99')
+ck('an unknown code still creates the account but says the referral failed',
+   s == 200 and (junk.get('referral') or {}).get('applied') is False and bool((junk.get('referral') or {}).get('note')),
+   f"{s} referral={junk.get('referral')}", 'HIGH', 'An invalid code silently links nothing with no warning.')
+# changing the code keeps the old one paying
+_vcode2 = f'NEXT{_RUN_TAG[-4:]}'.upper()
+s, changed = req('/api/refer/custom-code', {'code': _vcode2}, token=tu3, ip_addr=ip())
+ck('a user can change their custom code', s == 200 and changed.get('referCode') == _vcode2,
+   f"{s} code={changed.get('referCode')}", 'HIGH', 'Changing the custom code fails.')
+s, oldstill = req(f'/api/refer/check-code?code={_vcode}', ip_addr=ip())
+ck('the previous code still resolves to the same owner after a change',
+   oldstill.get('resolves') is True and str(oldstill.get('referrerId')) == 'U3',
+   f"resolves={oldstill.get('resolves')} owner={oldstill.get('referrerId')}", 'CRITICAL',
+   'Renaming kills every link the user already published.')
+s, legacy = req('/api/refer/check-code?code=U3', ip_addr=ip())
+ck('the legacy number code still works as well', legacy.get('resolves') is True and str(legacy.get('referrerId')) == 'U3',
+   f"resolves={legacy.get('resolves')}", 'HIGH', 'Old numeric refer links stopped working.')
+_cap_codes = []
+for _i in range(4):
+    s, caps = req('/api/refer/custom-code', {'code': f'CAP{_i}{_RUN_TAG[-3:]}'.upper()}, token=tu3, ip_addr=ip())
+    _cap_codes.append(s)
+    if s == 429:
+        break
+ck('a user cannot claim unlimited codes', _cap_codes[-1] == 429 and _cap_codes.count(200) <= 2,
+   f"statuses={_cap_codes}", 'MEDIUM', 'The custom-code claim cap is not enforced — codes can be cycled forever.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

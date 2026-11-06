@@ -901,6 +901,91 @@ function getReferralsCount(db: any, referrerId: string): number {
   return (db.referrals || []).filter((r:any)=>String(r.referrerId)===String(referrerId)).length;
 }
 
+// ── Custom referral codes (vanity codes) ────────────────────────────────────
+// A user's code is what youtubers put in a video description, so it has to be
+// memorable ("MRBEAST", "TECH_GURU") and it has to keep working forever: when a
+// user claims a new code the OLD one stays alive as an alias, so every link that
+// was ever published still credits them. `db.referCodes` is the single registry
+// ({code, userId, createdAt}); the number id keeps working as a fallback.
+const REF_CODE_MIN = 4;
+const REF_CODE_MAX = 16;
+const REF_CODE_MAX_CLAIMS = 3;  // 1 first claim + 2 changes, for the account's lifetime
+const REF_CODE_RESERVED = new Set([
+  'ADMIN','ADMIN1','ADMINS','AGENT','AGENTS','SUPPORT','SYSTEM','ROOT','OWNER','STAFF',
+  'BOOSTPAY','OFFICIAL','MANAGEMENT','API','NULL','UNDEFINED','TEST','DEMO','HELP','INFO',
+  'REF','REFER','REFERRAL','JOIN','SIGNUP','LOGIN','WALLET','MONEY','FREE','BONUS','USDT',
+]);
+
+function normalizeRefCode(raw: any): string {
+  return String(raw ?? '').trim()
+    .replace(/^#/, '')
+    .replace(/^REF-?/i, '')
+    .replace(/[\s-]+/g, '')
+    .toUpperCase();
+}
+
+/** Format rules only — "is this allowed at all", not "is it taken". */
+function validateRefCodeFormat(code: string): { ok: boolean; error?: string } {
+  if (!code) return { ok: false, error: 'Refer code is required.' };
+  if (code.length < REF_CODE_MIN) return { ok: false, error: `Code must be at least ${REF_CODE_MIN} characters.` };
+  if (code.length > REF_CODE_MAX) return { ok: false, error: `Code can be at most ${REF_CODE_MAX} characters.` };
+  if (!/^[A-Z][A-Z0-9_]*$/.test(code)) return { ok: false, error: 'Use letters, numbers and _ only, and start with a letter.' };
+  if (/^\d+$/.test(code)) return { ok: false, error: 'A code cannot be only numbers.' };
+  if (REF_CODE_RESERVED.has(code)) return { ok: false, error: 'That code is reserved — pick another one.' };
+  if (/^U\d+$/.test(code)) return { ok: false, error: 'That looks like a user ID — pick another one.' };
+  if (/^(\d)\1+$/.test(code)) return { ok: false, error: 'That code is too repetitive — pick another one.' };
+  return { ok: true };
+}
+
+/** Who owns this code right now? Custom codes first, then the legacy number id. */
+function resolveRefCode(db: any, rawCode: any): { userId: string | null; code: string; via: 'custom' | 'id' | null } {
+  const code = normalizeRefCode(rawCode);
+  if (!code) return { userId: null, code, via: null };
+  const row = (db.referCodes || []).find((r: any) => String(r.code).toUpperCase() === code);
+  if (row) {
+    const owner = (db.users || []).find((u: any) => String(u.id) === String(row.userId));
+    if (owner) return { userId: String(owner.id), code, via: 'custom' };
+  }
+  // legacy: the plain user id (case-insensitive, "U12" or "12")
+  const byId = (db.users || []).find((u: any) => String(u.id).toUpperCase() === code);
+  if (byId) return { userId: String(byId.id), code, via: 'id' };
+  return { userId: null, code, via: null };
+}
+
+/** The code a user should share: their custom one, else their number id. */
+function primaryRefCode(db: any, user: any): string {
+  if (!user) return '';
+  const custom = String(user.referCodeCustom || '').toUpperCase();
+  if (custom) return custom;
+  return String(user.id);
+}
+
+/** Every code that still credits this user (primary first, then old aliases, then the id). */
+function refCodeList(db: any, user: any): Array<{ code: string; primary: boolean; createdAt: number; kind: string }> {
+  if (!user) return [];
+  const primary = primaryRefCode(db, user);
+  const rows = (db.referCodes || []).filter((r: any) => String(r.userId) === String(user.id));
+  const out: Array<{ code: string; primary: boolean; createdAt: number; kind: string }> = [];
+  const seen = new Set<string>();
+  for (const r of rows) {
+    const c = String(r.code).toUpperCase();
+    if (seen.has(c)) continue;
+    seen.add(c);
+    out.push({ code: c, primary: c === primary, createdAt: Number(r.createdAt) || 0, kind: 'custom' });
+  }
+  out.sort((a, b) => (a.primary === b.primary ? b.createdAt - a.createdAt : (a.primary ? -1 : 1)));
+  if (!seen.has(String(user.id).toUpperCase())) {
+    out.push({ code: String(user.id), primary: !out.some(o => o.primary), createdAt: Number(user.createdAt) || 0, kind: 'id' });
+  }
+  return out;
+}
+
+function refCodeClaimsLeft(db: any, user: any): number {
+  const used = (db.referCodes || []).filter((r: any) => String(r.userId) === String(user?.id)).length;
+  return Math.max(0, REF_CODE_MAX_CLAIMS - used);
+}
+
+
 // ── Team tree (unlimited downline) ───────────────────────────────────────────
 // A user's team is every account that joined under them, at ANY depth. The tree
 // is derived from db.referrals ({referrerId → referredId}) — it is never stored
@@ -3597,24 +3682,19 @@ async function startServer() {
         return res.status(400).json({ error: 'Only @gmail.com email addresses are allowed for signup (example: user@gmail.com).' });
       }
 
-      // Referral code handling (optional)
+      // Referral code handling (optional). A code can be a custom vanity code
+      // ("MRBEAST") or the legacy number id ("12", "U12"). An unknown code never
+      // blocks a signup — the account is created and the response says why the
+      // referral was not linked, so the phone can warn the user.
       let referralCodeRaw = (req.body && (req.body as any).referralCode) ? String((req.body as any).referralCode).trim() : '';
       if (!referralCodeRaw && (req.body as any).referrerId) referralCodeRaw = String((req.body as any).referrerId).trim();
-      // strip leading # or REF- prefix
-      let referrerIdClean = referralCodeRaw.replace(/^#/,'').replace(/^REF-?/i,'').trim();
-      let referrerForNew: any = null;
-      if (referralCodeRaw) {
-        referrerForNew = db.users.find((u:any)=> String(u.id)===referrerIdClean);
-        // also allow code that equals id with case-insensitive email alias? just id match
-        if (!referrerForNew) {
-          // fail silently? But inform user
-          // We'll allow signup even if invalid code, just record no referral
-          referrerForNew = null;
-        }
-      }
-      if (referrerForNew && String(referrerForNew.id) === String(referrerForNew.id)) {
-        // self-refer check: will compare after id assigned
-      }
+      const incomingCode = normalizeRefCode(referralCodeRaw);
+      const resolvedRef = incomingCode ? resolveRefCode(db, incomingCode) : { userId: null, code: '', via: null as any };
+      let referrerForNew: any = resolvedRef.userId
+        ? (db.users || []).find((u: any) => String(u.id) === String(resolvedRef.userId))
+        : null;
+      let referralNote = '';
+      if (incomingCode && !referrerForNew) referralNote = `Refer code ${incomingCode} was not found — signed up without a referrer.`;
 
       const userId = getNextSequentialUserId(db.users);
 
@@ -3666,7 +3746,18 @@ async function startServer() {
       db.users.push(newUser);
       const sess3 = createSession(db, userId, 'USER', clientIp(req), String(req.headers['user-agent'] || ''));
       writeDb(db);
-      res.json({ success: true, user: { ...publicUser(newUser), referCode: String(userId), referredBy: (newUser as any).referredBy || undefined }, token: issueToken(userId, 'USER', sess3.id), sessionId: sess3.id });
+      res.json({
+        success: true,
+        user: { ...publicUser(newUser), referCode: String(userId), referredBy: (newUser as any).referredBy || undefined },
+        referral: {
+          applied: !!(newUser as any).referredBy,
+          usedCode: incomingCode || null,
+          via: resolvedRef.via,
+          referrerId: (newUser as any).referredBy || null,
+          note: referralNote || undefined,
+        },
+        token: issueToken(userId, 'USER', sess3.id), sessionId: sess3.id
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -8509,9 +8600,16 @@ async function startServer() {
         earnedFromMe
       };
     }
+    const myPrimaryCode = primaryRefCode(db, me);
     res.json({
-      referCode: String(uid),
-      referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${uid}`,
+      referCode: myPrimaryCode,
+      customCode: String((me as any).referCodeCustom || '') || null,
+      codes: refCodeList(db, me),
+      codeClaimsLeft: refCodeClaimsLeft(db, me),
+      claimsLimit: REF_CODE_MAX_CLAIMS,
+      claimsUsed: (db.referCodes || []).filter((r:any)=> String(r.userId)===uid).length,
+      referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${myPrimaryCode}`,
+      legacyReferLink: `${req.protocol}://${req.get('host')}/#/join-ref/${uid}`,
       referralsCount: myReferrals.length,
       dailyCount,
       rate,
@@ -8638,18 +8736,89 @@ async function startServer() {
   });
 
   app.get('/api/refer/code', requireUser, (req:any,res)=>{
-    const uid=String(req.authUserId||'');
-    res.json({ referCode: uid, referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${uid}` });
+    const db=readDb(); const uid=String(req.authUserId||'');
+    const me=(db.users||[]).find((u:any)=> String(u.id)===uid);
+    const code=primaryRefCode(db, me);
+    res.json({ referCode: code, customCode: (me && (me as any).referCodeCustom) || null,
+      codes: refCodeList(db, me), codeClaimsLeft: me ? refCodeClaimsLeft(db, me) : 0,
+      claimsLimit: REF_CODE_MAX_CLAIMS, claimsUsed: (db.referCodes || []).filter((r:any)=> String(r.userId)===uid).length,
+      referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${code}` });
+  });
+
+  // Is a code free? Public (the signup screen checks as you type). Format rules
+  // and ownership are answered separately so the UI can explain the reason.
+  app.get('/api/refer/check-code', rateLimit(40), (req:any,res)=>{
+    try {
+      const db=readDb();
+      const raw=String(req.query.code||'');
+      const code=normalizeRefCode(raw);
+      const fmt=validateRefCodeFormat(code);
+      const owner=code ? resolveRefCode(db, code) : { userId:null, via:null };
+      let yours=false;
+      try {
+        // optional auth: this route is public, so nobody has run requireUser yet
+        const payload:any=verifyToken(getBearerToken(req));
+        const auth=payload && payload.role==='USER' ? String(payload.sub) : '';
+        if (auth && owner.userId && String(owner.userId)===auth) yours=true;
+      } catch {}
+      res.setHeader('Cache-Control','no-store');
+      res.json({
+        code,
+        formatOk: fmt.ok,
+        formatError: fmt.error||null,
+        taken: !!owner.userId && !yours,
+        yours,
+        available: fmt.ok && (!owner.userId || yours),
+        resolves: !!owner.userId,
+        // who a signup with this code would be linked to (ids only, never names)
+        referrerId: owner.userId || null,
+      });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not check that code.' }); }
+  });
+
+  // Claim a custom code. Old codes stay alive as aliases, so a youtuber's earlier
+  // links never stop paying them; the number of claims per account is capped.
+  app.post('/api/refer/custom-code', requireUser, rateLimit(10), (req:any,res)=>{
+    try {
+      const db=readDb(); const uid=String(req.authUserId||'');
+      const me=(db.users||[]).find((u:any)=> String(u.id)===uid);
+      if (!me) return res.status(404).json({ error:'User not found.' });
+      if (me.isFrozen) return res.status(403).json({ error:'Account is frozen.' });
+      const code=normalizeRefCode((req.body||{}).code);
+      const fmt=validateRefCodeFormat(code);
+      if (!fmt.ok) return res.status(400).json({ error: fmt.error });
+      if (code===String(uid).toUpperCase()) return res.status(400).json({ error:'That is already your default code.' });
+      const owner=resolveRefCode(db, code);
+      if (owner.userId && String(owner.userId)!==uid) return res.status(409).json({ error:'That code is already taken — try another one.' });
+      if (String((me as any).referCodeCustom||'').toUpperCase()===code) return res.status(400).json({ error:'That is already your code.' });
+      const left=refCodeClaimsLeft(db, me);
+      if (left<=0) return res.status(429).json({ error:`You have used all ${REF_CODE_MAX_CLAIMS} custom codes. Old codes keep working — contact support for a new one.` });
+      if (!db.referCodes) db.referCodes=[];
+      db.referCodes.unshift({ code, userId: uid, createdAt: Date.now() });
+      (me as any).referCodeCustom = code;
+      recordAuditLog(db, 'REFERRAL_CODE_CLAIMED', uid, `User #${uid} claimed custom refer code ${code}`, uid);
+      writeDb(db);
+      res.json({
+        success:true,
+        referCode: code,
+        referLink: `${req.protocol}://${req.get('host')}/#/join-ref/${code}`,
+        codes: refCodeList(db, me),
+        codeClaimsLeft: refCodeClaimsLeft(db, me),
+        claimsLimit: REF_CODE_MAX_CLAIMS,
+        claimsUsed: (db.referCodes || []).filter((r:any)=> String(r.userId)===uid).length,
+      });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not save that code.' }); }
   });
   app.post('/api/refer/apply', requireUser, (req:any,res)=>{
     const db=readDb(); const uid=String(req.authUserId||'');
-    const codeRaw=String((req.body&&req.body.code)||'').trim().replace(/^#/,'').replace(/^REF-?/i,'');
+    const codeRaw=normalizeRefCode((req.body&&req.body.code)||'');
     if (!codeRaw) return res.status(400).json({error:'Refer code required'});
-    if (codeRaw===uid) return res.status(400).json({error:'You cannot refer yourself'});
+    const resolvedApply=resolveRefCode(db, codeRaw);
+    if (resolvedApply.userId && String(resolvedApply.userId)===String(uid)) return res.status(400).json({error:'You cannot refer yourself'});
     const me=(db.users||[]).find((u:any)=> String(u.id)===uid);
     if (!me) return res.status(404).json({error:'User not found'});
     if ((me as any).referredBy) return res.status(400).json({error:'You already have a referrer'});
-    const referrer=(db.users||[]).find((u:any)=> String(u.id)===codeRaw);
+    const referrer=resolvedApply.userId ? (db.users||[]).find((u:any)=> String(u.id)===String(resolvedApply.userId)) : null;
     if (!referrer) return res.status(404).json({error:'Invalid refer code — user not found'});
     const cfgRef:any=(db.config||INITIAL_DB.config).referral;
     if (!cfgRef|| cfgRef.enabled===false) return res.status(403).json({error:'Referral system is disabled by admin'});

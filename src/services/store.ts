@@ -2182,6 +2182,29 @@ export class BoostPayStore {
     try { const j = await res.json(); if (j?.error) msg = j.error; } catch {}
     throw new Error(msg);
   }
+  /** Is this vanity refer code free? Public endpoint — used by the signup form too. */
+  static async checkReferCode(code: string): Promise<{ code:string, formatOk:boolean, formatError:string|null, taken:boolean, yours:boolean, available:boolean, resolves:boolean, referrerId:string|null } | null> {
+    try {
+      const clean = (code || '').replace(/^#/, '').replace(/^REF-?/i, '').trim();
+      if (!clean) return null;
+      const res = await fetch(`/api/refer/check-code?code=${encodeURIComponent(clean)}`, { headers: this.authHeaders() });
+      if (res.ok) return await res.json();
+    } catch {}
+    return null;
+  }
+  /** Claim a custom refer code (letters/numbers/_, 4-16 chars). Old codes keep working. */
+  static async setCustomReferCode(code: string): Promise<{ success:boolean, error?:string, referCode?:string, referLink?:string, codes?:any[], codeClaimsLeft?:number }> {
+    try {
+      const res = await fetch('/api/refer/custom-code', {
+        method: 'POST',
+        headers: this.authHeaders(),
+        body: JSON.stringify({ code })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) return { success: true, ...data };
+      return { success: false, error: data?.error || `HTTP ${res.status}` };
+    } catch (e:any) { return { success: false, error: e?.message || 'Network error' }; }
+  }
   static async getReferCode(): Promise<{ referCode:string, referLink:string } | null> {
     try {
       const res = await fetch('/api/refer/code', { headers: this.authHeaders() });
