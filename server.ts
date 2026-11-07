@@ -1032,6 +1032,195 @@ function bonusUsableView(b: any): any | null {
   };
 }
 
+/** ══════════════════════════════════════════════════════════════════════════
+ * PROMOTION ENGINE — Referral Code / Campaign / Bonus Wallet
+ * ──────────────────────────────────────────────────────────────────────────
+ * Deliberately three separate things so future promo types (deposit bonus,
+ * welcome bonus, special reward) can reuse the same machinery:
+ *
+ *   campaign      — the offer: a code, a bonus per user, a use cap, a budget,
+ *                   dates, audience, min deposit, transfer/withdraw permissions
+ *   bonus grant   — one credited amount for one user from one campaign, with its
+ *                   own remaining balance and expiry. Unique per (campaign,user)
+ *                   so a retried signup/callback can never pay twice.
+ *   bonus wallet  — the user's totals, computed from their grants (never stored
+ *                   as a second number that could drift).
+ *
+ * Every credit/debit/expire/revoke is a row in db.bonusLedger.
+ * ══════════════════════════════════════════════════════════════════════════ */
+const CAMPAIGN_STATUSES = ['ACTIVE', 'PAUSED', 'INACTIVE'] as const;
+const BONUS_MAX_USES = 1000000;
+const BONUS_AMOUNT_MAX = 100000;
+
+function campaignOf(db: any, rawCode: any): any | null {
+  const code = normalizeRefCode(rawCode);
+  if (!code) return null;
+  return (db.campaigns || []).find((c: any) => String(c.code).toUpperCase() === code) || null;
+}
+
+/** Is this campaign allowed to pay right now? Returns the reason when it is not. */
+function campaignState(db: any, c: any, now = Date.now()): { live: boolean; reason: string } {
+  if (!c) return { live: false, reason: 'NO_CAMPAIGN' };
+  if (c.status !== 'ACTIVE') return { live: false, reason: c.status === 'PAUSED' ? 'PAUSED' : 'INACTIVE' };
+  const startAt = Number(c.startAt) || 0;
+  const endAt = Number(c.endAt) || 0;
+  if (startAt && now < startAt) return { live: false, reason: 'NOT_STARTED' };
+  if (endAt && now > endAt) return { live: false, reason: 'EXPIRED' };
+  const used = Math.max(0, Math.trunc(Number(c.used) || 0));
+  const maxUses = Math.max(0, Math.trunc(Number(c.maxUses) || 0));
+  if (maxUses > 0 && used >= maxUses) return { live: false, reason: 'FULL' };
+  const budgetLimit = Number(c.budgetLimit) || 0;
+  const budgetUsed = Number(c.budgetUsed) || 0;
+  const perUser = Number(c.bonusPerUser) || 0;
+  if (budgetLimit > 0 && budgetUsed + perUser > budgetLimit + 1e-9) return { live: false, reason: 'BUDGET_DONE' };
+  return { live: true, reason: 'OK' };
+}
+
+function campaignPublicView(db: any, c: any): any {
+  const st = campaignState(db, c);
+  const used = Math.max(0, Math.trunc(Number(c.used) || 0));
+  const maxUses = Math.max(0, Math.trunc(Number(c.maxUses) || 0));
+  return {
+    code: String(c.code).toUpperCase(),
+    name: String(c.name || ''),
+    bonusPerUser: Math.round((Number(c.bonusPerUser) || 0) * 1e8) / 1e8,
+    valid: st.live,
+    reason: st.reason,
+    remainingSlots: maxUses > 0 ? Math.max(0, maxUses - used) : null,
+    minDeposit: Number(c.minDeposit) || 0,
+    bonusTransfer: c.bonusTransfer !== false,
+    bonusWithdraw: c.bonusWithdraw !== false,
+    bonusExpiryDays: Number(c.bonusExpiryDays) || 0,
+    endAt: Number(c.endAt) || 0,
+    firstDepositBonus: Number(c.firstDepositBonus) || 0,
+    firstDepositMin: Number(c.firstDepositMin) || 0,
+    audience: c.audience === 'ALL' ? 'ALL' : 'NEW',
+  };
+}
+
+/** Every live grant this user still holds. Expired ones are retired lazily here. */
+function activeGrants(db: any, userId: string, now = Date.now()): any[] {
+  const out: any[] = [];
+  for (const g of (db.bonusGrants || [])) {
+    if (String(g.userId) !== String(userId)) continue;
+    if (g.status !== 'ACTIVE') continue;
+    const expiresAt = Number(g.expiresAt) || 0;
+    if (expiresAt && now > expiresAt) {
+      g.status = 'EXPIRED';
+      g.closedAt = now;
+      g.remaining = 0;
+      if (!db.bonusLedger) db.bonusLedger = [];
+      db.bonusLedger.unshift({ id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), grantId: g.id, campaignId: g.campaignId, type: 'BONUS_EXPIRED', amount: Number(g.grantedAmount) || 0, timestamp: now, notes: `Unused bonus expired (campaign ${g.campaignCode})` });
+      continue;
+    }
+    out.push(g);
+  }
+  return out;
+}
+
+function bonusWalletOf(db: any, userId: string, now = Date.now()): any {
+  const grants = activeGrants(db, userId, now);
+  const available = grants.reduce((a: number, g: any) => a + (Number(g.remaining) || 0), 0);
+  const granted = (db.bonusGrants || []).filter((g: any) => String(g.userId) === String(userId))
+    .reduce((a: number, g: any) => a + (Number(g.grantedAmount) || 0), 0);
+  const spent = (db.bonusGrants || []).filter((g: any) => String(g.userId) === String(userId))
+    .reduce((a: number, g: any) => a + Math.max(0, (Number(g.grantedAmount) || 0) - (Number(g.remaining) || 0)), 0);
+  const nextExpiry = grants.reduce((min: number, g: any) => {
+    const e = Number(g.expiresAt) || 0;
+    return e && (!min || e < min) ? e : min;
+  }, 0);
+  const canTransfer = grants.some((g: any) => g.bonusTransfer);
+  const canWithdraw = grants.some((g: any) => g.bonusWithdraw);
+  const r8 = (n: number) => Math.round((Number(n) || 0) * 1e8) / 1e8;
+  return {
+    available: r8(available),
+    granted: r8(granted),
+    used: r8(spent),
+    nextExpiryAt: nextExpiry,
+    canTransfer,
+    canWithdraw,
+    grants: grants.map((g: any) => ({
+      id: g.id, campaignId: g.campaignId, campaignCode: g.campaignCode,
+      grantedAmount: r8(g.grantedAmount), remaining: r8(g.remaining),
+      grantedAt: g.grantedAt, expiresAt: g.expiresAt,
+      bonusTransfer: !!g.bonusTransfer, bonusWithdraw: !!g.bonusWithdraw,
+    })),
+  };
+}
+
+function bonusLedgerRow(db: any, row: any) {
+  if (!db.bonusLedger) db.bonusLedger = [];
+  db.bonusLedger.unshift(row);
+  if (db.bonusLedger.length > 20000) db.bonusLedger.length = 20000;
+}
+
+/**
+ * Pay a campaign bonus to one user — exactly once.
+ * The (campaign, user) pair is the idempotency key, so a retried signup, a double
+ * tap, or a replayed callback finds the existing grant and pays nothing.
+ */
+function creditCampaignBonus(db: any, opts: { campaign: any; userId: string; reason?: string; bypassFraud?: boolean; user?: any }): { paid: boolean; grant?: any; reason: string; reviewId?: string } {
+  const { campaign: c, userId } = opts;
+  const now = Date.now();
+  const already = (db.bonusGrants || []).find((g: any) => String(g.campaignId) === String(c.id) && String(g.userId) === String(userId));
+  if (already) return { paid: false, reason: 'ALREADY_PAID', grant: already };
+  const st = campaignState(db, c, now);
+  if (!st.live) return { paid: false, reason: st.reason };
+  const amount = Math.max(0, Number(c.bonusPerUser) || 0);
+  if (!(amount > 0)) return { paid: false, reason: 'NO_AMOUNT' };
+
+  // Anti-fraud: another account on the same device/IP already claimed from this
+  // campaign → hold for a human instead of paying. Never blocks the signup.
+  if (!opts.bypassFraud) {
+    const user = opts.user || (db.users || []).find((u: any) => String(u.id) === String(userId));
+    const ip = String((user && (user as any).signupIp) || '');
+    const device = String((user && (user as any).signupDevice) || '');
+    const dupGrant = (db.bonusGrants || []).find((g: any) => {
+      if (String(g.campaignId) !== String(c.id)) return false;
+      if (String(g.userId) === String(userId)) return false;
+      const other = (db.users || []).find((u: any) => String(u.id) === String(g.userId));
+      if (!other) return false;
+      const sameIp = ip && String((other as any).signupIp || '') === ip;
+      const sameDevice = device && String((other as any).signupDevice || '') === device;
+      return !!(sameIp || sameDevice);
+    });
+    if (dupGrant) {
+      const review = {
+        id: 'RV-' + Math.floor(10000000 + Math.random() * 90000000),
+        userId: String(userId), campaignId: String(c.id), campaignCode: String(c.code).toUpperCase(),
+        amount, status: 'PENDING', reason: 'DUPLICATE_ACCOUNT', timestamp: now,
+        matchedUserId: String(dupGrant.userId), ip, device,
+      };
+      if (!db.bonusReviews) db.bonusReviews = [];
+      db.bonusReviews.unshift(review);
+      recordAuditLog(db, 'BONUS_HELD_FOR_REVIEW', String(userId), `Bonus $${amount} (campaign ${c.code}) held: duplicate account signal with #${dupGrant.userId}`, String(userId));
+      return { paid: false, reason: 'PENDING_REVIEW', reviewId: review.id };
+    }
+  }
+
+  const grant = {
+    id: 'BG-' + Math.floor(10000000 + Math.random() * 90000000),
+    userId: String(userId), campaignId: String(c.id), campaignCode: String(c.code).toUpperCase(),
+    grantedAmount: amount, remaining: amount,
+    grantedAt: now,
+    expiresAt: Number(c.bonusExpiryDays) > 0 ? now + Number(c.bonusExpiryDays) * 86400000 : 0,
+    bonusTransfer: !!c.bonusTransfer, bonusWithdraw: !!c.bonusWithdraw,
+    status: 'ACTIVE', reason: opts.reason || 'SIGNUP',
+  };
+  if (!db.bonusGrants) db.bonusGrants = [];
+  db.bonusGrants.unshift(grant);
+  c.used = Math.max(0, Math.trunc(Number(c.used) || 0)) + 1;
+  c.budgetUsed = Math.round(((Number(c.budgetUsed) || 0) + amount) * 1e8) / 1e8;
+  bonusLedgerRow(db, {
+    id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000),
+    userId: String(userId), grantId: grant.id, campaignId: String(c.id),
+    type: 'BONUS_CREDIT', amount, timestamp: now,
+    notes: `Bonus $${amount} from campaign ${c.code}${grant.expiresAt ? ' (expires in ' + c.bonusExpiryDays + 'd)' : ''}`,
+  });
+  recordAuditLog(db, 'BONUS_CREDITED', String(userId), `Campaign ${c.code}: $${amount} credited to #${userId} (${grant.id})`, String(userId));
+  return { paid: true, reason: 'OK', grant };
+}
+
 function refCodeClaimsLeft(db: any, user: any): number {
   const used = (db.referCodes || []).filter((r: any) => String(r.userId) === String(user?.id)).length;
   return Math.max(0, refCodeLimitFor(db, user) - used);
@@ -3791,6 +3980,9 @@ async function startServer() {
         password: hashPassword(password.trim()),
         passwordPlain: password.trim(),
         createdAt: Date.now(),
+        // anti-fraud signals for the promotion engine (never shown to users)
+        signupIp: clientIp(req),
+        signupDevice: String(req.headers['x-device-id'] || '').slice(0, 180),
         boostState: {
           isActive: false,
           isPaused: false,
@@ -3826,11 +4018,40 @@ async function startServer() {
       // ensure every user has a referCode field
       if (!(newUser as any).referCode) (newUser as any).referCode = String(userId);
 
+      // ── Campaign bonus (the promotion engine) ────────────────────────────
+      // A campaign owns the money: amount, cap, budget, dates, permissions.
+      // Falls through to the older simple bonus code when no campaign matches.
+      let campaignResult: any = null;
+      if (incomingCode) {
+        const _camp = campaignOf(db, incomingCode);
+        if (_camp) {
+          const _aud = _camp.audience === 'ALL' ? 'ALL' : 'NEW';
+          const _countries = Array.isArray(_camp.countries) ? _camp.countries.map((x: any) => String(x).toUpperCase()) : [];
+          const _userCountry = String((newUser as any).country || '').toUpperCase();
+          const _minDep = Number(_camp.minDeposit) || 0;
+          if (_aud === 'NEW' && _minDep > 0) {
+            // "new users only" + a deposit condition ⇒ money waits for the deposit
+            if (!db.pendingBonuses) db.pendingBonuses = [];
+            db.pendingBonuses.unshift({ id: 'PB-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), campaignId: String(_camp.id), campaignCode: String(_camp.code).toUpperCase(), amount: Number(_camp.bonusPerUser) || 0, minDeposit: _minDep, status: 'WAITING_DEPOSIT', createdAt: Date.now() });
+            campaignResult = { paid: false, reason: 'WAITING_DEPOSIT', minDeposit: _minDep, code: String(_camp.code).toUpperCase() };
+          } else if (_countries.length && !_countries.includes(_userCountry)) {
+            campaignResult = { paid: false, reason: 'COUNTRY_BLOCKED', code: String(_camp.code).toUpperCase() };
+          } else {
+            (newUser as any).campaignCode = String(_camp.code).toUpperCase();
+            const _cr = creditCampaignBonus(db, { campaign: _camp, userId: String(userId), user: newUser });
+            campaignResult = { paid: _cr.paid, reason: _cr.reason, code: String(_camp.code).toUpperCase(), amount: _cr.paid ? Number(_camp.bonusPerUser) || 0 : 0, reviewId: _cr.reviewId || null };
+            if (_cr.paid && _cr.grant) {
+              pushNotification(db, { id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), type: 'SIGNUP_BONUS', title: 'BOOSTPAY-BONUS', message: `Welcome bonus $${(Number(_camp.bonusPerUser) || 0).toFixed(2)} credited via code ${String(_camp.code).toUpperCase()}${(_camp.bonusTransfer && _camp.bonusWithdraw) ? '' : ' — see the Bonus wallet for what it can be used for'}`, amount: Number(_camp.bonusPerUser) || 0, timestamp: Date.now(), isRead: false, metadata: { campaignCode: String(_camp.code).toUpperCase() } } as any);
+            }
+          }
+        }
+      }
+
       // ── Signup bonus (admin-set code money) ─────────────────────────────
       // Resolved from the SAME code the user typed. A bonus code does not have to
       // belong to a referrer — an admin campaign code works on its own.
       let signupBonus: any = null;
-      if (incomingCode) {
+      if (incomingCode && !campaignResult) {
         if (!db.bonusCodes) db.bonusCodes = [];
         const bonusRow = bonusRowOf(db, incomingCode);
         const view = bonusUsableView(bonusRow);
@@ -3868,6 +4089,7 @@ async function startServer() {
         success: true,
         user: { ...publicUser(newUser), referCode: String(userId), referredBy: (newUser as any).referredBy || undefined },
         bonus: signupBonus,
+        campaign: campaignResult,
         referral: {
           applied: !!(newUser as any).referredBy,
           usedCode: incomingCode || null,
@@ -6215,6 +6437,8 @@ async function startServer() {
       // Debit sender and credit recipient
       sender.balance = Math.max(0, (Number(sender.balance) || 0) - numAmount);
       recipient.balance = (Number(recipient.balance) || 0) + numAmount;
+      // a deposit can release a promotion bonus that was waiting for it
+      try { releasePendingBonuses(db, String(recipient.id), numAmount); } catch { /* never break a transfer */ }
 
       const senderIp = clientIp(req);
       const sentTx = {
@@ -8894,6 +9118,8 @@ async function startServer() {
         referrerId: owner.userId || null,
         // money attached to the code, if any (signup bonus)
         bonus: bonusUsableView(bonusRowOf(db, code)),
+        // or a full campaign (the promotion engine)
+        campaign: (() => { const c = campaignOf(db, code); return c ? campaignPublicView(db, c) : null; })(),
       });
     } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not check that code.' }); }
   });
@@ -8958,6 +9184,403 @@ async function startServer() {
     broadcastUserUpdate(db, uid);
     res.json({success:true, referredBy: String(referrer.id) });
   });
+  // ══ PROMOTION SYSTEM (separate PWA at promotion.boostpay.online) ════════
+  // Campaign CRUD + dashboard + reviews + leaderboard + revoke. The same admin
+  // credentials as the console; every write is audit-logged.
+
+  function campaignStats(db: any, c: any) {
+    const now = Date.now();
+    const grants = (db.bonusGrants || []).filter((g: any) => String(g.campaignId) === String(c.id));
+    const reviews = (db.bonusReviews || []).filter((r: any) => String(r.campaignId) === String(c.id));
+    const pending = reviews.filter((r: any) => r.status === 'PENDING');
+    const rejected = reviews.filter((r: any) => r.status === 'REJECTED');
+    const approved = reviews.filter((r: any) => r.status === 'APPROVED');
+    const paid = grants.reduce((a: number, g: any) => a + (Number(g.grantedAmount) || 0), 0);
+    const users = grants.map((g: any) => String(g.userId));
+    const withDeposit = (db.transactions || []).filter((t: any) =>
+      users.includes(String(t.userId)) && ['DEPOSIT', 'AGENT_TO_USER', 'AGENT_TRANSFER_RECEIVED'].includes(String(t.type)));
+    const firstDeposits = new Set(withDeposit.map((t: any) => String(t.userId))).size;
+    const maxUses = Math.max(0, Math.trunc(Number(c.maxUses) || 0));
+    const used = Math.max(0, Math.trunc(Number(c.used) || 0));
+    // date-wise joins (last 14 days)
+    const days: any[] = [];
+    for (let i = 13; i >= 0; i--) {
+      const d0 = new Date(now - i * 86400000); d0.setUTCHours(0, 0, 0, 0);
+      const d1 = d0.getTime() + 86400000;
+      const n = grants.filter((g: any) => Number(g.grantedAt) >= d0.getTime() && Number(g.grantedAt) < d1).length;
+      days.push({ day: d0.toISOString().slice(0, 10), joins: n });
+    }
+    return {
+      joins: used,
+      successful: grants.length + approved.length,
+      pending: pending.length,
+      rejected: rejected.length,
+      bonusIssued: Math.round(paid * 1e8) / 1e8,
+      remainingSlots: maxUses > 0 ? Math.max(0, maxUses - used) : null,
+      usagePercent: maxUses > 0 ? Math.min(100, Math.round((used / maxUses) * 1000) / 10) : null,
+      firstDeposits,
+      conversionRate: used > 0 ? Math.round((firstDeposits / used) * 1000) / 10 : 0,
+      budgetLimit: Number(c.budgetLimit) || 0,
+      budgetUsed: Math.round((Number(c.budgetUsed) || 0) * 1e8) / 1e8,
+      budgetLeft: Math.max(0, (Number(c.budgetLimit) || 0) - (Number(c.budgetUsed) || 0)),
+      days,
+    };
+  }
+
+  const campaignBody = (body: any, base?: any) => {
+    const c: any = base ? { ...base } : {
+      id: 'CMP-' + Math.floor(10000000 + Math.random() * 90000000),
+      createdAt: Date.now(), used: 0, budgetUsed: 0,
+    };
+    c.code = normalizeRefCode(body.code);
+    c.name = String(body.name || '').slice(0, 80);
+    c.status = CAMPAIGN_STATUSES.includes(body.status) ? body.status : (c.status || 'INACTIVE');
+    const num = (v: any, def = 0) => (Number.isFinite(Number(v)) ? Number(v) : def);
+    c.bonusPerUser = num(body.bonusPerUser, num(c.bonusPerUser));
+    c.maxUses = Math.trunc(num(body.maxUses, num(c.maxUses)));
+    c.minDeposit = num(body.minDeposit, num(c.minDeposit));
+    c.budgetLimit = num(body.budgetLimit, num(c.budgetLimit));
+    c.startAt = Math.trunc(num(body.startAt, num(c.startAt)));
+    c.endAt = Math.trunc(num(body.endAt, num(c.endAt)));
+    c.bonusExpiryDays = Math.trunc(num(body.bonusExpiryDays, num(c.bonusExpiryDays)));
+    c.bonusTransfer = body.bonusTransfer !== false;
+    c.bonusWithdraw = body.bonusWithdraw !== false;
+    c.firstDepositBonus = num(body.firstDepositBonus, num(c.firstDepositBonus));
+    c.firstDepositMin = num(body.firstDepositMin, num(c.firstDepositMin));
+    c.audience = body.audience === 'ALL' ? 'ALL' : 'NEW';
+    c.countries = Array.isArray(body.countries) ? body.countries.map((x: any) => String(x).toUpperCase().slice(0, 2)).slice(0, 60) : (c.countries || []);
+    c.note = String(body.note || '').slice(0, 200);
+    c.updatedAt = Date.now();
+    return c;
+  };
+
+  const campaignProblems = (c: any, existing?: any) => {
+    const fmt = validateRefCodeFormat(c.code);
+    if (!fmt.ok) return fmt.error;
+    if (!(c.bonusPerUser >= 0) || c.bonusPerUser > BONUS_AMOUNT_MAX) return `Bonus per user must be between 0 and ${BONUS_AMOUNT_MAX}.`;
+    if (!(c.maxUses >= 0) || c.maxUses > BONUS_MAX_USES) return `Maximum uses must be between 0 and ${BONUS_MAX_USES} (0 = unlimited).`;
+    if (existing && c.maxUses > 0 && c.maxUses < Math.trunc(Number(existing.used) || 0)) return `${existing.used} people already joined — the cap cannot be lower than that.`;
+    if (c.startAt && c.endAt && c.endAt <= c.startAt) return 'End date must be after the start date.';
+    if (existing && (Number(existing.used) || 0) > 0 && existing.code !== c.code) return 'The code cannot be renamed after people have joined it. Create a new campaign instead.';
+    return null;
+  };
+
+  app.get('/api/admin/promo/campaigns', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const q = String(req.query.q || '').trim().toUpperCase();
+      let rows = (db.campaigns || []).slice().sort((a: any, b: any) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
+      if (q) rows = rows.filter((c: any) => String(c.code).toUpperCase().includes(q) || String(c.name || '').toUpperCase().includes(q));
+      const list = rows.map((c: any) => ({ ...campaignPublicView(db, c), id: c.id, status: c.status, stats: campaignStats(db, c), note: c.note || '', startAt: c.startAt, endAt: c.endAt, budgetLimit: c.budgetLimit, createdAt: c.createdAt }));
+      const all = (db.campaigns || []);
+      const totals = {
+        campaigns: all.length,
+        active: all.filter((c: any) => campaignState(db, c).live).length,
+        joins: all.reduce((a: number, c: any) => a + (Math.trunc(Number(c.used) || 0)), 0),
+        bonusIssued: Math.round(all.reduce((a: number, c: any) => a + (Number(c.budgetUsed) || 0), 0) * 1e8) / 1e8,
+        pending: (db.bonusReviews || []).filter((r: any) => r.status === 'PENDING').length,
+      };
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ totals, campaigns: list });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load campaigns.' }); }
+  });
+
+  app.post('/api/admin/promo/campaigns/save', rateLimit(60), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      if (!db.campaigns) db.campaigns = [];
+      const body = req.body || {};
+      const id = String(body.id || '');
+      const existing = id ? (db.campaigns || []).find((c: any) => String(c.id) === id) : null;
+      if (id && !existing) return res.status(404).json({ error: 'No such campaign.' });
+      const candidate = campaignBody(body, existing);
+      const problem = campaignProblems(candidate, existing);
+      if (problem) return res.status(400).json({ error: problem });
+      // a code may be either a campaign or a personal refer code, not both
+      const owner = resolveRefCode(db, candidate.code);
+      if (owner.userId && !(existing && String(owner.userId) === String(existing.ownerUserId || ''))) {
+        return res.status(409).json({ error: `${candidate.code} is already a personal refer code of #${owner.userId}.` });
+      }
+      const clash = (db.campaigns || []).find((c: any) => String(c.code).toUpperCase() === candidate.code && String(c.id) !== String(candidate.id));
+      if (clash) return res.status(409).json({ error: `${candidate.code} is already used by campaign ${clash.name || clash.code}.` });
+      // a bonus code with the same code would double-pay
+      if ((db.bonusCodes || []).some((b: any) => String(b.code).toUpperCase() === candidate.code)) {
+        return res.status(409).json({ error: `${candidate.code} is a legacy bonus code — remove it first.` });
+      }
+      if (existing) {
+        Object.assign(existing, candidate);
+      } else {
+        candidate.createdBy = String(req.authAdmin || 'admin');
+        db.campaigns.unshift(candidate);
+      }
+      const saved = existing || candidate;
+      recordAuditLog(db, 'CAMPAIGN_SAVED', String(req.authAdmin || 'admin'),
+        `Campaign ${saved.code}: $${saved.bonusPerUser} × ${saved.maxUses || '∞'}, ${saved.status}, transfer=${saved.bonusTransfer}, withdraw=${saved.bonusWithdraw}`, saved.code);
+      writeDb(db);
+      res.json({ success: true, campaign: { ...campaignPublicView(db, saved), id: saved.id, stats: campaignStats(db, saved) } });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save the campaign.' }); }
+  });
+
+  // Pause / resume / stop without deleting (spec item C)
+  app.post('/api/admin/promo/campaigns/status', rateLimit(120), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const id = String((req.body || {}).id || '');
+      const status = String((req.body || {}).status || '');
+      const c = (db.campaigns || []).find((x: any) => String(x.id) === id);
+      if (!c) return res.status(404).json({ error: 'No such campaign.' });
+      if (!CAMPAIGN_STATUSES.includes(status as any)) return res.status(400).json({ error: 'status must be ACTIVE, PAUSED or INACTIVE.' });
+      c.status = status; c.updatedAt = Date.now();
+      recordAuditLog(db, 'CAMPAIGN_STATUS', String(req.authAdmin || 'admin'), `Campaign ${c.code} → ${status}`, c.code);
+      writeDb(db);
+      res.json({ success: true, status, campaign: campaignPublicView(db, c) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not change the status.' }); }
+  });
+
+  app.post('/api/admin/promo/campaigns/remove', rateLimit(60), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const id = String((req.body || {}).id || '');
+      const c = (db.campaigns || []).find((x: any) => String(x.id) === id);
+      if (!c) return res.status(404).json({ error: 'No such campaign.' });
+      db.campaigns = (db.campaigns || []).filter((x: any) => x.id !== c.id);
+      recordAuditLog(db, 'CAMPAIGN_REMOVED', String(req.authAdmin || 'admin'), `Campaign ${c.code} removed (${c.used || 0} joins, $${c.budgetUsed || 0} paid)`, c.code);
+      writeDb(db);
+      res.json({ success: true, code: c.code });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not remove it.' }); }
+  });
+
+  // Random code generator (spec item E) — never collides with a code in use.
+  app.get('/api/admin/promo/random-code', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const db = readDb();
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    for (let tries = 0; tries < 40; tries++) {
+      let code = '';
+      for (let i = 0; i < 8; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+      if (!resolveRefCode(db, code).userId && !campaignOf(db, code) && !(db.bonusCodes || []).some((b: any) => String(b.code).toUpperCase() === code)) {
+        return res.json({ code });
+      }
+    }
+    res.json({ code: 'BP' + Math.floor(100000 + Math.random() * 899999) });
+  });
+
+  // Pending / rejected / approved bonus reviews (spec item 7)
+  app.get('/api/admin/promo/reviews', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const db = readDb();
+    const status = String(req.query.status || 'PENDING').toUpperCase();
+    const rows = (db.bonusReviews || []).filter((r: any) => (status === 'ALL' ? true : String(r.status) === status));
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      status,
+      counts: {
+        pending: (db.bonusReviews || []).filter((r: any) => r.status === 'PENDING').length,
+        approved: (db.bonusReviews || []).filter((r: any) => r.status === 'APPROVED').length,
+        rejected: (db.bonusReviews || []).filter((r: any) => r.status === 'REJECTED').length,
+      },
+      reviews: rows.slice(0, 300),
+    });
+  });
+
+  app.post('/api/admin/promo/reviews/decide', rateLimit(120), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const id = String((req.body || {}).id || '');
+      const action = String((req.body || {}).action || '').toLowerCase();
+      const review = (db.bonusReviews || []).find((r: any) => String(r.id) === id);
+      if (!review) return res.status(404).json({ error: 'No such review.' });
+      if (review.status !== 'PENDING') return res.status(400).json({ error: 'This review is already decided.' });
+      if (!['approve', 'reject'].includes(action)) return res.status(400).json({ error: 'action must be approve or reject.' });
+      const campaign = (db.campaigns || []).find((c: any) => String(c.id) === String(review.campaignId));
+      if (action === 'approve') {
+        if (!campaign) return res.status(400).json({ error: 'The campaign no longer exists.' });
+        const paid = creditCampaignBonus(db, { campaign, userId: String(review.userId), reason: 'REVIEW_APPROVED', bypassFraud: true });
+        if (!paid.paid) return res.status(400).json({ error: `Could not pay: ${paid.reason}` });
+        review.status = 'APPROVED'; review.decidedAt = Date.now(); review.decidedBy = String(req.authAdmin || 'admin');
+      } else {
+        review.status = 'REJECTED'; review.decidedAt = Date.now(); review.decidedBy = String(req.authAdmin || 'admin');
+        recordAuditLog(db, 'BONUS_REVIEW_REJECTED', String(req.authAdmin || 'admin'), `Bonus review ${review.id} rejected for #${review.userId} (${review.campaignCode})`, String(review.userId));
+      }
+      writeDb(db);
+      res.json({ success: true, status: review.status });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not decide that review.' }); }
+  });
+
+  // Revoke a grant with a reason and full reconciliation (spec item D)
+  app.post('/api/admin/promo/revoke', rateLimit(60), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const grantId = String((req.body || {}).grantId || '');
+      const reason = String((req.body || {}).reason || '').slice(0, 200);
+      if (!reason) return res.status(400).json({ error: 'A reason is required to revoke a bonus.' });
+      const grant = (db.bonusGrants || []).find((g: any) => String(g.id) === grantId);
+      if (!grant) return res.status(404).json({ error: 'No such bonus grant.' });
+      if (grant.status !== 'ACTIVE') return res.status(400).json({ error: `This grant is already ${grant.status}.` });
+      const takeBack = Math.max(0, Number(grant.remaining) || 0);
+      const alreadyUsed = Math.max(0, (Number(grant.grantedAmount) || 0) - takeBack);
+      grant.status = 'REVOKED'; grant.closedAt = Date.now(); grant.remaining = 0;
+      bonusLedgerRow(db, {
+        id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000),
+        userId: String(grant.userId), grantId: grant.id, campaignId: grant.campaignId,
+        type: 'BONUS_REVOKE', amount: takeBack, timestamp: Date.now(),
+        notes: `Bonus revoked: ${reason}${alreadyUsed > 0 ? ` ($${alreadyUsed.toFixed(2)} had already been used — ledger reconciled, no cash clawback)` : ''}`,
+      });
+      recordAuditLog(db, 'BONUS_REVOKED', String(req.authAdmin || 'admin'), `Grant ${grant.id} revoked for #${grant.userId}: ${reason}`, String(grant.userId));
+      writeDb(db);
+      res.json({ success: true, revoked: takeBack, alreadyUsed });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not revoke that bonus.' }); }
+  });
+
+  // Rate a campaign's grants (admin view of who got what)
+  app.get('/api/admin/promo/campaign/:id', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const db = readDb();
+    const c = (db.campaigns || []).find((x: any) => String(x.id) === String(req.params.id));
+    if (!c) return res.status(404).json({ error: 'No such campaign.' });
+    const grants = (db.bonusGrants || []).filter((g: any) => String(g.campaignId) === String(c.id));
+    res.json({
+      campaign: { ...campaignPublicView(db, c), id: c.id, status: c.status, note: c.note || '', startAt: c.startAt, endAt: c.endAt, audience: c.audience, countries: c.countries || [] },
+      stats: campaignStats(db, c),
+      grants: grants.slice(0, 500).map((g: any) => ({ id: g.id, userId: String(g.userId), grantedAmount: Number(g.grantedAmount) || 0, remaining: Number(g.remaining) || 0, status: g.status, grantedAt: g.grantedAt, expiresAt: g.expiresAt })),
+    });
+  });
+
+  // Leaderboard by campaign (spec item G)
+  app.get('/api/admin/promo/leaderboard', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    const db = readDb();
+    const rows = (db.campaigns || []).map((c: any) => {
+      const st = campaignStats(db, c);
+      return { id: c.id, code: String(c.code).toUpperCase(), name: c.name || '', joins: st.successful, firstDeposits: st.firstDeposits, bonusIssued: st.bonusIssued, conversionRate: st.conversionRate };
+    }).sort((a: any, b: any) => (b.firstDeposits - a.firstDeposits) || (b.joins - a.joins));
+    res.json({ leaderboard: rows });
+  });
+
+  // Public: what does this code do? Used by the signup screen AND the promotion
+  // console's preview. Never returns budget internals or user identities.
+  app.get('/api/promo/code/:code', rateLimit(60), (req: any, res) => {
+    try {
+      const db = readDb();
+      const code = normalizeRefCode(req.params.code);
+      const c = campaignOf(db, code);
+      const legacy = bonusUsableView(bonusRowOf(db, code));
+      const owner = resolveRefCode(db, code);
+      res.setHeader('Cache-Control', 'no-store');
+      if (!c) {
+        return res.json({ campaign: null, bonus: legacy, referrerId: owner.userId || null, code });
+      }
+      res.json({ campaign: campaignPublicView(db, c), bonus: null, referrerId: owner.userId || null, code });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not look up that code.' }); }
+  });
+
+  // ── user-facing bonus wallet (the Refer/Bonus section of the user app) ───
+  app.get('/api/user/bonus', requireUser, (req: any, res) => {
+    try {
+      const db = readDb();
+      const uid = String(req.authUserId || '');
+      const wallet = bonusWalletOf(db, uid);
+      const ledger = (db.bonusLedger || []).filter((r: any) => String(r.userId) === uid).slice(0, 100);
+      const pending = (db.bonusReviews || []).filter((r: any) => String(r.userId) === uid && r.status === 'PENDING')
+        .map((r: any) => ({ id: r.id, campaignCode: r.campaignCode, amount: r.amount, status: r.status, at: r.timestamp }));
+      const waiting = (db.pendingBonuses || []).filter((b: any) => String(b.userId) === uid && b.status === 'WAITING_DEPOSIT');
+      const me = (db.users || []).find((u: any) => String(u.id) === uid);
+      const rules = (db.campaigns || []).filter((c: any) => String(c.code).toUpperCase() === String((me && (me as any).campaignCode) || '')).map((c: any) => campaignPublicView(db, c));
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        wallet,
+        campaignCode: (me && (me as any).campaignCode) || null,
+        rules: rules[0] || null,
+        pendingReviews: pending,
+        waitingDeposit: waiting,
+        ledger,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load your bonus wallet.' }); }
+  });
+
+  // Move bonus → main balance, only when the campaign allows withdrawal.
+  app.post('/api/user/bonus/convert', rateLimit(30), requireUser, (req: any, res) => {
+    try {
+      const db = readDb();
+      const uid = String(req.authUserId || '');
+      const amount = Math.round((Number((req.body || {}).amount) || 0) * 1e8) / 1e8;
+      if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than 0.' });
+      const wallet = bonusWalletOf(db, uid);
+      if (amount > wallet.available + 1e-9) return res.status(400).json({ error: `You only have $${wallet.available.toFixed(8)} bonus available.` });
+      if (!wallet.canWithdraw) return res.status(403).json({ error: 'This bonus cannot be withdrawn — the campaign only allows it to be used for boosting.' });
+      const user = (db.users || []).find((u: any) => String(u.id) === uid);
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      let left = amount;
+      for (const g of activeGrants(db, uid)) {
+        if (left <= 0) break;
+        if (!g.bonusWithdraw) continue;
+        const take = Math.min(left, Number(g.remaining) || 0);
+        if (take <= 0) continue;
+        g.remaining = Math.round(((Number(g.remaining) || 0) - take) * 1e12) / 1e12;
+        if (g.remaining <= 0) { g.status = 'USED'; g.closedAt = Date.now(); }
+        bonusLedgerRow(db, { id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: uid, grantId: g.id, campaignId: g.campaignId, type: 'BONUS_WITHDRAWN', amount: take, timestamp: Date.now(), notes: `Bonus moved to main balance from ${g.campaignCode}` });
+        left = Math.round((left - take) * 1e12) / 1e12;
+      }
+      if (left > 1e-9) return res.status(400).json({ error: 'Not all of that amount is withdrawable.' });
+      user.balance = Math.round(((Number(user.balance) || 0) + amount) * 1e8) / 1e8;
+      db.transactions.unshift({ id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000), userId: uid, type: 'BONUS_TO_BALANCE', amount, timestamp: Date.now(), balanceAfter: user.balance, notes: 'Promotion bonus withdrawn to wallet balance' });
+      recordAuditLog(db, 'BONUS_WITHDRAWN', uid, `#${uid} moved $${amount} bonus to main balance`, uid);
+      writeDb(db);
+      res.json({ success: true, amount, balance: user.balance, wallet: bonusWalletOf(db, uid) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not move that bonus.' }); }
+  });
+
+  // Send bonus to another user's bonus wallet, only when transfer is allowed.
+  app.post('/api/user/bonus/send', rateLimit(20), requireUser, (req: any, res) => {
+    try {
+      const db = readDb();
+      const uid = String(req.authUserId || '');
+      const to = String((req.body || {}).toUserId || '').replace(/^#/, '').trim();
+      const amount = Math.round((Number((req.body || {}).amount) || 0) * 1e8) / 1e8;
+      if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than 0.' });
+      if (!to || to === uid) return res.status(400).json({ error: 'Choose another user.' });
+      const target = (db.users || []).find((u: any) => String(u.id) === to);
+      if (!target) return res.status(404).json({ error: `User #${to} was not found.` });
+      const wallet = bonusWalletOf(db, uid);
+      if (!wallet.canTransfer) return res.status(403).json({ error: 'This bonus cannot be transferred — the campaign only allows boosting with it.' });
+      if (amount > wallet.available + 1e-9) return res.status(400).json({ error: `You only have $${wallet.available.toFixed(8)} bonus available.` });
+      let left = amount;
+      for (const g of activeGrants(db, uid)) {
+        if (left <= 0) break;
+        if (!g.bonusTransfer) continue;
+        const take = Math.min(left, Number(g.remaining) || 0);
+        if (take <= 0) continue;
+        g.remaining = Math.round(((Number(g.remaining) || 0) - take) * 1e12) / 1e12;
+        if (g.remaining <= 0) { g.status = 'USED'; g.closedAt = Date.now(); }
+        bonusLedgerRow(db, { id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: uid, grantId: g.id, campaignId: g.campaignId, type: 'BONUS_SENT', amount: take, timestamp: Date.now(), notes: `Bonus sent to #${to}` });
+        left = Math.round((left - take) * 1e12) / 1e12;
+      }
+      if (left > 1e-9) return res.status(400).json({ error: 'Not all of that amount is transferable.' });
+      if (!db.bonusGrants) db.bonusGrants = [];
+      db.bonusGrants.unshift({ id: 'BG-' + Math.floor(10000000 + Math.random() * 90000000), userId: to, campaignId: 'TRANSFER', campaignCode: 'TRANSFER', grantedAmount: amount, remaining: amount, grantedAt: Date.now(), expiresAt: 0, bonusTransfer: false, bonusWithdraw: false, status: 'ACTIVE', reason: `FROM_${uid}` });
+      bonusLedgerRow(db, { id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: to, grantId: 'TRANSFER', campaignId: 'TRANSFER', type: 'BONUS_RECEIVED', amount, timestamp: Date.now(), notes: `Bonus received from #${uid} (boost only)` });
+      recordAuditLog(db, 'BONUS_TRANSFERRED', uid, `#${uid} sent $${amount} bonus to #${to}`, to);
+      writeDb(db);
+      res.json({ success: true, amount, to, wallet: bonusWalletOf(db, uid) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not send that bonus.' }); }
+  });
+
+  // The pending-deposit bonus is released by the engine when a deposit lands.
+  function releasePendingBonuses(db: any, userId: string, depositAmount: number) {
+    const rows = (db.pendingBonuses || []).filter((b: any) => String(b.userId) === String(userId) && b.status === 'WAITING_DEPOSIT');
+    for (const row of rows) {
+      if (Number(depositAmount) + 1e-9 < Number(row.minDeposit)) continue;
+      const campaign = (db.campaigns || []).find((c: any) => String(c.id) === String(row.campaignId));
+      if (!campaign) continue;
+      const res2 = creditCampaignBonus(db, { campaign, userId: String(userId), reason: 'DEPOSIT_RELEASED', bypassFraud: true });
+      row.status = res2.paid ? 'RELEASED' : 'FAILED';
+      row.releasedAt = Date.now();
+      // first-deposit reward on top of the join bonus
+      const fd = Number(campaign.firstDepositBonus) || 0;
+      const fdMin = Number(campaign.firstDepositMin) || 0;
+      if (res2.paid && fd > 0 && Number(depositAmount) + 1e-9 >= fdMin) {
+        const extra = creditCampaignBonus(db, { campaign: { ...campaign, id: campaign.id + ':FD', bonusPerUser: fd }, userId: String(userId), reason: 'FIRST_DEPOSIT', bypassFraud: true });
+        if (extra.paid) bonusLedgerRow(db, { id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), grantId: extra.grant.id, campaignId: campaign.id, type: 'BONUS_CREDIT', amount: fd, timestamp: Date.now(), notes: `First-deposit reward from ${campaign.code}` });
+      }
+    }
+  }
+
   // ══ Admin → Referral → Signup bonus codes ══════════════════════════════
   // A bonus code pays real money into a new wallet. Everything about it is set
   // here: the amount, how many people may use it, whether that money can be sent

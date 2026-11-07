@@ -2182,6 +2182,26 @@ export class BoostPayStore {
     try { const j = await res.json(); if (j?.error) msg = j.error; } catch {}
     throw new Error(msg);
   }
+  /** The user's promotion bonus wallet: available/locked totals, permissions, expiry, history. */
+  static async getBonusWallet(): Promise<any | null> {
+    try {
+      const res = await fetch('/api/user/bonus', { headers: this.authHeaders() });
+      if (res.ok) return await res.json();
+    } catch {}
+    return null;
+  }
+  /** Move bonus money to the main balance — server refuses when the campaign says no. */
+  static async withdrawBonus(amount: number): Promise<{ success: boolean; error?: string; wallet?: any }> {
+    try {
+      const res = await fetch('/api/user/bonus/convert', {
+        method: 'POST', headers: this.authHeaders(), body: JSON.stringify({ amount }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (res.ok) return { success: true, wallet: j.wallet };
+      return { success: false, error: j?.error || `HTTP ${res.status}` };
+    } catch (e: any) { return { success: false, error: e?.message || 'Network error' }; }
+  }
+
   /** Is this vanity refer code free? Public endpoint — used by the signup form too. */
   static async checkReferCode(code: string): Promise<{ code:string, formatOk:boolean, formatError:string|null, taken:boolean, yours:boolean, available:boolean, resolves:boolean, referrerId:string|null } | null> {
     try {

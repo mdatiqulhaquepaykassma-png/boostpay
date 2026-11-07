@@ -379,6 +379,14 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                     <p className="text-[10px] text-emerald-400/80 font-mono">
                       ✓ Code {refCheck.code} is valid{refCheck.referrerId ? ` — linked to User #${refCheck.referrerId}` : ''}
                     </p>
+                    {refCheck.campaign && refCheck.campaign.valid && Number(refCheck.campaign.bonusPerUser) > 0 && (
+                      <p className="text-[10px] font-mono text-amber-300">
+                        🎁 ${Number(refCheck.campaign.bonusPerUser).toFixed(2)} join bonus
+                        {refCheck.campaign.bonusWithdraw ? ' (withdrawable)' : ' (boost only)'}
+                        {Number(refCheck.campaign.remainingSlots) > 0 ? ` · ${refCheck.campaign.remainingSlots} slots left` : ''}
+                        {refCheck.campaign.bonusExpiryDays > 0 ? ` · expires ${refCheck.campaign.bonusExpiryDays}d after join` : ''}
+                      </p>
+                    )}
                     {refCheck.bonus && refCheck.bonus.active && (
                       <p className="text-[10px] font-mono text-amber-300">
                         🎁 ${Number(refCheck.bonus.amount).toFixed(2)} signup bonus
@@ -386,11 +394,11 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                       </p>
                     )}
                   </div>
-                ) : refCheck && !refCheck.resolves && refCheck.bonus && refCheck.bonus.active ? (
+                ) : refCheck && !refCheck.resolves && ((refCheck.bonus && refCheck.bonus.active) || (refCheck.campaign && refCheck.campaign.valid && Number(refCheck.campaign.bonusPerUser) > 0)) ? (
                   <div className="mt-1 space-y-0.5">
                     <p className="text-[10px] font-mono text-amber-300">
-                      🎁 Code {refCheck.code} gives a ${Number(refCheck.bonus.amount).toFixed(2)} signup bonus
-                      {refCheck.bonus.transferable ? '' : ' (boost only)'}
+                      🎁 Code {refCheck.code} gives a ${Number((refCheck.campaign && refCheck.campaign.valid ? refCheck.campaign.bonusPerUser : refCheck.bonus.amount) || 0).toFixed(2)} signup bonus
+                      {(refCheck.campaign ? refCheck.campaign.bonusWithdraw : refCheck.bonus.transferable) ? '' : ' (boost only)'}
                     </p>
                     <p className="text-[10px] font-mono text-zinc-500">no personal referrer on this code</p>
                   </div>

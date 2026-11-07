@@ -861,6 +861,149 @@ sx, after = req(f'/api/refer/check-code?code={_bc}', ip_addr=ip())
 ck('a retired code no longer offers money', (after.get('bonus') or {}) in (None, {}) or (after.get('bonus') or {}).get('active') is False,
    f"bonus={after.get('bonus')}", 'CRITICAL', 'A retired bonus code still pays.')
 
+# ── 18. promotion engine (campaigns + bonus wallet) ─────────────────────────
+print("\n[18. promotion engine]")
+sa, pa = req('/api/admin/login', ADMIN, ip_addr=ip())
+pt = pa.get('token') or ''
+_c = f'CAMP{_RUN_TAG[-3:]}'.upper()
+sx, anon = req('/api/admin/promo/campaigns', ip_addr=ip())
+ck('the campaign list needs an admin session', sx == 401, f"{sx}", 'CRITICAL', 'Anonymous callers can read every campaign.')
+sx, asuser = req('/api/admin/promo/campaigns', token=tu3, ip_addr=ip())
+ck('a user token cannot read campaigns', sx in (401, 403), f"{sx}", 'CRITICAL', 'A user can read the campaign registry.')
+sx, bad = req('/api/admin/promo/campaigns/save', {'code': _c, 'bonusPerUser': -1, 'maxUses': 10}, token=pt, ip_addr=ip())
+ck('a negative bonus is refused', sx == 400, f"{sx} {bad.get('error')}", 'CRITICAL', 'A campaign can be created that debits users.')
+sx, made = req('/api/admin/promo/campaigns/save', {
+    'code': _c, 'name': 'Journey campaign', 'bonusPerUser': 2, 'maxUses': 2,
+    'status': 'ACTIVE', 'bonusTransfer': False, 'bonusWithdraw': False,
+    'budgetLimit': 100, 'bonusExpiryDays': 7, 'audience': 'NEW'}, token=pt, ip_addr=ip())
+ck('an admin can create a campaign with all its settings', sx == 200 and num((made.get('campaign') or {}).get('bonusPerUser')) == 2,
+   f"{sx} {made.get('error')}", 'HIGH', 'Campaigns cannot be created.')
+sx, dupe = req('/api/admin/promo/campaigns/save', {'code': _c, 'bonusPerUser': 2, 'maxUses': 2, 'status': 'ACTIVE'}, token=pt, ip_addr=ip())
+ck('the same campaign code cannot exist twice', sx == 409, f"{sx}", 'HIGH', 'Two campaigns can share one code.')
+sx, rnd = req('/api/admin/promo/random-code', token=pt, ip_addr=ip())
+ck('a random code can be generated', sx == 200 and len(str(rnd.get('code') or '')) >= 6, f"code={rnd.get('code')}", 'MEDIUM',
+   'The random code generator does not work.')
+sx, pub = req(f'/api/promo/code/{_c}', ip_addr=ip())
+ck('the signup screen can read a campaign before joining', sx == 200 and num((pub.get('campaign') or {}).get('bonusPerUser')) == 2,
+   f"{sx} {pub.get('campaign')}", 'HIGH', 'The public campaign lookup fails.')
+ck('the public view exposes the permissions but no internals',
+   (pub.get('campaign') or {}).get('bonusTransfer') is False and 'budgetUsed' not in json.dumps(pub.get('campaign') or {}),
+   f"campaign={pub.get('campaign')}", 'HIGH', 'The public campaign view leaks internals.')
+# join 1: paid
+sx, cid1, cj1 = signup_child('camp1@gmail.com', _c)
+ck('joining with a campaign code pays the bonus', sx == 200 and (cj1.get('campaign') or {}).get('paid') is True,
+   f"{sx} campaign={cj1.get('campaign')}", 'CRITICAL', 'A campaign bonus is not paid at signup.')
+ct1, _ = login((cj1.get('_email') or 'camp1@gmail.com', 'Staging123!'), ip_addr=ip())
+sx, bw = req('/api/user/bonus', token=ct1, ip_addr=ip())
+ck('the user bonus wallet shows the money and the expiry',
+   sx == 200 and num((bw.get('wallet') or {}).get('available')) == 2 and num(((bw.get('wallet') or {}).get('grants') or [{}])[0].get('expiresAt')) > 0,
+   f"wallet={bw.get('wallet')}", 'CRITICAL', 'The bonus wallet does not show the granted bonus.')
+ck('the no-transfer / no-withdraw permissions come through to the user',
+   (bw.get('wallet') or {}).get('canTransfer') is False and (bw.get('wallet') or {}).get('canWithdraw') is False,
+   f"transfer={(bw.get('wallet') or {}).get('canTransfer')} withdraw={(bw.get('wallet') or {}).get('canWithdraw')}", 'CRITICAL',
+   'A blocked permission is not enforced in the user view.')
+sx, conv = req('/api/user/bonus/convert', {'amount': 1}, token=ct1, ip_addr=ip())
+ck('withdrawing a no-withdraw bonus is refused', sx == 403, f"{sx} {conv.get('error')}", 'CRITICAL',
+   'Bonus money marked "no withdrawal" can be moved to the wallet.')
+sx, sendb = req('/api/user/bonus/send', {'toUserId': 'U1', 'amount': 1}, token=ct1, ip_addr=ip())
+ck('transferring a no-transfer bonus is refused', sx == 403, f"{sx} {sendb.get('error')}", 'CRITICAL',
+   'Bonus money marked "no transfer" can be sent to another account.')
+# bonus expiry
+sx, _ = req('/api/admin/promo/campaigns/save', {'id': (made.get('campaign') or {}).get('id'), 'code': _c, 'name': 'Journey campaign', 'bonusPerUser': 2, 'maxUses': 2, 'status': 'ACTIVE', 'budgetLimit': 100, 'bonusExpiryDays': 7, 'audience': 'NEW', 'bonusTransfer': True, 'bonusWithdraw': True}, token=pt, ip_addr=ip())
+ck('a campaign can be edited (permissions flipped)', sx == 200, f"{sx}", 'HIGH', 'Campaign edit fails.')
+# join 2 uses the last slot
+sx, cid2, cj2 = signup_child('camp2@gmail.com', _c)
+ck('the last remaining slot still pays', sx == 200 and (cj2.get('campaign') or {}).get('paid') is True, f"{sx}", 'HIGH',
+   'The cap blocks a join one slot too early.')
+# join 3: cap full
+sx, cid3, cj3 = signup_child('camp3@gmail.com', _c)
+ck('when the cap is reached nobody else is paid', sx == 200 and (cj3.get('campaign') or {}).get('paid') is False and (cj3.get('campaign') or {}).get('reason') == 'FULL',
+   f"{sx} campaign={cj3.get('campaign')}", 'CRITICAL', 'The use-cap does not stop the bonus.')
+# pause stops payment, resume restores it
+sx, _ = req('/api/admin/promo/campaigns/status', {'id': (made.get('campaign') or {}).get('id'), 'status': 'PAUSED'}, token=pt, ip_addr=ip())
+sx2, cp = req(f'/api/promo/code/{_c}', ip_addr=ip())
+ck('a paused campaign reports itself as paused', cp and (cp.get('campaign') or {}).get('valid') is False and (cp.get('campaign') or {}).get('reason') == 'PAUSED',
+   f"{cp.get('campaign')}", 'HIGH', 'Pause is not visible on the signup screen.')
+sx, _ = req('/api/admin/promo/campaigns/status', {'id': (made.get('campaign') or {}).get('id'), 'status': 'ACTIVE'}, token=pt, ip_addr=ip())
+sx2, cv = req(f'/api/promo/code/{_c}', ip_addr=ip())
+ck('pausing is reversible (resume restores the code)', (cv.get('campaign') or {}).get('reason') in ('FULL', 'OK'), f"{cv.get('campaign')}", 'HIGH',
+   'Resume does not restore the campaign.')
+# budget + expiry rules are enforced server-side
+sx, bud = req('/api/admin/promo/campaigns/save', {'code': f'BUD{_RUN_TAG[-3:]}'.upper(), 'bonusPerUser': 70, 'maxUses': 100, 'status': 'ACTIVE', 'budgetLimit': 100}, token=pt, ip_addr=ip())
+_bc2 = f'BUD{_RUN_TAG[-3:]}'.upper()
+sx1, _, bj1 = signup_child('bud1@gmail.com', _bc2)
+sx2, _, bj2 = signup_child('bud2@gmail.com', _bc2)
+ck('a campaign stops paying when the budget is spent',
+   (bj1.get('campaign') or {}).get('paid') is True and (bj2.get('campaign') or {}).get('paid') is False,
+   f"first={bj1.get('campaign')} second={bj2.get('campaign')}", 'CRITICAL', 'The budget cap does not stop payments.')
+# date window
+_ec = f'EXP{_RUN_TAG[-3:]}'.upper()
+sx, _ = req('/api/admin/promo/campaigns/save', {'code': _ec, 'bonusPerUser': 1, 'maxUses': 10, 'status': 'ACTIVE',
+    'startAt': int(time.time()*1000) + 86400000, 'endAt': int(time.time()*1000) + 2*86400000}, token=pt, ip_addr=ip())
+sx1, _, ej = signup_child('exp1@gmail.com', _ec)
+ck('a campaign that has not started yet pays nothing', (ej.get('campaign') or {}).get('paid') is False and (ej.get('campaign') or {}).get('reason') == 'NOT_STARTED',
+   f"campaign={ej.get('campaign')}", 'HIGH', 'A future campaign pays early.')
+# dashboard + leaderboard + reviews
+sx, dash = req('/api/admin/promo/campaigns', token=pt, ip_addr=ip())
+_rows = (dash.get('campaigns') or [])
+_mine = [c for c in _rows if c.get('code') == _c]
+ck('the dashboard reports joins, paid total, slots and conversion',
+   bool(_mine) and num(_mine[0]['stats']['joins']) >= 2 and num(_mine[0]['stats']['bonusIssued']) > 0 and isinstance(_mine[0]['stats']['days'], list),
+   f"stats={(_mine[0]['stats'] if _mine else None)}", 'HIGH', 'The campaign dashboard has no usable statistics.')
+ck('the campaign list carries no user e-mails', '@' not in json.dumps(_rows), 'ids only', 'CRITICAL', 'The campaign dashboard leaks user identities.')
+sx, lb = req('/api/admin/promo/leaderboard', token=pt, ip_addr=ip())
+ck('the leaderboard ranks campaigns by first deposits', sx == 200 and isinstance(lb.get('leaderboard'), list), f"{sx}", 'MEDIUM',
+   'No leaderboard data.')
+sx, rv = req('/api/admin/promo/reviews', token=pt, ip_addr=ip())
+ck('the fraud review queue is readable', sx == 200 and isinstance(rv.get('reviews'), list), f"{sx} {rv.get('counts')}", 'HIGH',
+   'The review queue cannot be read.')
+# revoke with a reason
+sx, g = req(f'/api/admin/promo/campaign/{ (made.get("campaign") or {}).get("id") }', token=pt, ip_addr=ip())
+_gr = (g.get('grants') or [])
+_g1 = next((x for x in _gr if str(x.get('userId')) == str(cid1)), (_gr[0] if _gr else {}))
+sx, rev = req('/api/admin/promo/revoke', {'grantId': (_g1.get('id') or 'x'), 'reason': ''}, token=pt, ip_addr=ip())
+ck('revoking without a reason is refused', sx == 400, f"{sx} {rev.get('error')}", 'HIGH', 'A bonus can be revoked with no audit trail.')
+sx, rev2 = req('/api/admin/promo/revoke', {'grantId': (_g1.get('id') or 'x'), 'reason': 'journey test'}, token=pt, ip_addr=ip())
+ck('an admin can revoke a bonus with a reason', sx == 200, f"{sx} {rev2.get('error')}", 'HIGH', 'Bonus revoke fails.')
+sx, after = req('/api/user/bonus', token=ct1, ip_addr=ip())  # ct1 = first join of this campaign
+ck('the revoked bonus disappears from the wallet', num((after.get('wallet') or {}).get('available')) == 0,
+   f"available={(after.get('wallet') or {}).get('available')}", 'CRITICAL', 'A revoked bonus is still spendable.')
+
+# duplicate-account protection
+_dc = f'DUP{_RUN_TAG[-3:]}'.upper()
+req('/api/admin/promo/campaigns/save', {'code': _dc, 'bonusPerUser': 1, 'maxUses': 50, 'status': 'ACTIVE'}, token=pt, ip_addr=ip())
+_same_ip = '10.55.55.5'
+def signup_at(email, code, ip_addr, device=''):
+    local, _, dom = email.partition('@')
+    addr = f'{local}-{_RUN_TAG}@{dom}'
+    headers_extra = {'x-device-id': device} if device else {}
+    sX, jX = req('/api/users/register', {'email': addr, 'password': 'Staging123!', 'referralCode': code},
+                 ip_addr=ip_addr)
+    if isinstance(jX, dict):
+        jX['_email'] = addr
+    return sX, str(((jX.get('user') or {}).get('id')) or ''), jX
+s1, d1id, dj1 = signup_at('dup1@gmail.com', _dc, _same_ip, device='DEV-DUP')
+ck('first claim from an IP is paid', (dj1.get('campaign') or {}).get('paid') is True, f"{dj1.get('campaign')}", 'HIGH',
+   'The duplicate test could not establish a clean first claim.')
+s2, d2id, dj2 = signup_at('dup2@gmail.com', _dc, _same_ip, device='DEV-DUP')
+ck('a second account from the same IP/device is held, not paid',
+   (dj2.get('campaign') or {}).get('paid') is False and (dj2.get('campaign') or {}).get('reason') == 'PENDING_REVIEW',
+   f"{dj2.get('campaign')}", 'CRITICAL', 'One person can farm the same campaign with several accounts.')
+sx, q = req('/api/admin/promo/reviews?status=PENDING', token=pt, ip_addr=ip())
+_pending_rows = q.get('reviews') or []
+ck('the held bonus shows up in the admin review queue',
+   any(str(r.get('userId')) == str(d2id) for r in _pending_rows), f"pending={len(_pending_rows)} num(q.get('counts'))", 'HIGH',
+   'A held bonus never reaches the review queue.')
+_row = next((r for r in _pending_rows if str(r.get('userId')) == str(d2id)), None)
+if _row:
+    sx, dec = req('/api/admin/promo/reviews/decide', {'id': _row['id'], 'action': 'approve'}, token=pt, ip_addr=ip())
+    ck('an admin can approve a held bonus and it is paid', sx == 200, f"{sx} {dec.get('error')}", 'HIGH',
+       'Approving a review does not pay the bonus.')
+    dt2, _ = login((dj2.get('_email') or 'dup2@gmail.com', 'Staging123!'), ip_addr=ip())
+    sx, bw2 = req('/api/user/bonus', token=dt2, ip_addr=ip())
+    ck('the approved bonus lands in the wallet', num((bw2.get('wallet') or {}).get('available')) == 1,
+       f"available={(bw2.get('wallet') or {}).get('available')}", 'CRITICAL', 'An approved bonus is not credited.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
