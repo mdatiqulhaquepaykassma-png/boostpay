@@ -33,6 +33,8 @@ interface BalanceCardProps {
   boostState: BoostState;
   dynamicTargetDurationMs: number;
   minuteRatePercent: number;
+  bonusLocked?: number;
+  bonusCode?: string | null;
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
   onOpenAgentPay?: () => void;
@@ -44,6 +46,8 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   boostState,
   dynamicTargetDurationMs,
   minuteRatePercent,
+  bonusLocked,
+  bonusCode,
   onOpenSendMoney,
   onOpenQR,
   onOpenAgentPay,
@@ -180,6 +184,15 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
               <TrendingUp className="w-3 h-3 text-amber-400" />
               <span className="font-mono">+${formatPrecisionAmount(liveAccrued, 6)}</span>
               <span className="text-amber-400/70 font-medium">yield</span>
+            </span>
+          )}
+          {Number(bonusLocked) > 0 && (
+            <span
+              className="flex items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/[0.08] px-2.5 py-1 text-[10px] font-semibold text-amber-300/90"
+              title={`$${formatPrecisionAmount(Number(bonusLocked), 2)} of your balance was a signup bonus (code ${bonusCode || ''}) and can only be boosted — it cannot be sent, paid to an agent or withdrawn. Profit you earn on top of it can be.`}
+            >
+              🎁 <span className="font-mono">${formatPrecisionAmount(Number(bonusLocked), 2)}</span>
+              <span className="text-amber-400/70 font-medium">boost only</span>
             </span>
           )}
           {isRunning ? (
@@ -594,6 +607,8 @@ export const WalletView: FC<Props> = ({
         boostState={user.boostState}
         dynamicTargetDurationMs={dynamicTargetDurationMs}
         minuteRatePercent={config.minuteRatePercent !== undefined ? config.minuteRatePercent : (config.hourlyRatePercent ? config.hourlyRatePercent / 60 : 0.001605)}
+        bonusLocked={Number((user as any).signupBonusLocked) || 0}
+        bonusCode={((user as any).signupBonusCode as string) || null}
         onOpenSendMoney={onOpenSendMoney}
         onOpenQR={onOpenQR}
         onOpenAgentPay={onOpenAgentPay}

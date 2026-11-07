@@ -396,6 +396,8 @@ def signup_child(email, referrer):
     local, _, domain = email.partition('@')
     email = f'{local}-{_RUN_TAG}@{domain or "gmail.com"}'
     s2, j2 = req('/api/users/register', {'email': email, 'password': 'Staging123!', 'referralCode': referrer}, ip_addr=ip())
+    if isinstance(j2, dict):
+        j2['_email'] = email   # the run-tagged address, so the test can sign in again
     return s2, str(((j2.get('user') or {}).get('id')) or ''), j2
 
 # a 3-level chain under U1: two direct, one under each of them. Counts are
@@ -770,6 +772,94 @@ ck('existing codes keep resolving while claiming is off', stillworks.get('resolv
 req('/api/admin/refer-codes/settings', {'enabled': True, 'limit': 3}, token=at, ip_addr=ip())
 req('/api/admin/refer-codes/grant', {'userId': 'U3', 'extra': 0}, token=at, ip_addr=ip())
 ck('the switches are reversible back to defaults', True, 'limit restored to 3, codes ON', 'LOW', '')
+
+# ── 17. signup bonus codes (admin money on a code) ──────────────────────────
+print("\n[17. signup bonus codes]")
+sa, aa2 = req('/api/admin/login', ADMIN, ip_addr=ip())
+at2 = aa2.get('token') or ''
+_bc = f'BONUS{_RUN_TAG[-3:]}'.upper()
+sx, anon_list = req('/api/admin/bonus-codes', ip_addr=ip())
+ck('the bonus-code list needs an admin session', sx == 401, f"{sx}", 'CRITICAL', 'Anonymous callers can list bonus codes.')
+sx, badamt = req('/api/admin/bonus-codes/save', {'code': _bc, 'amount': -5, 'maxClaims': 5}, token=at2, ip_addr=ip())
+ck('a negative bonus is refused', sx == 400, f"{sx} {badamt.get('error')}", 'HIGH', 'A negative bonus can be created — that would debit a new user.')
+sx, badmax = req('/api/admin/bonus-codes/save', {'code': _bc, 'amount': 5, 'maxClaims': -1}, token=at2, ip_addr=ip())
+ck('a negative person-cap is refused', sx == 400, f"{sx} {badmax.get('error')}", 'HIGH', 'A negative cap can be created.')
+sx, made = req('/api/admin/bonus-codes/save', {'code': _bc, 'amount': 5, 'maxClaims': 2, 'transferable': False, 'note': 'journey test'}, token=at2, ip_addr=ip())
+ck('an admin can create a bonus code', sx == 200 and num((made.get('code') or {}).get('amount')) == 5,
+   f"{sx} {made.get('error')}", 'HIGH', 'Bonus codes cannot be created.')
+sx, usertry = req('/api/admin/bonus-codes/save', {'code': 'HACKBONUS', 'amount': 1000000, 'maxClaims': 1}, token=tu3, ip_addr=ip())
+ck('a user cannot create a bonus code', sx in (401, 403), f"{sx}", 'CRITICAL', 'A user token can mint bonus money.')
+sx, chk = req(f'/api/refer/check-code?code={_bc}', ip_addr=ip())
+ck('the signup screen can see the bonus before signing up',
+   (chk.get('bonus') or {}).get('active') is True and num((chk.get('bonus') or {}).get('amount')) == 5,
+   f"bonus={chk.get('bonus')}", 'HIGH', 'The signup form cannot warn the user about the bonus.')
+# 1st signup gets the money
+s1, id1, j1 = signup_child('bonus1@gmail.com', _bc)
+ck('a signup with the bonus code is credited exactly the amount',
+   s1 == 200 and num((j1.get('user') or {}).get('balance')) == 5 and num((j1.get('bonus') or {}).get('paid')) == 5,
+   f"{s1} balance={(j1.get('user') or {}).get('balance')} bonus={j1.get('bonus')}", 'CRITICAL',
+   'The signup bonus is not paid exactly once as configured.')
+ck('a boost-only bonus is marked locked on the account',
+   num((j1.get('user') or {}).get('signupBonusLocked')) == 5,
+   f"locked={(j1.get('user') or {}).get('signupBonusLocked')}", 'CRITICAL',
+   'Boost-only bonus money can be sent out.')
+# locked money cannot leave the wallet
+_t1, _ = login((j1.get('_email') or 'bonus1@gmail.com', 'Staging123!'), ip_addr=ip())
+sx, sent = req('/api/transfer', {'senderId': id1, 'recipientId': 'U1', 'amount': 5, 'idempotencyKey': 'bonus-locked-' + _RUN_TAG},
+               token=_t1, ip_addr=ip())
+ck('boost-only bonus money cannot be transferred', sx in (400, 403),
+   f"{sx} {sent.get('error')} sendable={sent.get('sendable')}", 'CRITICAL', 'A boost-only signup bonus can be sent out of the wallet.')
+ck('the refusal names the bonus, not a fake admin hold',
+   'signup bonus' in str(sent.get('error') or '').lower(), f"{sent.get('error')}", 'HIGH',
+   'The user is told an admin is holding their money when it is really a boost-only bonus.')
+# the ledger recorded it as money in — visible to the admin as a claimant row
+sx, ledger = req('/api/db', token=_t1, ip_addr=ip())
+_txs = (ledger or {}).get('transactions') or []
+ck('the bonus is a real ledger row',
+   any(str((t or {}).get('type')) == 'SIGNUP_BONUS' and str((t or {}).get('userId')) == str(id1) for t in _txs),
+   f"rows={len(_txs)}", 'HIGH', 'The bonus is not in the transaction history.')
+# 2nd signup uses the last remaining slot, 3rd gets nothing
+s2, id2, j2 = signup_child('bonus2@gmail.com', _bc)
+ck('the second signup still gets the bonus', s2 == 200 and num((j2.get('bonus') or {}).get('paid')) == 5,
+   f"{s2} bonus={j2.get('bonus')}", 'HIGH', 'The cap blocks a signup too early.')
+s3, id3, j3 = signup_child('bonus3@gmail.com', _bc)
+ck('once the person-cap is reached nobody else gets money', s3 == 200 and not (j3.get('bonus') or {}).get('paid'),
+   f"{s3} bonus={j3.get('bonus')} balance={(j3.get('user') or {}).get('balance')}", 'CRITICAL',
+   'The person-cap does not stop the bonus — money can be minted without limit.')
+sx, chk2 = req(f'/api/refer/check-code?code={_bc}', ip_addr=ip())
+ck('an exhausted code reports itself as inactive', (chk2.get('bonus') or {}).get('active') is False,
+   f"bonus={chk2.get('bonus')}", 'HIGH', 'An exhausted code still advertises a bonus.')
+# a transferable bonus is spendable
+_tc = f'BONUST{_RUN_TAG[-3:]}'.upper()
+sx, _ = req('/api/admin/bonus-codes/save', {'code': _tc, 'amount': 3, 'maxClaims': 5, 'transferable': True}, token=at2, ip_addr=ip())
+s4, id4, j4 = signup_child('bonust@gmail.com', _tc)
+ck('a transferable bonus is credited and NOT locked',
+   s4 == 200 and num((j4.get('user') or {}).get('balance')) == 3 and num((j4.get('user') or {}).get('signupBonusLocked')) == 0,
+   f"balance={(j4.get('user') or {}).get('balance')} locked={(j4.get('user') or {}).get('signupBonusLocked')}", 'HIGH',
+   'A transferable bonus behaves like locked money.')
+_tok4, _ = login((j4.get('_email') or 'bonust@gmail.com', 'Staging123!'), ip_addr=ip())
+sx, sent2 = req('/api/transfer', {'senderId': id4, 'recipientId': 'U1', 'amount': 1, 'idempotencyKey': 'bonus-open-' + _RUN_TAG},
+                token=_tok4, ip_addr=ip())
+ck('a transferable bonus can be sent', sx == 200, f"{sx} {sent2.get('error')}", 'CRITICAL',
+   'A transferable bonus cannot be spent — the flag does nothing.')
+# editing + switching off
+sx, edited = req('/api/admin/bonus-codes/save', {'code': _tc, 'amount': 4, 'maxClaims': 1, 'transferable': True, 'enabled': False}, token=at2, ip_addr=ip())
+ck('an admin can edit and switch a bonus code off', sx in (200, 400),
+   f"{sx} {edited.get('error')}", 'HIGH', 'Bonus codes cannot be edited or switched off.')
+sx, capdown = req('/api/admin/bonus-codes/save', {'code': _bc, 'amount': 5, 'maxClaims': 1}, token=at2, ip_addr=ip())
+ck('the cap cannot be lowered below the people who already used it', sx == 400, f"{sx} {capdown.get('error')}", 'MEDIUM',
+   'Lowering the cap can make the ledger inconsistent.')
+sx, listed = req('/api/admin/bonus-codes', token=at2, ip_addr=ip())
+ck('the admin list shows usage, paid total and claimants (ids only)',
+   sx == 200 and any(c.get('code') == _bc for c in (listed.get('codes') or [])) and num(listed.get('stats', {}).get('totalClaims')) >= 2
+   and '@' not in json.dumps(listed.get('codes') or []),
+   f"paid={listed.get('stats', {}).get('paidTotal')} claims={listed.get('stats', {}).get('totalClaims')}", 'HIGH',
+   'The admin cannot see who used a bonus code.')
+sx, gone = req('/api/admin/bonus-codes/remove', {'code': _bc}, token=at2, ip_addr=ip())
+ck('an admin can retire a bonus code', sx == 200, f"{sx}", 'HIGH', 'Bonus codes cannot be retired.')
+sx, after = req(f'/api/refer/check-code?code={_bc}', ip_addr=ip())
+ck('a retired code no longer offers money', (after.get('bonus') or {}) in (None, {}) or (after.get('bonus') or {}).get('active') is False,
+   f"bonus={after.get('bonus')}", 'CRITICAL', 'A retired bonus code still pays.')
 
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:

@@ -999,6 +999,39 @@ function refCodeLimitFor(db: any, user: any): number {
   return base + extra;
 }
 
+/** ── Signup bonus codes ────────────────────────────────────────────────────
+ * A code can carry money: join with it and the new wallet is credited. The admin
+ * decides per code the amount, how many people may use it, and whether that money
+ * is transferable or boost-only. Rows live in db.bonusCodes.
+ */
+const BONUS_MAX_AMOUNT = 100000;
+const BONUS_MAX_CLAIMS = 1000000;
+
+function bonusRowOf(db: any, rawCode: any): any | null {
+  const code = normalizeRefCode(rawCode);
+  if (!code) return null;
+  return (db.bonusCodes || []).find((b: any) => String(b.code).toUpperCase() === code) || null;
+}
+
+function bonusUsableView(b: any): any | null {
+  if (!b) return null;
+  const max = Math.max(0, Math.trunc(Number(b.maxClaims) || 0));
+  const used = Math.max(0, Math.trunc(Number(b.used) || 0));
+  const remaining = Math.max(0, max - used);
+  const amount = Math.max(0, Number(b.amount) || 0);
+  const active = b.enabled !== false && remaining > 0 && amount > 0;
+  return {
+    code: String(b.code).toUpperCase(),
+    amount: Math.round(amount * 1e8) / 1e8,
+    transferable: b.transferable !== false,
+    maxClaims: max,
+    used,
+    remaining,
+    active,
+    note: String(b.note || ''),
+  };
+}
+
 function refCodeClaimsLeft(db: any, user: any): number {
   const used = (db.referCodes || []).filter((r: any) => String(r.userId) === String(user?.id)).length;
   return Math.max(0, refCodeLimitFor(db, user) - used);
@@ -2255,7 +2288,12 @@ function publicUser(u: any): any {
     serverTime: Date.now(),
     // The user sees their own holds (the admin note stays internal).
     sendLock: { full: lock.full, amount: lock.amount, sendable: sendableBalance(u) },
-    agentLock: { full: pay.full, amount: agentLock.amount, sendable: pay.cap, cause: pay.cause }
+    agentLock: { full: pay.full, amount: agentLock.amount, sendable: pay.cap, cause: pay.cause },
+    // A "boost only" signup bonus is visible but cannot leave the wallet.
+    signupBonusLocked: signupBonusLockOf(u),
+    signupBonus: Number((u as any).signupBonus) || 0,
+    signupBonusCode: (u as any).signupBonusCode || null,
+    signupBonusTransferable: (u as any).signupBonusTransferable !== false
   };
 }
 
@@ -2394,10 +2432,24 @@ function lockOf(u: any, key: LockKey): LockView {
 function sendLockOf(u: any): LockView { return lockOf(u, 'sendLock'); }
 function agentLockOf(u: any): LockView { return lockOf(u, 'agentLock'); }
 
+/**
+ * A signup bonus can be marked "boost only" by the admin (per code). That money
+ * sits in the wallet and compounds like any other balance, but it can never leave
+ * the account: transfers, agent payments and withdrawals are capped at
+ * (balance − hold − locked bonus). Profit earned ON TOP of the bonus is spendable,
+ * so a $5 boost-only bonus on a $0 wallet becomes sendable as the wallet grows.
+ */
+function signupBonusLockOf(u: any): number {
+  const raw = Number(u && u.signupBonusLocked);
+  if (!(raw > 0)) return 0;
+  const balance = lockMoney(Number(u && u.balance) || 0);
+  return lockMoney(Math.min(raw, balance));
+}
+
 function sendableWith(u: any, lock: LockView): number {
   const balance = lockMoney(Number(u && u.balance) || 0);
   if (lock.full) return 0;
-  return lockMoney(Math.max(0, balance - lock.amount));
+  return lockMoney(Math.max(0, balance - lock.amount - signupBonusLockOf(u)));
 }
 
 /** Balance the user may transfer out right now (P2P only). */
@@ -2425,8 +2477,15 @@ function agentPayInfo(u: any): { cap: number; full: boolean; cause: 'none' | 'se
 /** Refusal for an outgoing P2P transfer. */
 function sendLockError(u: any): string {
   const lock = sendLockOf(u);
+  const bonusLocked = signupBonusLockOf(u);
   if (lock.full) return 'Sending money is temporarily locked on this account by administration. Please contact support.';
   const left = sendableBalance(u);
+  // A signup bonus marked "boost only" is a DIFFERENT reason than an admin hold —
+  // the refusal must name the real one, or the user is left guessing.
+  if (lock.amount <= 0 && bonusLocked > 0) {
+    if (left <= 0) return `Your $${bonusLocked.toFixed(2)} signup bonus can only be boosted — it cannot be sent, paid to an agent or withdrawn. Boost it and the profit you earn on top becomes sendable.`;
+    return `$${bonusLocked.toFixed(2)} of your balance is a boost-only signup bonus. You can send up to $${left.toFixed(2)} of your own profit.`;
+  }
   if (left <= 0) return `$${lock.amount.toFixed(2)} is temporarily held on this account by administration, which currently covers your whole balance. You cannot send money right now. Please contact support.`;
   return `$${lock.amount.toFixed(2)} of your balance is temporarily held by administration. You can send up to $${left.toFixed(2)} right now.`;
 }
@@ -2439,6 +2498,11 @@ function agentLockError(u: any): string {
     if (lock.full) return 'Payments to an agent are temporarily locked on this account by administration. Please contact support.';
     if (info.cap <= 0) return `$${lock.amount.toFixed(2)} is temporarily held for agent payments on this account, which currently covers your whole balance. You cannot pay an agent right now. Please contact support.`;
     return `$${lock.amount.toFixed(2)} of your balance is temporarily held for agent payments. You can still pay an agent up to $${info.cap.toFixed(2)}.`;
+  }
+  const bonusLocked = signupBonusLockOf(u);
+  if (bonusLocked > 0 && lock.amount <= 0) {
+    if (info.cap <= 0) return `Your $${bonusLocked.toFixed(2)} signup bonus can only be boosted — it cannot be paid to an agent or sent. Profit you earn on top of it can be.`;
+    return `Only $${info.cap.toFixed(2)} of your balance can go to an agent right now — $${bonusLocked.toFixed(2)} of it is a boost-only signup bonus.`;
   }
   if (info.full) return 'Sending money is temporarily locked on this account by administration. Please contact support.';
   return `Only $${info.cap.toFixed(2)} of your balance can go to an agent right now — the rest is temporarily held by administration.`;
@@ -3762,12 +3826,48 @@ async function startServer() {
       // ensure every user has a referCode field
       if (!(newUser as any).referCode) (newUser as any).referCode = String(userId);
 
+      // ── Signup bonus (admin-set code money) ─────────────────────────────
+      // Resolved from the SAME code the user typed. A bonus code does not have to
+      // belong to a referrer — an admin campaign code works on its own.
+      let signupBonus: any = null;
+      if (incomingCode) {
+        if (!db.bonusCodes) db.bonusCodes = [];
+        const bonusRow = bonusRowOf(db, incomingCode);
+        const view = bonusUsableView(bonusRow);
+        if (view && view.active) {
+          const amount = view.amount;
+          (newUser as any).balance = (Number((newUser as any).balance) || 0) + amount;
+          (newUser as any).signupBonus = amount;
+          (newUser as any).signupBonusCode = view.code;
+          (newUser as any).signupBonusLocked = view.transferable ? 0 : amount;
+          (newUser as any).signupBonusTransferable = view.transferable;
+          bonusRow.used = Math.max(0, Math.trunc(Number(bonusRow.used) || 0)) + 1;
+          bonusRow.lastUsedAt = Date.now();
+          if (!db.transactions) db.transactions = [];
+          db.transactions.unshift({
+            id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000),
+            userId: String(userId),
+            type: 'SIGNUP_BONUS',
+            amount,
+            timestamp: Date.now(),
+            balanceAfter: Number((newUser as any).balance) || 0,
+            notes: `Signup bonus via code ${view.code} (${view.transferable ? 'transferable' : 'boost only'})`,
+            metadata: { code: view.code, transferable: view.transferable, locked: !view.transferable },
+          });
+          recordAuditLog(db, 'SIGNUP_BONUS_PAID', String(userId),
+            `User #${userId} received $${amount} signup bonus via code ${view.code} (${view.transferable ? 'transferable' : 'boost only'}, ${bonusRow.used}/${view.maxClaims} used)`, String(userId));
+          signupBonus = { ...view, paid: amount, locked: !view.transferable, remainingAfter: Math.max(0, view.maxClaims - bonusRow.used) };
+          pushNotification(db, { id: 'NOTIF-'+Math.floor(10000000+Math.random()*90000000), userId: String(userId), type: 'SIGNUP_BONUS', title: 'BOOSTPAY-BONUS', message: `Welcome bonus $${amount.toFixed(2)} credited via code ${view.code}${view.transferable ? '' : ' — boost only, it cannot be sent out'}`, amount, timestamp: Date.now(), isRead: false, metadata: { code: view.code, transferable: view.transferable } } as any);
+        }
+      }
+
       db.users.push(newUser);
       const sess3 = createSession(db, userId, 'USER', clientIp(req), String(req.headers['user-agent'] || ''));
       writeDb(db);
       res.json({
         success: true,
         user: { ...publicUser(newUser), referCode: String(userId), referredBy: (newUser as any).referredBy || undefined },
+        bonus: signupBonus,
         referral: {
           applied: !!(newUser as any).referredBy,
           usedCode: incomingCode || null,
@@ -4056,7 +4156,7 @@ async function startServer() {
       const DAY_MS = 86400000;
       // Which transaction types move a wallet balance — needed to rebuild the
       // balance each day started with (the ledger records amounts, not deltas).
-      const CREDIT_TYPES = new Set(['REWARD', 'YIELD_REWARD', 'TRANSFER_RECEIVED', 'REFERRAL_COMMISSION',
+      const CREDIT_TYPES = new Set(['REWARD', 'YIELD_REWARD', 'TRANSFER_RECEIVED', 'REFERRAL_COMMISSION', 'SIGNUP_BONUS',
         'ADMIN_CREDIT', 'AGENT_TRANSFER_RECEIVED', 'AGENT_PAYOUT_REFUND', 'OPENING_BALANCE',
         'DEPOSIT', 'AGENT_TO_USER', 'AGENT_FUND', 'WITHDRAWAL_REFUND']);
       const DEBIT_TYPES = new Set(['TRANSFER_SENT', 'AGENT_TRANSFER_SENT', 'USER_TO_AGENT',
@@ -8792,6 +8892,8 @@ async function startServer() {
         resolves: !!owner.userId,
         // who a signup with this code would be linked to (ids only, never names)
         referrerId: owner.userId || null,
+        // money attached to the code, if any (signup bonus)
+        bonus: bonusUsableView(bonusRowOf(db, code)),
       });
     } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not check that code.' }); }
   });
@@ -8856,6 +8958,106 @@ async function startServer() {
     broadcastUserUpdate(db, uid);
     res.json({success:true, referredBy: String(referrer.id) });
   });
+  // ══ Admin → Referral → Signup bonus codes ══════════════════════════════
+  // A bonus code pays real money into a new wallet. Everything about it is set
+  // here: the amount, how many people may use it, whether that money can be sent
+  // out, and an on/off switch. Every change is audit-logged.
+  app.get('/api/admin/bonus-codes', requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    try {
+      const db=readDb();
+      const rows=(db.bonusCodes||[]).slice().sort((a:any,b:any)=> (Number(b.createdAt)||0)-(Number(a.createdAt)||0));
+      const claims=(db.transactions||[]).filter((t:any)=> t.type==='SIGNUP_BONUS');
+      const paidTotal=claims.reduce((a:number,t:any)=> a+(Number(t.amount)||0),0);
+      const q=String(req.query.q||'').trim().toUpperCase();
+      let list=rows.map((b:any)=>{
+        const v=bonusUsableView(b) || {};
+        const mine=claims.filter((t:any)=> String((t.metadata||{}).code||'')===String(b.code).toUpperCase());
+        return {
+          id: b.id, code: String(b.code).toUpperCase(),
+          amount: Number(b.amount)||0, maxClaims: Number(b.maxClaims)||0,
+          used: Math.max(0, Math.trunc(Number(b.used)||0)),
+          remaining: v.remaining, active: !!v.active, enabled: b.enabled!==false,
+          transferable: b.transferable!==false,
+          note: String(b.note||''), createdAt: Number(b.createdAt)||0,
+          // staff identity stays in the audit log — the panel only needs "was it staff"
+          createdByStaff: !!b.createdBy,
+          paidTotal: mine.reduce((a:number,t:any)=> a+(Number(t.amount)||0),0),
+          lastUsedAt: Number(b.lastUsedAt)||0,
+          claimedBy: mine.slice(0,20).map((t:any)=> ({ userId:String(t.userId), amount:Number(t.amount)||0, at:Number(t.timestamp)||0 })),
+        };
+      });
+      if (q) list=list.filter((b:any)=> b.code.includes(q) || b.note.toUpperCase().includes(q));
+      res.setHeader('Cache-Control','no-store');
+      res.json({
+        bounds:{ maxAmount: BONUS_MAX_AMOUNT, maxClaims: BONUS_MAX_CLAIMS },
+        stats:{ codes:rows.length, activeCodes:list.filter((b:any)=>b.active).length, totalClaims:claims.length, paidTotal: Math.round(paidTotal*1e8)/1e8, lockedClaims: claims.filter((t:any)=> (t.metadata||{}).locked).length },
+        codes:list,
+      });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not load bonus codes.' }); }
+  });
+
+  app.post('/api/admin/bonus-codes/save', rateLimit(60), requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    try {
+      const db=readDb();
+      if (!db.bonusCodes) db.bonusCodes=[];
+      const body=req.body||{};
+      const id=String(body.id||'');
+      const code=normalizeRefCode(body.code);
+      const fmt=validateRefCodeFormat(code);
+      if (!fmt.ok) return res.status(400).json({ error: fmt.error });
+      const amount=Number(body.amount);
+      if (!Number.isFinite(amount) || amount<0 || amount>BONUS_MAX_AMOUNT) {
+        return res.status(400).json({ error:`Bonus amount must be between 0 and ${BONUS_MAX_AMOUNT}.` });
+      }
+      const maxClaims=Math.trunc(Number(body.maxClaims));
+      if (!Number.isFinite(maxClaims) || maxClaims<0 || maxClaims>BONUS_MAX_CLAIMS) {
+        return res.status(400).json({ error:`How many people may use it must be between 0 and ${BONUS_MAX_CLAIMS}.` });
+      }
+      let row=(db.bonusCodes||[]).find((b:any)=> (id && String(b.id)===id) || String(b.code).toUpperCase()===code);
+      // a bonus code must not collide with somebody's personal refer code
+      const owner=resolveRefCode(db, code);
+      if (owner.userId && !(row && String(owner.userId)===String(row.ownerUserId||''))) {
+        return res.status(409).json({ error:`${code} is already a personal refer code of #${owner.userId}. Pick another code, or use that user's code and set the bonus on it here (ownerUserId).` });
+      }
+      if (row) {
+        const nextUsed=Math.max(0, Math.trunc(Number(row.used)||0));
+        if (maxClaims < nextUsed) return res.status(400).json({ error:`${nextUsed} people already used this code — the limit cannot be lower than that.` });
+        row.amount=amount; row.maxClaims=maxClaims;
+        row.transferable=body.transferable!==false;
+        row.enabled=body.enabled!==false;
+        row.note=String(body.note||'').slice(0,200);
+        row.updatedAt=Date.now();
+        row.updatedBy=String(req.authAdmin||'admin');
+      } else {
+        row={ id:'BN-'+Math.floor(10000000+Math.random()*90000000), code, amount, maxClaims, used:0,
+          transferable: body.transferable!==false, enabled: body.enabled!==false,
+          note:String(body.note||'').slice(0,200), createdAt:Date.now(),
+          createdBy:String(req.authAdmin||'admin'),
+          ownerUserId: owner.userId ? String(owner.userId) : null };
+        db.bonusCodes.unshift(row);
+      }
+      recordAuditLog(db,'BONUS_CODE_SAVED', String(req.authAdmin||'admin'),
+        `Signup bonus code ${row.code}: $${amount}, max ${maxClaims}, ${row.transferable?'transferable':'boost only'}, ${row.enabled?'ON':'OFF'}`, row.code);
+      writeDb(db);
+      res.json({ success:true, code: bonusUsableView(row), id: row.id });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not save the bonus code.' }); }
+  });
+
+  app.post('/api/admin/bonus-codes/remove', rateLimit(60), requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    try {
+      const db=readDb();
+      const id=String((req.body||{}).id||'');
+      const code=normalizeRefCode((req.body||{}).code);
+      const row=(db.bonusCodes||[]).find((b:any)=> (id && String(b.id)===id) || (code && String(b.code).toUpperCase()===code));
+      if (!row) return res.status(404).json({ error:'No such bonus code.' });
+      db.bonusCodes=(db.bonusCodes||[]).filter((b:any)=> b!==row);
+      recordAuditLog(db,'BONUS_CODE_REMOVED', String(req.authAdmin||'admin'),
+        `Bonus code ${row.code} removed (paid ${row.used||0} people)`, String(row.code));
+      writeDb(db);
+      res.json({ success:true, code:String(row.code).toUpperCase() });
+    } catch (err:any) { res.status(500).json({ error: err?.message || 'Could not remove the bonus code.' }); }
+  });
+
   // ══ Admin → Referral → Codes ═══════════════════════════════════════════
   // Everything about vanity codes is driven from the admin panel: the global
   // limit, an on/off switch, per-user grants, and direct set/remove/make-primary

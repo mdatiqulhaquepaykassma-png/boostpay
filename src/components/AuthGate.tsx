@@ -375,9 +375,25 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                 refChecking ? (
                   <p className="text-[10px] text-zinc-500 mt-1 font-mono">checking code…</p>
                 ) : refCheck && refCheck.resolves ? (
-                  <p className="text-[10px] text-emerald-400/80 mt-1 font-mono">
-                    ✓ Code {refCheck.code} is valid{refCheck.referrerId ? ` — linked to User #${refCheck.referrerId}` : ''}
-                  </p>
+                  <div className="mt-1 space-y-0.5">
+                    <p className="text-[10px] text-emerald-400/80 font-mono">
+                      ✓ Code {refCheck.code} is valid{refCheck.referrerId ? ` — linked to User #${refCheck.referrerId}` : ''}
+                    </p>
+                    {refCheck.bonus && refCheck.bonus.active && (
+                      <p className="text-[10px] font-mono text-amber-300">
+                        🎁 ${Number(refCheck.bonus.amount).toFixed(2)} signup bonus
+                        {refCheck.bonus.transferable ? ' (withdrawable)' : ' (boost only — cannot be sent out)'}
+                      </p>
+                    )}
+                  </div>
+                ) : refCheck && !refCheck.resolves && refCheck.bonus && refCheck.bonus.active ? (
+                  <div className="mt-1 space-y-0.5">
+                    <p className="text-[10px] font-mono text-amber-300">
+                      🎁 Code {refCheck.code} gives a ${Number(refCheck.bonus.amount).toFixed(2)} signup bonus
+                      {refCheck.bonus.transferable ? '' : ' (boost only)'}
+                    </p>
+                    <p className="text-[10px] font-mono text-zinc-500">no personal referrer on this code</p>
+                  </div>
                 ) : refCheck && !refCheck.resolves ? (
                   <p className="text-[10px] text-rose-400/90 mt-1 font-mono">
                     ✕ No user has the code {refCheck.code} — you can still sign up, but no referrer will be linked.
