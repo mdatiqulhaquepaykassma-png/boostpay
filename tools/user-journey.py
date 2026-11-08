@@ -1096,6 +1096,98 @@ ck('a no-withdraw bonus can never be paid out by expiry',
    f"before={cbal} after={me4.get('balance')}", 'CRITICAL',
    'A boost-only bonus becomes withdrawable cash just by waiting.')
 
+
+# ── 20. "send to refer only" — admin pins transfers to the upline ────────────
+print("\n[20. send to refer only]")
+_up1_s, _up1, _ = signup_child('upline@gmail.com', 'U1')          # child of U1 (L1)
+_up2_s, _up2, _ = signup_child('downline@gmail.com', _up1)        # grandchild (L2)
+_up3_s, _up3, _ = signup_child('deep@gmail.com', _up2)            # great-grandchild (L3)
+_l1_tok, _ = login((f'upline-{_RUN_TAG}@gmail.com', 'Staging123!'), ip_addr=ip())
+_l2_tok, _ = login((f'downline-{_RUN_TAG}@gmail.com', 'Staging123!'), ip_addr=ip())
+# fresh admin session — an admin token from an earlier section can be signed out
+_rsa_s, _rsa_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rsadm = _rsa_j.get('token') or ''
+ck('the test chain exists (L1 + L2 + L3)', bool(_up1 and _up2 and _up3), f'{_up1}/{_up2}/{_up3}', 'HIGH',
+   'The upline chain could not be built, so the send rule cannot be tested.')
+
+# fund the sender so a refusal is about the rule, not about the balance
+for _amt in (6, 6):
+    req('/api/transfer', {'senderId': 'U1', 'recipientId': _up1, 'amount': _amt,
+                          'idempotencyKey': f'rsfund{_RUN_TAG}{_amt}{_up1}'}, tu1, ip_addr=ip())
+
+sx, rs = req('/api/admin/users/refer-send', {'userId': _up1, 'mode': 'l1', 'amount': 10, 'period': 'total',
+                                             'note': 'journey test'}, token=_rsadm, ip_addr=ip())
+ck('an admin can pin sending to the direct refer, with a cap', sx == 200 and (rs.get('referSend') or {}).get('mode') == 'l1',
+   f"{sx} {rs.get('referSend')}", 'CRITICAL', 'The admin cannot set a send-to-refer rule.')
+
+sx, mine = req('/api/user/refer-send', token=_l1_tok, ip_addr=ip())
+ck('the user is told the rule before they send', mine.get('restricted') is True and mine.get('mode') == 'l1',
+   f"restricted={mine.get('restricted')} mode={mine.get('mode')} referrer={mine.get('referrerId')}", 'HIGH',
+   'The Send screen cannot know about the restriction.')
+ck('only one recipient is allowed on L1 mode', int(mine.get('allowedCount') or 0) == 1,
+   f"allowed={mine.get('allowedCount')}", 'HIGH', 'L1 mode allows more than the direct refer.')
+ck('the rule names the real referrer', str(mine.get('referrerId')) == 'U1',
+   f"referrerId={mine.get('referrerId')}", 'MEDIUM', 'The referrer shown is not the real account.')
+
+sx, to_stranger = req('/api/transfer', {'senderId': _up1, 'recipientId': 'U2', 'amount': 1,
+                                        'idempotencyKey': f'rsx{_RUN_TAG}1'}, _l1_tok, ip_addr=ip())
+ck('sending to somebody outside the rule is refused', sx == 403 and to_stranger.get('referSendLimited') is True,
+   f"{sx} {to_stranger.get('error')}", 'CRITICAL', 'A restricted user can still pay anyone.')
+
+sx, to_child = req('/api/transfer', {'senderId': _up1, 'recipientId': _up2, 'amount': 1,
+                                     'idempotencyKey': f'rsx{_RUN_TAG}2'}, _l1_tok, ip_addr=ip())
+ck('L1 mode also blocks the user own downline', sx == 403,
+   f"{sx} {to_child.get('error')}", 'HIGH', 'L1 mode leaks to team members.')
+
+sx, ok_send = req('/api/transfer', {'senderId': _up1, 'recipientId': 'U1', 'amount': 4,
+                                    'idempotencyKey': f'rsok{_RUN_TAG}'}, _l1_tok, ip_addr=ip())
+ck('sending to the direct refer still works inside the cap', sx == 200,
+   f"{sx} {(ok_send or {}).get('error')}", 'CRITICAL', 'The rule blocks even the allowed transfer.')
+
+sx, over = req('/api/transfer', {'senderId': _up1, 'recipientId': 'U1', 'amount': 7,
+                                 'idempotencyKey': f'rsover{_RUN_TAG}'}, _l1_tok, ip_addr=ip())
+ck('the cap is enforced — $4 used of $10 means $7 is refused', sx == 403,
+   f"{sx} {over.get('error')}", 'CRITICAL', 'The amount cap can be bypassed.')
+sx, mine2 = req('/api/user/refer-send', token=_l1_tok, ip_addr=ip())
+ck('the user sees how much of the cap is left', abs(num(mine2.get('used')) - 4) < 1e-6 and abs(num(mine2.get('remaining')) - 6) < 1e-6,
+   f"used={mine2.get('used')} remaining={mine2.get('remaining')}", 'HIGH',
+   'The user cannot tell how much they may still send.')
+
+sx, audit = req('/api/admin/audit-logs', token=_rsadm, ip_addr=ip())
+_rows = audit.get('logs') if isinstance(audit.get('logs'), list) else (audit.get('auditLogs') or [])
+ck('the rule change is in the audit log',
+   any('REFER_SEND' in str(r.get('action') or r.get('type') or '') and str(_up1) in str(r.get('details') or r.get('message') or '') for r in _rows),
+   f"rows={len(_rows)}", 'HIGH', 'An admin send-rule change left no audit trail.')
+
+# tick "also allow team members" → the downline (L2 and L3) may now receive
+sx, teamset = req('/api/admin/users/refer-send', {'userId': _up1, 'mode': 'team', 'amount': 0, 'period': 'day'},
+                  token=_rsadm, ip_addr=ip())
+ck('the admin can widen it to refer + team', sx == 200 and (teamset.get('referSend') or {}).get('mode') == 'team',
+   f"{sx} {teamset.get('referSend')}", 'HIGH', 'Team mode cannot be set.')
+sx, mine3 = req('/api/user/refer-send', token=_l1_tok, ip_addr=ip())
+ck('team mode allows the whole downline, not just one level', int(mine3.get('allowedCount') or 0) >= 2,
+   f"allowed={mine3.get('allowedCount')}", 'HIGH', 'Team mode only reaches L1.')
+sx, deep_ok = req('/api/transfer', {'senderId': _up1, 'recipientId': _up3, 'amount': 1,
+                                    'idempotencyKey': f'rsteam{_RUN_TAG}'}, _l1_tok, ip_addr=ip())
+ck('an L3 member can receive once team mode is on', sx == 200,
+   f"{sx} {(deep_ok or {}).get('error')}", 'CRITICAL', 'Team mode does not reach deep members.')
+sx, still_no = req('/api/transfer', {'senderId': _up1, 'recipientId': 'U2', 'amount': 1,
+                                     'idempotencyKey': f'rsteamx{_RUN_TAG}'}, _l1_tok, ip_addr=ip())
+ck('team mode still refuses outsiders', sx == 403, f"{sx} {still_no.get('error')}", 'HIGH',
+   'Team mode opens sending to the whole platform.')
+
+sx, off = req('/api/admin/users/refer-send', {'userId': _up1, 'mode': 'off'}, token=_rsadm, ip_addr=ip())
+sx, after = req('/api/transfer', {'senderId': _up1, 'recipientId': 'U2', 'amount': 1,
+                                  'idempotencyKey': f'rsoff{_RUN_TAG}'}, _l1_tok, ip_addr=ip())
+ck('removing the rule restores normal sending', sx == 200,
+   f"{sx} {(after or {}).get('error')}", 'CRITICAL', 'The restriction cannot be released.')
+sx, neg = req('/api/admin/users/refer-send', {'userId': _up1, 'mode': 'team', 'amount': -5}, token=_rsadm, ip_addr=ip())
+ck('a negative limit is refused', sx == 400, f"{sx} {neg.get('error')}", 'MEDIUM',
+   'A negative cap is accepted, which could block or corrupt the check.')
+sx, badmode = req('/api/admin/users/refer-send', {'userId': _up1, 'mode': 'everyone'}, token=_rsadm, ip_addr=ip())
+ck('an unknown mode is refused', sx == 400, f"{sx} {badmode.get('error')}", 'MEDIUM',
+   'An unknown mode silently becomes something else.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

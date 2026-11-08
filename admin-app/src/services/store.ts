@@ -1081,6 +1081,35 @@ export class BoostPayStore {
     return this.adminSetTemporaryLock('/api/admin/users/send-lock', userId, payload) as any;
   }
 
+  /**
+   * Admin: "Send to refer only" rule for one user.
+   *   mode 'off'  → normal sending
+   *   mode 'l1'   → only the direct referrer
+   *   mode 'team' → the direct referrer plus their whole downline
+   *   amount + period ('day' | 'send' | 'total') → the cap (0 = no cap)
+   * Enforced server-side inside /api/transfer.
+   */
+  static async adminSetReferSend(
+    userId: string,
+    payload: { mode: 'off' | 'l1' | 'team'; amount?: number; period?: 'day' | 'send' | 'total'; note?: string }
+  ): Promise<{ success: boolean; user?: any; referSend?: any; error?: string }> {
+    try {
+      const res = await fetch('/api/admin/users/refer-send', {
+        method: 'POST',
+        headers: this.adminAuthHeaders(),
+        body: JSON.stringify({ userId, ...payload }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (data.mfaRequired) return { success: false, error: 'Admin sign-in required. Please reload the console and sign in again.' };
+        return { success: false, error: data.error || `Could not save the rule (${res.status})` };
+      }
+      return { success: true, user: data.user, referSend: data.referSend };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Network error.' };
+    }
+  }
+
   private static async adminSetTemporaryLock(
     path: string,
     userId: string,

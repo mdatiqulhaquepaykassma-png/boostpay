@@ -2709,6 +2709,97 @@ function sendLockError(u: any): string {
   return `$${lock.amount.toFixed(2)} of your balance is temporarily held by administration. You can send up to $${left.toFixed(2)} right now.`;
 }
 
+// ── "Send to refer only" policy ────────────────────────────────────────────
+// Admin can pin a user's outgoing P2P transfers to their own upline, with a cap:
+//   mode 'off'  → normal sending
+//   mode 'l1'   → only the direct referrer (tick: "only L1 refer")
+//   mode 'team' → the direct referrer AND everyone in their downline
+//   period      → the cap applies per day ('day'), per send ('send') or once ('total')
+// It is a SEND restriction only: receiving, boosting, withdrawals and agent
+// payments are untouched. The server is the only place it is enforced.
+const referRound2 = (n: number) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+const REFER_SEND_MODES = ['off', 'l1', 'team'];
+const REFER_SEND_PERIODS = ['day', 'send', 'total'];
+
+function referSendPolicyOf(u: any) {
+  const p = (u && (u as any).referSend) || {};
+  const mode = REFER_SEND_MODES.includes(String(p.mode)) ? String(p.mode) : 'off';
+  const period = REFER_SEND_PERIODS.includes(String(p.period)) ? String(p.period) : 'day';
+  const amount = Math.max(0, referRound2(Number(p.amount) || 0));
+  return {
+    mode, period, amount,
+    note: String(p.note || '').slice(0, 160),
+    setBy: String(p.setBy || ''),
+    setAt: Number(p.setAt) || 0,
+  };
+}
+
+/** Who this user is allowed to send to under the policy (empty set when mode is off). */
+function referSendRecipients(db: any, userId: string, mode: string): Set<string> {
+  const out = new Set<string>();
+  if (mode === 'off') return out;
+  const uid = String(userId);
+  // "Only refer" always means the person who referred ME (my upline, L1).
+  const uplink = (db.referrals || []).find((r: any) => String(r.referredId) === uid);
+  if (uplink) out.add(String(uplink.referrerId));
+  if (mode === 'team') {
+    // Tick "also team members": everyone under me, at any depth.
+    const walk = walkTeam(buildReferralIndex(db), uid);
+    for (const id of walk.level.keys()) out.add(String(id));
+  }
+  return out;
+}
+
+/** How much of the cap is already spent in the policy window. */
+function referSendUsed(db: any, userId: string, period: string, now = Date.now()): number {
+  if (period === 'send') return 0;
+  const uid = String(userId);
+  const today = getDayKey(now);
+  let total = 0;
+  for (const t of (db.transactions || [])) {
+    if (String(t.userId) !== uid || t.type !== 'TRANSFER_SENT') continue;
+    if (period === 'day' && getDayKey(Number(t.timestamp) || 0) !== today) continue;
+    total += Number(t.amount) || 0;
+  }
+  return referRound2(total);
+}
+
+/** Human wording for who the user may pay. */
+function referSendLabel(mode: string): string {
+  return mode === 'l1' ? 'your direct referrer only' : 'your direct referrer and your own team members only';
+}
+
+/**
+ * Refusal for an outgoing P2P transfer blocked by the "send to refer only" rule.
+ * Returns null when the transfer is allowed.
+ */
+function referSendLimitError(db: any, sender: any, recipientId: string, amount: number): { error: string; referSend: any } | null {
+  const policy = referSendPolicyOf(sender);
+  if (policy.mode === 'off') return null;
+  const allowed = referSendRecipients(db, String(sender.id), policy.mode);
+  const publicPolicy = { mode: policy.mode, amount: policy.amount, period: policy.period, note: policy.note };
+  if (!allowed.has(String(recipientId))) {
+    return {
+      error: `Sending is limited on this account: you can only send money to ${referSendLabel(policy.mode)}. This recipient is not in that list.`,
+      referSend: publicPolicy,
+    };
+  }
+  if (policy.amount > 0) {
+    const used = referSendUsed(db, String(sender.id), policy.period);
+    const left = referRound2(Math.max(0, policy.amount - used));
+    if (amount > left + 1e-9) {
+      const when = policy.period === 'day' ? ' per day' : (policy.period === 'total' ? ' in total' : ' per transfer');
+      return {
+        error: left <= 0
+          ? `You have used your whole limit of $${policy.amount.toFixed(2)}${when} for sending to ${referSendLabel(policy.mode)}.`
+          : `Your sending limit is $${policy.amount.toFixed(2)}${when} to ${referSendLabel(policy.mode)} — you can send at most $${left.toFixed(2)} right now.`,
+        referSend: { ...publicPolicy, used, remaining: left },
+      };
+    }
+  }
+  return null;
+}
+
 /** Refusal for an outgoing payment to an agent (names whichever hold binds). */
 function agentLockError(u: any): string {
   const info = agentPayInfo(u);
@@ -2738,7 +2829,9 @@ function adminUserView(u: any): any {
     sendLock: { mode: lock.full ? 'full' : (lock.amount > 0 ? 'amount' : 'off'), amount: lock.amount, note: lock.note, setAt: lock.setAt },
     sendableBalance: sendableBalance(u),
     agentLock: { mode: agent.full ? 'full' : (agent.amount > 0 ? 'amount' : 'off'), amount: agent.amount, note: agent.note, setAt: agent.setAt },
-    agentSendable: agentPayInfo(u).cap
+    agentSendable: agentPayInfo(u).cap,
+    referSend: referSendPolicyOf(u),
+    referSendUsed: 0
   };
 }
 
@@ -6444,6 +6537,13 @@ async function startServer() {
       if (recipient.isBlocked) return res.status(403).json({ error: 'Recipient account is restricted.' });
       if (recipient.isFrozen) return res.status(403).json({ error: 'Recipient account is currently frozen.' });
 
+      // "Send to refer only" — checked before any money moves.
+      const referBlock = referSendLimitError(db, sender, String(recipient.id), numAmount);
+      if (referBlock) {
+        refundRateLimit(req);
+        return res.status(403).json({ ...referBlock, referSendLimited: true });
+      }
+
       const senderSendable = sendableBalance(sender);
       if (senderSendable <= 0) {
         return res.status(403).json({ error: sendLockError(sender), sendLocked: sendLockOf(sender), sendable: senderSendable });
@@ -7661,6 +7761,96 @@ async function startServer() {
   // support cases, so it is NOT gated behind the 5-minute MFA unlock (treasury,
   // freeze and delete still are). Only a signed-in SUPERADMIN can call it and
   // every change is written to the audit log.
+  /**
+   * Admin → Manage → "Send to refer only".
+   * Pins a user's outgoing P2P transfers to their own upline, with an optional cap:
+   *   mode 'off'    → normal sending
+   *   mode 'l1'     → only the direct referrer (tick: "only L1 refer")
+   *   mode 'team'   → the direct referrer plus everyone in their downline
+   *   amount/period → cap per day, per transfer, or once in total (0 = no cap)
+   * SUPERADMIN only, audit-logged, and enforced again inside /api/transfer.
+   */
+  app.post('/api/admin/users/refer-send', requireSuperAdmin, (req: any, res) => {
+    try {
+      const body: any = req.body || {};
+      const userId = String(body.userId || '').trim();
+      if (!userId) return res.status(400).json({ error: 'userId is required.' });
+      const mode = String(body.mode || '').trim().toLowerCase();
+      if (!REFER_SEND_MODES.includes(mode)) return res.status(400).json({ error: "mode must be 'off', 'l1' or 'team'." });
+      const period = REFER_SEND_PERIODS.includes(String(body.period || '').trim().toLowerCase())
+        ? String(body.period).trim().toLowerCase() : 'day';
+      const db = readDb();
+      const user = (db.users || []).find((u: any) => String(u.id) === userId);
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+
+      let amount = 0;
+      if (mode !== 'off') {
+        amount = referRound2(Number(body.amount) || 0);
+        if (!(amount >= 0)) return res.status(400).json({ error: 'Limit amount cannot be negative.' });
+        if (amount > MAX_LOCK_AMOUNT) return res.status(400).json({ error: 'That limit is too large.' });
+      }
+      if (mode === 'off') {
+        user.referSend = { mode: 'off', amount: 0, period: 'day', note: '', setBy: String(req.authAdmin || ''), setAt: Date.now() };
+      } else {
+        user.referSend = {
+          mode, amount, period,
+          note: sanitizeText(body.note, 160),
+          setBy: String(req.authAdmin || ''),
+          setAt: Date.now(),
+        };
+      }
+      const policy = referSendPolicyOf(user);
+      const allowed = referSendRecipients(db, String(user.id), policy.mode);
+      try {
+        recordAuditLog(
+          db, 'USER_REFER_SEND_LIMIT', String(req.authAdmin || 'admin'),
+          `User #${user.id} send-to-refer -> ${policy.mode === 'off' ? 'released' : `${policy.mode === 'l1' ? 'direct refer only' : 'refer + team'}, ${policy.amount > 0 ? `$${policy.amount.toFixed(2)} ${policy.period === 'day' ? 'per day' : (policy.period === 'total' ? 'in total' : 'per transfer')}` : 'no amount cap'}${policy.note ? ` (${policy.note})` : ''}`}`,
+          String(user.id)
+        );
+      } catch { /* audit must not break the action */ }
+      writeDb(db);
+      try { broadcastUserUpdate(db, String(user.id)); } catch { /* ignore */ }
+      res.json({
+        success: true,
+        user: adminUserView(user),
+        referSend: { ...policy, allowedRecipients: allowed.size, used: referSendUsed(db, String(user.id), policy.period) },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Could not save the send limit.' });
+    }
+  });
+
+  /** The signed-in user's own send rule, so the Send screen can warn before they tap. */
+  app.get('/api/user/refer-send', requireUser, (req: any, res) => {
+    try {
+      const db = readDb();
+      const uid = String(req.authUserId || '');
+      const me = (db.users || []).find((u: any) => String(u.id) === uid);
+      if (!me) return res.status(404).json({ error: 'User not found.' });
+      const policy = referSendPolicyOf(me);
+      const allowed = referSendRecipients(db, uid, policy.mode);
+      const used = referSendUsed(db, uid, policy.period);
+      // The upline comes from the referral graph (the same source commissions use),
+      // not from the stored code, so the ID shown is always the real account.
+      const uplink = (db.referrals || []).find((r: any) => String(r.referredId) === uid);
+      const referrer = uplink ? String(uplink.referrerId) : null;
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        mode: policy.mode,
+        amount: policy.amount,
+        period: policy.period,
+        note: policy.note,
+        restricted: policy.mode !== 'off',
+        label: policy.mode === 'off' ? '' : referSendLabel(policy.mode),
+        referrerId: referrer,
+        allowedRecipients: Array.from(allowed).slice(0, 500),
+        allowedCount: allowed.size,
+        used,
+        remaining: policy.amount > 0 ? referRound2(Math.max(0, policy.amount - used)) : null,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load your send rule.' }); }
+  });
+
   app.post('/api/admin/users/send-lock', requireSuperAdmin, (req: any, res) => {
     try {
       const body: any = req.body || {};

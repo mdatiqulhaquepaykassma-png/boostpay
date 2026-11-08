@@ -1,4 +1,5 @@
 import { FC, useState, useEffect, useRef } from 'react';
+import { ReferSendCard } from './ReferSendCard';
 import { SendLockCard } from './SendLockCard';
 import { MoneyFlowView } from './MoneyFlowView';
 import { ReferCodesView } from './ReferCodesView';
@@ -2139,6 +2140,20 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       void refreshData(true);
                     }}
                   />
+
+                  {/* Send to refer only — pins outgoing transfers to the upline */}
+                  <ReferSendCard
+                    key={`refersend-desktop-${selectedUser.id}`}
+                    userId={String(selectedUser.id)}
+                    policy={(selectedUser as any).referSend}
+                    onChanged={(updated?: any) => {
+                      if (updated) {
+                        setSelectedUser((curr: any) => (curr && String(curr.id) === String(updated.id) ? { ...curr, ...updated } : curr));
+                        setUsers((prev: any[]) => prev.map((u: any) => (String(u.id) === String(updated.id) ? { ...u, ...updated } : u)));
+                      }
+                      void refreshData(true);
+                    }}
+                  />
                 </div>
               </div>
             )}
@@ -2244,6 +2259,19 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       }
                       void refreshData(true);
                     }}
+                        />
+
+                        <ReferSendCard
+                          key={`refersend-mobile-${selectedUser.id}`}
+                          userId={String(selectedUser.id)}
+                          policy={(selectedUser as any).referSend}
+                          onChanged={(updated?: any) => {
+                            if (updated) {
+                              setSelectedUser((curr: any) => (curr && String(curr.id) === String(updated.id) ? { ...curr, ...updated } : curr));
+                              setUsers((prev: any[]) => prev.map((u: any) => (String(u.id) === String(updated.id) ? { ...u, ...updated } : u)));
+                            }
+                            void refreshData(true);
+                          }}
                         />
                         <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
                           <div className="text-xs font-bold text-white mb-2 flex items-center gap-2"><PlusCircle className="w-4 h-4 text-emerald-400" /> Treasury — Credit / Debit</div>

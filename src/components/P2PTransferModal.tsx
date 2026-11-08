@@ -27,6 +27,9 @@ export const P2PTransferModal: FC<Props> = ({
   // Admin "sent money" hold — shown ONLY when the user taps Send (owner request:
   // no standing notice anywhere else in the app).
   const [lockNotice, setLockNotice] = useState('');
+  // Admin "send to refer only" rule — fetched when the sheet opens, and the server
+  // is still the final authority on every transfer.
+  const [rule, setRule] = useState<any>(null);
   const [step, setStep] = useState<'INPUT' | 'SUCCESS'>('INPUT');
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -61,6 +64,37 @@ export const P2PTransferModal: FC<Props> = ({
   const lockCap = typeof sendLock?.sendable === 'number' ? sendLock.sendable : null;
 
   useEffect(() => { setLockNotice(''); }, [amount, recipientId]);
+
+  useEffect(() => {
+    let alive = true;
+    if (!isOpen) return;
+    setRule(null);
+    fetch('/api/user/refer-send', { headers: BoostPayStore.authHeaders() })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (alive && j) setRule(j); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [isOpen]);
+
+  const ruleMode = rule?.restricted ? String(rule.mode) : 'off';
+  const ruleAllowed: string[] = Array.isArray(rule?.allowedRecipients) ? rule.allowedRecipients.map(String) : [];
+  const ruleRemaining = rule?.remaining === null || rule?.remaining === undefined ? null : Number(rule.remaining);
+
+  /** Client-side pre-check so the user never has to trigger a server refusal. */
+  const ruleError = (toId: string, amt: number): string | null => {
+    if (ruleMode === 'off') return null;
+    const who = ruleMode === 'l1' ? 'your direct referrer' : 'your referrer or your own team members';
+    if (toId && !ruleAllowed.includes(toId)) {
+      return `Sending is limited on this account — you can only send to ${who}. #${toId} is not in that list.`;
+    }
+    if (ruleRemaining !== null && amt > ruleRemaining + 1e-9) {
+      const per = rule?.period === 'day' ? ' per day' : rule?.period === 'total' ? ' in total' : ' per transfer';
+      return ruleRemaining <= 0
+        ? `You have used your whole sending limit of $${Number(rule.amount).toFixed(2)}${per} for sending to ${who}.`
+        : `Your sending limit is $${Number(rule.amount).toFixed(2)}${per} to ${who} — you can send at most $${ruleRemaining.toFixed(2)} right now.`;
+    }
+    return null;
+  };
 
   if (!isOpen) return null;
 
@@ -103,6 +137,12 @@ export const P2PTransferModal: FC<Props> = ({
     const cleanRecipient = recipientId.trim();
     if (!cleanRecipient || cleanRecipient === currentUser.id) {
       setError('Please enter a valid recipient User ID different from your own.');
+      return;
+    }
+
+    const blocked = ruleError(cleanRecipient, numAmount);
+    if (blocked) {
+      setError(blocked);
       return;
     }
 
@@ -211,6 +251,22 @@ export const P2PTransferModal: FC<Props> = ({
         {/* Step 1: Clean Input Form */}
         {step === 'INPUT' && (
           <form onSubmit={handleExecuteTransfer} className="space-y-4">
+            {/* Send-to-refer rule (set by admin) — shown only when it exists */}
+            {ruleMode !== 'off' && (
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] p-3 text-[11px] leading-relaxed text-emerald-200">
+                <p className="font-bold text-emerald-300">
+                  {ruleMode === 'l1' ? 'You can send only to your direct referrer' : 'You can send only to your referrer and team members'}
+                </p>
+                <p className="mt-0.5 text-emerald-200/80">
+                  {rule?.referrerId ? `Referrer: #${rule.referrerId}. ` : ''}
+                  {Number(rule?.amount) > 0
+                    ? `Limit $${Number(rule.amount).toFixed(2)} ${rule?.period === 'day' ? 'per day' : rule?.period === 'total' ? 'in total' : 'per transfer'} — $${Number(rule?.remaining ?? 0).toFixed(2)} left.`
+                    : 'No amount limit.'}
+                </p>
+                {rule?.note ? <p className="mt-0.5 text-emerald-200/60">“{rule.note}”</p> : null}
+              </div>
+            )}
+
             {/* Boost Active Protection Warning */}
             {isBoostActive && (
               <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-3 flex items-start gap-2.5 text-xs text-amber-300">
