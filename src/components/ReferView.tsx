@@ -234,8 +234,10 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
       {bonus && bonus.wallet && (Number(bonus.wallet.granted) > 0 || Number(bonus.wallet.available) > 0) && (
         <div className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.04] p-4">
           <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">🎁 Bonus wallet</span>
-            {bonus.campaignCode && <span className="rounded-full bg-zinc-950 px-2 py-0.5 font-mono text-[10px] text-zinc-400">{bonus.campaignCode}</span>}
+            <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
+              🎁 {bonus.campaignCode === 'WELCOME' ? 'Welcome bonus' : 'Bonus wallet'}
+            </span>
+            {bonus.campaignCode && bonus.campaignCode !== 'WELCOME' && <span className="rounded-full bg-zinc-950 px-2 py-0.5 font-mono text-[10px] text-zinc-400">{bonus.campaignCode}</span>}
           </div>
           <div className="mt-2 grid grid-cols-2 gap-2">
             <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 px-3 py-2">

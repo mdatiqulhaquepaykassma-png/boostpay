@@ -1052,10 +1052,19 @@ const CAMPAIGN_STATUSES = ['ACTIVE', 'PAUSED', 'INACTIVE'] as const;
 const BONUS_MAX_USES = 1000000;
 const BONUS_AMOUNT_MAX = 100000;
 
+/** The single automatic welcome-bonus campaign, if one is configured and live. */
+function welcomeCampaignOf(db: any): any | null {
+  const list = (db.campaigns || []).filter((c: any) => c && c.kind === 'WELCOME');
+  if (!list.length) return null;
+  // prefer a live one, so an expired welcome campaign never hides a newer active one
+  const live = list.find((c: any) => campaignState(db, c).live);
+  return live || null;
+}
+
 function campaignOf(db: any, rawCode: any): any | null {
   const code = normalizeRefCode(rawCode);
   if (!code) return null;
-  return (db.campaigns || []).find((c: any) => String(c.code).toUpperCase() === code) || null;
+  return (db.campaigns || []).find((c: any) => c.kind !== 'WELCOME' && String(c.code).toUpperCase() === code) || null;
 }
 
 /** Is this campaign allowed to pay right now? Returns the reason when it is not. */
@@ -1096,6 +1105,8 @@ function campaignPublicView(db: any, c: any): any {
     firstDepositBonus: Number(c.firstDepositBonus) || 0,
     firstDepositMin: Number(c.firstDepositMin) || 0,
     audience: c.audience === 'ALL' ? 'ALL' : 'NEW',
+    kind: c.kind === 'WELCOME' ? 'WELCOME' : 'CODE',
+    stackWithCode: c.stackWithCode !== false,
   };
 }
 
@@ -4260,6 +4271,38 @@ async function startServer() {
         }
       }
 
+      // ── Welcome bonus (automatic, no code needed) ────────────────────────
+      // The welcome campaign is the one campaign of kind WELCOME. It pays every
+      // new account once, unless the admin unticked "also give it when the user
+      // joined with a code" and the user did join one.
+      let welcomeResult: any = null;
+      try {
+        const _wc = welcomeCampaignOf(db);
+        if (_wc) {
+          const paidByCode = !!(campaignResult && campaignResult.paid);
+          const skippedByStack = paidByCode && _wc.stackWithCode === false;
+          if (!skippedByStack) {
+            const _countries2 = Array.isArray(_wc.countries) ? _wc.countries.map((x: any) => String(x).toUpperCase()) : [];
+            const _userCountry2 = String((newUser as any).country || '').toUpperCase();
+            const _minDep2 = Number(_wc.minDeposit) || 0;
+            if (_countries2.length && !_countries2.includes(_userCountry2)) {
+              welcomeResult = { paid: false, reason: 'COUNTRY_BLOCKED', code: 'WELCOME' };
+            } else if (_minDep2 > 0) {
+              if (!db.pendingBonuses) db.pendingBonuses = [];
+              db.pendingBonuses.unshift({ id: 'PB-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), campaignId: String(_wc.id), campaignCode: 'WELCOME', amount: Number(_wc.bonusPerUser) || 0, minDeposit: _minDep2, status: 'WAITING_DEPOSIT', createdAt: Date.now() });
+              welcomeResult = { paid: false, reason: 'WAITING_DEPOSIT', minDeposit: _minDep2, code: 'WELCOME' };
+            } else {
+              if (!(newUser as any).campaignCode) (newUser as any).campaignCode = 'WELCOME';
+              const _wr = creditCampaignBonus(db, { campaign: _wc, userId: String(userId), user: newUser });
+              welcomeResult = { paid: _wr.paid, reason: _wr.reason, code: 'WELCOME', amount: _wr.paid ? Number(_wc.bonusPerUser) || 0 : 0, reviewId: _wr.reviewId || null };
+              if (_wr.paid) {
+                pushNotification(db, { id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), type: 'SIGNUP_BONUS', title: 'BOOSTPAY-WELCOME', message: `Welcome bonus $${(Number(_wc.bonusPerUser) || 0).toFixed(2)} added to your Bonus wallet`, amount: Number(_wc.bonusPerUser) || 0, timestamp: Date.now(), isRead: false, metadata: { campaignCode: 'WELCOME' } } as any);
+              }
+            }
+          }
+        }
+      } catch { /* a welcome bonus must never break a signup */ }
+
       // ── Signup bonus (admin-set code money) ─────────────────────────────
       // Resolved from the SAME code the user typed. A bonus code does not have to
       // belong to a referrer — an admin campaign code works on its own.
@@ -4303,6 +4346,7 @@ async function startServer() {
         user: { ...publicUser(newUser), referCode: String(userId), referredBy: (newUser as any).referredBy || undefined },
         bonus: signupBonus,
         campaign: campaignResult,
+        welcome: welcomeResult,
         referral: {
           applied: !!(newUser as any).referredBy,
           usedCode: incomingCode || null,
@@ -9557,8 +9601,12 @@ async function startServer() {
       id: 'CMP-' + Math.floor(10000000 + Math.random() * 90000000),
       createdAt: Date.now(), used: 0, budgetUsed: 0,
     };
-    c.code = normalizeRefCode(body.code);
-    c.name = String(body.name || '').slice(0, 80);
+    // A campaign is either entered by code, or the automatic welcome bonus.
+    c.kind = body.kind === 'WELCOME' ? 'WELCOME' : 'CODE';
+    c.code = c.kind === 'WELCOME' ? 'WELCOME' : normalizeRefCode(body.code);
+    c.name = String(body.name || '').slice(0, 80) || (c.kind === 'WELCOME' ? 'Welcome bonus' : '');
+    // welcome only: still pay it when the user signed up with a code campaign
+    c.stackWithCode = body.stackWithCode !== false;
     c.status = CAMPAIGN_STATUSES.includes(body.status) ? body.status : (c.status || 'INACTIVE');
     const num = (v: any, def = 0) => (Number.isFinite(Number(v)) ? Number(v) : def);
     c.bonusPerUser = num(body.bonusPerUser, num(c.bonusPerUser));
@@ -9582,13 +9630,20 @@ async function startServer() {
   };
 
   const campaignProblems = (c: any, existing?: any) => {
+    if (c.kind === 'WELCOME') {
+      if (!(c.bonusPerUser > 0)) return 'Enter the welcome bonus amount.';
+      if (c.bonusPerUser > BONUS_AMOUNT_MAX) return `Bonus per user must be between 0 and ${BONUS_AMOUNT_MAX}.`;
+      if (!(c.maxUses >= 0) || c.maxUses > BONUS_MAX_USES) return `Maximum uses must be between 0 and ${BONUS_MAX_USES} (0 = unlimited).`;
+      if (c.startAt && c.endAt && c.endAt <= c.startAt) return 'End date must be after the start date.';
+      return null;
+    }
     const fmt = validateRefCodeFormat(c.code);
     if (!fmt.ok) return fmt.error;
     if (!(c.bonusPerUser >= 0) || c.bonusPerUser > BONUS_AMOUNT_MAX) return `Bonus per user must be between 0 and ${BONUS_AMOUNT_MAX}.`;
     if (!(c.maxUses >= 0) || c.maxUses > BONUS_MAX_USES) return `Maximum uses must be between 0 and ${BONUS_MAX_USES} (0 = unlimited).`;
     if (existing && c.maxUses > 0 && c.maxUses < Math.trunc(Number(existing.used) || 0)) return `${existing.used} people already joined — the cap cannot be lower than that.`;
     if (c.startAt && c.endAt && c.endAt <= c.startAt) return 'End date must be after the start date.';
-    if (existing && (Number(existing.used) || 0) > 0 && existing.code !== c.code) return 'The code cannot be renamed after people have joined it. Create a new campaign instead.';
+    if (c.kind !== 'WELCOME' && existing && (Number(existing.used) || 0) > 0 && existing.code !== c.code) return 'The code cannot be renamed after people have joined it. Create a new campaign instead.';
     return null;
   };
 
@@ -9623,15 +9678,19 @@ async function startServer() {
       const candidate = campaignBody(body, existing);
       const problem = campaignProblems(candidate, existing);
       if (problem) return res.status(400).json({ error: problem });
+      if (candidate.kind === 'WELCOME') {
+        const other = (db.campaigns || []).find((c: any) => c.kind === 'WELCOME' && String(c.id) !== String(candidate.id));
+        if (other) return res.status(409).json({ error: 'A welcome bonus already exists — edit that one instead of creating a second.' });
+      }
       // a code may be either a campaign or a personal refer code, not both
-      const owner = resolveRefCode(db, candidate.code);
+      const owner = candidate.kind === 'WELCOME' ? { userId: null } : resolveRefCode(db, candidate.code);
       if (owner.userId && !(existing && String(owner.userId) === String(existing.ownerUserId || ''))) {
         return res.status(409).json({ error: `${candidate.code} is already a personal refer code of #${owner.userId}.` });
       }
-      const clash = (db.campaigns || []).find((c: any) => String(c.code).toUpperCase() === candidate.code && String(c.id) !== String(candidate.id));
+      const clash = candidate.kind === 'WELCOME' ? null : (db.campaigns || []).find((c: any) => c.kind !== 'WELCOME' && String(c.code).toUpperCase() === candidate.code && String(c.id) !== String(candidate.id));
       if (clash) return res.status(409).json({ error: `${candidate.code} is already used by campaign ${clash.name || clash.code}.` });
       // a bonus code with the same code would double-pay
-      if ((db.bonusCodes || []).some((b: any) => String(b.code).toUpperCase() === candidate.code)) {
+      if (candidate.kind !== 'WELCOME' && (db.bonusCodes || []).some((b: any) => String(b.code).toUpperCase() === candidate.code)) {
         return res.status(409).json({ error: `${candidate.code} is a legacy bonus code — remove it first.` });
       }
       if (existing) {
@@ -9778,6 +9837,16 @@ async function startServer() {
       return { id: c.id, code: String(c.code).toUpperCase(), name: c.name || '', joins: st.successful, firstDeposits: st.firstDeposits, bonusIssued: st.bonusIssued, conversionRate: st.conversionRate };
     }).sort((a: any, b: any) => (b.firstDeposits - a.firstDeposits) || (b.joins - a.joins));
     res.json({ leaderboard: rows });
+  });
+
+  // Public: is there a welcome bonus running? (shown on the signup screen — numbers only)
+  app.get('/api/promo/welcome', rateLimit(60), (req: any, res) => {
+    try {
+      const db = readDb();
+      const c = welcomeCampaignOf(db);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ welcome: c ? campaignPublicView(db, c) : null });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not read the welcome bonus.' }); }
   });
 
   // Public: what does this code do? Used by the signup screen AND the promotion

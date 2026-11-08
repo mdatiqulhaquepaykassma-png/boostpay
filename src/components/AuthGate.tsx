@@ -25,6 +25,8 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
   const [signupError, setSignupError] = useState('');
   // live validation of the refer code field (public check-code endpoint)
   const [refCheck, setRefCheck] = useState<any>(null);
+  // the automatic welcome bonus (no code needed) — advertised before signup
+  const [welcomeOffer, setWelcomeOffer] = useState<any>(null);
   const [refChecking, setRefChecking] = useState(false);
   const [isSigningUp, setIsSigningUp] = useState(false);
   const [showForgot, setShowForgot] = useState(false);
@@ -58,6 +60,14 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
 
   // Validate the code as the user types — a wrong code must not be a surprise
   // after signup. Cosmetic only: an unknown code never blocks registration.
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/promo/welcome').then((r) => (r.ok ? r.json() : null)).then((j) => {
+      if (alive && j && j.welcome && j.welcome.valid) setWelcomeOffer(j.welcome);
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
   useEffect(() => {
     const c = referralCode.trim().replace(/^#/, '').replace(/^REF-?/i, '');
     if (!c) { setRefCheck(null); setRefChecking(false); return; }
@@ -358,6 +368,13 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
             </div>
 
             <div>
+              {welcomeOffer && (
+                <div className="mb-2 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2 text-[10px] font-mono text-emerald-300">
+                  🎁 New account welcome bonus ${Number(welcomeOffer.bonusPerUser).toFixed(2)}
+                  {welcomeOffer.bonusWithdraw ? ' (withdrawable)' : ' (boost only)'}
+                  {welcomeOffer.bonusExpiryDays > 0 ? ` · expires ${welcomeOffer.bonusExpiryDays}d after signup` : ''}
+                </div>
+              )}
               <label className="block text-[11px] font-medium text-zinc-300 mb-1.5 flex items-center gap-1.5">
                 <Gift className="w-3.5 h-3.5 text-amber-400" /> Referral Code <span className="text-[10px] text-zinc-500 font-normal">(optional)</span>
               </label>

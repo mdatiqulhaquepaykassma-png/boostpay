@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 type Campaign = {
   id: string; code: string; name: string; bonusPerUser: number; valid: boolean; reason: string;
+  kind?: 'CODE' | 'WELCOME'; stackWithCode?: boolean;
   status: 'ACTIVE' | 'PAUSED' | 'INACTIVE';
   remainingSlots: number | null; minDeposit: number; bonusTransfer: boolean; bonusWithdraw: boolean;
   bonusExpiryDays: number; expiryAction?: 'BURN' | 'TO_BALANCE'; startAt: number; endAt: number; budgetLimit: number;
@@ -85,7 +86,7 @@ export function App() {
     code: '', name: '', bonusPerUser: 1, maxUses: 500, minDeposit: 0,
     status: 'ACTIVE', startAt: '', endAt: '', budgetLimit: 0,
     bonusTransfer: true, bonusWithdraw: true, bonusExpiryDays: 0, expiryAction: 'BURN',
-    audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0,
+    audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0, kind: 'CODE', stackWithCode: true,
     countries: '', note: '',
   });
 
@@ -165,7 +166,8 @@ export function App() {
       code: '', name: '', bonusPerUser: 1, maxUses: 500, minDeposit: 0,
       status: 'ACTIVE', startAt: '', endAt: '', budgetLimit: 0,
       bonusTransfer: true, bonusWithdraw: true, bonusExpiryDays: 0, expiryAction: 'BURN',
-      audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0, countries: '', note: '',
+      audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0, kind: 'CODE', stackWithCode: true,
+      countries: '', note: '',
     });
     setTab('CAMPAIGN');
   };
@@ -178,6 +180,7 @@ export function App() {
       budgetLimit: c.budgetLimit, bonusTransfer: c.bonusTransfer, bonusWithdraw: c.bonusWithdraw,
       bonusExpiryDays: c.bonusExpiryDays, expiryAction: c.expiryAction || 'BURN', audience: c.audience,
       firstDepositBonus: c.firstDepositBonus, firstDepositMin: c.firstDepositMin,
+      kind: c.kind || 'CODE', stackWithCode: c.stackWithCode !== false,
       countries: (c.countries || []).join(', '), note: c.note || '',
     });
     setTab('CAMPAIGN');
@@ -197,6 +200,8 @@ export function App() {
       bonusWithdraw: !!form.bonusWithdraw,
       bonusExpiryDays: Number(form.bonusExpiryDays),
       expiryAction: form.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN',
+      kind: form.kind === 'WELCOME' ? 'WELCOME' : 'CODE',
+      stackWithCode: !!form.stackWithCode,
       audience: form.audience,
       firstDepositBonus: Number(form.firstDepositBonus),
       firstDepositMin: Number(form.firstDepositMin),
@@ -331,12 +336,28 @@ export function App() {
         <div className="card">
           <div className="h"><h2>{editId ? 'Edit campaign' : 'New campaign'}</h2><span className="sub">every field is enforced by the backend</span></div>
           <div className="grid g2">
-            <label className="f">Referral code
+            <label className="f">Campaign type
+              <select
+                value={form.kind}
+                onChange={(e) => setForm({ ...form, kind: e.target.value })}
+                disabled={!!editId}
+              >
+                <option value="CODE">Referral / promo code</option>
+                <option value="WELCOME">Welcome bonus (automatic, every new user)</option>
+              </select>
+            </label>
+            {form.kind === 'WELCOME' ? (
+              <label className="f">Applies to
+                <input value="Every new account, once — no code needed" disabled />
+              </label>
+            ) : (
+              <label className="f">Referral code
               <div className="row" style={{ gap: 6 }}>
                 <input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 16) })} placeholder="BP2026VIP" disabled={!!editId} />
                 {!editId && <button className="ghost" onClick={() => void randomCode()} title="Generate">🎲</button>}
               </div>
             </label>
+            )}
             <label className="f">Campaign name
               <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="VIP 2026" />
             </label>
@@ -392,6 +413,14 @@ export function App() {
                 <option value="0">Not allowed</option>
               </select>
             </label>
+            {form.kind === 'WELCOME' && (
+              <label className="f">If the user also joined with a code
+                <select value={form.stackWithCode ? '1' : '0'} onChange={(e) => setForm({ ...form, stackWithCode: e.target.value === '1' })}>
+                  <option value="1">Give the welcome bonus too</option>
+                  <option value="0">Skip it — code campaigns win</option>
+                </select>
+              </label>
+            )}
             <label className="f">Who can use it
               <select value={form.audience} onChange={(e) => setForm({ ...form, audience: e.target.value })}>
                 <option value="NEW">New users only</option>

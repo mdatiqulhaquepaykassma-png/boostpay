@@ -1420,6 +1420,122 @@ sx, after = req('/api/transfer', {'senderId': UP, 'recipientId': 'U1', 'amount':
 ck('removing the rule restores sending in every direction', sx == 200,
    f"{sx} {(after or {}).get('error')}", 'CRITICAL', 'The upline block survives the rule being removed.')
 
+
+# ── 24. welcome bonus (automatic, with its own permission ticks) ──────────────
+print("\n[24. welcome bonus]")
+_rs4_s, _rs4_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rs4 = _rs4_j.get('token') or ''
+
+# a leftover welcome campaign from an earlier run must not block this one
+sx, existing = req('/api/admin/promo/campaigns', token=_rs4, ip_addr=ip())
+for _c in (existing.get('campaigns') or []):
+    if _c.get('kind') == 'WELCOME':
+        req('/api/admin/promo/campaigns/remove', {'id': _c['id']}, token=_rs4, ip_addr=ip())
+
+sx, wc = req('/api/admin/promo/campaigns/save', {
+    'kind': 'WELCOME', 'name': 'Journey welcome', 'bonusPerUser': 3, 'maxUses': 0,
+    'bonusWithdraw': True, 'bonusTransfer': False, 'bonusExpiryDays': 7,
+    'expiryAction': 'BURN', 'status': 'ACTIVE', 'stackWithCode': True,
+}, token=_rs4, ip_addr=ip())
+ck('an admin can create a welcome bonus', sx == 200, f"{sx} {wc.get('error')}", 'CRITICAL',
+   'The welcome bonus cannot be created.')
+
+sx, _wl = req('/api/admin/promo/campaigns', token=_rs4, ip_addr=ip())
+_wrow0 = next((c for c in (_wl.get('campaigns') or []) if c.get('kind') == 'WELCOME'), None)
+_wid = (_wrow0 or {}).get('id') or ''
+ck('the welcome campaign is listed with its type', bool(_wid), f"id={_wid}", 'HIGH',
+   'The welcome campaign is invisible in the campaign list.')
+
+sx, wc2 = req('/api/admin/promo/campaigns/save', {
+    'kind': 'WELCOME', 'name': 'Second welcome', 'bonusPerUser': 9, 'maxUses': 0, 'status': 'ACTIVE',
+}, token=_rs4, ip_addr=ip())
+ck('only one welcome bonus can exist', sx == 409, f"{sx} {wc2.get('error')}", 'HIGH',
+   'Two welcome campaigns would double-pay every new user.')
+
+sx, pub = req('/api/promo/welcome', ip_addr=ip())
+ck('the signup screen can advertise it', (pub.get('welcome') or {}).get('bonusPerUser') == 3,
+   f"{pub.get('welcome')}", 'HIGH', 'New users are not told about the welcome bonus.')
+ck('the welcome bonus never reports its permissions as optional',
+   (pub.get('welcome') or {}).get('bonusTransfer') is False and (pub.get('welcome') or {}).get('bonusWithdraw') is True,
+   f"transfer={(pub.get('welcome') or {}).get('bonusTransfer')} withdraw={(pub.get('welcome') or {}).get('bonusWithdraw')}", 'HIGH',
+   'The permission ticks do not reach the public view.')
+
+# a plain signup with no code at all still gets it
+_ws, WID, _wj = signup_child('welcome1@gmail.com', '')
+ck('a signup with no code at all still gets the welcome bonus',
+   (_wj.get('welcome') or {}).get('paid') is True and num((_wj.get('welcome') or {}).get('amount')) == 3,
+   f"{_wj.get('welcome')}", 'CRITICAL', 'The welcome bonus is not paid automatically.')
+_wtok, _ = login((_wj.get('_email'), 'Staging123!'), ip_addr=ip())
+sx, wb = req('/api/user/bonus', token=_wtok, ip_addr=ip())
+ck('it lands in the bonus wallet, labelled welcome',
+   num((wb.get('wallet') or {}).get('available')) == 3 and wb.get('campaignCode') == 'WELCOME',
+   f"available={(wb.get('wallet') or {}).get('available')} code={wb.get('campaignCode')}", 'CRITICAL',
+   'The welcome bonus is not visible to the user.')
+
+# the ticks actually decide what the user may do
+sx, conv = req('/api/user/bonus/convert', {'amount': 1}, token=_wtok, ip_addr=ip())
+ck('the withdrawal tick lets them move part of it to the wallet', sx == 200,
+   f"{sx} {conv.get('error')}", 'CRITICAL', 'A welcome bonus marked withdrawable cannot be moved.')
+sx, snd = req('/api/user/bonus/send', {'toUserId': 'U2', 'amount': 1}, token=_wtok, ip_addr=ip())
+ck('the transfer tick being off blocks sending it', sx == 403,
+   f"{sx} {snd.get('error')}", 'CRITICAL', 'A welcome bonus marked no-transfer can still be sent.')
+
+# a second signup on the same account can never pay twice
+sx, wb2 = req('/api/user/bonus', token=_wtok, ip_addr=ip())
+ck('the wallet never shows the welcome bonus twice', num((wb2.get('wallet') or {}).get('granted')) == 3,
+   f"granted={(wb2.get('wallet') or {}).get('granted')}", 'CRITICAL', 'The welcome bonus can be double-claimed.')
+
+# with the stack tick off, a code campaign wins
+sx, _stackoff = req('/api/admin/promo/campaigns/save', {
+    'id': _wid, 'kind': 'WELCOME', 'name': 'Journey welcome', 'bonusPerUser': 3, 'maxUses': 0,
+    'bonusWithdraw': True, 'bonusTransfer': False, 'bonusExpiryDays': 7, 'expiryAction': 'BURN',
+    'status': 'ACTIVE', 'stackWithCode': False,
+}, token=_rs4, ip_addr=ip())
+ck('the stack tick can be switched off', sx == 200, f"{sx} {_stackoff.get('error')}", 'HIGH',
+   'The welcome campaign cannot be edited.')
+sx, cc = req('/api/admin/promo/campaigns/save', {
+    'code': f'WSK{_RUN_TAG}', 'name': 'Code beats welcome', 'bonusPerUser': 1, 'maxUses': 50,
+    'bonusWithdraw': False, 'bonusTransfer': False, 'status': 'ACTIVE',
+}, token=_rs4, ip_addr=ip())
+ck('a normal code campaign can still be created next to it', sx == 200, f"{sx} {cc.get('error')}", 'HIGH',
+   'The welcome bonus blocks normal campaigns.')
+_sx2, _cid2, _cj2 = signup_child('welcome2@gmail.com', f'WSK{_RUN_TAG}')
+ck('with "skip when a code is used" the code campaign pays instead',
+   (_cj2.get('campaign') or {}).get('paid') is True and (_cj2.get('welcome') or {}).get('paid') is not True,
+   f"campaign={_cj2.get('campaign')} welcome={_cj2.get('welcome')}", 'HIGH',
+   'The stack tick is ignored — both bonuses pay.')
+
+# back on, and a paused welcome pays nothing
+req('/api/admin/promo/campaigns/save', {
+    'id': _wid, 'kind': 'WELCOME', 'name': 'Journey welcome', 'bonusPerUser': 3, 'maxUses': 0,
+    'bonusWithdraw': True, 'bonusTransfer': False, 'bonusExpiryDays': 7, 'expiryAction': 'BURN',
+    'status': 'ACTIVE', 'stackWithCode': True,
+}, token=_rs4, ip_addr=ip())
+sx, pub2 = req('/api/promo/welcome', ip_addr=ip())
+_wcid = (pub2.get('welcome') or {}).get('id') or ''
+sx, lst = req('/api/admin/promo/campaigns', token=_rs4, ip_addr=ip())
+_wrow = next((c for c in (lst.get('campaigns') or []) if c.get('kind') == 'WELCOME'), None)
+if _wrow:
+    req('/api/admin/promo/campaigns/status', {'id': _wrow['id'], 'status': 'PAUSED'}, token=_rs4, ip_addr=ip())
+    _sx3, _wid3, _wj3 = signup_child('welcome3@gmail.com', '')
+    ck('a paused welcome bonus pays nothing',
+       (_wj3.get('welcome') or {}).get('paid') is not True, f"{_wj3.get('welcome')}", 'CRITICAL',
+       'Pausing the welcome campaign does not stop the payout.')
+    req('/api/admin/promo/campaigns/status', {'id': _wrow['id'], 'status': 'ACTIVE'}, token=_rs4, ip_addr=ip())
+
+# the welcome campaign is not a refer code
+sx, chk = req('/api/refer/check-code?code=WELCOME', ip_addr=ip())
+ck('WELCOME cannot be used as a referral code', chk.get('resolves') is not True and chk.get('campaign') in (None, {}),
+   f"resolves={chk.get('resolves')} campaign={chk.get('campaign')}", 'HIGH',
+   'A welcome campaign leaked into the refer-code namespace.')
+
+# and it is audited like everything else
+sx, au3 = req('/api/admin/audit-logs', token=_rs4, ip_addr=ip())
+_rows4 = au3.get('logs') if isinstance(au3.get('logs'), list) else (au3.get('auditLogs') or [])
+ck('welcome grants are audit-logged',
+   any('WELCOME' in str(r.get('details') or '').upper() or 'CAMPAIGN_BONUS' in str(r.get('action') or '').upper() for r in _rows4),
+   f"rows={len(_rows4)}", 'HIGH', 'A welcome bonus payout leaves no audit trail.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
