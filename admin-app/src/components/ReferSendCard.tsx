@@ -18,10 +18,12 @@ import { BoostPayStore } from '../services/store';
 export function ReferSendCard({
   userId,
   policy,
+  usage,
   onChanged,
 }: {
   userId: string;
-  policy?: { mode: 'off' | 'l1' | 'team'; amount: number; period: 'day' | 'send' | 'total'; note?: string; setAt?: number };
+  policy?: { mode: 'off' | 'l1' | 'team'; amount: number; period: 'day' | 'send' | 'total'; inherit?: boolean; note?: string; setAt?: number };
+  usage?: { period: string; cap: number; used: number; remaining: number | null; todayUsed: number; totalUsed: number; sendsToday: number } | null;
   onChanged?: (updatedUser?: any) => void;
 }) {
   const [mode, setMode] = useState<'off' | 'l1' | 'team'>('off');
@@ -34,6 +36,7 @@ export function ReferSendCard({
   const [error, setError] = useState('');
   const [ok, setOk] = useState('');
   const [server, setServer] = useState<{ mode: string; amount: number; period: string; inherit?: boolean; allowedRecipients?: number; used?: number } | null>(null);
+  const [liveUsage, setLiveUsage] = useState<any>(usage || null);
 
   const live = server || (policy ? { mode: policy.mode, amount: Number(policy.amount) || 0, period: policy.period } : null);
   const current = live?.mode || 'off';
@@ -48,8 +51,12 @@ export function ReferSendCard({
     setError('');
     setOk('');
     setServer(null);
+    setLiveUsage(usage || null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
+
+  // keep up with the parent's refreshed numbers while the sheet is open
+  useEffect(() => { if (usage) setLiveUsage(usage); }, [JSON.stringify(usage || null)]);
 
   const post = async (payload: Record<string, any>, okText: string) => {
     setBusy(true); setError(''); setOk('');
@@ -57,6 +64,7 @@ export function ReferSendCard({
       const res = await BoostPayStore.adminSetReferSend(userId, payload as any);
       if (!res.success) throw new Error(res.error || 'Could not save the rule.');
       const saved: any = (res as any).referSend || null;
+      if ((res as any).referSendUsage) setLiveUsage((res as any).referSendUsage);
       if (saved) setServer({ mode: saved.mode, amount: Number(saved.amount) || 0, period: saved.period, inherit: !!saved.inherit, allowedRecipients: saved.allowedRecipients, used: saved.used });
       setOk(
         saved
@@ -118,6 +126,46 @@ export function ReferSendCard({
           <div className="flex justify-between text-zinc-500"><span>Allowed recipients</span><span className="text-zinc-200">{live.allowedRecipients}</span></div>
         )}
       </div>
+
+      {/* How much has already gone out, and how much is left */}
+      {liveUsage && (
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-2.5 space-y-1">
+          <div className="flex justify-between text-[11px] font-mono text-zinc-400">
+            <span>Sent today</span>
+            <span className="text-white font-bold">${Number(liveUsage.todayUsed || 0).toFixed(2)} <span className="text-zinc-500 font-normal">({liveUsage.sendsToday || 0} send{(liveUsage.sendsToday || 0) === 1 ? '' : 's'})</span></span>
+          </div>
+          <div className="flex justify-between text-[11px] font-mono text-zinc-400">
+            <span>Sent in total</span>
+            <span className="text-zinc-200">${Number(liveUsage.totalUsed || 0).toFixed(2)}</span>
+          </div>
+          {Number(liveUsage.cap) > 0 ? (
+            <>
+              <div className="flex justify-between text-[11px] font-mono text-zinc-400">
+                <span>
+                  Limit used ({liveUsage.period === 'day' ? 'per day' : liveUsage.period === 'total' ? 'in total' : 'per transfer'})
+                </span>
+                <span className="text-amber-300">${Number(liveUsage.used || 0).toFixed(2)} / ${Number(liveUsage.cap).toFixed(2)}</span>
+              </div>
+              <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+                <div
+                  className={`h-full rounded-full ${Number(liveUsage.remaining) <= 0 ? 'bg-red-500' : 'bg-emerald-500'}`}
+                  style={{ width: `${Math.min(100, Math.round((Number(liveUsage.used || 0) / Math.max(1, Number(liveUsage.cap))) * 100))}%` }}
+                />
+              </div>
+              <div className="flex justify-between text-[11px] font-mono">
+                <span className="text-zinc-500">Left to send</span>
+                <span className={Number(liveUsage.remaining) > 0 ? 'text-emerald-300 font-bold' : 'text-red-400 font-bold'}>
+                  ${Number(liveUsage.remaining || 0).toFixed(2)}
+                </span>
+              </div>
+            </>
+          ) : (
+            <div className="flex justify-between text-[11px] font-mono text-zinc-500">
+              <span>Amount limit</span><span className="text-zinc-300">none</span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-1.5">
         <button

@@ -2146,6 +2146,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     key={`refersend-desktop-${selectedUser.id}`}
                     userId={String(selectedUser.id)}
                     policy={(selectedUser as any).referSend}
+                    usage={(selectedUser as any).referSendUsage}
                     onChanged={(updated?: any) => {
                       if (updated) {
                         setSelectedUser((curr: any) => (curr && String(curr.id) === String(updated.id) ? { ...curr, ...updated } : curr));
@@ -2265,6 +2266,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           key={`refersend-mobile-${selectedUser.id}`}
                           userId={String(selectedUser.id)}
                           policy={(selectedUser as any).referSend}
+                          usage={(selectedUser as any).referSendUsage}
                           onChanged={(updated?: any) => {
                             if (updated) {
                               setSelectedUser((curr: any) => (curr && String(curr.id) === String(updated.id) ? { ...curr, ...updated } : curr));

@@ -1272,6 +1272,85 @@ ck('every inheritance is written to the audit log',
 for _uid in (X, Y, Z, 'U1'):
     req('/api/admin/users/refer-send', {'userId': _uid, 'mode': 'off'}, token=_rs2adm, ip_addr=ip())
 
+
+# ── 22. the admin can see how much a user has sent and how much is left ─────
+print("\n[22. admin sees sent / remaining]")
+_u3_s, U, _ = signup_child('usageu@gmail.com', 'U1')
+_u_tok, _ = login((f'usageu-{_RUN_TAG}@gmail.com', 'Staging123!'), ip_addr=ip())
+_u1b, _ = login(U1, ip_addr=ip())
+for _a in (6, 6):
+    req('/api/transfer', {'senderId': 'U1', 'recipientId': U, 'amount': _a,
+                          'idempotencyKey': f'usf{_RUN_TAG}{_a}'}, _u1b, ip_addr=ip())
+sx, _ = req('/api/admin/users/refer-send', {'userId': U, 'mode': 'team', 'amount': 10, 'period': 'day'},
+            token=_rs2adm, ip_addr=ip())
+req('/api/transfer', {'senderId': U, 'recipientId': 'U1', 'amount': 3,
+                      'idempotencyKey': f'us1{_RUN_TAG}'}, _u_tok, ip_addr=ip())
+req('/api/transfer', {'senderId': U, 'recipientId': 'U1', 'amount': 2,
+                      'idempotencyKey': f'us2{_RUN_TAG}'}, _u_tok, ip_addr=ip())
+
+sx, alist = req('/api/admin/users', token=_rs2adm, ip_addr=ip())
+_row = next((x for x in (alist.get('users') or []) if str(x.get('id')) == str(U)), None)
+_usage = (_row or {}).get('referSendUsage') or {}
+ck('the admin user list carries the send usage', bool(_usage), f"{list(_usage)[:6]}", 'CRITICAL',
+   'The admin cannot see how much a restricted user has sent.')
+ck('it shows what the user sent today', abs(num(_usage.get('todayUsed')) - 5) < 1e-6,
+   f"todayUsed={_usage.get('todayUsed')}", 'HIGH', 'The amount sent today is wrong or missing.')
+ck('it shows how many sends that was', int(_usage.get('sendsToday') or 0) == 2,
+   f"sendsToday={_usage.get('sendsToday')}", 'MEDIUM', 'The send count is missing.')
+ck('it shows how much of the limit is used', abs(num(_usage.get('used')) - 5) < 1e-6 and abs(num(_usage.get('cap')) - 10) < 1e-6,
+   f"used={_usage.get('used')} cap={_usage.get('cap')}", 'HIGH', 'The used/cap pair is wrong.')
+ck('it shows how much is left to send', abs(num(_usage.get('remaining')) - 5) < 1e-6,
+   f"remaining={_usage.get('remaining')}", 'CRITICAL', 'The admin cannot see the remaining allowance.')
+
+sx, sr = req('/api/admin/users/refer-send', {'userId': U, 'mode': 'team', 'amount': 10, 'period': 'day'},
+             token=_rs2adm, ip_addr=ip())
+ck('saving the rule answers with the same numbers', abs(num((sr.get('referSendUsage') or {}).get('remaining')) - 5) < 1e-6,
+   f"{sr.get('referSendUsage')}", 'HIGH', 'The card cannot refresh its numbers after a save.')
+
+sx, mine = req('/api/user/refer-send', token=_u_tok, ip_addr=ip())
+ck('the user sees the same today/total numbers', abs(num(mine.get('todayUsed')) - 5) < 1e-6 and abs(num(mine.get('totalUsed')) - 5) < 1e-6,
+   f"today={mine.get('todayUsed')} total={mine.get('totalUsed')} remaining={mine.get('remaining')}", 'HIGH',
+   'The user and the admin disagree about how much has been sent.')
+
+# the count must only ever include money the user SENT — incoming money is not a send
+req('/api/transfer', {'senderId': 'U1', 'recipientId': U, 'amount': 4,
+                      'idempotencyKey': f'usin{_RUN_TAG}'}, _u1b, ip_addr=ip())
+sx, alist2 = req('/api/admin/users', token=_rs2adm, ip_addr=ip())
+_row2 = next((x for x in (alist2.get('users') or []) if str(x.get('id')) == str(U)), None)
+_usage2 = (_row2 or {}).get('referSendUsage') or {}
+ck('money the user receives is not counted as money they sent', abs(num(_usage2.get('totalUsed')) - 5) < 1e-6,
+   f"totalUsed={_usage2.get('totalUsed')}", 'HIGH', 'The usage counter counts incoming money as sends.')
+
+# an attempt over the cap changes nothing — and the admin can see that too
+sx, over = req('/api/transfer', {'senderId': U, 'recipientId': 'U1', 'amount': 5.5,
+                                 'idempotencyKey': f'us3{_RUN_TAG}'}, _u_tok, ip_addr=ip())
+ck('a send over the cap is refused', sx == 403 and over.get('referSendLimited') is True,
+   f"{sx} {over.get('error')}", 'CRITICAL', 'A user can send past the limit the admin sees.')
+sx, alist3 = req('/api/admin/users', token=_rs2adm, ip_addr=ip())
+_row3 = next((x for x in (alist3.get('users') or []) if str(x.get('id')) == str(U)), None)
+_usage3 = (_row3 or {}).get('referSendUsage') or {}
+ck('the refused attempt does not use up the allowance', abs(num(_usage3.get('remaining')) - 5) < 1e-6,
+   f"used={_usage3.get('used')} remaining={_usage3.get('remaining')}", 'HIGH',
+   'A refused send eats the user allowance.')
+
+# spend the rest, then the admin sees zero left and the next send is refused
+sx, exact = req('/api/transfer', {'senderId': U, 'recipientId': 'U1', 'amount': 5,
+                                  'idempotencyKey': f'us5{_RUN_TAG}'}, _u_tok, ip_addr=ip())
+ck('sending exactly what is left works', sx == 200, f"{sx} {(exact or {}).get('error')}", 'HIGH',
+   'The user cannot use the last of their allowance.')
+sx, alist4 = req('/api/admin/users', token=_rs2adm, ip_addr=ip())
+_row4 = next((x for x in (alist4.get('users') or []) if str(x.get('id')) == str(U)), None)
+_usage4 = (_row4 or {}).get('referSendUsage') or {}
+ck('when the limit is used up the admin sees zero left',
+   num(_usage4.get('remaining')) == 0 and num(_usage4.get('used')) == num(_usage4.get('cap')),
+   f"used={_usage4.get('used')} cap={_usage4.get('cap')} remaining={_usage4.get('remaining')}", 'HIGH',
+   'The remaining allowance never reaches zero.')
+sx, blocked = req('/api/transfer', {'senderId': U, 'recipientId': 'U1', 'amount': 0.5,
+                                    'idempotencyKey': f'us4{_RUN_TAG}'}, _u_tok, ip_addr=ip())
+ck('and the server then refuses the next send', sx == 403, f"{sx} {(blocked or {}).get('error')}", 'CRITICAL',
+   'A user can send past the limit the admin sees.')
+req('/api/admin/users/refer-send', {'userId': U, 'mode': 'off'}, token=_rs2adm, ip_addr=ip())
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

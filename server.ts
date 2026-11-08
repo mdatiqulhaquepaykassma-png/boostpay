@@ -2811,6 +2811,43 @@ function referSendLabel(mode: string): string {
 }
 
 /**
+ * How much of the send rule has already been used — the numbers the admin sees.
+ * `used` follows the rule's own period, while today/lifetime are always reported
+ * so the console can show the full picture.
+ */
+function referSendUsage(db: any, user: any): {
+  period: string; cap: number; used: number; remaining: number | null;
+  todayUsed: number; totalUsed: number; limited: boolean; sendsToday: number;
+} {
+  const policy = referSendPolicyOf(user);
+  const uid = String(user && user.id);
+  const today = getDayKey();
+  let todayUsed = 0;
+  let totalUsed = 0;
+  let sendsToday = 0;
+  for (const t of (db.transactions || [])) {
+    if (String(t.userId) !== uid || t.type !== 'TRANSFER_SENT') continue;
+    const amt = Number(t.amount) || 0;
+    totalUsed += amt;
+    if (getDayKey(Number(t.timestamp) || 0) === today) { todayUsed += amt; sendsToday += 1; }
+  }
+  todayUsed = referRound2(todayUsed);
+  totalUsed = referRound2(totalUsed);
+  const used = policy.period === 'day' ? todayUsed : (policy.period === 'send' ? 0 : totalUsed);
+  const cap = policy.amount;
+  return {
+    period: policy.period,
+    cap,
+    used,
+    remaining: cap > 0 ? referRound2(Math.max(0, cap - used)) : null,
+    todayUsed,
+    totalUsed,
+    sendsToday,
+    limited: policy.mode !== 'off',
+  };
+}
+
+/**
  * Refusal for an outgoing P2P transfer blocked by the "send to refer only" rule.
  * Returns null when the transfer is allowed.
  */
@@ -2859,8 +2896,9 @@ function agentLockError(u: any): string {
   return `Only $${info.cap.toFixed(2)} of your balance can go to an agent right now — the rest is temporarily held by administration.`;
 }
 
-function adminUserView(u: any): any {
+function adminUserView(u: any, dbArg?: any): any {
   if (!u || typeof u !== 'object') return u;
+  const db = dbArg && typeof dbArg === 'object' && !Array.isArray(dbArg) ? dbArg : null;
   const lock = sendLockOf(u);
   const agent = agentLockOf(u);
   return {
@@ -2872,7 +2910,8 @@ function adminUserView(u: any): any {
     agentLock: { mode: agent.full ? 'full' : (agent.amount > 0 ? 'amount' : 'off'), amount: agent.amount, note: agent.note, setAt: agent.setAt },
     agentSendable: agentPayInfo(u).cap,
     referSend: referSendPolicyOf(u),
-    referSendUsed: 0
+    // what the admin needs to see: how much has gone out, how much is left
+    referSendUsage: db ? referSendUsage(db, u) : null
   };
 }
 
@@ -7320,7 +7359,7 @@ async function startServer() {
       if (aT || bT) return (bT||0)-(aT||0);
       return Number(b.id)-Number(a.id);
     });
-    res.json({ users: sorted.map(adminUserView), config: db.config });
+    res.json({ users: sorted.map((u: any) => adminUserView(u, db)), config: db.config });
   });
 
   // Storage Diagnostic Probe: Live read/write verification and stats
@@ -7862,6 +7901,7 @@ async function startServer() {
         success: true,
         user: adminUserView(user),
         referSend: { ...policy, allowedRecipients: allowed.size, used: referSendUsed(db, String(user.id), policy.period) },
+        referSendUsage: referSendUsage(db, user),
       });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Could not save the send limit.' });
@@ -7898,6 +7938,7 @@ async function startServer() {
         allowedCount: allowed.size,
         used,
         remaining: policy.amount > 0 ? referRound2(Math.max(0, policy.amount - used)) : null,
+        ...(() => { const u = referSendUsage(db, me); return { todayUsed: u.todayUsed, totalUsed: u.totalUsed, sendsToday: u.sendsToday }; })(),
       });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load your send rule.' }); }
   });
