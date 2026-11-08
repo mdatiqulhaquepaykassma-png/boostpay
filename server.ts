@@ -1091,6 +1091,7 @@ function campaignPublicView(db: any, c: any): any {
     bonusTransfer: c.bonusTransfer !== false,
     bonusWithdraw: c.bonusWithdraw !== false,
     bonusExpiryDays: Number(c.bonusExpiryDays) || 0,
+    expiryAction: c.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN',
     endAt: Number(c.endAt) || 0,
     firstDepositBonus: Number(c.firstDepositBonus) || 0,
     firstDepositMin: Number(c.firstDepositMin) || 0,
@@ -1106,16 +1107,43 @@ function activeGrants(db: any, userId: string, now = Date.now()): any[] {
     if (g.status !== 'ACTIVE') continue;
     const expiresAt = Number(g.expiresAt) || 0;
     if (expiresAt && now > expiresAt) {
+      const left = Number(g.remaining) || 0;
+      db.__expiryDirty = true;
       g.status = 'EXPIRED';
       g.closedAt = now;
       g.remaining = 0;
       if (!db.bonusLedger) db.bonusLedger = [];
-      db.bonusLedger.unshift({ id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), grantId: g.id, campaignId: g.campaignId, type: 'BONUS_EXPIRED', amount: Number(g.grantedAmount) || 0, timestamp: now, notes: `Unused bonus expired (campaign ${g.campaignCode})` });
+      if (g.expiryAction === 'TO_BALANCE' && left > 0) {
+        // Policy chosen by the admin on the campaign: the unused bonus becomes real money
+        // instead of vanishing. Only ever for bonuses the user may already withdraw.
+        const user = (db.users || []).find((u: any) => String(u.id) === String(userId));
+        if (user && g.bonusWithdraw) {
+          user.balance = Math.round(((Number(user.balance) || 0) + left) * 1e8) / 1e8;
+          if (!db.transactions) db.transactions = [];
+          db.transactions.unshift({
+            id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId),
+            type: 'BONUS_TO_BALANCE', amount: left, timestamp: now, balanceAfter: user.balance,
+            notes: `Unused bonus moved to main balance on expiry (campaign ${g.campaignCode})`,
+          });
+          db.bonusLedger.unshift({ id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), grantId: g.id, campaignId: g.campaignId, type: 'BONUS_EXPIRED_TO_BALANCE', amount: left, timestamp: now, notes: `Unused bonus expired and moved to main balance (campaign ${g.campaignCode})` });
+          recordAuditLog(db, 'BONUS_EXPIRED_TO_BALANCE', String(userId), `#${userId} $${left} unused bonus from ${g.campaignCode} moved to main balance on expiry`, 'system');
+          continue;
+        }
+      }
+      db.bonusLedger.unshift({ id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), grantId: g.id, campaignId: g.campaignId, type: 'BONUS_EXPIRED', amount: left, timestamp: now, notes: `Unused bonus expired (campaign ${g.campaignCode})` });
       continue;
     }
     out.push(g);
   }
   return out;
+}
+
+/** The expiry sweep mutates the db lazily — make sure a read path actually saves it. */
+function persistBonusSweep(db: any) {
+  if (db && db.__expiryDirty) {
+    delete db.__expiryDirty;
+    try { writeDb(db); } catch { /* next write will carry it */ }
+  }
 }
 
 function bonusWalletOf(db: any, userId: string, now = Date.now()): any {
@@ -1144,6 +1172,7 @@ function bonusWalletOf(db: any, userId: string, now = Date.now()): any {
       grantedAmount: r8(g.grantedAmount), remaining: r8(g.remaining),
       grantedAt: g.grantedAt, expiresAt: g.expiresAt,
       bonusTransfer: !!g.bonusTransfer, bonusWithdraw: !!g.bonusWithdraw,
+      expiryAction: g.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN',
     })),
   };
 }
@@ -1204,6 +1233,7 @@ function creditCampaignBonus(db: any, opts: { campaign: any; userId: string; rea
     grantedAmount: amount, remaining: amount,
     grantedAt: now,
     expiresAt: Number(c.bonusExpiryDays) > 0 ? now + Number(c.bonusExpiryDays) * 86400000 : 0,
+    expiryAction: c.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN',
     bonusTransfer: !!c.bonusTransfer, bonusWithdraw: !!c.bonusWithdraw,
     status: 'ACTIVE', reason: opts.reason || 'SIGNUP',
   };
@@ -9243,6 +9273,8 @@ async function startServer() {
     c.startAt = Math.trunc(num(body.startAt, num(c.startAt)));
     c.endAt = Math.trunc(num(body.endAt, num(c.endAt)));
     c.bonusExpiryDays = Math.trunc(num(body.bonusExpiryDays, num(c.bonusExpiryDays)));
+    // what happens to an unused bonus when it expires: burn it, or hand it over as real money
+    c.expiryAction = body.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN';
     c.bonusTransfer = body.bonusTransfer !== false;
     c.bonusWithdraw = body.bonusWithdraw !== false;
     c.firstDepositBonus = num(body.firstDepositBonus, num(c.firstDepositBonus));
@@ -9482,6 +9514,7 @@ async function startServer() {
       const waiting = (db.pendingBonuses || []).filter((b: any) => String(b.userId) === uid && b.status === 'WAITING_DEPOSIT');
       const me = (db.users || []).find((u: any) => String(u.id) === uid);
       const rules = (db.campaigns || []).filter((c: any) => String(c.code).toUpperCase() === String((me && (me as any).campaignCode) || '')).map((c: any) => campaignPublicView(db, c));
+      persistBonusSweep(db);   // an expiry that paid out must survive the request
       res.setHeader('Cache-Control', 'no-store');
       res.json({
         wallet,

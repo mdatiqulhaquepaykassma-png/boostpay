@@ -259,6 +259,13 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
                 expires {new Date(Number(bonus.wallet.nextExpiryAt)).toLocaleDateString()}
               </span>
             )}
+            {Number(bonus.wallet.nextExpiryAt) > 0 && (
+              <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[9px] font-bold text-zinc-300">
+                {(bonus.wallet.grants || []).some((g: any) => g.expiryAction === 'TO_BALANCE')
+                  ? 'unused → main balance'
+                  : 'unused expires'}
+              </span>
+            )}
           </div>
           {bonus.waitingDeposit?.length > 0 && (
             <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-300">
@@ -286,6 +293,11 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
             {bonus.wallet.canWithdraw
               ? 'You can move this bonus into your main balance, and boost it like normal money.'
               : 'This bonus can only be boosted — it cannot be sent or withdrawn. Profit you earn on top of it can be.'}
+            {Number(bonus.wallet.nextExpiryAt) > 0 && (
+              (bonus.wallet.grants || []).some((g: any) => g.expiryAction === 'TO_BALANCE')
+                ? ' Whatever you have not used when it expires is added to your main balance — not lost.'
+                : ' Whatever you have not used when it expires is cancelled, so use it before then.'
+            )}
           </p>
         </div>
       )}

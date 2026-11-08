@@ -1004,6 +1004,98 @@ if _row:
     ck('the approved bonus lands in the wallet', num((bw2.get('wallet') or {}).get('available')) == 1,
        f"available={(bw2.get('wallet') or {}).get('available')}", 'CRITICAL', 'An approved bonus is not credited.')
 
+
+# ── 19. bonus expiry policy: cancelled, or moved into the main balance ───────
+print("\n[19. bonus expiry policy]")
+DB_PATH = os.environ.get('JOURNEY_DB', 'data/boostpay_db.json')
+
+
+def _expire_grant_now(user_id, campaign_code):
+    """Pull one ACTIVE grant's expiry into the past so the lazy sweep fires."""
+    try:
+        raw = json.load(open(DB_PATH))
+    except Exception:
+        return 0
+    hit = 0
+    for g in raw.get('bonusGrants', []):
+        if (str(g.get('userId')) == str(user_id) and str(g.get('campaignCode')) == campaign_code
+                and g.get('status') == 'ACTIVE'):
+            g['expiresAt'] = int(time.time() * 1000) - 60000
+            hit += 1
+    if hit:
+        json.dump(raw, open(DB_PATH, 'w'), indent=1)
+    return hit
+
+
+def _policy_campaign(code, amount, action, withdraw):
+    sx, jx = req('/api/admin/promo/campaigns/save', {
+        'code': code, 'name': f'Policy {action}', 'bonusPerUser': amount, 'maxUses': 20,
+        'minDeposit': 0, 'bonusExpiryDays': 7, 'expiryAction': action,
+        'bonusTransfer': False, 'bonusWithdraw': withdraw, 'status': 'ACTIVE', 'audience': 'NEW',
+    }, token=pt, ip_addr=ip())
+    return sx, jx
+
+
+def _join_and_read(email, code, device):
+    _s, _id, _j = signup_at(email, code, ip(), device=device)
+    _tok, _me = login(((_j.get('_email') or email), 'Staging123!'), ip_addr=ip())
+    return _id, _tok, num((_me or {}).get('balance')), _j
+
+
+_polA = f'POL{_RUN_TAG}'
+sx, jx = _policy_campaign(_polA, 5, 'TO_BALANCE', True)
+ck('a campaign can say "an unused bonus moves to the balance"', sx == 200,
+   f'{sx} {jx.get("error")}', 'HIGH', 'The expiry policy cannot be configured.')
+pid, ptok, pbal, pj = _join_and_read('pol1@gmail.com', _polA, 'DEV-POL1')
+ck('joining such a campaign pays the bonus', (pj.get('campaign') or {}).get('paid') is True,
+   f"{pj.get('campaign')}", 'HIGH', 'A TO_BALANCE campaign does not pay at signup.')
+sx, bw = req('/api/user/bonus', token=ptok, ip_addr=ip())
+_g = ((bw.get('wallet') or {}).get('grants') or [{}])[0]
+ck('the grant remembers the policy it was issued under', _g.get('expiryAction') == 'TO_BALANCE',
+   f"expiryAction={_g.get('expiryAction')}", 'HIGH',
+   'The policy is not stored on the grant, so old money could move by mistake.')
+ck('the signup screen shows what expiry will do',
+   (req(f'/api/promo/code/{_polA}', ip_addr=ip())[1] or {}).get('campaign', {}).get('expiryAction') == 'TO_BALANCE',
+   f"{req(f'/api/promo/code/{_polA}', ip_addr=ip())[1].get('campaign')}", 'MEDIUM',
+   'Users are not told where an expiring bonus goes.')
+_expire_grant_now(pid, _polA)
+sx, bw2 = req('/api/user/bonus', token=ptok, ip_addr=ip())
+ck('the expired bonus leaves the bonus wallet',
+   num((bw2.get('wallet') or {}).get('available')) == 0,
+   f"available={(bw2.get('wallet') or {}).get('available')}", 'HIGH', 'An expired bonus is still usable.')
+_tok2, me2 = login((pj.get('_email'), 'Staging123!'), ip_addr=ip())
+ck('the unused bonus lands in the main balance instead of vanishing',
+   abs(num(me2.get('balance')) - (pbal + 5)) < 1e-6,
+   f"before={pbal} after={me2.get('balance')}", 'CRITICAL',
+   'The TO_BALANCE policy does not actually move the money — users lose it.')
+ck('the bonus ledger records the move',
+   any(r.get('type') == 'BONUS_EXPIRED_TO_BALANCE' for r in (bw2.get('ledger') or [])),
+   f"{(bw2.get('ledger') or [])[:2]}", 'MEDIUM', 'There is no audit trail for an expiry payout.')
+
+_burB = f'BUR{_RUN_TAG}'
+_policy_campaign(_burB, 3, 'BURN', True)
+bid, btok, bbal, bj = _join_and_read('pol2@gmail.com', _burB, 'DEV-POL2')
+_expire_grant_now(bid, _burB)
+sx, bw3 = req('/api/user/bonus', token=btok, ip_addr=ip())
+_tok3, me3 = login((bj.get('_email'), 'Staging123!'), ip_addr=ip())
+ck('a BURN campaign cancels the unused bonus', num((bw3.get('wallet') or {}).get('available')) == 0,
+   f"available={(bw3.get('wallet') or {}).get('available')}", 'HIGH', 'A cancelled bonus stays usable.')
+ck('a BURN campaign does not touch the main balance',
+   abs(num(me3.get('balance')) - bbal) < 1e-6,
+   f"before={bbal} after={me3.get('balance')}", 'CRITICAL',
+   'Money is leaking into the balance from a burn-only campaign.')
+
+_safeC = f'SAF{_RUN_TAG}'
+_policy_campaign(_safeC, 4, 'TO_BALANCE', False)   # policy says pay out, but withdrawal is forbidden
+cid_, ctok, cbal, cj = _join_and_read('pol3@gmail.com', _safeC, 'DEV-POL3')
+_expire_grant_now(cid_, _safeC)
+sx, bw4 = req('/api/user/bonus', token=ctok, ip_addr=ip())
+_tok4, me4 = login((cj.get('_email'), 'Staging123!'), ip_addr=ip())
+ck('a no-withdraw bonus can never be paid out by expiry',
+   abs(num(me4.get('balance')) - cbal) < 1e-6,
+   f"before={cbal} after={me4.get('balance')}", 'CRITICAL',
+   'A boost-only bonus becomes withdrawable cash just by waiting.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

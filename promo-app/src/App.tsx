@@ -19,7 +19,7 @@ type Campaign = {
   id: string; code: string; name: string; bonusPerUser: number; valid: boolean; reason: string;
   status: 'ACTIVE' | 'PAUSED' | 'INACTIVE';
   remainingSlots: number | null; minDeposit: number; bonusTransfer: boolean; bonusWithdraw: boolean;
-  bonusExpiryDays: number; startAt: number; endAt: number; budgetLimit: number;
+  bonusExpiryDays: number; expiryAction?: 'BURN' | 'TO_BALANCE'; startAt: number; endAt: number; budgetLimit: number;
   firstDepositBonus: number; firstDepositMin: number; audience: 'NEW' | 'ALL';
   countries?: string[]; note: string;
   stats: {
@@ -84,7 +84,7 @@ export function App() {
   const [form, setForm] = useState<any>({
     code: '', name: '', bonusPerUser: 1, maxUses: 500, minDeposit: 0,
     status: 'ACTIVE', startAt: '', endAt: '', budgetLimit: 0,
-    bonusTransfer: true, bonusWithdraw: true, bonusExpiryDays: 0,
+    bonusTransfer: true, bonusWithdraw: true, bonusExpiryDays: 0, expiryAction: 'BURN',
     audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0,
     countries: '', note: '',
   });
@@ -164,7 +164,7 @@ export function App() {
     setForm({
       code: '', name: '', bonusPerUser: 1, maxUses: 500, minDeposit: 0,
       status: 'ACTIVE', startAt: '', endAt: '', budgetLimit: 0,
-      bonusTransfer: true, bonusWithdraw: true, bonusExpiryDays: 0,
+      bonusTransfer: true, bonusWithdraw: true, bonusExpiryDays: 0, expiryAction: 'BURN',
       audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0, countries: '', note: '',
     });
     setTab('CAMPAIGN');
@@ -176,7 +176,7 @@ export function App() {
       code: c.code, name: c.name || '', bonusPerUser: c.bonusPerUser, maxUses: c.remainingSlots === null ? 0 : (Number(c.remainingSlots) + Number(c.stats?.joins || 0)),
       minDeposit: c.minDeposit, status: c.status, startAt: day(c.startAt), endAt: day(c.endAt),
       budgetLimit: c.budgetLimit, bonusTransfer: c.bonusTransfer, bonusWithdraw: c.bonusWithdraw,
-      bonusExpiryDays: c.bonusExpiryDays, audience: c.audience,
+      bonusExpiryDays: c.bonusExpiryDays, expiryAction: c.expiryAction || 'BURN', audience: c.audience,
       firstDepositBonus: c.firstDepositBonus, firstDepositMin: c.firstDepositMin,
       countries: (c.countries || []).join(', '), note: c.note || '',
     });
@@ -196,6 +196,7 @@ export function App() {
       bonusTransfer: !!form.bonusTransfer,
       bonusWithdraw: !!form.bonusWithdraw,
       bonusExpiryDays: Number(form.bonusExpiryDays),
+      expiryAction: form.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN',
       audience: form.audience,
       firstDepositBonus: Number(form.firstDepositBonus),
       firstDepositMin: Number(form.firstDepositMin),
@@ -292,7 +293,7 @@ export function App() {
                   </span>
                   <span className={`pill ${c.bonusTransfer ? 'sky' : 'off'}`}>{c.bonusTransfer ? 'transfer ✓' : 'no transfer'}</span>
                   <span className={`pill ${c.bonusWithdraw ? 'sky' : 'off'}`}>{c.bonusWithdraw ? 'withdraw ✓' : 'no withdraw'}</span>
-                  {c.bonusExpiryDays > 0 && <span className="pill violet">{c.bonusExpiryDays}d expiry</span>}
+                  {c.bonusExpiryDays > 0 && <span className="pill violet">{c.bonusExpiryDays}d expiry · {(c.expiryAction || 'BURN') === 'TO_BALANCE' ? 'to balance' : 'burn'}</span>}
                   {c.audience === 'ALL' && <span className="pill off">all users</span>}
                 </div>
                 <div className="grid g4" style={{ marginTop: 9 }}>
@@ -364,6 +365,12 @@ export function App() {
                 <option value={15}>15 days</option>
                 <option value={30}>30 days</option>
                 <option value={90}>90 days</option>
+              </select>
+            </label>
+            <label className="f">When the unused bonus expires
+              <select value={form.expiryAction} onChange={(e) => setForm({ ...form, expiryAction: e.target.value })}>
+                <option value="BURN">Expire — the unused bonus is cancelled</option>
+                <option value="TO_BALANCE">Move to the user's main balance</option>
               </select>
             </label>
             <label className="f">Status

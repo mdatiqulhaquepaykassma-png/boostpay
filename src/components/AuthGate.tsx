@@ -384,7 +384,11 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                         🎁 ${Number(refCheck.campaign.bonusPerUser).toFixed(2)} join bonus
                         {refCheck.campaign.bonusWithdraw ? ' (withdrawable)' : ' (boost only)'}
                         {Number(refCheck.campaign.remainingSlots) > 0 ? ` · ${refCheck.campaign.remainingSlots} slots left` : ''}
-                        {refCheck.campaign.bonusExpiryDays > 0 ? ` · expires ${refCheck.campaign.bonusExpiryDays}d after join` : ''}
+                        {refCheck.campaign.bonusExpiryDays > 0
+                          ? (refCheck.campaign.expiryAction === 'TO_BALANCE'
+                              ? ` · unused part moves to balance after ${refCheck.campaign.bonusExpiryDays}d`
+                              : ` · expires ${refCheck.campaign.bonusExpiryDays}d after join`)
+                          : ''}
                       </p>
                     )}
                     {refCheck.bonus && refCheck.bonus.active && (
