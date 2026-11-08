@@ -18,7 +18,23 @@
 | বিল্ড ফিক্স | প্রথম দুবার ক্র্যাশ: `server.ts` কমিট হয়নি, তারপর `express` ডিপেন্ডেন্সি বাদ ছিল — দুটোই ফিক্স করে পুশ করা হয়েছে (`d1a247a`, `0cbed99`) |
 | ডক্টর | Dokploy DB-র pg_dump ব্যাকআপ: `/root/backups/dokploy-20261108-073225.sql` (লেখার আগে) |
 
-## ২. এখনকার সত্যিকারের অবস্থা (হোস্ট-লেভেলে টেস্ট করা)
+## ২. DNS + HTTPS — **লাইভ** ✅
+
+- Cloudflare: `A promotion` → `72.60.42.18`, **Proxied** (`45e2cd11ced751b9f7d18a86504847cc`), SSL mode **strict** (আগে থেকেই ছিল)
+- কনসোলের টোকেন দিয়ে রেকর্ডটা প্রথমে **DNS-only** করে Let's Encrypt-কে HTTP-01 চ্যালেঞ্জ পাস করতে দিতে হয়েছে (proxied থাকলে ৫২৬ হচ্ছিল), সার্টিফিকেট ইস্যুর পর আবার **Proxied** করে দেওয়া হয়েছে
+- সার্টিফিকেট: Let's Encrypt, **08 Nov 2026 → 06 Feb 2027**, SAN = `promotion.boostpay.online`
+- Traefik-কে একবার `docker restart dokploy-traefik` করতে হয়েছে নতুন রাউট লোড করতে (এতে বাকি সব সাইট রিস্টার্ট-পরবর্তী টেস্টে ২০০ — `boostpay.online`, `admin`, `supportchat`, `agent`)
+
+**পাবলিক টেস্ট (Cloudflare হয়ে):**
+```
+https://promotion.boostpay.online/             → 200  (Playwright: title "BoostPay Promotion", SW registered, 0 page errors)
+https://promotion.boostpay.online/manifest.json → 200
+https://promotion.boostpay.online/sw.js         → 200
+https://promotion.boostpay.online/api/health    → {"status":"ok","version":"v1.2.1794124784"}
+/api/admin/promo/campaigns                      → 401 (সুরক্ষিত)
+```
+
+## ৩. (আগের) হোস্ট-লেভেল টেস্ট
 
 ```
 https://promotion.boostpay.online/            → 200  (PWA shell)
@@ -31,7 +47,22 @@ POST /api/admin/login (ভুল পাসওয়ার্ড) → 401 (প্
 এখনো **DNS নেই** — তাই এই টেস্টগুলো `--resolve promotion.boostpay.online:443:72.60.42.18`
 দিয়ে করা হয়েছে এবং TLS সার্টিফিকেট এখনো Let's Encrypt থেকে ইস্যু হয়নি (DNS ছাড়া হয় না)।
 
-## ৩. আপনার হাত থেকে যা লাগবে (দুটোর যেকোনো একটা)
+## ৪. Cloudflare Access — ⚠️ এখনো বাকি (একটা ক্লিক আপনার দিক থেকে)
+
+আপনার দেওয়া টোকেন (`cfut_…`) **বৈধ** এবং DNS লিখতে পেরেছে, কিন্তু Access API বলছে:
+
+> `access.api.error.not_enabled: Access is not enabled. Visit the Access dashboard and click the 'Enable Access' button.`
+
+অর্থাৎ এই অ্যাকাউন্টে **Zero Trust / Access এখনো চালুই হয়নি**, তাই টোকেনে permission থাকলেও API কিছু বানাতে পারবে না।
+
+**আপনাকে শুধু এটা করতে হবে (একবার):** dash.cloudflare.com → বাঁ দিকের মেনু → **Zero Trust** → প্রথম স্ক্রিনে team name দিয়ে **Enable Access** (ফ্রি প্ল্যানে ৫০ ইউজার পর্যন্ত)। এরপর আমাকে বলুন — আমি সাথে সাথে:
+
+```bash
+CF_API_TOKEN=… python3 tools/cf-access-promotion.py --access --emails <আপনার ইমেইল>
+```
+চালিয়ে `promotion.boostpay.online`-এ Access app + allow-policy বসিয়ে দেবো (One-time PIN দিয়েই লগইন হবে)। যতক্ষণ না হয়, সাইটটা **পাবলিক** — শুধু লগইন স্ক্রিন দেখা যায়, বাকি সব `/api/admin/*` টোকেন ছাড়া ৪০১।
+
+## ৫. (আগের) আপনার হাত থেকে যা লাগবে
 
 **A. আমি করে দিচ্ছি** — Cloudflare টোকেন দিলে (`Zone:DNS:Edit` + `Account:Access: Apps and Policies:Edit`):
 
