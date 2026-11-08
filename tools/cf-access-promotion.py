@@ -14,7 +14,8 @@ Two separate, opt-in steps (nothing happens unless you ask for it):
     # both at once
     CF_API_TOKEN=... python3 tools/cf-access-promotion.py --dns --target IP --access --emails you@example.com
 
-Tokens: the API token needs  Zone:DNS:Edit  +  Account:Access: Apps and Policies:Edit.
+Auth: `CF_API_TOKEN` (preferred) or `CF_API_EMAIL` + `CF_API_KEY`.
+The API token needs  Zone:DNS:Edit  +  Account:Access: Apps and Policies:Edit.
 Never pass the token on the command line in a shared shell — export it for that
 shell only. The script never prints the token, and it prints IDs, not secrets.
 """
@@ -30,11 +31,22 @@ HOST = os.environ.get('CF_HOST', 'promotion.boostpay.online')
 ZONE_NAME = os.environ.get('CF_ZONE', 'boostpay.online')
 
 
+def auth_headers(token=''):
+    """Bearer API token (preferred) or the legacy Global API Key + account e-mail."""
+    if token:
+        return {'authorization': 'Bearer ' + token}
+    email = os.environ.get('CF_API_EMAIL', '').strip()
+    key = os.environ.get('CF_API_KEY', '').strip()
+    if email and key:
+        return {'x-auth-email': email, 'x-auth-key': key}
+    return {}
+
+
 def call(path, method='GET', body=None, token=''):
     data = json.dumps(body).encode() if body is not None else None
-    r = urllib.request.Request(API + path, data=data, method=method,
-                               headers={'authorization': 'Bearer ' + token,
-                                        'content-type': 'application/json'})
+    headers = auth_headers(token)
+    headers['content-type'] = 'application/json'
+    r = urllib.request.Request(API + path, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(r, timeout=30) as x:
             return x.status, json.loads(x.read() or b'{}')
@@ -138,8 +150,8 @@ def main():
     ap.add_argument('--name', default='BoostPay Promotion Console')
     a = ap.parse_args()
     token = os.environ.get('CF_API_TOKEN', '').strip()
-    if not token:
-        fail('CF_API_TOKEN is not set — export it for this shell only.')
+    if not token and not (os.environ.get('CF_API_EMAIL') and os.environ.get('CF_API_KEY')):
+        fail('set CF_API_TOKEN (preferred), or CF_API_EMAIL + CF_API_KEY for the legacy global key.')
     if not (a.dns or a.access):
         fail('nothing to do — pass --dns and/or --access')
     if a.dns:
