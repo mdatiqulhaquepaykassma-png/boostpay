@@ -107,27 +107,6 @@ export function App() {
     }
   };
 
-  /** Save one or two campaign settings straight from the card (no need to open Edit). */
-  const quickSave = async (c: Campaign, patch: any) => {
-    const body: any = {
-      id: c.id, kind: c.kind === 'WELCOME' ? 'WELCOME' : 'CODE', code: c.code, name: c.name || '',
-      bonusPerUser: Number(c.bonusPerUser) || 0,
-      maxUses: c.remainingSlots === null ? 0 : Number(c.remainingSlots) + Number(c.stats?.joins || 0),
-      minDeposit: Number(c.minDeposit) || 0, status: c.status,
-      startAt: Number(c.startAt) || 0, endAt: Number(c.endAt) || 0,
-      budgetLimit: Number(c.budgetLimit) || 0,
-      bonusLockDays: Number(c.bonusLockDays) || 0, bonusSend: c.bonusSend || 'ALL',
-      audience: c.audience, firstDepositBonus: Number(c.firstDepositBonus) || 0,
-      firstDepositMin: Number(c.firstDepositMin) || 0,
-      stackWithCode: c.stackWithCode !== false,
-      dupIp: c.dupIp !== false, dupDevice: c.dupDevice !== false,
-      countries: Array.isArray(c.countries) ? c.countries : [], note: c.note || '',
-      ...patch,
-    };
-    const res = await postRaw('/api/admin/promo/campaigns/save', body);
-    if (res) { flash(`${c.code} updated.`); void load(); }
-  };
-
   /** Move bonuses that still sit in the retired bonus wallet into the main balance. */
   const moveBonusToMain = async () => {
     const dry = await postRaw('/api/admin/promo/bonus/to-main', {});
@@ -376,36 +355,12 @@ export function App() {
                     send: {(c.bonusSend || 'ALL') === 'NONE' ? 'boost only' : (c.bonusSend || 'ALL') === 'L1' ? 'referrer only'
                       : (c.bonusSend || 'ALL') === 'DOWN' ? 'team below' : (c.bonusSend || 'ALL') === 'TEAM' ? 'team' : 'anyone'}
                   </span>
-                  <span className="pill off">lock: {Number(c.bonusLockDays) > 0 ? `${c.bonusLockDays}d` : 'none'}</span>
                   {(c.dupIp === false || c.dupDevice === false) && (
                     <span className="pill off">
                       dup: {c.dupIp === false ? 'no IP' : 'IP'}{c.dupDevice === false ? ' · no device' : ' · device'}
                     </span>
                   )}
                   {c.audience === 'ALL' && <span className="pill off">all users</span>}
-                </div>
-                <div className="grid g2" style={{ marginTop: 10 }}>
-                  <label className="f">Bonus can be sent to
-                    <select value={c.bonusSend || 'ALL'} disabled={busy}
-                      onChange={(e) => void quickSave(c, { bonusSend: e.target.value })}>
-                      <option value="NONE">Nobody — boost only</option>
-                      <option value="L1">Their direct referrer only</option>
-                      <option value="DOWN">Their own team members only (downline)</option>
-                      <option value="TEAM">Their referrer + own team (whole downline)</option>
-                      <option value="ALL">Anyone</option>
-                    </select>
-                  </label>
-                  <label className="f">Bonus lock (boost only)
-                    <select value={Number(c.bonusLockDays) || 0} disabled={busy}
-                      onChange={(e) => void quickSave(c, { bonusLockDays: Number(e.target.value) })}>
-                      <option value={0}>No lock — spend it right away</option>
-                      <option value={1}>1 day</option>
-                      <option value={3}>3 days</option>
-                      <option value={7}>7 days</option>
-                      <option value={14}>14 days</option>
-                      <option value={30}>30 days</option>
-                    </select>
-                  </label>
                 </div>
                 <div className="grid g4" style={{ marginTop: 9 }}>
                   <div className="stat"><span>Joins</span><b>{c.stats.joins}{c.remainingSlots !== null ? `/${c.stats.joins + c.remainingSlots}` : ''}</b></div>
@@ -492,6 +447,10 @@ export function App() {
             <label className="f">Expiry date
               <input type="date" value={form.endAt} onChange={(e) => setForm({ ...form, endAt: e.target.value })} />
             </label>
+            <div style={{ gridColumn: '1 / -1', marginTop: 4 }}>
+              <div className="h" style={{ marginBottom: 2 }}><h2 style={{ fontSize: 13 }}>Bonus rules — send &amp; lock</h2></div>
+              <span className="dim">Who may receive this bonus, and how long it can only be boosted.</span>
+            </div>
             <label className="f">Bonus lock (boost only)
               <select value={form.bonusLockDays} onChange={(e) => setForm({ ...form, bonusLockDays: e.target.value })}>
                 <option value={0}>No lock — spend it right away</option>
