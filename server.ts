@@ -2728,6 +2728,9 @@ function referSendPolicyOf(u: any) {
   const amount = Math.max(0, referRound2(Number(p.amount) || 0));
   return {
     mode, period, amount,
+    // tick in the admin card: may this user send to the person who referred them?
+    // Everything else in the rule is unaffected — only the upline is switched off.
+    allowUpline: p.allowUpline !== false,
     // tick in the admin card: the same rule follows the money to whoever receives it
     inherit: !!p.inherit,
     inheritedFrom: String(p.inheritedFrom || ''),
@@ -2758,6 +2761,7 @@ function applyInheritedReferRule(db: any, sender: any, recipient: any): boolean 
     mode: policy.mode,
     amount: policy.amount,
     period: policy.period,
+    allowUpline: policy.allowUpline,
     inherit: true,
     inheritedFrom: String(sender.id),
     source: 'INHERIT',
@@ -2776,13 +2780,14 @@ function applyInheritedReferRule(db: any, sender: any, recipient: any): boolean 
 }
 
 /** Who this user is allowed to send to under the policy (empty set when mode is off). */
-function referSendRecipients(db: any, userId: string, mode: string): Set<string> {
+function referSendRecipients(db: any, userId: string, mode: string, allowUpline = true): Set<string> {
   const out = new Set<string>();
   if (mode === 'off') return out;
   const uid = String(userId);
-  // "Only refer" always means the person who referred ME (my upline, L1).
+  // "Only refer" always means the person who referred ME (my upline, L1) —
+  // unless the admin unticked "allow sending to the upline".
   const uplink = (db.referrals || []).find((r: any) => String(r.referredId) === uid);
-  if (uplink) out.add(String(uplink.referrerId));
+  if (uplink && allowUpline) out.add(String(uplink.referrerId));
   if (mode === 'team') {
     // Tick "also team members": everyone under me, at any depth.
     const walk = walkTeam(buildReferralIndex(db), uid);
@@ -2806,8 +2811,13 @@ function referSendUsed(db: any, userId: string, period: string, now = Date.now()
 }
 
 /** Human wording for who the user may pay. */
-function referSendLabel(mode: string): string {
-  return mode === 'l1' ? 'your direct referrer only' : 'your direct referrer and your own team members only';
+function referSendLabel(mode: string, allowUpline = true): string {
+  if (mode === 'l1') {
+    return allowUpline ? 'your direct referrer only' : 'nobody — sending to your referrer is switched off and no team members are included';
+  }
+  return allowUpline
+    ? 'your direct referrer and your own team members only'
+    : 'your own team members only (not your referrer)';
 }
 
 /**
@@ -2854,11 +2864,11 @@ function referSendUsage(db: any, user: any): {
 function referSendLimitError(db: any, sender: any, recipientId: string, amount: number): { error: string; referSend: any } | null {
   const policy = referSendPolicyOf(sender);
   if (policy.mode === 'off') return null;
-  const allowed = referSendRecipients(db, String(sender.id), policy.mode);
-  const publicPolicy = { mode: policy.mode, amount: policy.amount, period: policy.period, note: policy.note };
+  const allowed = referSendRecipients(db, String(sender.id), policy.mode, policy.allowUpline);
+  const publicPolicy = { mode: policy.mode, amount: policy.amount, period: policy.period, allowUpline: policy.allowUpline, note: policy.note };
   if (!allowed.has(String(recipientId))) {
     return {
-      error: `Sending is limited on this account: you can only send money to ${referSendLabel(policy.mode)}. This recipient is not in that list.`,
+      error: `Sending is limited on this account: you can only send money to ${referSendLabel(policy.mode, policy.allowUpline)}. This recipient is not in that list.`,
       referSend: publicPolicy,
     };
   }
@@ -2869,8 +2879,8 @@ function referSendLimitError(db: any, sender: any, recipientId: string, amount: 
       const when = policy.period === 'day' ? ' per day' : (policy.period === 'total' ? ' in total' : ' per transfer');
       return {
         error: left <= 0
-          ? `You have used your whole limit of $${policy.amount.toFixed(2)}${when} for sending to ${referSendLabel(policy.mode)}.`
-          : `Your sending limit is $${policy.amount.toFixed(2)}${when} to ${referSendLabel(policy.mode)} — you can send at most $${left.toFixed(2)} right now.`,
+          ? `You have used your whole limit of $${policy.amount.toFixed(2)}${when} for sending to ${referSendLabel(policy.mode, policy.allowUpline)}.`
+          : `Your sending limit is $${policy.amount.toFixed(2)}${when} to ${referSendLabel(policy.mode, policy.allowUpline)} — you can send at most $${left.toFixed(2)} right now.`,
         referSend: { ...publicPolicy, used, remaining: left },
       };
     }
@@ -7874,11 +7884,13 @@ async function startServer() {
       }
       // Explicitly set from the console — this is never overwritten by an inherited rule.
       const inherit = body.inherit === true || body.inherit === 'true';
+      // default true: an admin who never touches this keeps today's behaviour
+      const allowUpline = !(body.allowUpline === false || body.allowUpline === 'false');
       if (mode === 'off') {
-        user.referSend = { mode: 'off', amount: 0, period: 'day', inherit: false, note: '', source: 'ADMIN', setBy: String(req.authAdmin || ''), setAt: Date.now() };
+        user.referSend = { mode: 'off', amount: 0, period: 'day', inherit: false, allowUpline: true, note: '', source: 'ADMIN', setBy: String(req.authAdmin || ''), setAt: Date.now() };
       } else {
         user.referSend = {
-          mode, amount, period, inherit,
+          mode, amount, period, inherit, allowUpline,
           note: sanitizeText(body.note, 160),
           source: 'ADMIN',
           inheritedFrom: '',
@@ -7887,11 +7899,11 @@ async function startServer() {
         };
       }
       const policy = referSendPolicyOf(user);
-      const allowed = referSendRecipients(db, String(user.id), policy.mode);
+      const allowed = referSendRecipients(db, String(user.id), policy.mode, policy.allowUpline);
       try {
         recordAuditLog(
           db, 'USER_REFER_SEND_LIMIT', String(req.authAdmin || 'admin'),
-          `User #${user.id} send-to-refer -> ${policy.mode === 'off' ? 'released' : `${policy.mode === 'l1' ? 'direct refer only' : 'refer + team'}, ${policy.amount > 0 ? `$${policy.amount.toFixed(2)} ${policy.period === 'day' ? 'per day' : (policy.period === 'total' ? 'in total' : 'per transfer')}` : 'no amount cap'}${policy.inherit ? ' + follows the money to the receiver' : ''}${policy.note ? ` (${policy.note})` : ''}`}`,
+          `User #${user.id} send-to-refer -> ${policy.mode === 'off' ? 'released' : `${policy.mode === 'l1' ? 'direct refer only' : 'refer + team'}, ${policy.amount > 0 ? `$${policy.amount.toFixed(2)} ${policy.period === 'day' ? 'per day' : (policy.period === 'total' ? 'in total' : 'per transfer')}` : 'no amount cap'}${policy.allowUpline ? '' : ' + upline sending blocked'}${policy.inherit ? ' + follows the money to the receiver' : ''}${policy.note ? ` (${policy.note})` : ''}`}`,
           String(user.id)
         );
       } catch { /* audit must not break the action */ }
@@ -7900,7 +7912,7 @@ async function startServer() {
       res.json({
         success: true,
         user: adminUserView(user),
-        referSend: { ...policy, allowedRecipients: allowed.size, used: referSendUsed(db, String(user.id), policy.period) },
+        referSend: { ...policy, allowedRecipients: allowed.size, uplineAllowed: allowed.has(String(((db.referrals || []).find((r: any) => String(r.referredId) === String(user.id)) || {}).referrerId || '')), used: referSendUsed(db, String(user.id), policy.period) },
         referSendUsage: referSendUsage(db, user),
       });
     } catch (err: any) {
@@ -7916,7 +7928,7 @@ async function startServer() {
       const me = (db.users || []).find((u: any) => String(u.id) === uid);
       if (!me) return res.status(404).json({ error: 'User not found.' });
       const policy = referSendPolicyOf(me);
-      const allowed = referSendRecipients(db, uid, policy.mode);
+      const allowed = referSendRecipients(db, uid, policy.mode, policy.allowUpline);
       const used = referSendUsed(db, uid, policy.period);
       // The upline comes from the referral graph (the same source commissions use),
       // not from the stored code, so the ID shown is always the real account.
@@ -7927,12 +7939,13 @@ async function startServer() {
         mode: policy.mode,
         amount: policy.amount,
         period: policy.period,
+        allowUpline: policy.allowUpline,
         inherit: policy.inherit,
         inherited: policy.source === 'INHERIT',
         inheritedFrom: policy.inheritedFrom || null,
         note: policy.note,
         restricted: policy.mode !== 'off',
-        label: policy.mode === 'off' ? '' : referSendLabel(policy.mode),
+        label: policy.mode === 'off' ? '' : referSendLabel(policy.mode, policy.allowUpline),
         referrerId: referrer,
         allowedRecipients: Array.from(allowed).slice(0, 500),
         allowedCount: allowed.size,

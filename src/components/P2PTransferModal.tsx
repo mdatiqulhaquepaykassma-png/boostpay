@@ -83,7 +83,9 @@ export const P2PTransferModal: FC<Props> = ({
   /** Client-side pre-check so the user never has to trigger a server refusal. */
   const ruleError = (toId: string, amt: number): string | null => {
     if (ruleMode === 'off') return null;
-    const who = ruleMode === 'l1' ? 'your direct referrer' : 'your referrer or your own team members';
+    const who = rule?.allowUpline === false
+      ? (ruleMode === 'l1' ? 'nobody — sending up to your referrer is switched off' : 'your own team members only (not your referrer)')
+      : (ruleMode === 'l1' ? 'your direct referrer' : 'your referrer or your own team members');
     if (toId && !ruleAllowed.includes(toId)) {
       return `Sending is limited on this account — you can only send to ${who}. #${toId} is not in that list.`;
     }
@@ -255,10 +257,12 @@ export const P2PTransferModal: FC<Props> = ({
             {ruleMode !== 'off' && (
               <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] p-3 text-[11px] leading-relaxed text-emerald-200">
                 <p className="font-bold text-emerald-300">
-                  {ruleMode === 'l1' ? 'You can send only to your direct referrer' : 'You can send only to your referrer and team members'}
+                  {rule?.allowUpline === false
+                    ? (ruleMode === 'l1' ? 'Sending is closed on this account' : 'You can send only to your own team members')
+                    : (ruleMode === 'l1' ? 'You can send only to your direct referrer' : 'You can send only to your referrer and team members')}
                 </p>
                 <p className="mt-0.5 text-emerald-200/80">
-                  {rule?.referrerId ? `Referrer: #${rule.referrerId}. ` : ''}
+                  {rule?.referrerId ? `Referrer: #${rule.referrerId}${rule?.allowUpline === false ? ' (sending to them is off)' : ''}. ` : ''}
                   {Number(rule?.amount) > 0
                     ? `Limit $${Number(rule.amount).toFixed(2)} ${rule?.period === 'day' ? 'per day' : rule?.period === 'total' ? 'in total' : 'per transfer'} — $${Number(rule?.remaining ?? 0).toFixed(2)} left.`
                     : 'No amount limit.'}

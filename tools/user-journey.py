@@ -1351,6 +1351,75 @@ ck('and the server then refuses the next send', sx == 403, f"{sx} {(blocked or {
    'A user can send past the limit the admin sees.')
 req('/api/admin/users/refer-send', {'userId': U, 'mode': 'off'}, token=_rs2adm, ip_addr=ip())
 
+
+# ── 23. "allow sending to the upline (refer)" tick ───────────────────────────
+print("\n[23. upline send tick]")
+_rs3_s, _rs3_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rs3 = _rs3_j.get('token') or ''
+_su_s, UP, _ = signup_child('upx@gmail.com', 'U1')        # the user we restrict
+_sd_s, DOWN, _ = signup_child('downx@gmail.com', UP)      # their own team member
+_up_tok2, _ = login((f'upx-{_RUN_TAG}@gmail.com', 'Staging123!'), ip_addr=ip())
+_u1c, _ = login(U1, ip_addr=ip())
+for _a in (4, 4):
+    req('/api/transfer', {'senderId': 'U1', 'recipientId': UP, 'amount': _a,
+                          'idempotencyKey': f'upf{_RUN_TAG}{_a}'}, _u1c, ip_addr=ip())
+ck('the upline test chain exists', bool(UP and DOWN), f'{UP}/{DOWN}', 'HIGH', 'Could not build the upline chain.')
+
+# tick ON (default): the referrer may receive
+sx, on = req('/api/admin/users/refer-send', {'userId': UP, 'mode': 'team', 'amount': 0, 'allowUpline': True},
+             token=_rs3, ip_addr=ip())
+ck('the upline tick defaults to allowed', (on.get('referSend') or {}).get('allowUpline') is True,
+   f"{(on.get('referSend') or {}).get('allowUpline')}", 'HIGH', 'The upline tick cannot be left on.')
+sx, to_up = req('/api/transfer', {'senderId': UP, 'recipientId': 'U1', 'amount': 1,
+                                  'idempotencyKey': f'upok{_RUN_TAG}'}, _up_tok2, ip_addr=ip())
+ck('with the tick on the user can pay their referrer', sx == 200,
+   f"{sx} {(to_up or {}).get('error')}", 'CRITICAL', 'The user cannot pay their own referrer.')
+
+# tick OFF: the referrer is closed, the team stays open
+sx, off = req('/api/admin/users/refer-send', {'userId': UP, 'mode': 'team', 'amount': 0, 'allowUpline': False},
+              token=_rs3, ip_addr=ip())
+ck('an admin can switch sending to the upline off', (off.get('referSend') or {}).get('allowUpline') is False,
+   f"{(off.get('referSend') or {}).get('allowUpline')}", 'CRITICAL', 'The upline tick cannot be turned off.')
+sx, blocked = req('/api/transfer', {'senderId': UP, 'recipientId': 'U1', 'amount': 1,
+                                    'idempotencyKey': f'upno{_RUN_TAG}'}, _up_tok2, ip_addr=ip())
+ck('with the tick off the referrer is refused', sx == 403 and blocked.get('referSendLimited') is True,
+   f"{sx} {blocked.get('error')}", 'CRITICAL', 'Money still goes up to the referrer after switching it off.')
+sx, to_down = req('/api/transfer', {'senderId': UP, 'recipientId': DOWN, 'amount': 1,
+                                    'idempotencyKey': f'updown{_RUN_TAG}'}, _up_tok2, ip_addr=ip())
+ck('the rest of the rule still works — team members can be paid', sx == 200,
+   f"{sx} {(to_down or {}).get('error')}", 'HIGH', 'Switching off the upline also closes the team.')
+
+sx, mine2 = req('/api/user/refer-send', token=_up_tok2, ip_addr=ip())
+ck('the user is told the upline is off', mine2.get('allowUpline') is False and 'referrer' in str(mine2.get('label') or '').lower(),
+   f"allowUpline={mine2.get('allowUpline')} label={mine2.get('label')}", 'HIGH',
+   'The Send screen does not explain that the referrer is closed.')
+ck('the allowed list no longer contains the referrer', 'U1' not in [str(x) for x in (mine2.get('allowedRecipients') or [])],
+   f"allowed={mine2.get('allowedRecipients')}", 'HIGH', 'The referrer is still in the allowed list.')
+
+# L1 + upline off = nobody at all
+sx, _ = req('/api/admin/users/refer-send', {'userId': UP, 'mode': 'l1', 'amount': 0, 'allowUpline': False},
+            token=_rs3, ip_addr=ip())
+sx, mine3 = req('/api/user/refer-send', token=_up_tok2, ip_addr=ip())
+ck('L1 with the upline off allows nobody', int(mine3.get('allowedCount') or 0) == 0,
+   f"allowed={mine3.get('allowedCount')} label={mine3.get('label')}", 'HIGH',
+   'A rule that allows nobody still lists recipients.')
+sx, none = req('/api/transfer', {'senderId': UP, 'recipientId': 'U1', 'amount': 1,
+                                 'idempotencyKey': f'upnone{_RUN_TAG}'}, _up_tok2, ip_addr=ip())
+ck('and every send is refused', sx == 403, f"{sx} {(none or {}).get('error')}", 'CRITICAL',
+   'Sending still works when the rule allows nobody.')
+
+# the tick is audited and can be released
+sx, au2 = req('/api/admin/audit-logs', token=_rs3, ip_addr=ip())
+_rows3 = au2.get('logs') if isinstance(au2.get('logs'), list) else (au2.get('auditLogs') or [])
+ck('switching the upline off is audit-logged',
+   any('upline sending blocked' in str(r.get('details') or '') for r in _rows3), f"rows={len(_rows3)}", 'HIGH',
+   'An admin can silently close the uplink without a trace.')
+req('/api/admin/users/refer-send', {'userId': UP, 'mode': 'off'}, token=_rs3, ip_addr=ip())
+sx, after = req('/api/transfer', {'senderId': UP, 'recipientId': 'U1', 'amount': 1,
+                                  'idempotencyKey': f'upoff{_RUN_TAG}'}, _up_tok2, ip_addr=ip())
+ck('removing the rule restores sending in every direction', sx == 200,
+   f"{sx} {(after or {}).get('error')}", 'CRITICAL', 'The upline block survives the rule being removed.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

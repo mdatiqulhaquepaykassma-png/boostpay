@@ -22,7 +22,7 @@ export function ReferSendCard({
   onChanged,
 }: {
   userId: string;
-  policy?: { mode: 'off' | 'l1' | 'team'; amount: number; period: 'day' | 'send' | 'total'; inherit?: boolean; note?: string; setAt?: number };
+  policy?: { mode: 'off' | 'l1' | 'team'; amount: number; period: 'day' | 'send' | 'total'; inherit?: boolean; allowUpline?: boolean; note?: string; setAt?: number };
   usage?: { period: string; cap: number; used: number; remaining: number | null; todayUsed: number; totalUsed: number; sendsToday: number } | null;
   onChanged?: (updatedUser?: any) => void;
 }) {
@@ -32,10 +32,11 @@ export function ReferSendCard({
   const [period, setPeriod] = useState<'day' | 'send' | 'total'>('day');
   const [note, setNote] = useState('');
   const [inherit, setInherit] = useState(false);
+  const [allowUpline, setAllowUpline] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [ok, setOk] = useState('');
-  const [server, setServer] = useState<{ mode: string; amount: number; period: string; inherit?: boolean; allowedRecipients?: number; used?: number } | null>(null);
+  const [server, setServer] = useState<{ mode: string; amount: number; period: string; inherit?: boolean; allowUpline?: boolean; allowedRecipients?: number; uplineAllowed?: boolean; used?: number } | null>(null);
   const [liveUsage, setLiveUsage] = useState<any>(usage || null);
 
   const live = server || (policy ? { mode: policy.mode, amount: Number(policy.amount) || 0, period: policy.period } : null);
@@ -48,6 +49,7 @@ export function ReferSendCard({
     setPeriod((live?.period as any) || 'day');
     setNote(policy?.note || '');
     setInherit(!!(policy as any)?.inherit);
+    setAllowUpline((policy as any)?.allowUpline !== false);
     setError('');
     setOk('');
     setServer(null);
@@ -65,7 +67,7 @@ export function ReferSendCard({
       if (!res.success) throw new Error(res.error || 'Could not save the rule.');
       const saved: any = (res as any).referSend || null;
       if ((res as any).referSendUsage) setLiveUsage((res as any).referSendUsage);
-      if (saved) setServer({ mode: saved.mode, amount: Number(saved.amount) || 0, period: saved.period, inherit: !!saved.inherit, allowedRecipients: saved.allowedRecipients, used: saved.used });
+      if (saved) setServer({ mode: saved.mode, amount: Number(saved.amount) || 0, period: saved.period, inherit: !!saved.inherit, allowUpline: saved.allowUpline !== false, allowedRecipients: saved.allowedRecipients, uplineAllowed: saved.uplineAllowed, used: saved.used });
       setOk(
         saved
           ? `${okText} Server confirms: ${saved.mode === 'off' ? 'no restriction' : `${saved.mode === 'l1' ? 'direct refer only' : 'refer + team'} · ${saved.allowedRecipients ?? 0} allowed recipient(s)${saved.amount > 0 ? ` · cap $${Number(saved.amount).toFixed(2)} ${saved.period === 'day' ? 'per day' : saved.period === 'total' ? 'in total' : 'per transfer'}` : ' · no cap'}${saved.inherit ? ' · also applies to the receiver' : ''}`}.`
@@ -83,7 +85,7 @@ export function ReferSendCard({
     if (amount !== '' && (!Number.isFinite(value) || value < 0)) { setError('Enter a limit of 0 or more (0 = no cap).'); return; }
     const finalMode = team ? 'team' : 'l1';
     return post(
-      { mode: finalMode, amount: Number.isFinite(value) ? value : 0, period, inherit, note },
+      { mode: finalMode, amount: Number.isFinite(value) ? value : 0, period, inherit, allowUpline, note },
       finalMode === 'l1'
         ? `User #${userId} can now send only to their direct referrer.`
         : `User #${userId} can now send only to their referrer and team members.`
@@ -111,6 +113,14 @@ export function ReferSendCard({
               {(live?.amount || 0) > 0
                 ? `$${(live?.amount || 0).toFixed(2)} ${live?.period === 'day' ? 'per day' : live?.period === 'total' ? 'in total' : 'per transfer'}`
                 : 'no amount cap'}
+            </span>
+          </div>
+        )}
+        {current !== 'off' && (
+          <div className="flex justify-between text-zinc-500">
+            <span>Upline (refer)</span>
+            <span className={live?.allowUpline === false ? 'text-red-400' : 'text-emerald-300'}>
+              {live?.allowUpline === false ? 'blocked' : 'allowed'}
             </span>
           </div>
         )}
@@ -198,6 +208,21 @@ export function ReferSendCard({
               Also allow <b>team members under them</b>
               <span className="block text-[10px] text-zinc-500">
                 Unticked = the tick means <b>only the L1 (direct) refer</b> can receive money.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-2 text-[11px] text-zinc-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={allowUpline}
+              onChange={(e) => setAllowUpline(e.target.checked)}
+              className="mt-0.5 accent-emerald-500"
+            />
+            <span>
+              Allow sending <b>to the upline (refer)</b>
+              <span className="block text-[10px] text-zinc-500">
+                Unticked = the user can <b>never</b> send money up to the person who referred them (their team may stay open).
               </span>
             </span>
           </label>

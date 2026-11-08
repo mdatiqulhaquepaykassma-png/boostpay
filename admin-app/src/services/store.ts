@@ -1091,7 +1091,7 @@ export class BoostPayStore {
    */
   static async adminSetReferSend(
     userId: string,
-    payload: { mode: 'off' | 'l1' | 'team'; amount?: number; period?: 'day' | 'send' | 'total'; inherit?: boolean; note?: string }
+    payload: { mode: 'off' | 'l1' | 'team'; amount?: number; period?: 'day' | 'send' | 'total'; inherit?: boolean; allowUpline?: boolean; note?: string }
   ): Promise<{ success: boolean; user?: any; referSend?: any; error?: string }> {
     try {
       const res = await fetch('/api/admin/users/refer-send', {
