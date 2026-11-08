@@ -1820,6 +1820,17 @@ def _send(token, sid, rid, amount, tag):
                                  'idempotencyKey': f'{tag}{_RUN_TAG}'}, token=token, ip_addr=ip())
 
 
+# a WELCOME campaign created without the tick is boost-only by default
+req('/api/admin/promo/campaigns/save', {
+    'id': _wid, 'kind': 'WELCOME', 'name': 'Journey welcome', 'bonusPerUser': 3, 'maxUses': 0,
+    'bonusLockDays': 0, 'status': 'ACTIVE', 'stackWithCode': True,
+}, token=_rs9, ip_addr=ip())
+sx, _dpub = req('/api/promo/welcome', ip_addr=ip())
+ck('a welcome bonus defaults to boost only when the tick was never set',
+   (_dpub.get('welcome') or {}).get('bonusSend') == 'NONE',
+   f"send={(_dpub.get('welcome') or {}).get('bonusSend')}", 'HIGH',
+   'The welcome bonus defaults to being sendable anywhere.')
+
 # NONE: the bonus may only be boosted
 sx, _ = _welcome_tick('NONE')
 ck('the campaign can say "boost only, nobody may receive it"', sx == 200, f"{sx}", 'HIGH',

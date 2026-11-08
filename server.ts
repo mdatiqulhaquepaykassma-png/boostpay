@@ -2741,7 +2741,11 @@ const BONUS_SEND_LABEL: Record<string, string> = {
 
 function campaignBonusSend(c: any): string {
   const m = String((c && c.bonusSend) || '').toUpperCase();
-  return BONUS_SEND_MODES.includes(m) ? m : 'ALL';   // legacy campaigns keep the old freedom
+  if (BONUS_SEND_MODES.includes(m)) return m;
+  // No tick stored yet (campaigns created before this setting): a WELCOME bonus is
+  // boost-only by default — that is the owner's rule for the welcome bonus — while
+  // older code campaigns keep the freedom they already had.
+  return String((c && c.kind) || '').toUpperCase() === 'WELCOME' ? 'NONE' : 'ALL';
 }
 
 /** The people a bonus may be paid to under one mode. */
@@ -9795,10 +9799,13 @@ async function startServer() {
     // `bonusLockDays` keeps the bonus slice locked for transfers/withdrawals only
     // (0 = no lock). The old burn/expiry policy is dead — existing data is zeroed.
     c.bonusLockDays = Math.min(365, Math.max(0, Math.trunc(num(body.bonusLockDays, num(c.bonusLockDays)))));
-    // who the bonus money may be sent to (NONE / L1 / DOWN / TEAM / ALL)
+    // who the bonus money may be sent to (NONE / L1 / DOWN / TEAM / ALL).
+    // Left untouched when the editor does not send it, so the kind-based default
+    // (welcome = boost only) still applies to older campaigns.
     {
-      const _m = String(body.bonusSend || c.bonusSend || 'ALL').toUpperCase();
-      c.bonusSend = BONUS_SEND_MODES.includes(_m) ? _m : 'ALL';
+      const _m = String(body.bonusSend != null ? body.bonusSend : (c.bonusSend || '')).toUpperCase();
+      if (BONUS_SEND_MODES.includes(_m)) c.bonusSend = _m;
+      else if (!c.bonusSend) delete c.bonusSend;
     }
     c.bonusExpiryDays = 0;
     c.expiryAction = 'NONE';
