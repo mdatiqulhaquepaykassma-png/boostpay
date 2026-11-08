@@ -17,7 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 type Campaign = {
   id: string; code: string; name: string; bonusPerUser: number; valid: boolean; reason: string;
-  kind?: 'CODE' | 'WELCOME'; stackWithCode?: boolean;
+  kind?: 'CODE' | 'WELCOME'; stackWithCode?: boolean; dupIp?: boolean; dupDevice?: boolean;
   status: 'ACTIVE' | 'PAUSED' | 'INACTIVE';
   remainingSlots: number | null; minDeposit: number; bonusTransfer: boolean; bonusWithdraw: boolean;
   bonusExpiryDays: number; expiryAction?: 'BURN' | 'TO_BALANCE'; startAt: number; endAt: number; budgetLimit: number;
@@ -87,7 +87,7 @@ export function App() {
     status: 'ACTIVE', startAt: '', endAt: '', budgetLimit: 0,
     bonusTransfer: true, bonusWithdraw: true, bonusExpiryDays: 0, expiryAction: 'BURN',
     audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0, kind: 'CODE', stackWithCode: true,
-    countries: '', note: '',
+    dupIp: true, dupDevice: true, countries: '', note: '',
   });
 
   const flash = (m: string) => { setNote(m); setTimeout(() => setNote(''), 4000); };
@@ -190,7 +190,7 @@ export function App() {
       status: 'ACTIVE', startAt: '', endAt: '', budgetLimit: 0,
       bonusTransfer: true, bonusWithdraw: true, bonusExpiryDays: 0, expiryAction: 'BURN',
       audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0, kind: 'CODE', stackWithCode: true,
-      countries: '', note: '',
+      dupIp: true, dupDevice: true, countries: '', note: '',
     });
     setTab('CAMPAIGN');
   };
@@ -204,6 +204,7 @@ export function App() {
       bonusExpiryDays: c.bonusExpiryDays, expiryAction: c.expiryAction || 'BURN', audience: c.audience,
       firstDepositBonus: c.firstDepositBonus, firstDepositMin: c.firstDepositMin,
       kind: c.kind || 'CODE', stackWithCode: c.stackWithCode !== false,
+      dupIp: c.dupIp !== false, dupDevice: c.dupDevice !== false,
       countries: (c.countries || []).join(', '), note: c.note || '',
     });
     setTab('CAMPAIGN');
@@ -225,6 +226,8 @@ export function App() {
       expiryAction: form.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN',
       kind: form.kind === 'WELCOME' ? 'WELCOME' : 'CODE',
       stackWithCode: !!form.stackWithCode,
+      dupIp: !!form.dupIp,
+      dupDevice: !!form.dupDevice,
       audience: form.audience,
       firstDepositBonus: Number(form.firstDepositBonus),
       firstDepositMin: Number(form.firstDepositMin),
@@ -321,6 +324,11 @@ export function App() {
                   </span>
                   <span className={`pill ${c.bonusTransfer ? 'sky' : 'off'}`}>{c.bonusTransfer ? 'transfer ✓' : 'no transfer'}</span>
                   <span className={`pill ${c.bonusWithdraw ? 'sky' : 'off'}`}>{c.bonusWithdraw ? 'withdraw ✓' : 'no withdraw'}</span>
+                  {(c.dupIp === false || c.dupDevice === false) && (
+                    <span className="pill off">
+                      dup: {c.dupIp === false ? 'no IP' : 'IP'}{c.dupDevice === false ? ' · no device' : ' · device'}
+                    </span>
+                  )}
                   {c.bonusExpiryDays > 0 && <span className="pill violet">{c.bonusExpiryDays}d expiry · {(c.expiryAction || 'BURN') === 'TO_BALANCE' ? 'to balance' : 'burn'}</span>}
                   {c.audience === 'ALL' && <span className="pill off">all users</span>}
                 </div>
@@ -449,6 +457,18 @@ export function App() {
                 </select>
               </label>
             )}
+            <label className="f">Duplicate account check — same IP
+              <select value={form.dupIp ? '1' : '0'} onChange={(e) => setForm({ ...form, dupIp: e.target.value === '1' })}>
+                <option value="1">Hold for review</option>
+                <option value="0">Ignore the IP (mobile / shared wifi)</option>
+              </select>
+            </label>
+            <label className="f">Duplicate account check — same device
+              <select value={form.dupDevice ? '1' : '0'} onChange={(e) => setForm({ ...form, dupDevice: e.target.value === '1' })}>
+                <option value="1">Hold for review</option>
+                <option value="0">Ignore the device</option>
+              </select>
+            </label>
             <label className="f">Who can use it
               <select value={form.audience} onChange={(e) => setForm({ ...form, audience: e.target.value })}>
                 <option value="NEW">New users only</option>

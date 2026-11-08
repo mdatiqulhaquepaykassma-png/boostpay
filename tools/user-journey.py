@@ -1587,6 +1587,94 @@ ck('the backfill is audit-logged',
    any('WELCOME_BACKFILL' in str(r.get('action') or '') for r in _rows5), f"rows={len(_rows5)}", 'HIGH',
    'A mass payout leaves no audit trail.')
 
+
+# ── 26. duplicate-account check is configurable (shared IP ≠ same person) ────
+print("\n[26. duplicate check configurable]")
+_rs6_s, _rs6_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rs6 = _rs6_j.get('token') or ''
+_SHARED_IP = '10.44.44.44'
+
+def _dup_campaign(code, dupIp, dupDevice):
+    return req('/api/admin/promo/campaigns/save', {
+        'code': code, 'name': 'Dup ' + code, 'bonusPerUser': 2, 'maxUses': 50,
+        'bonusWithdraw': True, 'bonusTransfer': False, 'status': 'ACTIVE',
+        'dupIp': dupIp, 'dupDevice': dupDevice,
+    }, token=_rs6, ip_addr=ip())
+
+def _signup_shared(email, code, device=''):
+    local, _, dom = email.partition('@')
+    addr = f'{local}-{_RUN_TAG}@{dom}'
+    hdr = {'content-type': 'application/json', 'x-forwarded-for': _SHARED_IP}
+    if device: hdr['x-device-id'] = device
+    body = json.dumps({'email': addr, 'password': 'Staging123!', 'referralCode': code}).encode()
+    r = urllib.request.Request(API + '/api/users/register', data=body, method='POST', headers=hdr)
+    try:
+        with urllib.request.urlopen(r, timeout=25) as x:
+            return x.status, json.loads(x.read() or b'{}')
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b'{}')
+        except Exception:
+            return e.code, {}
+
+# IP check ON (default): the second account on the same IP is held
+_c1 = f'DUPON{_RUN_TAG}'
+sx, _ = _dup_campaign(_c1, True, True)
+_s1, _d1 = _signup_shared('dupip1@gmail.com', _c1, 'DEV-A')
+_s2, _d2 = _signup_shared('dupip2@gmail.com', _c1, 'DEV-B')
+ck('with the IP check on, a second account on the same IP pays first',
+   (_d1.get('campaign') or {}).get('paid') is True, f"{_d1.get('campaign')}", 'HIGH',
+   'The first claim on a shared IP is not paid.')
+ck('…and the second one is held for review', (_d2.get('campaign') or {}).get('reason') == 'PENDING_REVIEW',
+   f"{_d2.get('campaign')}", 'HIGH', 'The IP check does not hold a duplicate.')
+
+# IP check OFF: the same shared IP is fine, the device signal is still watched
+_c2 = f'DUPOFF{_RUN_TAG}'
+sx, _ = _dup_campaign(_c2, False, True)
+_e1, _e1j = _signup_shared('dupip3@gmail.com', _c2, 'DEV-C')
+_e2, _e2j = _signup_shared('dupip4@gmail.com', _c2, 'DEV-D')
+ck('with the IP check off, two real users behind one mobile IP both get paid',
+   (_e1j.get('campaign') or {}).get('paid') is True and (_e2j.get('campaign') or {}).get('paid') is True,
+   f"first={(_e1j.get('campaign') or {}).get('reason')} second={(_e2j.get('campaign') or {}).get('reason')}", 'CRITICAL',
+   'Genuine users on a shared carrier IP are still blocked.')
+
+_c3 = f'DUPDEV{_RUN_TAG}'
+sx, _ = _dup_campaign(_c3, False, True)
+_f1, _f1j = _signup_shared('dupip5@gmail.com', _c3, 'DEV-SAME')
+_f2, _f2j = _signup_shared('dupip6@gmail.com', _c3, 'DEV-SAME')
+ck('the same device is still held even when the IP is ignored',
+   (_f1j.get('campaign') or {}).get('paid') is True and (_f2j.get('campaign') or {}).get('reason') == 'PENDING_REVIEW',
+   f"first={(_f1j.get('campaign') or {}).get('reason')} second={(_f2j.get('campaign') or {}).get('reason')}", 'CRITICAL',
+   'Turning the IP check off also disabled device protection.')
+
+# both off: nothing is held
+_c4 = f'DUPNONE{_RUN_TAG}'
+sx, _ = _dup_campaign(_c4, False, False)
+_g1, _g1j = _signup_shared('dupip7@gmail.com', _c4, 'DEV-X')
+_g2, _g2j = _signup_shared('dupip8@gmail.com', _c4, 'DEV-X')
+ck('with both checks off nothing is held at all',
+   (_g1j.get('campaign') or {}).get('paid') is True and (_g2j.get('campaign') or {}).get('paid') is True,
+   f"first={(_g1j.get('campaign') or {}).get('reason')} second={(_g2j.get('campaign') or {}).get('reason')}", 'HIGH',
+   'The duplicate checks cannot be switched off.')
+
+# the held bonus can be released from the review queue (the exact case of user 186)
+sx, q = req('/api/admin/promo/reviews?status=PENDING', token=_rs6, ip_addr=ip())
+_rowd = next((r for r in (q.get('reviews') or []) if r.get('reason') == 'DUPLICATE_ACCOUNT'), None)
+ck('the review queue lists the held duplicate', bool(_rowd), f"rows={len(q.get('reviews') or [])}", 'HIGH',
+   'A held duplicate never reaches the admin queue.')
+if _rowd:
+    sx, dec = req('/api/admin/promo/reviews/decide', {'id': _rowd['id'], 'action': 'approve'}, token=_rs6, ip_addr=ip())
+    ck('approving it pays the held bonus', sx == 200, f"{sx} {dec.get('error')}", 'CRITICAL',
+       'Approving a held duplicate does not pay it.')
+
+# the ticks are visible to the console and enforced by the engine
+sx, lst2 = req('/api/admin/promo/campaigns', token=_rs6, ip_addr=ip())
+_row2 = next((c for c in (lst2.get('campaigns') or []) if c.get('code') == _c2), None)
+ck('the campaign reports which duplicate signals are watched',
+   (_row2 or {}).get('dupIp') is False and (_row2 or {}).get('dupDevice') is True,
+   f"dupIp={(_row2 or {}).get('dupIp')} dupDevice={(_row2 or {}).get('dupDevice')}", 'MEDIUM',
+   'The console cannot tell which checks are active.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

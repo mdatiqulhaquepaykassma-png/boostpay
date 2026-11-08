@@ -1107,6 +1107,8 @@ function campaignPublicView(db: any, c: any): any {
     audience: c.audience === 'ALL' ? 'ALL' : 'NEW',
     kind: c.kind === 'WELCOME' ? 'WELCOME' : 'CODE',
     stackWithCode: c.stackWithCode !== false,
+    dupIp: c.dupIp !== false,
+    dupDevice: c.dupDevice !== false,
   };
 }
 
@@ -1212,16 +1214,21 @@ function creditCampaignBonus(db: any, opts: { campaign: any; userId: string; rea
   // Anti-fraud: another account on the same device/IP already claimed from this
   // campaign → hold for a human instead of paying. Never blocks the signup.
   if (!opts.bypassFraud) {
+    // Which duplicate signals count is a per-campaign choice. Mobile carriers put
+    // thousands of real users behind one IP (CGNAT), so IP-only matching blocks
+    // genuine people — the admin can turn that signal off and keep device matching.
+    const watchIp = c.dupIp !== false;
+    const watchDevice = c.dupDevice !== false;
     const user = opts.user || (db.users || []).find((u: any) => String(u.id) === String(userId));
-    const ip = String((user && (user as any).signupIp) || '');
-    const device = String((user && (user as any).signupDevice) || '');
-    const dupGrant = (db.bonusGrants || []).find((g: any) => {
+    const ip = watchIp ? String((user && (user as any).signupIp) || '') : '';
+    const device = watchDevice ? String((user && (user as any).signupDevice) || '') : '';
+    const dupGrant = (!watchIp && !watchDevice) ? null : (db.bonusGrants || []).find((g: any) => {
       if (String(g.campaignId) !== String(c.id)) return false;
       if (String(g.userId) === String(userId)) return false;
       const other = (db.users || []).find((u: any) => String(u.id) === String(g.userId));
       if (!other) return false;
-      const sameIp = ip && String((other as any).signupIp || '') === ip;
-      const sameDevice = device && String((other as any).signupDevice || '') === device;
+      const sameIp = watchIp && ip && String((other as any).signupIp || '') === ip;
+      const sameDevice = watchDevice && device && String((other as any).signupDevice || '') === device;
       return !!(sameIp || sameDevice);
     });
     if (dupGrant) {
@@ -9607,6 +9614,9 @@ async function startServer() {
     c.name = String(body.name || '').slice(0, 80) || (c.kind === 'WELCOME' ? 'Welcome bonus' : '');
     // welcome only: still pay it when the user signed up with a code campaign
     c.stackWithCode = body.stackWithCode !== false;
+    // duplicate-account protection: which signals put a bonus in the review queue
+    c.dupIp = body.dupIp !== false;
+    c.dupDevice = body.dupDevice !== false;
     c.status = CAMPAIGN_STATUSES.includes(body.status) ? body.status : (c.status || 'INACTIVE');
     const num = (v: any, def = 0) => (Number.isFinite(Number(v)) ? Number(v) : def);
     c.bonusPerUser = num(body.bonusPerUser, num(c.bonusPerUser));
