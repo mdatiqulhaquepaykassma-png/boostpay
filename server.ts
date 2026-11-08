@@ -9931,6 +9931,44 @@ async function startServer() {
     }
   });
 
+  // Rebuild a campaign's counters from the bonus ledger. Slots used and budget are
+  // derived values — they can drift (a backfill used to bump them twice), and no
+  // money moves here, so this is a safe repair action for the admin console.
+  app.post('/api/admin/promo/campaigns/recount', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const body = req.body || {};
+      const only = body.campaignId ? String(body.campaignId) : '';
+      const apply = body.confirm === true;
+      const campaigns = (db.campaigns || []).filter((c: any) => !only || String(c.id) === only);
+      if (!campaigns.length) return res.status(404).json({ error: 'No such campaign.' });
+      const rows = campaigns.map((c: any) => {
+        const grants = (db.bonusGrants || []).filter((g: any) => String(g.campaignId) === String(c.id));
+        const before = {
+          used: Math.max(0, Math.trunc(Number(c.used) || 0)),
+          budgetUsed: referRound2(Number(c.budgetUsed) || 0),
+        };
+        const after = {
+          used: grants.length,
+          budgetUsed: referRound2(grants.reduce((a: number, g: any) => a + (Number(g.grantedAmount) || 0), 0)),
+        };
+        if (apply) { c.used = after.used; c.budgetUsed = after.budgetUsed; }
+        return { id: String(c.id), code: String(c.code).toUpperCase(), before, after, changed: before.used !== after.used || before.budgetUsed !== after.budgetUsed };
+      });
+      if (apply) {
+        const fixed = rows.filter((r: any) => r.changed);
+        if (fixed.length) {
+          recordAuditLog(db, 'CAMPAIGN_RECOUNT', String(req.authAdmin || 'admin'),
+            `Campaign counters rebuilt from the bonus ledger: ${fixed.map((r: any) => `${r.code} ${r.before.used}→${r.after.used} slots, $${r.before.budgetUsed}→$${r.after.budgetUsed}`).join('; ')}`);
+          writeDb(db);
+        }
+      }
+      res.json({ success: true, dryRun: !apply, campaigns: rows });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Could not recount the campaign.' });
+    }
+  });
+
   // Leaderboard by campaign (spec item G)
   app.get('/api/admin/promo/leaderboard', requireAdmin, requireSuperAdmin, (req: any, res) => {
     const db = readDb();

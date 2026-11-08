@@ -106,6 +106,23 @@ export function App() {
     }
   };
 
+  /** Rebuild a campaign's slot/budget counters from the bonus ledger (no money moves). */
+  const recount = async (campaignId: string) => {
+    const dry = await postRaw('/api/admin/promo/campaigns/recount', { campaignId, dryRun: true });
+    if (!dry) return;
+    const row = (dry.campaigns || [])[0];
+    if (!row) return;
+    if (!row.changed) { flash(`${row.code} counters already match the bonus ledger.`); return; }
+    const msg = `Recalculate ${row.code}?\n\nslots used: ${row.before.used} → ${row.after.used}\nbudget used: $${Number(row.before.budgetUsed).toFixed(2)} → $${Number(row.after.budgetUsed).toFixed(2)}\n\nNo money moves — the counters are re-read from the bonus ledger.`;
+    if (!confirm(msg)) return;
+    const res = await postRaw('/api/admin/promo/campaigns/recount', { campaignId, confirm: true });
+    if (res) {
+      const r2 = (res.campaigns || [])[0] || row;
+      flash(`${r2.code} counters rebuilt · ${r2.after.used} slots used`);
+      void load();
+    }
+  };
+
   const postRaw = async (path: string, body: any): Promise<any | null> => {
     try {
       const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
@@ -352,6 +369,7 @@ export function App() {
                       Give to existing users
                     </button>
                   )}
+                  <button onClick={() => void recount(c.id)} title="Rebuild slot and budget counters from the bonus ledger (no money moves)">Fix counters</button>
                   <button onClick={() => edit(c)}>Edit</button>
                   {c.status === 'ACTIVE'
                     ? <button onClick={() => void post('/api/admin/promo/campaigns/status', { id: c.id, status: 'PAUSED' }, `${c.code} paused.`)}>Pause</button>

@@ -1683,6 +1683,36 @@ ck('the campaign reports which duplicate signals are watched',
    f"dupIp={(_row2 or {}).get('dupIp')} dupDevice={(_row2 or {}).get('dupDevice')}", 'MEDIUM',
    'The console cannot tell which checks are active.')
 
+
+# ── 27. campaign counters can be repaired (slots must match the ledger) ──────
+print("\n[27. campaign counters match the ledger]")
+_rs7_s, _rs7_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rs7 = _rs7_j.get('token') or ''
+# the welcome campaign has exactly one paid account from §25 (U2)
+sx, _rec = req('/api/admin/promo/campaigns/recount', {'campaignId': _wcid}, token=_rs7, ip_addr=ip())
+_r = (_rec.get('campaigns') or [{}])[0]
+ck('the stored slot count matches the bonus ledger', sx == 200 and _r.get('changed') is False,
+   f"{sx} stored={(_r.get('before') or {}).get('used')} ledger={(_r.get('after') or {}).get('used')}", 'HIGH',
+   'Slots and grants disagree — the campaign runs out of slots early (double-counting backfill).')
+sx, _cd = req('/api/admin/promo/campaign/' + _wcid, token=_rs7, ip_addr=ip())
+_grants = _cd.get('grants') if isinstance(_cd.get('grants'), list) else []
+ck('the slot count is exactly the number of bonus grants', len(_grants) == int(((_r.get('after') or {}).get('used')) or -1),
+   f"grants={len(_grants)} used={(_r.get('after') or {}).get('used')}", 'HIGH',
+   'Each paid user must consume exactly one slot — a drifted counter loses slots.')
+sx, _rec2 = req('/api/admin/promo/campaigns/recount', {'campaignId': _wcid, 'confirm': True}, token=_rs7, ip_addr=ip())
+_r2 = (_rec2.get('campaigns') or [{}])[0]
+ck('recalculating the counters changes nothing when they are already right',
+   sx == 200 and (_r2.get('before') or {}) == (_r2.get('after') or {}),
+   f"{sx} before={_r2.get('before')} after={_r2.get('after')}", 'HIGH',
+   'Recalculating the counters rewrote a correct ledger.')
+sx, bw9 = req('/api/user/bonus', token=_u2tok, ip_addr=ip())
+ck('recalculating never touches the money already paid', num((bw9.get('wallet') or {}).get('granted')) > 0,
+   f"granted={(bw9.get('wallet') or {}).get('granted')}", 'CRITICAL', 'Recalculating clawed back paid bonuses.')
+sx, _ = req('/api/admin/promo/campaigns/recount', {'campaignId': _wcid, 'confirm': True}, token=tu1, ip_addr=ip())
+ck('a normal user cannot recalculate campaign counters', sx in (401, 403), f"{sx}", 'CRITICAL',
+   'A regular user can rewrite campaign counters.')
+
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
