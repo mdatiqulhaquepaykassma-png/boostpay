@@ -92,6 +92,29 @@ export function App() {
 
   const flash = (m: string) => { setNote(m); setTimeout(() => setNote(''), 4000); };
 
+  /** Give the welcome bonus to accounts that already exist (dry-run first). */
+  const backfill = async (campaignId: string, userIds?: string[]) => {
+    const dry = await postRaw('/api/admin/promo/welcome/backfill', { campaignId, userIds, dryRun: true });
+    if (!dry) return;
+    const target = userIds && userIds.length ? `user ${userIds.join(', ')}` : 'every eligible existing account';
+    const msg = `Give the welcome bonus to ${target}?\n\nWould pay ${dry.wouldPay} account(s) · total $${Number(dry.total || 0).toFixed(2)}\nAlready paid: ${dry.alreadyPaid || 0}`;
+    if (!confirm(msg)) return;
+    const res = await postRaw('/api/admin/promo/welcome/backfill', { campaignId, userIds, confirm: true });
+    if (res) {
+      flash(`Welcome bonus paid to ${res.paid} account(s) · $${Number(res.total || 0).toFixed(2)}`);
+      void load();
+    }
+  };
+
+  const postRaw = async (path: string, body: any): Promise<any | null> => {
+    try {
+      const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { flash(j?.error || `HTTP ${r.status}`); return null; }
+      return j;
+    } catch (e: any) { flash(e?.message || 'Network error'); return null; }
+  };
+
   const login = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true); setLoginErr('');
@@ -316,6 +339,11 @@ export function App() {
                   </div>
                 )}
                 <div className="row" style={{ marginTop: 10 }}>
+                  {c.kind === 'WELCOME' && (
+                    <button onClick={() => void backfill(c.id)} title="Give the welcome bonus to accounts that already exist">
+                      Give to existing users
+                    </button>
+                  )}
                   <button onClick={() => edit(c)}>Edit</button>
                   {c.status === 'ACTIVE'
                     ? <button onClick={() => void post('/api/admin/promo/campaigns/status', { id: c.id, status: 'PAUSED' }, `${c.code} paused.`)}>Pause</button>

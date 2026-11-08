@@ -1536,6 +1536,57 @@ ck('welcome grants are audit-logged',
    any('WELCOME' in str(r.get('details') or '').upper() or 'CAMPAIGN_BONUS' in str(r.get('action') or '').upper() for r in _rows4),
    f"rows={len(_rows4)}", 'HIGH', 'A welcome bonus payout leaves no audit trail.')
 
+
+# ── 25. welcome bonus for accounts that already existed (backfill) ───────────
+print("\n[25. welcome backfill for existing users]")
+_rs5_s, _rs5_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rs5 = _rs5_j.get('token') or ''
+sx, _lst = req('/api/admin/promo/campaigns', token=_rs5, ip_addr=ip())
+_wrow = next((c for c in (_lst.get('campaigns') or []) if c.get('kind') == 'WELCOME'), None)
+_wcid = (_wrow or {}).get('id') or ''
+ck('the welcome campaign is live for the backfill', bool(_wcid), f"id={_wcid}", 'HIGH',
+   'The backfill has no welcome campaign to pay from.')
+
+# U2 was seeded before the welcome campaign existed — exactly the case the admin hit
+_u2tok, _ = login(U2, ip_addr=ip())
+sx, bw0 = req('/api/user/bonus', token=_u2tok, ip_addr=ip())
+_before = num((bw0.get('wallet') or {}).get('granted'))
+ck('the old account has no welcome bonus to begin with', _before == 0,
+   f"granted={_before}", 'HIGH', 'The backfill test needs an account without the bonus.')
+
+sx, dry0 = req('/api/admin/promo/welcome/backfill', {'campaignId': _wcid, 'userIds': ['U2'], 'dryRun': True}, token=_rs5, ip_addr=ip())
+ck('a dry run reports what would happen without paying anything',
+   sx == 200 and dry0.get('dryRun') is True and int(dry0.get('wouldPay') or 0) == 1,
+   f"wouldPay={dry0.get('wouldPay')} total={dry0.get('total')}", 'HIGH', 'The dry run does not report the plan.')
+sx, bw2 = req('/api/user/bonus', token=_u2tok, ip_addr=ip())
+ck('the dry run pays nobody', num((bw2.get('wallet') or {}).get('granted')) == 0,
+   f"granted={(bw2.get('wallet') or {}).get('granted')}", 'CRITICAL', 'A dry run moved real money.')
+
+sx, one = req('/api/admin/promo/welcome/backfill', {'campaignId': _wcid, 'userIds': ['U2'], 'confirm': True}, token=_rs5, ip_addr=ip())
+ck('a targeted backfill pays exactly that account', sx == 200 and int(one.get('paid') or 0) == 1,
+   f"{sx} paid={one.get('paid')} total={one.get('total')}", 'CRITICAL',
+   'The backfill cannot credit an existing account.')
+sx, bw3 = req('/api/user/bonus', token=_u2tok, ip_addr=ip())
+ck('the money really lands in that user wallet', num((bw3.get('wallet') or {}).get('granted')) > 0,
+   f"granted={(bw3.get('wallet') or {}).get('granted')}", 'CRITICAL', 'The backfill reports success but pays nothing.')
+
+sx, again = req('/api/admin/promo/welcome/backfill', {'campaignId': _wcid, 'userIds': ['U2'], 'confirm': True}, token=_rs5, ip_addr=ip())
+ck('running it twice never pays the same account twice', int(again.get('paid') or 0) == 0,
+   f"paid={again.get('paid')}", 'CRITICAL', 'The backfill can double-pay an account.')
+
+sx, bad = req('/api/admin/promo/welcome/backfill', {'campaignId': 'CMP-NOPE', 'confirm': True}, token=_rs5, ip_addr=ip())
+ck('an unknown campaign is refused', sx == 404, f"{sx} {bad.get('error')}", 'MEDIUM',
+   'The backfill accepts an unknown campaign id.')
+sx, nonadmin = req('/api/admin/promo/welcome/backfill', {'campaignId': _wcid, 'confirm': True}, token=tu1, ip_addr=ip())
+ck('a normal user cannot run the backfill', nonadmin if False else nonadmin is False or sx in (401, 403, 400),
+   f"{sx} {nonadmin}", 'CRITICAL', 'A regular user can trigger a platform-wide payout.')
+
+sx, au4 = req('/api/admin/audit-logs', token=_rs5, ip_addr=ip())
+_rows5 = au4.get('logs') if isinstance(au4.get('logs'), list) else (au4.get('auditLogs') or [])
+ck('the backfill is audit-logged',
+   any('WELCOME_BACKFILL' in str(r.get('action') or '') for r in _rows5), f"rows={len(_rows5)}", 'HIGH',
+   'A mass payout leaves no audit trail.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

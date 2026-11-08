@@ -9829,6 +9829,98 @@ async function startServer() {
     });
   });
 
+  /**
+   * Give the welcome bonus to accounts that already exist.
+   *
+   * A welcome campaign only pays signups that happen AFTER it goes live, so users
+   * who registered earlier (or who signed up with a code while "skip when a code
+   * is used" was on) never receive it. This route is the explicit, audited way to
+   * fix that — admin-only, dry-run first, and it can target specific user IDs.
+   *
+   *   POST { dryRun: true }                → what WOULD happen (counts + ids)
+   *   POST { confirm: true }               → pay everyone eligible
+   *   POST { userIds: ['185'], confirm }   → pay only those accounts
+   */
+  app.post('/api/admin/promo/welcome/backfill', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const body: any = req.body || {};
+      const wanted = Array.isArray(body.userIds)
+        ? body.userIds.map((x: any) => String(x).replace(/^#/, '').trim()).filter(Boolean)
+        : [];
+      const camp = body.campaignId
+        ? (db.campaigns || []).find((c: any) => String(c.id) === String(body.campaignId))
+        : welcomeCampaignOf(db);
+      if (!camp) return res.status(404).json({ error: 'No welcome campaign found — create one first.' });
+      if (camp.kind !== 'WELCOME') return res.status(400).json({ error: 'That campaign is not a welcome campaign.' });
+      const state = campaignState(db, camp);
+      if (!state.live) return res.status(400).json({ error: `The welcome campaign is not live (${state.reason}). Activate it first.` });
+      const amount = Math.max(0, Number(camp.bonusPerUser) || 0);
+      if (!(amount > 0)) return res.status(400).json({ error: 'The welcome campaign has no amount.' });
+
+      const grantedIds = new Set((db.bonusGrants || [])
+        .filter((g: any) => String(g.campaignId) === String(camp.id))
+        .map((g: any) => String(g.userId)));
+      const pool = wanted.length
+        ? (db.users || []).filter((u: any) => wanted.includes(String(u.id)))
+        : (db.users || []);
+      const skipped: { id: string; reason: string }[] = [];
+      const eligible: any[] = [];
+      for (const u of pool) {
+        const id = String(u.id);
+        if (grantedIds.has(id)) { skipped.push({ id, reason: 'ALREADY_PAID' }); continue; }
+        if (u.isBlocked) { skipped.push({ id, reason: 'BLOCKED' }); continue; }
+        // the campaign may be limited to first-time / country-specific users
+        const countries = Array.isArray(camp.countries) ? camp.countries.map((x: any) => String(x).toUpperCase()) : [];
+        const uc = String(u.country || '').toUpperCase();
+        if (countries.length && !countries.includes(uc)) { skipped.push({ id, reason: 'COUNTRY_BLOCKED' }); continue; }
+        eligible.push(u);
+      }
+      // the slot cap is respected even in a backfill
+      const maxUses = Math.trunc(Number(camp.maxUses) || 0);
+      const used = Math.trunc(Number(camp.used) || 0);
+      let capped = eligible;
+      if (maxUses > 0) {
+        const room = Math.max(0, maxUses - used);
+        if (eligible.length > room) {
+          for (const u of eligible.slice(room)) skipped.push({ id: String(u.id), reason: 'NO_SLOTS_LEFT' });
+          capped = eligible.slice(0, room);
+        }
+      }
+
+      if (body.confirm !== true) {
+        return res.json({
+          dryRun: true, campaign: { id: camp.id, name: camp.name, amount }, live: state.live,
+          wouldPay: capped.length, total: capped.length * amount,
+          alreadyPaid: skipped.filter((x) => x.reason === 'ALREADY_PAID').length,
+          skipped: skipped.slice(0, 50),
+          preview: capped.slice(0, 50).map((u: any) => ({ id: String(u.id) })),
+        });
+      }
+
+      let paid = 0;
+      const failed: { id: string; reason: string }[] = [];
+      for (const u of capped) {
+        // an admin-driven grant skips only the duplicate-device hold; caps, dates
+        // and budget are still enforced by the engine itself
+        const r = creditCampaignBonus(db, { campaign: camp, userId: String(u.id), user: u, bypassFraud: true });
+        if (r.paid) paid += 1; else failed.push({ id: String(u.id), reason: r.reason });
+        camp.used = Math.max(0, Math.trunc(Number(camp.used) || 0)) + (r.paid ? 1 : 0);
+        if (r.paid) camp.budgetUsed = referRound2((Number(camp.budgetUsed) || 0) + amount);
+      }
+      try {
+        recordAuditLog(db, 'WELCOME_BACKFILL', String(req.authAdmin || 'admin'),
+          `Welcome bonus $${amount.toFixed(2)} given to ${paid} existing account(s)${wanted.length ? ` (targeted: ${wanted.join(', ')})` : ' (all eligible)'}${failed.length ? `, ${failed.length} failed` : ''}`,
+          wanted.length === 1 ? wanted[0] : undefined);
+      } catch { /* audit must not break the action */ }
+      writeDb(db);
+      try { for (const u of capped) broadcastUserUpdate(db, String(u.id)); } catch { /* ignore */ }
+      res.json({ success: true, paid, total: referRound2(paid * amount), failed: failed.slice(0, 50), skipped: skipped.slice(0, 50) });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Could not run the welcome backfill.' });
+    }
+  });
+
   // Leaderboard by campaign (spec item G)
   app.get('/api/admin/promo/leaderboard', requireAdmin, requireSuperAdmin, (req: any, res) => {
     const db = readDb();
