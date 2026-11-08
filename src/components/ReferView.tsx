@@ -230,77 +230,19 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
         </div>
       </div>
 
-      {/* ── Promotion bonus wallet ─────────────────────────────────────── */}
-      {bonus && bonus.wallet && (Number(bonus.wallet.granted) > 0 || Number(bonus.wallet.available) > 0) && (
-        <div className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.04] p-4">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-amber-400">
-              🎁 {bonus.campaignCode === 'WELCOME' ? 'Welcome bonus' : 'Bonus wallet'}
-            </span>
-            {bonus.campaignCode && bonus.campaignCode !== 'WELCOME' && <span className="rounded-full bg-zinc-950 px-2 py-0.5 font-mono text-[10px] text-zinc-400">{bonus.campaignCode}</span>}
-          </div>
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 px-3 py-2">
-              <div className="text-[9px] uppercase tracking-wider text-zinc-500">Bonus balance</div>
-              <div className="font-mono text-sm font-bold text-emerald-300">${Number(bonus.wallet.available).toFixed(4)}</div>
-            </div>
-            <div className="rounded-xl border border-zinc-800 bg-zinc-950/70 px-3 py-2">
-              <div className="text-[9px] uppercase tracking-wider text-zinc-500">Used</div>
-              <div className="font-mono text-sm font-bold text-zinc-300">${Number(bonus.wallet.used).toFixed(4)}</div>
-            </div>
-          </div>
-          <div className="mt-2 flex flex-wrap gap-1">
-            <span className={`rounded-full px-2 py-0.5 text-[9px] font-bold ${bonus.wallet.canTransfer ? 'bg-sky-500/15 text-sky-300' : 'bg-zinc-800 text-zinc-400'}`}>
-              Transfer {bonus.wallet.canTransfer ? 'allowed' : 'not allowed'}
-            </span>
-            <span className={`rounded-full px-2 py-0.5 text-[9px] font-bold ${bonus.wallet.canWithdraw ? 'bg-sky-500/15 text-sky-300' : 'bg-zinc-800 text-zinc-400'}`}>
-              Withdraw {bonus.wallet.canWithdraw ? 'allowed' : 'not allowed'}
-            </span>
-            {Number(bonus.wallet.nextExpiryAt) > 0 && (
-              <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[9px] font-bold text-violet-300">
-                expires {new Date(Number(bonus.wallet.nextExpiryAt)).toLocaleDateString()}
-              </span>
-            )}
-            {Number(bonus.wallet.nextExpiryAt) > 0 && (
-              <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[9px] font-bold text-zinc-300">
-                {(bonus.wallet.grants || []).some((g: any) => g.expiryAction === 'TO_BALANCE')
-                  ? 'unused → main balance'
-                  : 'unused expires'}
-              </span>
-            )}
-          </div>
+      {/* ── Promotion bonus: it is real money in the main balance now ────── */}
+      {bonus && (bonus.pendingReviews?.length > 0 || bonus.waitingDeposit?.length > 0) && (
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3">
           {bonus.waitingDeposit?.length > 0 && (
-            <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-300">
-              ⏳ ${Number(bonus.waitingDeposit[0].amount).toFixed(2)} bonus waits for a deposit of ${Number(bonus.waitingDeposit[0].minDeposit).toFixed(2)}.
+            <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-300">
+              ⏳ ${Number(bonus.waitingDeposit[0].amount).toFixed(2)} bonus is released once you deposit ${Number(bonus.waitingDeposit[0].minDeposit).toFixed(2)}.
             </p>
           )}
           {bonus.pendingReviews?.length > 0 && (
-            <p className="mt-2 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[10px] text-zinc-400">
-              🕒 A bonus is under review — you will be credited once it is approved.
+            <p className={`rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-[10px] text-zinc-400 ${bonus.waitingDeposit?.length > 0 ? 'mt-2' : ''}`}>
+              🕒 A bonus is under review — it will be added to your balance once approved.
             </p>
           )}
-          {Array.isArray(bonus.ledger) && bonus.ledger.length > 0 && (
-            <div className="mt-2 max-h-[110px] overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950/60 px-2 py-1">
-              {bonus.ledger.slice(0, 20).map((row: any) => (
-                <div key={row.id} className="flex items-center justify-between gap-2 border-b border-zinc-900 py-1 last:border-0 font-mono text-[9px]">
-                  <span className="text-zinc-500">{row.type.replace(/_/g, ' ').toLowerCase()}</span>
-                  <span className={row.type === 'BONUS_CREDIT' || row.type === 'BONUS_RECEIVED' ? 'text-emerald-400' : 'text-zinc-400'}>
-                    {row.type === 'BONUS_CREDIT' || row.type === 'BONUS_RECEIVED' ? '+' : '−'}${Number(row.amount).toFixed(4)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-          <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">
-            {bonus.wallet.canWithdraw
-              ? 'You can move this bonus into your main balance, and boost it like normal money.'
-              : 'This bonus can only be boosted — it cannot be sent or withdrawn. Profit you earn on top of it can be.'}
-            {Number(bonus.wallet.nextExpiryAt) > 0 && (
-              (bonus.wallet.grants || []).some((g: any) => g.expiryAction === 'TO_BALANCE')
-                ? ' Whatever you have not used when it expires is added to your main balance — not lost.'
-                : ' Whatever you have not used when it expires is cancelled, so use it before then.'
-            )}
-          </p>
         </div>
       )}
 

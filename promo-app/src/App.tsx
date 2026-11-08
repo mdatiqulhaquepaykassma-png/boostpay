@@ -19,8 +19,8 @@ type Campaign = {
   id: string; code: string; name: string; bonusPerUser: number; valid: boolean; reason: string;
   kind?: 'CODE' | 'WELCOME'; stackWithCode?: boolean; dupIp?: boolean; dupDevice?: boolean;
   status: 'ACTIVE' | 'PAUSED' | 'INACTIVE';
-  remainingSlots: number | null; minDeposit: number; bonusTransfer: boolean; bonusWithdraw: boolean;
-  bonusExpiryDays: number; expiryAction?: 'BURN' | 'TO_BALANCE'; startAt: number; endAt: number; budgetLimit: number;
+  remainingSlots: number | null; minDeposit: number; bonusLockDays?: number; creditedTo?: string;
+  startAt: number; endAt: number; budgetLimit: number;
   firstDepositBonus: number; firstDepositMin: number; audience: 'NEW' | 'ALL';
   countries?: string[]; note: string;
   stats: {
@@ -85,7 +85,7 @@ export function App() {
   const [form, setForm] = useState<any>({
     code: '', name: '', bonusPerUser: 1, maxUses: 500, minDeposit: 0,
     status: 'ACTIVE', startAt: '', endAt: '', budgetLimit: 0,
-    bonusTransfer: true, bonusWithdraw: true, bonusExpiryDays: 0, expiryAction: 'BURN',
+    bonusLockDays: 0,
     audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0, kind: 'CODE', stackWithCode: true,
     dupIp: true, dupDevice: true, countries: '', note: '',
   });
@@ -104,6 +104,17 @@ export function App() {
       flash(`Welcome bonus paid to ${res.paid} account(s) · $${Number(res.total || 0).toFixed(2)}`);
       void load();
     }
+  };
+
+  /** Move bonuses that still sit in the retired bonus wallet into the main balance. */
+  const moveBonusToMain = async () => {
+    const dry = await postRaw('/api/admin/promo/bonus/to-main', {});
+    if (!dry) return;
+    if (!Number(dry.grants)) { flash('No bonus is waiting to be moved — every grant is already in a balance.'); return; }
+    const msg = `Move promotion bonuses into the main balance?\n\n${dry.grants} grant(s) · ${dry.users} user(s) · total $${Number(dry.total || 0).toFixed(2)}\n\nThis is one-time and idempotent — each grant moves once.`;
+    if (!confirm(msg)) return;
+    const res = await postRaw('/api/admin/promo/bonus/to-main', { confirm: true });
+    if (res) { flash(`$${Number(res.total || 0).toFixed(2)} moved into ${res.users} balance(s)`); void load(); }
   };
 
   /** Rebuild a campaign's slot/budget counters from the bonus ledger (no money moves). */
@@ -205,7 +216,7 @@ export function App() {
     setForm({
       code: '', name: '', bonusPerUser: 1, maxUses: 500, minDeposit: 0,
       status: 'ACTIVE', startAt: '', endAt: '', budgetLimit: 0,
-      bonusTransfer: true, bonusWithdraw: true, bonusExpiryDays: 0, expiryAction: 'BURN',
+      bonusLockDays: 0,
       audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0, kind: 'CODE', stackWithCode: true,
       dupIp: true, dupDevice: true, countries: '', note: '',
     });
@@ -217,8 +228,7 @@ export function App() {
     setForm({
       code: c.code, name: c.name || '', bonusPerUser: c.bonusPerUser, maxUses: c.remainingSlots === null ? 0 : (Number(c.remainingSlots) + Number(c.stats?.joins || 0)),
       minDeposit: c.minDeposit, status: c.status, startAt: day(c.startAt), endAt: day(c.endAt),
-      budgetLimit: c.budgetLimit, bonusTransfer: c.bonusTransfer, bonusWithdraw: c.bonusWithdraw,
-      bonusExpiryDays: c.bonusExpiryDays, expiryAction: c.expiryAction || 'BURN', audience: c.audience,
+      budgetLimit: c.budgetLimit, bonusLockDays: c.bonusLockDays || 0, audience: c.audience,
       firstDepositBonus: c.firstDepositBonus, firstDepositMin: c.firstDepositMin,
       kind: c.kind || 'CODE', stackWithCode: c.stackWithCode !== false,
       dupIp: c.dupIp !== false, dupDevice: c.dupDevice !== false,
@@ -237,10 +247,7 @@ export function App() {
       status: form.status,
       startAt: fromDay(form.startAt), endAt: fromDay(form.endAt),
       budgetLimit: Number(form.budgetLimit),
-      bonusTransfer: !!form.bonusTransfer,
-      bonusWithdraw: !!form.bonusWithdraw,
-      bonusExpiryDays: Number(form.bonusExpiryDays),
-      expiryAction: form.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN',
+      bonusLockDays: Number(form.bonusLockDays) || 0,
       kind: form.kind === 'WELCOME' ? 'WELCOME' : 'CODE',
       stackWithCode: !!form.stackWithCode,
       dupIp: !!form.dupIp,
@@ -339,14 +346,13 @@ export function App() {
                   <span className={`pill ${c.status === 'ACTIVE' && c.valid ? 'on' : c.status === 'PAUSED' ? 'warn' : 'off'}`}>
                     {c.status === 'ACTIVE' ? (c.valid ? 'Running' : c.reason) : c.status}
                   </span>
-                  <span className={`pill ${c.bonusTransfer ? 'sky' : 'off'}`}>{c.bonusTransfer ? 'transfer ✓' : 'no transfer'}</span>
-                  <span className={`pill ${c.bonusWithdraw ? 'sky' : 'off'}`}>{c.bonusWithdraw ? 'withdraw ✓' : 'no withdraw'}</span>
+                  <span className="pill sky">→ balance</span>
+                  {Number(c.bonusLockDays) > 0 && <span className="pill violet">{c.bonusLockDays}d boost-only</span>}
                   {(c.dupIp === false || c.dupDevice === false) && (
                     <span className="pill off">
                       dup: {c.dupIp === false ? 'no IP' : 'IP'}{c.dupDevice === false ? ' · no device' : ' · device'}
                     </span>
                   )}
-                  {c.bonusExpiryDays > 0 && <span className="pill violet">{c.bonusExpiryDays}d expiry · {(c.expiryAction || 'BURN') === 'TO_BALANCE' ? 'to balance' : 'burn'}</span>}
                   {c.audience === 'ALL' && <span className="pill off">all users</span>}
                 </div>
                 <div className="grid g4" style={{ marginTop: 9 }}>
@@ -364,6 +370,7 @@ export function App() {
                   </div>
                 )}
                 <div className="row" style={{ marginTop: 10 }}>
+                  <button onClick={() => void moveBonusToMain()} title="Move bonuses left in the old bonus wallet into the main balance (one-time)">Bonus → balance</button>
                   {c.kind === 'WELCOME' && (
                     <button onClick={() => void backfill(c.id)} title="Give the welcome bonus to accounts that already exist">
                       Give to existing users
@@ -433,38 +440,24 @@ export function App() {
             <label className="f">Expiry date
               <input type="date" value={form.endAt} onChange={(e) => setForm({ ...form, endAt: e.target.value })} />
             </label>
-            <label className="f">Bonus validity after join
-              <select value={form.bonusExpiryDays} onChange={(e) => setForm({ ...form, bonusExpiryDays: e.target.value })}>
-                <option value={0}>Never expires</option>
+            <label className="f">Bonus lock (boost only)
+              <select value={form.bonusLockDays} onChange={(e) => setForm({ ...form, bonusLockDays: e.target.value })}>
+                <option value={0}>No lock — spend it right away</option>
+                <option value={1}>1 day</option>
+                <option value={3}>3 days</option>
                 <option value={7}>7 days</option>
-                <option value={15}>15 days</option>
+                <option value={14}>14 days</option>
                 <option value={30}>30 days</option>
-                <option value={90}>90 days</option>
               </select>
             </label>
-            <label className="f">When the unused bonus expires
-              <select value={form.expiryAction} onChange={(e) => setForm({ ...form, expiryAction: e.target.value })}>
-                <option value="BURN">Expire — the unused bonus is cancelled</option>
-                <option value="TO_BALANCE">Move to the user's main balance</option>
-              </select>
-            </label>
+            <div className="f" style={{ gridColumn: '1 / -1' }}>
+              <span className="dim">The bonus is added straight to the user's <b>main balance</b> (no separate bonus wallet) and never expires. A lock only keeps that slice out of transfers and withdrawals — boosting is always allowed.</span>
+            </div>
             <label className="f">Status
               <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
                 <option value="ACTIVE">Active</option>
                 <option value="PAUSED">Paused</option>
                 <option value="INACTIVE">Inactive</option>
-              </select>
-            </label>
-            <label className="f">Bonus transfer
-              <select value={form.bonusTransfer ? '1' : '0'} onChange={(e) => setForm({ ...form, bonusTransfer: e.target.value === '1' })}>
-                <option value="1">Allowed</option>
-                <option value="0">Not allowed</option>
-              </select>
-            </label>
-            <label className="f">Bonus withdrawal
-              <select value={form.bonusWithdraw ? '1' : '0'} onChange={(e) => setForm({ ...form, bonusWithdraw: e.target.value === '1' })}>
-                <option value="1">Allowed</option>
-                <option value="0">Not allowed</option>
               </select>
             </label>
             {form.kind === 'WELCOME' && (

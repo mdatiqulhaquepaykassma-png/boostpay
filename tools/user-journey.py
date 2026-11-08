@@ -886,8 +886,8 @@ ck('a random code can be generated', sx == 200 and len(str(rnd.get('code') or ''
 sx, pub = req(f'/api/promo/code/{_c}', ip_addr=ip())
 ck('the signup screen can read a campaign before joining', sx == 200 and num((pub.get('campaign') or {}).get('bonusPerUser')) == 2,
    f"{sx} {pub.get('campaign')}", 'HIGH', 'The public campaign lookup fails.')
-ck('the public view exposes the permissions but no internals',
-   (pub.get('campaign') or {}).get('bonusTransfer') is False and 'budgetUsed' not in json.dumps(pub.get('campaign') or {}),
+ck('the public view exposes the bonus rules but no internals',
+   (pub.get('campaign') or {}).get('creditedTo') == 'BALANCE' and 'budgetUsed' not in json.dumps(pub.get('campaign') or {}),
    f"campaign={pub.get('campaign')}", 'HIGH', 'The public campaign view leaks internals.')
 # join 1: paid
 sx, cid1, cj1 = signup_child('camp1@gmail.com', _c)
@@ -895,22 +895,21 @@ ck('joining with a campaign code pays the bonus', sx == 200 and (cj1.get('campai
    f"{sx} campaign={cj1.get('campaign')}", 'CRITICAL', 'A campaign bonus is not paid at signup.')
 ct1, _ = login((cj1.get('_email') or 'camp1@gmail.com', 'Staging123!'), ip_addr=ip())
 sx, bw = req('/api/user/bonus', token=ct1, ip_addr=ip())
-ck('the user bonus wallet shows the money and the expiry',
-   sx == 200 and num((bw.get('wallet') or {}).get('available')) == 2 and num(((bw.get('wallet') or {}).get('grants') or [{}])[0].get('expiresAt')) > 0,
-   f"wallet={bw.get('wallet')}", 'CRITICAL', 'The bonus wallet does not show the granted bonus.')
-ck('the no-transfer / no-withdraw permissions come through to the user',
-   (bw.get('wallet') or {}).get('canTransfer') is False and (bw.get('wallet') or {}).get('canWithdraw') is False,
-   f"transfer={(bw.get('wallet') or {}).get('canTransfer')} withdraw={(bw.get('wallet') or {}).get('canWithdraw')}", 'CRITICAL',
-   'A blocked permission is not enforced in the user view.')
+ck('the campaign bonus lands in the main balance',
+   sx == 200 and num((bw.get('wallet') or {}).get('mainBalance')) >= 2,
+   f"main={(bw.get('wallet') or {}).get('mainBalance')}", 'CRITICAL', 'The campaign bonus does not reach the balance.')
+ck('there is no second bonus wallet to keep track of',
+   num((bw.get('wallet') or {}).get('available')) == 0 and (bw.get('wallet') or {}).get('grants') == [],
+   f"wallet={bw.get('wallet')}", 'HIGH', 'A separate bonus wallet still holds money.')
 sx, conv = req('/api/user/bonus/convert', {'amount': 1}, token=ct1, ip_addr=ip())
-ck('withdrawing a no-withdraw bonus is refused', sx == 403, f"{sx} {conv.get('error')}", 'CRITICAL',
-   'Bonus money marked "no withdrawal" can be moved to the wallet.')
+ck('the retired "convert" call does nothing and does not error', sx == 200 and num(conv.get('moved')) == 0,
+   f"{sx} moved={conv.get('moved')}", 'HIGH', 'An installed app breaks on the retired bonus wallet.')
 sx, sendb = req('/api/user/bonus/send', {'toUserId': 'U1', 'amount': 1}, token=ct1, ip_addr=ip())
-ck('transferring a no-transfer bonus is refused', sx == 403, f"{sx} {sendb.get('error')}", 'CRITICAL',
-   'Bonus money marked "no transfer" can be sent to another account.')
+ck('the retired bonus transfer is closed (410)', sx == 410, f"{sx} {sendb.get('error')}", 'HIGH',
+   'Bonus money can still be moved bonus-to-bonus.')
 # bonus expiry
-sx, _ = req('/api/admin/promo/campaigns/save', {'id': (made.get('campaign') or {}).get('id'), 'code': _c, 'name': 'Journey campaign', 'bonusPerUser': 2, 'maxUses': 2, 'status': 'ACTIVE', 'budgetLimit': 100, 'bonusExpiryDays': 7, 'audience': 'NEW', 'bonusTransfer': True, 'bonusWithdraw': True}, token=pt, ip_addr=ip())
-ck('a campaign can be edited (permissions flipped)', sx == 200, f"{sx}", 'HIGH', 'Campaign edit fails.')
+sx, _ = req('/api/admin/promo/campaigns/save', {'id': (made.get('campaign') or {}).get('id'), 'code': _c, 'name': 'Journey campaign', 'bonusPerUser': 2, 'maxUses': 2, 'status': 'ACTIVE', 'budgetLimit': 100, 'bonusLockDays': 0, 'audience': 'NEW'}, token=pt, ip_addr=ip())
+ck('a campaign can be edited (rules changed)', sx == 200, f"{sx}", 'HIGH', 'Campaign edit fails.')
 # join 2 uses the last slot
 sx, cid2, cj2 = signup_child('camp2@gmail.com', _c)
 ck('the last remaining slot still pays', sx == 200 and (cj2.get('campaign') or {}).get('paid') is True, f"{sx}", 'HIGH',
@@ -966,8 +965,9 @@ ck('revoking without a reason is refused', sx == 400, f"{sx} {rev.get('error')}"
 sx, rev2 = req('/api/admin/promo/revoke', {'grantId': (_g1.get('id') or 'x'), 'reason': 'journey test'}, token=pt, ip_addr=ip())
 ck('an admin can revoke a bonus with a reason', sx == 200, f"{sx} {rev2.get('error')}", 'HIGH', 'Bonus revoke fails.')
 sx, after = req('/api/user/bonus', token=ct1, ip_addr=ip())  # ct1 = first join of this campaign
-ck('the revoked bonus disappears from the wallet', num((after.get('wallet') or {}).get('available')) == 0,
-   f"available={(after.get('wallet') or {}).get('available')}", 'CRITICAL', 'A revoked bonus is still spendable.')
+ck('the revoked bonus is taken back out of the balance', sx == 200 and num(after.get('wallet', {}).get('mainBalance')) >= 0 and num(rev2.get('deducted')) > 0,
+   f"deducted={rev2.get('deducted')} main={(after.get('wallet') or {}).get('mainBalance')}", 'CRITICAL',
+   'A revoked bonus stays in the balance as real money.')
 
 # duplicate-account protection
 _dc = f'DUP{_RUN_TAG[-3:]}'.upper()
@@ -1001,17 +1001,33 @@ if _row:
        'Approving a review does not pay the bonus.')
     dt2, _ = login((dj2.get('_email') or 'dup2@gmail.com', 'Staging123!'), ip_addr=ip())
     sx, bw2 = req('/api/user/bonus', token=dt2, ip_addr=ip())
-    ck('the approved bonus lands in the wallet', num((bw2.get('wallet') or {}).get('available')) == 1,
-       f"available={(bw2.get('wallet') or {}).get('available')}", 'CRITICAL', 'An approved bonus is not credited.')
+    ck('the approved bonus lands in the main balance', num((bw2.get('wallet') or {}).get('mainBalance')) == 1,
+       f"main={(bw2.get('wallet') or {}).get('mainBalance')}", 'CRITICAL', 'An approved bonus is not credited.')
 
 
-# ── 19. bonus expiry policy: cancelled, or moved into the main balance ───────
-print("\n[19. bonus expiry policy]")
+# ── 19. promo bonus policy: main balance, optional lock, nothing expires ─────
+print("\n[19. promo bonus lock policy]")
+
+
+def _lock_campaign(code, amount, lock_days):
+    sx, jx = req('/api/admin/promo/campaigns/save', {
+        'code': code, 'name': f'Lock {lock_days}d', 'bonusPerUser': amount, 'maxUses': 20,
+        'minDeposit': 0, 'bonusLockDays': lock_days, 'status': 'ACTIVE', 'audience': 'NEW',
+    }, token=pt, ip_addr=ip())
+    return sx, jx
+
+
+def _join_and_read(email, code, device):
+    _s, _id, _j = signup_at(email, code, ip(), device=device)
+    _tok, _me = login(((_j.get('_email') or email), 'Staging123!'), ip_addr=ip())
+    return _id, _tok, num((_me or {}).get('balance')), _j
+
+
 DB_PATH = os.environ.get('JOURNEY_DB', 'data/boostpay_db.json')
 
 
 def _expire_grant_now(user_id, campaign_code):
-    """Pull one ACTIVE grant's expiry into the past so the lazy sweep fires."""
+    """Force an old expiry date onto a grant — nothing should happen any more."""
     try:
         raw = json.load(open(DB_PATH))
     except Exception:
@@ -1027,74 +1043,58 @@ def _expire_grant_now(user_id, campaign_code):
     return hit
 
 
-def _policy_campaign(code, amount, action, withdraw):
-    sx, jx = req('/api/admin/promo/campaigns/save', {
-        'code': code, 'name': f'Policy {action}', 'bonusPerUser': amount, 'maxUses': 20,
-        'minDeposit': 0, 'bonusExpiryDays': 7, 'expiryAction': action,
-        'bonusTransfer': False, 'bonusWithdraw': withdraw, 'status': 'ACTIVE', 'audience': 'NEW',
-    }, token=pt, ip_addr=ip())
-    return sx, jx
+_lokA = f'POL{_RUN_TAG}'
+sx, jx = _lock_campaign(_lokA, 5, 7)
+ck('a campaign can lock the bonus for transfers (boost stays open)', sx == 200,
+   f'{sx} {jx.get("error")}', 'HIGH', 'The bonus lock cannot be configured.')
+lkid, lktok, lkbal, lkj = _join_and_read('pol1@gmail.com', _lokA, 'DEV-POL1')
+ck('joining a locked campaign pays the bonus into the balance at once',
+   (lkj.get('campaign') or {}).get('paid') is True and abs(lkbal - 5) < 1e-6,
+   f"paid={(lkj.get('campaign') or {}).get('paid')} balance={lkbal}", 'CRITICAL',
+   'A locked campaign does not credit the balance.')
+sx, bw = req('/api/user/bonus', token=lktok, ip_addr=ip())
+ck('the wallet shows the bonus as locked, not as a separate purse',
+   num((bw.get('wallet') or {}).get('mainBalance')) == 5 and num((bw.get('wallet') or {}).get('lockedPromo')) == 5
+   and num((bw.get('wallet') or {}).get('available')) == 0,
+   f"main={(bw.get('wallet') or {}).get('mainBalance')} locked={(bw.get('wallet') or {}).get('lockedPromo')}", 'HIGH',
+   'The lock is not reported to the user.')
+sx, cv = req(f'/api/promo/code/{_lokA}', ip_addr=ip())
+ck('the lock is advertised at signup and no expiry is',
+   (cv.get('campaign') or {}).get('bonusLockDays') == 7 and 'bonusExpiryDays' not in (cv.get('campaign') or {}),
+   f"{cv.get('campaign')}", 'MEDIUM', 'The signup screen shows the wrong bonus rules.')
+sx, lsend = req('/api/transfer', {'senderId': str(lkid), 'recipientId': 'U1', 'amount': 1,
+                                  'idempotencyKey': 'pl' + str(int(time.time()))}, token=lktok, ip_addr=ip())
+ck('while locked the bonus cannot be transferred',
+   sx == 403 and 'promotion bonus' in str(lsend.get('error') or '').lower(),
+   f"{sx} {lsend.get('error')}", 'CRITICAL', 'Locked bonus money leaves the account.')
+sx, lboost = req('/api/boost/start', {'userId': str(lkid)}, token=lktok, ip_addr=ip())
+ck('while locked the bonus can still be boosted', sx == 200, f"{sx} {lboost.get('error')}", 'CRITICAL',
+   'The lock also blocks boosting — the owner asked for boosting to stay open.')
 
+# an unlocked campaign is spendable straight away
+_freC = f'FRE{_RUN_TAG}'
+_lock_campaign(_freC, 3, 0)
+frid, frtok, frbal, _ = _join_and_read('pol2@gmail.com', _freC, 'DEV-POL2')
+sx, fsend = req('/api/transfer', {'senderId': str(frid), 'recipientId': 'U1', 'amount': 1,
+                                  'idempotencyKey': 'pf' + str(int(time.time()))}, token=frtok, ip_addr=ip())
+ck('with no lock the bonus can be sent straight away', sx == 200, f"{sx} {fsend.get('error')}", 'CRITICAL',
+   'An unlocked bonus is still stuck.')
 
-def _join_and_read(email, code, device):
-    _s, _id, _j = signup_at(email, code, ip(), device=device)
-    _tok, _me = login(((_j.get('_email') or email), 'Staging123!'), ip_addr=ip())
-    return _id, _tok, num((_me or {}).get('balance')), _j
+# nothing expires any more: force the old expiry field and the money stays
+_expire_grant_now(frid, _freC)
+sx, bw3 = req('/api/user/bonus', token=frtok, ip_addr=ip())
+_tok3, me3 = login((f'pol2-{_RUN_TAG}@gmail.com', 'Staging123!'), ip_addr=ip())
+ck('a stale expiry date never removes money from the balance',
+   num(me3.get('balance')) >= 1 and num((bw3.get('wallet') or {}).get('mainBalance')) >= 1,
+   f"balance={me3.get('balance')}", 'CRITICAL', 'An expiry date still eats the user balance.')
+ck('nothing in the wallet claims an expiry or a burn',
+   num((bw3.get('wallet') or {}).get('nextExpiryAt')) == 0 and (bw3.get('wallet') or {}).get('grants') == [],
+   f"wallet={bw3.get('wallet')}", 'HIGH', 'The retired expiry policy is still exposed.')
 
-
-_polA = f'POL{_RUN_TAG}'
-sx, jx = _policy_campaign(_polA, 5, 'TO_BALANCE', True)
-ck('a campaign can say "an unused bonus moves to the balance"', sx == 200,
-   f'{sx} {jx.get("error")}', 'HIGH', 'The expiry policy cannot be configured.')
-pid, ptok, pbal, pj = _join_and_read('pol1@gmail.com', _polA, 'DEV-POL1')
-ck('joining such a campaign pays the bonus', (pj.get('campaign') or {}).get('paid') is True,
-   f"{pj.get('campaign')}", 'HIGH', 'A TO_BALANCE campaign does not pay at signup.')
-sx, bw = req('/api/user/bonus', token=ptok, ip_addr=ip())
-_g = ((bw.get('wallet') or {}).get('grants') or [{}])[0]
-ck('the grant remembers the policy it was issued under', _g.get('expiryAction') == 'TO_BALANCE',
-   f"expiryAction={_g.get('expiryAction')}", 'HIGH',
-   'The policy is not stored on the grant, so old money could move by mistake.')
-ck('the signup screen shows what expiry will do',
-   (req(f'/api/promo/code/{_polA}', ip_addr=ip())[1] or {}).get('campaign', {}).get('expiryAction') == 'TO_BALANCE',
-   f"{req(f'/api/promo/code/{_polA}', ip_addr=ip())[1].get('campaign')}", 'MEDIUM',
-   'Users are not told where an expiring bonus goes.')
-_expire_grant_now(pid, _polA)
-sx, bw2 = req('/api/user/bonus', token=ptok, ip_addr=ip())
-ck('the expired bonus leaves the bonus wallet',
-   num((bw2.get('wallet') or {}).get('available')) == 0,
-   f"available={(bw2.get('wallet') or {}).get('available')}", 'HIGH', 'An expired bonus is still usable.')
-_tok2, me2 = login((pj.get('_email'), 'Staging123!'), ip_addr=ip())
-ck('the unused bonus lands in the main balance instead of vanishing',
-   abs(num(me2.get('balance')) - (pbal + 5)) < 1e-6,
-   f"before={pbal} after={me2.get('balance')}", 'CRITICAL',
-   'The TO_BALANCE policy does not actually move the money — users lose it.')
-ck('the bonus ledger records the move',
-   any(r.get('type') == 'BONUS_EXPIRED_TO_BALANCE' for r in (bw2.get('ledger') or [])),
-   f"{(bw2.get('ledger') or [])[:2]}", 'MEDIUM', 'There is no audit trail for an expiry payout.')
-
-_burB = f'BUR{_RUN_TAG}'
-_policy_campaign(_burB, 3, 'BURN', True)
-bid, btok, bbal, bj = _join_and_read('pol2@gmail.com', _burB, 'DEV-POL2')
-_expire_grant_now(bid, _burB)
-sx, bw3 = req('/api/user/bonus', token=btok, ip_addr=ip())
-_tok3, me3 = login((bj.get('_email'), 'Staging123!'), ip_addr=ip())
-ck('a BURN campaign cancels the unused bonus', num((bw3.get('wallet') or {}).get('available')) == 0,
-   f"available={(bw3.get('wallet') or {}).get('available')}", 'HIGH', 'A cancelled bonus stays usable.')
-ck('a BURN campaign does not touch the main balance',
-   abs(num(me3.get('balance')) - bbal) < 1e-6,
-   f"before={bbal} after={me3.get('balance')}", 'CRITICAL',
-   'Money is leaking into the balance from a burn-only campaign.')
-
-_safeC = f'SAF{_RUN_TAG}'
-_policy_campaign(_safeC, 4, 'TO_BALANCE', False)   # policy says pay out, but withdrawal is forbidden
-cid_, ctok, cbal, cj = _join_and_read('pol3@gmail.com', _safeC, 'DEV-POL3')
-_expire_grant_now(cid_, _safeC)
-sx, bw4 = req('/api/user/bonus', token=ctok, ip_addr=ip())
-_tok4, me4 = login((cj.get('_email'), 'Staging123!'), ip_addr=ip())
-ck('a no-withdraw bonus can never be paid out by expiry',
-   abs(num(me4.get('balance')) - cbal) < 1e-6,
-   f"before={cbal} after={me4.get('balance')}", 'CRITICAL',
-   'A boost-only bonus becomes withdrawable cash just by waiting.')
+# the audit trail records where the money went
+ck('the ledger records the bonus as money added to the balance',
+   any('main balance' in str(r.get('notes') or '').lower() for r in ((bw3.get('ledger') or []))),
+   f"{(bw3.get('ledger') or [])[:1]}", 'MEDIUM', 'There is no audit trail for a bonus payout.')
 
 
 # ── 20. "send to refer only" — admin pins transfers to the upline ────────────
@@ -1434,8 +1434,7 @@ for _c in (existing.get('campaigns') or []):
 
 sx, wc = req('/api/admin/promo/campaigns/save', {
     'kind': 'WELCOME', 'name': 'Journey welcome', 'bonusPerUser': 3, 'maxUses': 0,
-    'bonusWithdraw': True, 'bonusTransfer': False, 'bonusExpiryDays': 7,
-    'expiryAction': 'BURN', 'status': 'ACTIVE', 'stackWithCode': True,
+    'bonusLockDays': 0, 'status': 'ACTIVE', 'stackWithCode': True,
 }, token=_rs4, ip_addr=ip())
 ck('an admin can create a welcome bonus', sx == 200, f"{sx} {wc.get('error')}", 'CRITICAL',
    'The welcome bonus cannot be created.')
@@ -1455,10 +1454,10 @@ ck('only one welcome bonus can exist', sx == 409, f"{sx} {wc2.get('error')}", 'H
 sx, pub = req('/api/promo/welcome', ip_addr=ip())
 ck('the signup screen can advertise it', (pub.get('welcome') or {}).get('bonusPerUser') == 3,
    f"{pub.get('welcome')}", 'HIGH', 'New users are not told about the welcome bonus.')
-ck('the welcome bonus never reports its permissions as optional',
-   (pub.get('welcome') or {}).get('bonusTransfer') is False and (pub.get('welcome') or {}).get('bonusWithdraw') is True,
-   f"transfer={(pub.get('welcome') or {}).get('bonusTransfer')} withdraw={(pub.get('welcome') or {}).get('bonusWithdraw')}", 'HIGH',
-   'The permission ticks do not reach the public view.')
+ck('the signup screen says the bonus is money in the balance with no lock',
+   (pub.get('welcome') or {}).get('creditedTo') == 'BALANCE' and (pub.get('welcome') or {}).get('bonusLockDays') == 0,
+   f"creditedTo={(pub.get('welcome') or {}).get('creditedTo')} lock={(pub.get('welcome') or {}).get('bonusLockDays')}", 'HIGH',
+   'The signup screen does not describe where the bonus lands.')
 
 # a plain signup with no code at all still gets it
 _ws, WID, _wj = signup_child('welcome1@gmail.com', '')
@@ -1467,35 +1466,34 @@ ck('a signup with no code at all still gets the welcome bonus',
    f"{_wj.get('welcome')}", 'CRITICAL', 'The welcome bonus is not paid automatically.')
 _wtok, _ = login((_wj.get('_email'), 'Staging123!'), ip_addr=ip())
 sx, wb = req('/api/user/bonus', token=_wtok, ip_addr=ip())
-ck('it lands in the bonus wallet, labelled welcome',
-   num((wb.get('wallet') or {}).get('available')) == 3 and wb.get('campaignCode') == 'WELCOME',
-   f"available={(wb.get('wallet') or {}).get('available')} code={wb.get('campaignCode')}", 'CRITICAL',
-   'The welcome bonus is not visible to the user.')
+ck('it lands in the MAIN balance — no separate bonus wallet',
+   num((wb.get('wallet') or {}).get('mainBalance')) == 3 and num((wb.get('wallet') or {}).get('available')) == 0,
+   f"main={(wb.get('wallet') or {}).get('mainBalance')} bonus={(wb.get('wallet') or {}).get('available')}", 'CRITICAL',
+   'The welcome bonus does not reach the main balance.')
 
 # the ticks actually decide what the user may do
 sx, conv = req('/api/user/bonus/convert', {'amount': 1}, token=_wtok, ip_addr=ip())
-ck('the withdrawal tick lets them move part of it to the wallet', sx == 200,
-   f"{sx} {conv.get('error')}", 'CRITICAL', 'A welcome bonus marked withdrawable cannot be moved.')
+ck('the old convert call is a harmless no-op (nothing left to convert)', sx == 200 and num(conv.get('moved')) == 0,
+   f"{sx} moved={conv.get('moved')}", 'HIGH', 'An installed app gets an error from the retired bonus wallet.')
 sx, snd = req('/api/user/bonus/send', {'toUserId': 'U2', 'amount': 1}, token=_wtok, ip_addr=ip())
-ck('the transfer tick being off blocks sending it', sx == 403,
-   f"{sx} {snd.get('error')}", 'CRITICAL', 'A welcome bonus marked no-transfer can still be sent.')
+ck('bonus-to-bonus transfer is gone (money moves from the balance instead)', sx == 410,
+   f"{sx} {snd.get('error')}", 'HIGH', 'The retired bonus transfer still works.')
 
 # a second signup on the same account can never pay twice
 sx, wb2 = req('/api/user/bonus', token=_wtok, ip_addr=ip())
-ck('the wallet never shows the welcome bonus twice', num((wb2.get('wallet') or {}).get('granted')) == 3,
-   f"granted={(wb2.get('wallet') or {}).get('granted')}", 'CRITICAL', 'The welcome bonus can be double-claimed.')
+ck('the balance never receives the welcome bonus twice', num((wb2.get('wallet') or {}).get('mainBalance')) == 3,
+   f"main={(wb2.get('wallet') or {}).get('mainBalance')}", 'CRITICAL', 'The welcome bonus can be double-claimed.')
 
 # with the stack tick off, a code campaign wins
 sx, _stackoff = req('/api/admin/promo/campaigns/save', {
     'id': _wid, 'kind': 'WELCOME', 'name': 'Journey welcome', 'bonusPerUser': 3, 'maxUses': 0,
-    'bonusWithdraw': True, 'bonusTransfer': False, 'bonusExpiryDays': 7, 'expiryAction': 'BURN',
-    'status': 'ACTIVE', 'stackWithCode': False,
+    'bonusLockDays': 0, 'status': 'ACTIVE', 'stackWithCode': False,
 }, token=_rs4, ip_addr=ip())
 ck('the stack tick can be switched off', sx == 200, f"{sx} {_stackoff.get('error')}", 'HIGH',
    'The welcome campaign cannot be edited.')
 sx, cc = req('/api/admin/promo/campaigns/save', {
     'code': f'WSK{_RUN_TAG}', 'name': 'Code beats welcome', 'bonusPerUser': 1, 'maxUses': 50,
-    'bonusWithdraw': False, 'bonusTransfer': False, 'status': 'ACTIVE',
+    'status': 'ACTIVE',
 }, token=_rs4, ip_addr=ip())
 ck('a normal code campaign can still be created next to it', sx == 200, f"{sx} {cc.get('error')}", 'HIGH',
    'The welcome bonus blocks normal campaigns.')
@@ -1508,8 +1506,7 @@ ck('with "skip when a code is used" the code campaign pays instead',
 # back on, and a paused welcome pays nothing
 req('/api/admin/promo/campaigns/save', {
     'id': _wid, 'kind': 'WELCOME', 'name': 'Journey welcome', 'bonusPerUser': 3, 'maxUses': 0,
-    'bonusWithdraw': True, 'bonusTransfer': False, 'bonusExpiryDays': 7, 'expiryAction': 'BURN',
-    'status': 'ACTIVE', 'stackWithCode': True,
+    'bonusLockDays': 0, 'status': 'ACTIVE', 'stackWithCode': True,
 }, token=_rs4, ip_addr=ip())
 sx, pub2 = req('/api/promo/welcome', ip_addr=ip())
 _wcid = (pub2.get('welcome') or {}).get('id') or ''
@@ -1550,17 +1547,20 @@ ck('the welcome campaign is live for the backfill', bool(_wcid), f"id={_wcid}", 
 # U2 was seeded before the welcome campaign existed — exactly the case the admin hit
 _u2tok, _ = login(U2, ip_addr=ip())
 sx, bw0 = req('/api/user/bonus', token=_u2tok, ip_addr=ip())
-_before = num((bw0.get('wallet') or {}).get('granted'))
-ck('the old account has no welcome bonus to begin with', _before == 0,
-   f"granted={_before}", 'HIGH', 'The backfill test needs an account without the bonus.')
+_before = num((bw0.get('wallet') or {}).get('mainBalance'))
+sx, _wd = req('/api/admin/promo/campaign/' + _wcid, token=_rs5, ip_addr=ip())
+ck('the old account has no welcome bonus to begin with',
+   not any(str(g.get('userId')) == 'U2' for g in (_wd.get('grants') or [])),
+   f"balance={_before} grants={len(_wd.get('grants') or [])}", 'HIGH',
+   'The backfill test needs an account without the bonus.')
 
 sx, dry0 = req('/api/admin/promo/welcome/backfill', {'campaignId': _wcid, 'userIds': ['U2'], 'dryRun': True}, token=_rs5, ip_addr=ip())
 ck('a dry run reports what would happen without paying anything',
    sx == 200 and dry0.get('dryRun') is True and int(dry0.get('wouldPay') or 0) == 1,
    f"wouldPay={dry0.get('wouldPay')} total={dry0.get('total')}", 'HIGH', 'The dry run does not report the plan.')
 sx, bw2 = req('/api/user/bonus', token=_u2tok, ip_addr=ip())
-ck('the dry run pays nobody', num((bw2.get('wallet') or {}).get('granted')) == 0,
-   f"granted={(bw2.get('wallet') or {}).get('granted')}", 'CRITICAL', 'A dry run moved real money.')
+ck('the dry run pays nobody', num((bw2.get('wallet') or {}).get('mainBalance')) == _before,
+   f"balance {_before} → {(bw2.get('wallet') or {}).get('mainBalance')}", 'CRITICAL', 'A dry run moved real money.')
 
 sx, _lb1 = req('/api/admin/promo/campaigns', token=_rs5, ip_addr=ip())
 _wu_b = int(((next((c for c in (_lb1.get('campaigns') or []) if c.get('id') == _wcid), {}) or {}).get('stats') or {}).get('joins') or 0)
@@ -1569,8 +1569,8 @@ ck('a targeted backfill pays exactly that account', sx == 200 and int(one.get('p
    f"{sx} paid={one.get('paid')} total={one.get('total')}", 'CRITICAL',
    'The backfill cannot credit an existing account.')
 sx, bw3 = req('/api/user/bonus', token=_u2tok, ip_addr=ip())
-ck('the money really lands in that user wallet', num((bw3.get('wallet') or {}).get('granted')) > 0,
-   f"granted={(bw3.get('wallet') or {}).get('granted')}", 'CRITICAL', 'The backfill reports success but pays nothing.')
+ck('the money really lands in that user balance', num((bw3.get('wallet') or {}).get('mainBalance')) > _before,
+   f"balance {_before} → {(bw3.get('wallet') or {}).get('mainBalance')}", 'CRITICAL', 'The backfill reports success but pays nothing.')
 
 sx, _lb2 = req('/api/admin/promo/campaigns', token=_rs5, ip_addr=ip())
 _wu_a = int(((next((c for c in (_lb2.get('campaigns') or []) if c.get('id') == _wcid), {}) or {}).get('stats') or {}).get('joins') or 0)
@@ -1706,12 +1706,100 @@ ck('recalculating the counters changes nothing when they are already right',
    f"{sx} before={_r2.get('before')} after={_r2.get('after')}", 'HIGH',
    'Recalculating the counters rewrote a correct ledger.')
 sx, bw9 = req('/api/user/bonus', token=_u2tok, ip_addr=ip())
-ck('recalculating never touches the money already paid', num((bw9.get('wallet') or {}).get('granted')) > 0,
-   f"granted={(bw9.get('wallet') or {}).get('granted')}", 'CRITICAL', 'Recalculating clawed back paid bonuses.')
+ck('recalculating never touches the money already paid', num((bw9.get('wallet') or {}).get('mainBalance')) > 0,
+   f"main={(bw9.get('wallet') or {}).get('mainBalance')}", 'CRITICAL', 'Recalculating clawed back paid bonuses.')
 sx, _ = req('/api/admin/promo/campaigns/recount', {'campaignId': _wcid, 'confirm': True}, token=tu1, ip_addr=ip())
 ck('a normal user cannot recalculate campaign counters', sx in (401, 403), f"{sx}", 'CRITICAL',
    'A regular user can rewrite campaign counters.')
 
+
+
+# ── 28. promo bonus is main-balance money (lock = boost only, no expiry) ─────
+print("\n[28. promo bonus → main balance]")
+_rs8_s, _rs8_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rs8 = _rs8_j.get('token') or ''
+# a fresh welcome campaign that locks the bonus for 7 days
+sx, _ = req('/api/admin/promo/campaigns/save', {
+    'id': _wid, 'kind': 'WELCOME', 'name': 'Journey welcome', 'bonusPerUser': 4, 'maxUses': 0,
+    'bonusLockDays': 7, 'status': 'ACTIVE', 'stackWithCode': True,
+}, token=_rs8, ip_addr=ip())
+ck('the campaign editor accepts a bonus lock in days', sx == 200, f"{sx}", 'HIGH',
+   'A bonus lock cannot be configured.')
+sx, _pub3 = req('/api/promo/welcome', ip_addr=ip())
+ck('the lock reaches the signup screen', (_pub3.get('welcome') or {}).get('bonusLockDays') == 7,
+   f"lock={(_pub3.get('welcome') or {}).get('bonusLockDays')}", 'HIGH', 'The lock is not advertised at signup.')
+ck('no expiry is advertised any more', 'bonusExpiryDays' not in (_pub3.get('welcome') or {}),
+   f"keys={sorted((_pub3.get('welcome') or {}).keys())}", 'MEDIUM', 'The retired expiry policy is still exposed.')
+
+_sx, LID, _lj = signup_child('lock1@gmail.com', '')
+ck('a locked bonus still lands in the balance', (_lj.get('welcome') or {}).get('paid') is True, f"{_lj.get('welcome')}",
+   'CRITICAL', 'A locked welcome bonus is not paid at all.')
+_ltok, _ = login((_lj.get('_email'), 'Staging123!'), ip_addr=ip())
+sx, _lw = req('/api/user/bonus', token=_ltok, ip_addr=ip())
+ck('the locked bonus is inside the main balance', num((_lw.get('wallet') or {}).get('mainBalance')) == 4,
+   f"main={( _lw.get('wallet') or {}).get('mainBalance')}", 'CRITICAL', 'The bonus did not reach the main balance.')
+ck('the wallet reports how much of it is locked', num((_lw.get('wallet') or {}).get('lockedPromo')) == 4,
+   f"locked={( _lw.get('wallet') or {}).get('lockedPromo')}", 'HIGH', 'The lock is invisible to the user.')
+
+# the locked money cannot leave the account…
+sx, _lsend = req('/api/transfer', {'senderId': str(LID), 'recipientId': 'U2', 'amount': 1,
+                                   'idempotencyKey': 'lk' + str(int(time.time()))}, token=_ltok, ip_addr=ip())
+ck('locked bonus money cannot be sent to another user', sx == 403 and 'promotion bonus' in str(_lsend.get('error') or '').lower(),
+   f"{sx} {_lsend.get('error')}", 'CRITICAL', 'A locked bonus can be transferred out immediately.')
+
+# …but it can be boosted (owner rule: boost always allowed)
+sx, _lboost = req('/api/boost/start', {'userId': str(LID)}, token=_ltok, ip_addr=ip())
+ck('the locked bonus can still be boosted', sx == 200, f"{sx} {_lboost.get('error')}", 'CRITICAL',
+   'Boosting is blocked by the bonus lock — the owner asked for the opposite.')
+
+# the one-time migration route (production: 184 users still on the old wallet)
+sx, _dry = req('/api/admin/promo/bonus/to-main', {}, token=_rs8, ip_addr=ip())
+ck('the bonus→balance migration has a dry run', sx == 200 and _dry.get('dryRun') is True,
+   f"{sx} grants={_dry.get('grants')} total={_dry.get('total')}", 'HIGH', 'The migration cannot be previewed.')
+sx, _conf = req('/api/admin/promo/bonus/to-main', {'confirm': True}, token=_rs8, ip_addr=ip())
+ck('running the migration on fresh data moves nothing twice', sx == 200 and num(_conf.get('total')) == 0,
+   f"{sx} moved={_conf.get('total')}", 'CRITICAL', 'The migration double-credits an already-migrated grant.')
+sx, _ = req('/api/admin/promo/bonus/to-main', {'confirm': True}, token=tu1, ip_addr=ip())
+ck('a normal user cannot run the bonus migration', sx in (401, 403), f"{sx}", 'CRITICAL',
+   'A regular user can move bonus money.')
+
+# a grant left over from the old bonus wallet is moved into the balance exactly once
+try:
+    _raw = json.load(open(DB_PATH))
+    _u2 = next((u for u in _raw.get('users', []) if str(u.get('id')) == 'U2'), None)
+    _legacy = {'id': 'BG-LEGACY1', 'userId': 'U2', 'campaignId': 'CMP-OLD', 'campaignCode': 'OLDWALLET',
+               'grantedAmount': 2, 'remaining': 2, 'grantedAt': int(time.time() * 1000) - 86400000,
+               'expiresAt': 0, 'expiryAction': 'BURN', 'bonusTransfer': False, 'bonusWithdraw': True,
+               'status': 'ACTIVE', 'reason': 'SIGNUP'}
+    _raw.setdefault('bonusGrants', []).insert(0, _legacy)
+    if _u2 is not None:
+        _u2['balance'] = num(_u2.get('balance')) - 2
+    json.dump(_raw, open(DB_PATH, 'w'), indent=1)
+    _seeded = _u2 is not None
+except Exception:
+    _seeded = False
+ck('a legacy bonus-wallet grant can be seeded for the migration test', _seeded, f"seeded={_seeded}", 'MEDIUM',
+   'The migration could not be exercised.')
+sx, _lg1 = req('/api/admin/promo/bonus/to-main', {'userId': 'U2'}, token=_rs8, ip_addr=ip())
+ck('the migration preview finds the old-wallet money',
+   sx == 200 and int(_lg1.get('grants') or 0) >= 1 and num(_lg1.get('total')) >= 2,
+   f"{sx} grants={_lg1.get('grants')} total={_lg1.get('total')}", 'HIGH', 'The migration cannot see old-wallet bonuses.')
+sx, _lg2 = req('/api/admin/promo/bonus/to-main', {'userId': 'U2', 'confirm': True}, token=_rs8, ip_addr=ip())
+ck('confirming moves that money into the balance', sx == 200 and num(_lg2.get('total')) >= 2,
+   f"{sx} moved={_lg2.get('total')}", 'CRITICAL', 'Old bonus-wallet money is never moved.')
+sx, _lg3 = req('/api/admin/promo/bonus/to-main', {'userId': 'U2', 'confirm': True}, token=_rs8, ip_addr=ip())
+ck('a second run moves nothing (idempotent)', sx == 200 and num(_lg3.get('total')) == 0,
+   f"{sx} moved={_lg3.get('total')}", 'CRITICAL', 'The migration pays the same grant twice.')
+_after_tok, _after_me = login(U2, ip_addr=ip())
+ck('the migrated money is spendable main-balance money',
+   num((_after_me or {}).get('balance')) >= 2, f"balance={(_after_me or {}).get('balance')}", 'CRITICAL',
+   'The migrated bonus is not in the balance.')
+
+# put the campaign back the way the rest of the suite expects
+req('/api/admin/promo/campaigns/save', {
+    'id': _wid, 'kind': 'WELCOME', 'name': 'Journey welcome', 'bonusPerUser': 3, 'maxUses': 0,
+    'bonusLockDays': 0, 'status': 'ACTIVE', 'stackWithCode': True,
+}, token=_rs8, ip_addr=ip())
 
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:

@@ -1097,10 +1097,10 @@ function campaignPublicView(db: any, c: any): any {
     reason: st.reason,
     remainingSlots: maxUses > 0 ? Math.max(0, maxUses - used) : null,
     minDeposit: Number(c.minDeposit) || 0,
-    bonusTransfer: c.bonusTransfer !== false,
-    bonusWithdraw: c.bonusWithdraw !== false,
-    bonusExpiryDays: Number(c.bonusExpiryDays) || 0,
-    expiryAction: c.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN',
+    // The bonus is real money in the main balance. It never expires; `bonusLockDays`
+    // only keeps that slice out of transfers/withdrawals (boost is always allowed).
+    bonusLockDays: Math.max(0, Math.trunc(Number(c.bonusLockDays) || 0)),
+    creditedTo: 'BALANCE',
     endAt: Number(c.endAt) || 0,
     firstDepositBonus: Number(c.firstDepositBonus) || 0,
     firstDepositMin: Number(c.firstDepositMin) || 0,
@@ -1112,43 +1112,13 @@ function campaignPublicView(db: any, c: any): any {
   };
 }
 
-/** Every live grant this user still holds. Expired ones are retired lazily here. */
+/**
+ * Every grant this user still holds, for reporting only. Bonuses no longer expire
+ * and no longer sit in a separate wallet, so nothing is retired here.
+ */
 function activeGrants(db: any, userId: string, now = Date.now()): any[] {
-  const out: any[] = [];
-  for (const g of (db.bonusGrants || [])) {
-    if (String(g.userId) !== String(userId)) continue;
-    if (g.status !== 'ACTIVE') continue;
-    const expiresAt = Number(g.expiresAt) || 0;
-    if (expiresAt && now > expiresAt) {
-      const left = Number(g.remaining) || 0;
-      db.__expiryDirty = true;
-      g.status = 'EXPIRED';
-      g.closedAt = now;
-      g.remaining = 0;
-      if (!db.bonusLedger) db.bonusLedger = [];
-      if (g.expiryAction === 'TO_BALANCE' && left > 0) {
-        // Policy chosen by the admin on the campaign: the unused bonus becomes real money
-        // instead of vanishing. Only ever for bonuses the user may already withdraw.
-        const user = (db.users || []).find((u: any) => String(u.id) === String(userId));
-        if (user && g.bonusWithdraw) {
-          user.balance = Math.round(((Number(user.balance) || 0) + left) * 1e8) / 1e8;
-          if (!db.transactions) db.transactions = [];
-          db.transactions.unshift({
-            id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId),
-            type: 'BONUS_TO_BALANCE', amount: left, timestamp: now, balanceAfter: user.balance,
-            notes: `Unused bonus moved to main balance on expiry (campaign ${g.campaignCode})`,
-          });
-          db.bonusLedger.unshift({ id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), grantId: g.id, campaignId: g.campaignId, type: 'BONUS_EXPIRED_TO_BALANCE', amount: left, timestamp: now, notes: `Unused bonus expired and moved to main balance (campaign ${g.campaignCode})` });
-          recordAuditLog(db, 'BONUS_EXPIRED_TO_BALANCE', String(userId), `#${userId} $${left} unused bonus from ${g.campaignCode} moved to main balance on expiry`, 'system');
-          continue;
-        }
-      }
-      db.bonusLedger.unshift({ id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), grantId: g.id, campaignId: g.campaignId, type: 'BONUS_EXPIRED', amount: left, timestamp: now, notes: `Unused bonus expired (campaign ${g.campaignCode})` });
-      continue;
-    }
-    out.push(g);
-  }
-  return out;
+  return (db.bonusGrants || []).filter((g: any) =>
+    String(g.userId) === String(userId) && g.status === 'ACTIVE');
 }
 
 /** The expiry sweep mutates the db lazily — make sure a read path actually saves it. */
@@ -1159,35 +1129,60 @@ function persistBonusSweep(db: any) {
   }
 }
 
+/**
+ * The separate bonus wallet is gone (owner decision 2026-11-08): every promotion
+ * bonus is credited straight to `user.balance`. This stays as an empty shell so
+ * older installed apps keep working — they render nothing when everything is 0.
+ */
 function bonusWalletOf(db: any, userId: string, now = Date.now()): any {
-  const grants = activeGrants(db, userId, now);
-  const available = grants.reduce((a: number, g: any) => a + (Number(g.remaining) || 0), 0);
-  const granted = (db.bonusGrants || []).filter((g: any) => String(g.userId) === String(userId))
-    .reduce((a: number, g: any) => a + (Number(g.grantedAmount) || 0), 0);
-  const spent = (db.bonusGrants || []).filter((g: any) => String(g.userId) === String(userId))
-    .reduce((a: number, g: any) => a + Math.max(0, (Number(g.grantedAmount) || 0) - (Number(g.remaining) || 0)), 0);
-  const nextExpiry = grants.reduce((min: number, g: any) => {
-    const e = Number(g.expiresAt) || 0;
-    return e && (!min || e < min) ? e : min;
-  }, 0);
-  const canTransfer = grants.some((g: any) => g.bonusTransfer);
-  const canWithdraw = grants.some((g: any) => g.bonusWithdraw);
-  const r8 = (n: number) => Math.round((Number(n) || 0) * 1e8) / 1e8;
+  const user = (db.users || []).find((u: any) => String(u.id) === String(userId));
   return {
-    available: r8(available),
-    granted: r8(granted),
-    used: r8(spent),
-    nextExpiryAt: nextExpiry,
-    canTransfer,
-    canWithdraw,
-    grants: grants.map((g: any) => ({
-      id: g.id, campaignId: g.campaignId, campaignCode: g.campaignCode,
-      grantedAmount: r8(g.grantedAmount), remaining: r8(g.remaining),
-      grantedAt: g.grantedAt, expiresAt: g.expiresAt,
-      bonusTransfer: !!g.bonusTransfer, bonusWithdraw: !!g.bonusWithdraw,
-      expiryAction: g.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN',
-    })),
+    available: 0, granted: 0, used: 0, nextExpiryAt: 0,
+    canTransfer: false, canWithdraw: false, grants: [],
+    mainBalance: Math.round((Number(user && user.balance) || 0) * 1e8) / 1e8,
+    lockedPromo: promoBonusLockOf(user),
+    creditedTo: 'BALANCE',
+    notice: 'Promotion bonuses are added straight to your main balance.',
   };
+}
+
+/**
+ * Move bonuses that still sit in the retired bonus wallet into the main balance
+ * (owner decision 2026-11-08). Idempotent — a grant is moved once and flagged
+ * `creditedTo: 'MAIN'`, so no money can be created or lost by running it twice.
+ */
+function migrateBonusWalletToBalance(db: any, opts: { userId?: string } = {}): { grants: number; users: string[]; total: number } {
+  const only = opts.userId ? String(opts.userId) : '';
+  const rows = (db.bonusGrants || []).filter((g: any) =>
+    g.status === 'ACTIVE' && Number(g.remaining) > 0 && g.creditedTo !== 'MAIN' &&
+    (!only || String(g.userId) === only));
+  const r8v = (n: number) => Math.round((Number(n) || 0) * 1e8) / 1e8;
+  let movedTotal = 0;
+  const touched = new Set<string>();
+  for (const g of rows) {
+    const u = (db.users || []).find((x: any) => String(x.id) === String(g.userId));
+    if (!u) continue;
+    const amt = r8v(Number(g.remaining) || 0);
+    if (!(amt > 0)) continue;
+    u.balance = r8v((Number(u.balance) || 0) + amt);
+    g.creditedTo = 'MAIN';
+    g.movedToBalanceAt = Date.now();
+    g.remaining = amt;
+    movedTotal = r8v(movedTotal + amt);
+    touched.add(String(u.id));
+    if (!db.transactions) db.transactions = [];
+    db.transactions.unshift({
+      id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(u.id),
+      type: 'PROMO_BONUS', amount: amt, timestamp: Date.now(), balanceAfter: u.balance,
+      notes: `${String(g.campaignCode || 'PROMO')} bonus moved into your balance`,
+    });
+    bonusLedgerRow(db, {
+      id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(u.id),
+      grantId: g.id, campaignId: g.campaignId, type: 'BONUS_MOVED_TO_MAIN', amount: amt,
+      timestamp: Date.now(), notes: `Bonus wallet retired — $${amt} from ${g.campaignCode} moved to the main balance`,
+    });
+  }
+  return { grants: rows.length, users: [...touched], total: movedTotal };
 }
 
 function bonusLedgerRow(db: any, row: any) {
@@ -1245,27 +1240,46 @@ function creditCampaignBonus(db: any, opts: { campaign: any; userId: string; rea
     }
   }
 
-  const grant = {
+  const grant: any = {
     id: 'BG-' + Math.floor(10000000 + Math.random() * 90000000),
     userId: String(userId), campaignId: String(c.id), campaignCode: String(c.code).toUpperCase(),
     grantedAmount: amount, remaining: amount,
     grantedAt: now,
-    expiresAt: Number(c.bonusExpiryDays) > 0 ? now + Number(c.bonusExpiryDays) * 86400000 : 0,
-    expiryAction: c.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN',
-    bonusTransfer: !!c.bonusTransfer, bonusWithdraw: !!c.bonusWithdraw,
+    expiresAt: 0, expiryAction: 'NONE',
+    bonusTransfer: true, bonusWithdraw: true,
     status: 'ACTIVE', reason: opts.reason || 'SIGNUP',
   };
   if (!db.bonusGrants) db.bonusGrants = [];
   db.bonusGrants.unshift(grant);
   c.used = Math.max(0, Math.trunc(Number(c.used) || 0)) + 1;
   c.budgetUsed = Math.round(((Number(c.budgetUsed) || 0) + amount) * 1e8) / 1e8;
+  const r8v = (n: number) => Math.round((Number(n) || 0) * 1e8) / 1e8;
+  const lockDays = Math.max(0, Math.trunc(Number(c.bonusLockDays) || 0));
+  grant.lockUntil = lockDays > 0 ? now + lockDays * 86400000 : 0;
+  // The money is real money now: it goes straight into the main balance (owner
+  // decision 2026-11-08 — no second wallet). The grant row stays for reporting.
+  grant.creditedTo = 'MAIN';
+  const moneyUser = opts.user || (db.users || []).find((u: any) => String(u.id) === String(userId));
+  if (moneyUser) {
+    moneyUser.balance = r8v((Number(moneyUser.balance) || 0) + amount);
+    if (lockDays > 0) {
+      moneyUser.promoBonusLocked = r8v((Number(moneyUser.promoBonusLocked) || 0) + amount);
+      moneyUser.promoBonusLockUntil = Math.max(Number(moneyUser.promoBonusLockUntil) || 0, grant.lockUntil);
+    }
+    if (!db.transactions) db.transactions = [];
+    db.transactions.unshift({
+      id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId),
+      type: 'PROMO_BONUS', amount, timestamp: now, balanceAfter: moneyUser.balance,
+      notes: `${String(c.code).toUpperCase()} bonus $${amount} added to balance${lockDays > 0 ? ` (locked for boosting for ${lockDays}d)` : ''}`,
+    });
+  }
   bonusLedgerRow(db, {
     id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000),
     userId: String(userId), grantId: grant.id, campaignId: String(c.id),
     type: 'BONUS_CREDIT', amount, timestamp: now,
-    notes: `Bonus $${amount} from campaign ${c.code}${grant.expiresAt ? ' (expires in ' + c.bonusExpiryDays + 'd)' : ''}`,
+    notes: `Bonus $${amount} from campaign ${c.code} added to main balance${lockDays > 0 ? ` (locked ${lockDays}d, boost only)` : ''}`,
   });
-  recordAuditLog(db, 'BONUS_CREDITED', String(userId), `Campaign ${c.code}: $${amount} credited to #${userId} (${grant.id})`, String(userId));
+  recordAuditLog(db, 'BONUS_CREDITED', String(userId), `Campaign ${c.code}: $${amount} added to the balance of #${userId} (${grant.id})`, String(userId));
   return { paid: true, reason: 'OK', grant };
 }
 
@@ -2683,10 +2697,26 @@ function signupBonusLockOf(u: any): number {
   return lockMoney(Math.min(raw, balance));
 }
 
+/**
+ * A promotion bonus lands in the main balance, but for `bonusLockDays` that slice
+ * cannot leave the account (transfers, agent payments, withdrawals). Boosting is
+ * always allowed — the owner's rule for the welcome bonus (2026-11-08).
+ * The lock expires on its own: once `promoBonusLockUntil` has passed nothing is held.
+ */
+function promoBonusLockOf(u: any): number {
+  if (!u) return 0;
+  const raw = Number(u.promoBonusLocked);
+  if (!(raw > 0)) return 0;
+  const until = Number(u.promoBonusLockUntil) || 0;
+  if (until && Date.now() > until) return 0;
+  const balance = lockMoney(Number(u.balance) || 0);
+  return lockMoney(Math.min(raw, balance));
+}
+
 function sendableWith(u: any, lock: LockView): number {
   const balance = lockMoney(Number(u && u.balance) || 0);
   if (lock.full) return 0;
-  return lockMoney(Math.max(0, balance - lock.amount - signupBonusLockOf(u)));
+  return lockMoney(Math.max(0, balance - lock.amount - signupBonusLockOf(u) - promoBonusLockOf(u)));
 }
 
 /** Balance the user may transfer out right now (P2P only). */
@@ -2715,7 +2745,15 @@ function agentPayInfo(u: any): { cap: number; full: boolean; cause: 'none' | 'se
 function sendLockError(u: any): string {
   const lock = sendLockOf(u);
   const bonusLocked = signupBonusLockOf(u);
+  const promoLocked = promoBonusLockOf(u);
   if (lock.full) return 'Sending money is temporarily locked on this account by administration. Please contact support.';
+  if (promoLocked > 0 && lock.amount <= 0 && bonusLocked <= 0) {
+    const until = Number(u && u.promoBonusLockUntil) || 0;
+    const when = until ? new Date(until).toISOString().slice(0, 10) : '';
+    const left = sendableBalance(u);
+    if (left <= 0) return `Your $${promoLocked.toFixed(2)} promotion bonus stays in your balance but can only be boosted${when ? ` until ${when}` : ''}. Boost it — the profit you earn on top is free to send.`;
+    return `$${promoLocked.toFixed(2)} of your balance is a promotion bonus locked for boosting${when ? ` until ${when}` : ''}. You can send up to $${left.toFixed(2)} right now.`;
+  }
   const left = sendableBalance(u);
   // A signup bonus marked "boost only" is a DIFFERENT reason than an admin hold —
   // the refusal must name the real one, or the user is left guessing.
@@ -4272,7 +4310,7 @@ async function startServer() {
             const _cr = creditCampaignBonus(db, { campaign: _camp, userId: String(userId), user: newUser });
             campaignResult = { paid: _cr.paid, reason: _cr.reason, code: String(_camp.code).toUpperCase(), amount: _cr.paid ? Number(_camp.bonusPerUser) || 0 : 0, reviewId: _cr.reviewId || null };
             if (_cr.paid && _cr.grant) {
-              pushNotification(db, { id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), type: 'SIGNUP_BONUS', title: 'BOOSTPAY-BONUS', message: `Welcome bonus $${(Number(_camp.bonusPerUser) || 0).toFixed(2)} credited via code ${String(_camp.code).toUpperCase()}${(_camp.bonusTransfer && _camp.bonusWithdraw) ? '' : ' — see the Bonus wallet for what it can be used for'}`, amount: Number(_camp.bonusPerUser) || 0, timestamp: Date.now(), isRead: false, metadata: { campaignCode: String(_camp.code).toUpperCase() } } as any);
+              pushNotification(db, { id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId), type: 'SIGNUP_BONUS', title: 'BOOSTPAY-BONUS', message: `Welcome bonus $${(Number(_camp.bonusPerUser) || 0).toFixed(2)} added to your balance (${String(_camp.code).toUpperCase()})${Number(_camp.bonusLockDays) > 0 ? ` — boost only for ${Number(_camp.bonusLockDays)} day(s)` : ''}`, amount: Number(_camp.bonusPerUser) || 0, timestamp: Date.now(), isRead: false, metadata: { campaignCode: String(_camp.code).toUpperCase() } } as any);
             }
           }
         }
@@ -9625,11 +9663,15 @@ async function startServer() {
     c.budgetLimit = num(body.budgetLimit, num(c.budgetLimit));
     c.startAt = Math.trunc(num(body.startAt, num(c.startAt)));
     c.endAt = Math.trunc(num(body.endAt, num(c.endAt)));
-    c.bonusExpiryDays = Math.trunc(num(body.bonusExpiryDays, num(c.bonusExpiryDays)));
-    // what happens to an unused bonus when it expires: burn it, or hand it over as real money
-    c.expiryAction = body.expiryAction === 'TO_BALANCE' ? 'TO_BALANCE' : 'BURN';
-    c.bonusTransfer = body.bonusTransfer !== false;
-    c.bonusWithdraw = body.bonusWithdraw !== false;
+    // Promotion bonuses are credited straight to the main balance and never expire.
+    // `bonusLockDays` keeps the bonus slice locked for transfers/withdrawals only
+    // (0 = no lock). The old burn/expiry policy is dead — existing data is zeroed.
+    c.bonusLockDays = Math.min(365, Math.max(0, Math.trunc(num(body.bonusLockDays, num(c.bonusLockDays)))));
+    c.bonusExpiryDays = 0;
+    c.expiryAction = 'NONE';
+    c.bonusTransfer = true;
+    c.bonusWithdraw = true;
+    c.creditedTo = 'BALANCE';
     c.firstDepositBonus = num(body.firstDepositBonus, num(c.firstDepositBonus));
     c.firstDepositMin = num(body.firstDepositMin, num(c.firstDepositMin));
     c.audience = body.audience === 'ALL' ? 'ALL' : 'NEW';
@@ -9813,16 +9855,33 @@ async function startServer() {
       if (grant.status !== 'ACTIVE') return res.status(400).json({ error: `This grant is already ${grant.status}.` });
       const takeBack = Math.max(0, Number(grant.remaining) || 0);
       const alreadyUsed = Math.max(0, (Number(grant.grantedAmount) || 0) - takeBack);
+      // The bonus lives in the main balance now, so revoking has to take the unspent
+      // part back out of that balance (never below zero, never touching real money).
+      const owner = (db.users || []).find((u: any) => String(u.id) === String(grant.userId));
+      let deducted = 0;
+      if (owner && takeBack > 0) {
+        const bal = Math.round((Number(owner.balance) || 0) * 1e8) / 1e8;
+        deducted = Math.round(Math.min(takeBack, bal) * 1e8) / 1e8;
+        if (deducted > 0) {
+          owner.balance = Math.round((bal - deducted) * 1e8) / 1e8;
+          if (!db.transactions) db.transactions = [];
+          db.transactions.unshift({
+            id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(grant.userId),
+            type: 'BONUS_REVOKED', amount: -deducted, timestamp: Date.now(), balanceAfter: owner.balance,
+            notes: `Bonus revoked: ${reason}`,
+          });
+        }
+      }
       grant.status = 'REVOKED'; grant.closedAt = Date.now(); grant.remaining = 0;
       bonusLedgerRow(db, {
         id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000),
         userId: String(grant.userId), grantId: grant.id, campaignId: grant.campaignId,
         type: 'BONUS_REVOKE', amount: takeBack, timestamp: Date.now(),
-        notes: `Bonus revoked: ${reason}${alreadyUsed > 0 ? ` ($${alreadyUsed.toFixed(2)} had already been used — ledger reconciled, no cash clawback)` : ''}`,
+        notes: `Bonus revoked: ${reason} — $${deducted.toFixed(2)} taken back from the balance${alreadyUsed > 0 ? `, $${alreadyUsed.toFixed(2)} had already been used` : ''}`,
       });
       recordAuditLog(db, 'BONUS_REVOKED', String(req.authAdmin || 'admin'), `Grant ${grant.id} revoked for #${grant.userId}: ${reason}`, String(grant.userId));
       writeDb(db);
-      res.json({ success: true, revoked: takeBack, alreadyUsed });
+      res.json({ success: true, revoked: takeBack, alreadyUsed, deducted });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not revoke that bonus.' }); }
   });
 
@@ -9931,6 +9990,35 @@ async function startServer() {
     }
   });
 
+  // One-off (and re-runnable) move of bonuses that still sit in the retired bonus
+  // wallet into the main balance. Dry-run by default.
+  app.post('/api/admin/promo/bonus/to-main', rateLimit(20), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const apply = (req.body || {}).confirm === true;
+      const only = (req.body || {}).userId ? String((req.body || {}).userId) : '';
+      const pending = (db.bonusGrants || []).filter((g: any) =>
+        g.status === 'ACTIVE' && Number(g.remaining) > 0 && g.creditedTo !== 'MAIN' &&
+        (!only || String(g.userId) === only));
+      if (!apply) {
+        const total = Math.round(pending.reduce((a: number, g: any) => a + (Number(g.remaining) || 0), 0) * 1e8) / 1e8;
+        return res.json({
+          dryRun: true, grants: pending.length, users: new Set(pending.map((g: any) => String(g.userId))).size, total,
+          preview: pending.slice(0, 50).map((g: any) => ({ grant: g.id, userId: String(g.userId), amount: Number(g.remaining) || 0, campaign: g.campaignCode })),
+        });
+      }
+      const out = migrateBonusWalletToBalance(db, { userId: only });
+      if (out.total > 0) {
+        recordAuditLog(db, 'BONUS_MOVED_TO_MAIN', String(req.authAdmin || 'admin'),
+          `Moved $${out.total.toFixed(2)} of promotion bonus into main balances (${out.users.length} user(s), ${out.grants} grant(s))`,
+          only || undefined);
+        writeDb(db);
+        for (const id of out.users) { try { broadcastUserUpdate(db, id); } catch { /* ignore */ } }
+      }
+      res.json({ success: true, grants: out.grants, users: out.users.length, total: out.total });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not move the bonuses.' }); }
+  });
+
   // Rebuild a campaign's counters from the bonus ledger. Slots used and budget are
   // derived values — they can drift (a backfill used to bump them twice), and no
   // money moves here, so this is a safe repair action for the admin console.
@@ -10031,71 +10119,29 @@ async function startServer() {
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load your bonus wallet.' }); }
   });
 
-  // Move bonus → main balance, only when the campaign allows withdrawal.
+  // Bonuses are credited to the main balance now, so there is nothing to convert.
+  // Kept as a graceful no-op: installed apps still call it and must not error.
   app.post('/api/user/bonus/convert', rateLimit(30), requireUser, (req: any, res) => {
     try {
       const db = readDb();
       const uid = String(req.authUserId || '');
-      const amount = Math.round((Number((req.body || {}).amount) || 0) * 1e8) / 1e8;
-      if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than 0.' });
-      const wallet = bonusWalletOf(db, uid);
-      if (amount > wallet.available + 1e-9) return res.status(400).json({ error: `You only have $${wallet.available.toFixed(8)} bonus available.` });
-      if (!wallet.canWithdraw) return res.status(403).json({ error: 'This bonus cannot be withdrawn — the campaign only allows it to be used for boosting.' });
       const user = (db.users || []).find((u: any) => String(u.id) === uid);
-      if (!user) return res.status(404).json({ error: 'User not found.' });
-      let left = amount;
-      for (const g of activeGrants(db, uid)) {
-        if (left <= 0) break;
-        if (!g.bonusWithdraw) continue;
-        const take = Math.min(left, Number(g.remaining) || 0);
-        if (take <= 0) continue;
-        g.remaining = Math.round(((Number(g.remaining) || 0) - take) * 1e12) / 1e12;
-        if (g.remaining <= 0) { g.status = 'USED'; g.closedAt = Date.now(); }
-        bonusLedgerRow(db, { id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: uid, grantId: g.id, campaignId: g.campaignId, type: 'BONUS_WITHDRAWN', amount: take, timestamp: Date.now(), notes: `Bonus moved to main balance from ${g.campaignCode}` });
-        left = Math.round((left - take) * 1e12) / 1e12;
-      }
-      if (left > 1e-9) return res.status(400).json({ error: 'Not all of that amount is withdrawable.' });
-      user.balance = Math.round(((Number(user.balance) || 0) + amount) * 1e8) / 1e8;
-      db.transactions.unshift({ id: 'TX-' + Math.floor(10000000 + Math.random() * 90000000), userId: uid, type: 'BONUS_TO_BALANCE', amount, timestamp: Date.now(), balanceAfter: user.balance, notes: 'Promotion bonus withdrawn to wallet balance' });
-      recordAuditLog(db, 'BONUS_WITHDRAWN', uid, `#${uid} moved $${amount} bonus to main balance`, uid);
-      writeDb(db);
-      res.json({ success: true, amount, balance: user.balance, wallet: bonusWalletOf(db, uid) });
-    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not move that bonus.' }); }
+      res.json({
+        success: true, amount: 0, moved: 0, balance: (user && Number(user.balance)) || 0,
+        wallet: bonusWalletOf(db, uid),
+        notice: 'Promotion bonuses are added straight to your main balance — there is nothing to convert.',
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load your balance.' }); }
   });
 
-  // Send bonus to another user's bonus wallet, only when transfer is allowed.
+  // Sending bonus money between bonus wallets no longer exists: the bonus is part
+  // of the main balance, and money is moved with the normal P2P send.
   app.post('/api/user/bonus/send', rateLimit(20), requireUser, (req: any, res) => {
-    try {
-      const db = readDb();
-      const uid = String(req.authUserId || '');
-      const to = String((req.body || {}).toUserId || '').replace(/^#/, '').trim();
-      const amount = Math.round((Number((req.body || {}).amount) || 0) * 1e8) / 1e8;
-      if (!(amount > 0)) return res.status(400).json({ error: 'Amount must be greater than 0.' });
-      if (!to || to === uid) return res.status(400).json({ error: 'Choose another user.' });
-      const target = (db.users || []).find((u: any) => String(u.id) === to);
-      if (!target) return res.status(404).json({ error: `User #${to} was not found.` });
-      const wallet = bonusWalletOf(db, uid);
-      if (!wallet.canTransfer) return res.status(403).json({ error: 'This bonus cannot be transferred — the campaign only allows boosting with it.' });
-      if (amount > wallet.available + 1e-9) return res.status(400).json({ error: `You only have $${wallet.available.toFixed(8)} bonus available.` });
-      let left = amount;
-      for (const g of activeGrants(db, uid)) {
-        if (left <= 0) break;
-        if (!g.bonusTransfer) continue;
-        const take = Math.min(left, Number(g.remaining) || 0);
-        if (take <= 0) continue;
-        g.remaining = Math.round(((Number(g.remaining) || 0) - take) * 1e12) / 1e12;
-        if (g.remaining <= 0) { g.status = 'USED'; g.closedAt = Date.now(); }
-        bonusLedgerRow(db, { id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: uid, grantId: g.id, campaignId: g.campaignId, type: 'BONUS_SENT', amount: take, timestamp: Date.now(), notes: `Bonus sent to #${to}` });
-        left = Math.round((left - take) * 1e12) / 1e12;
-      }
-      if (left > 1e-9) return res.status(400).json({ error: 'Not all of that amount is transferable.' });
-      if (!db.bonusGrants) db.bonusGrants = [];
-      db.bonusGrants.unshift({ id: 'BG-' + Math.floor(10000000 + Math.random() * 90000000), userId: to, campaignId: 'TRANSFER', campaignCode: 'TRANSFER', grantedAmount: amount, remaining: amount, grantedAt: Date.now(), expiresAt: 0, bonusTransfer: false, bonusWithdraw: false, status: 'ACTIVE', reason: `FROM_${uid}` });
-      bonusLedgerRow(db, { id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: to, grantId: 'TRANSFER', campaignId: 'TRANSFER', type: 'BONUS_RECEIVED', amount, timestamp: Date.now(), notes: `Bonus received from #${uid} (boost only)` });
-      recordAuditLog(db, 'BONUS_TRANSFERRED', uid, `#${uid} sent $${amount} bonus to #${to}`, to);
-      writeDb(db);
-      res.json({ success: true, amount, to, wallet: bonusWalletOf(db, uid) });
-    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not send that bonus.' }); }
+    const db = readDb();
+    res.status(410).json({
+      error: 'Promotion bonuses now go straight to your main balance — send money with the normal Send option instead.',
+      balance: ((db.users || []).find((u: any) => String(u.id) === String(req.authUserId || '')) || {}).balance || 0,
+    });
   });
 
   // The pending-deposit bonus is released by the engine when a deposit lands.
@@ -12939,6 +12985,20 @@ async function startServer() {
     }
     if (released) { console.log(`[boot] released ${released} account(s) frozen by the old chat-spam rule`); writeDb(dbBoot); }
   } catch (err) { console.error('[boot] chat-spam release skipped:', err); }
+
+  // One-time (idempotent) move of bonuses left in the retired bonus wallet into the
+  // main balance — the owner closed the separate bonus wallet on 2026-11-08 and asked
+  // for the existing bonuses to follow their money. Grants already moved are skipped.
+  try {
+    const dbBoot2 = readDb();
+    const out = migrateBonusWalletToBalance(dbBoot2);
+    if (out.total > 0) {
+      recordAuditLog(dbBoot2, 'BONUS_MOVED_TO_MAIN', 'system',
+        `Boot migration: moved $${out.total.toFixed(2)} of promotion bonus into main balances (${out.users.length} user(s), ${out.grants} grant(s))`);
+      writeDb(dbBoot2);
+      console.log(`[boot] moved $${out.total.toFixed(2)} of promotion bonus into ${out.users.length} main balance(s)`);
+    }
+  } catch (err) { console.error('[boot] bonus→balance migration skipped:', err); }
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`BoostPay Server listening on port ${PORT} [Version: ${SERVER_VERSION}]`);
