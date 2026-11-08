@@ -263,7 +263,12 @@ export const P2PTransferModal: FC<Props> = ({
                     ? `Limit $${Number(rule.amount).toFixed(2)} ${rule?.period === 'day' ? 'per day' : rule?.period === 'total' ? 'in total' : 'per transfer'} — $${Number(rule?.remaining ?? 0).toFixed(2)} left.`
                     : 'No amount limit.'}
                 </p>
-                {rule?.note ? <p className="mt-0.5 text-emerald-200/60">“{rule.note}”</p> : null}
+                {rule?.inherited ? (
+                  <p className="mt-0.5 text-emerald-200/70">
+                    This rule came with money you received{rule?.inheritedFrom ? ` from #${rule.inheritedFrom}` : ''}.
+                  </p>
+                ) : null}
+                {rule?.note && !rule?.inherited ? <p className="mt-0.5 text-emerald-200/60">“{rule.note}”</p> : null}
               </div>
             )}
 

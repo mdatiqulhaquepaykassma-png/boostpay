@@ -2728,10 +2728,51 @@ function referSendPolicyOf(u: any) {
   const amount = Math.max(0, referRound2(Number(p.amount) || 0));
   return {
     mode, period, amount,
+    // tick in the admin card: the same rule follows the money to whoever receives it
+    inherit: !!p.inherit,
+    inheritedFrom: String(p.inheritedFrom || ''),
+    source: String(p.source || ''),
     note: String(p.note || '').slice(0, 160),
     setBy: String(p.setBy || ''),
     setAt: Number(p.setAt) || 0,
   };
+}
+
+/**
+ * "Also apply to the receiver" — the rule follows the money.
+ *
+ * When a restricted user pays somebody and that tick is on, the receiver is put
+ * under the same rule (same mode, cap and period), so they too can only send to
+ * their own refer/team. Two safety rules:
+ *   · an EXPLICIT admin rule on the receiver is never overwritten;
+ *   · a rule that itself arrived by inheritance IS replaced by the newer one,
+ *     which is what makes the chain keep following the money downward.
+ */
+function applyInheritedReferRule(db: any, sender: any, recipient: any): boolean {
+  const policy = referSendPolicyOf(sender);
+  if (policy.mode === 'off' || !policy.inherit) return false;
+  const existing = referSendPolicyOf(recipient);
+  if (existing.mode !== 'off' && existing.source !== 'INHERIT') return false;   // admin rule wins
+  if (String(recipient.id) === String(sender.id)) return false;
+  recipient.referSend = {
+    mode: policy.mode,
+    amount: policy.amount,
+    period: policy.period,
+    inherit: true,
+    inheritedFrom: String(sender.id),
+    source: 'INHERIT',
+    note: `Followed the money from #${sender.id}`,
+    setBy: 'system',
+    setAt: Date.now(),
+  };
+  try {
+    recordAuditLog(
+      db, 'USER_REFER_SEND_INHERIT', 'system',
+      `User #${recipient.id} inherited the send-to-refer rule (${policy.mode === 'l1' ? 'direct refer only' : 'refer + team'}${policy.amount > 0 ? `, $${policy.amount.toFixed(2)} ${policy.period}` : ''}) from #${sender.id}`,
+      String(recipient.id)
+    );
+  } catch { /* audit must not break a transfer */ }
+  return true;
 }
 
 /** Who this user is allowed to send to under the policy (empty set when mode is off). */
@@ -6595,6 +6636,9 @@ async function startServer() {
       db.transactions.unshift(recvTx);
       db.transactions.unshift(sentTx);
 
+      // "Also apply to the receiver": the rule follows the money to this recipient
+      try { applyInheritedReferRule(db, sender, recipient); } catch { /* never break a transfer */ }
+
       // Construct official bank-style SMS alert notifications for both parties
       const recvNotif = {
         id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
@@ -7789,12 +7833,16 @@ async function startServer() {
         if (!(amount >= 0)) return res.status(400).json({ error: 'Limit amount cannot be negative.' });
         if (amount > MAX_LOCK_AMOUNT) return res.status(400).json({ error: 'That limit is too large.' });
       }
+      // Explicitly set from the console — this is never overwritten by an inherited rule.
+      const inherit = body.inherit === true || body.inherit === 'true';
       if (mode === 'off') {
-        user.referSend = { mode: 'off', amount: 0, period: 'day', note: '', setBy: String(req.authAdmin || ''), setAt: Date.now() };
+        user.referSend = { mode: 'off', amount: 0, period: 'day', inherit: false, note: '', source: 'ADMIN', setBy: String(req.authAdmin || ''), setAt: Date.now() };
       } else {
         user.referSend = {
-          mode, amount, period,
+          mode, amount, period, inherit,
           note: sanitizeText(body.note, 160),
+          source: 'ADMIN',
+          inheritedFrom: '',
           setBy: String(req.authAdmin || ''),
           setAt: Date.now(),
         };
@@ -7804,7 +7852,7 @@ async function startServer() {
       try {
         recordAuditLog(
           db, 'USER_REFER_SEND_LIMIT', String(req.authAdmin || 'admin'),
-          `User #${user.id} send-to-refer -> ${policy.mode === 'off' ? 'released' : `${policy.mode === 'l1' ? 'direct refer only' : 'refer + team'}, ${policy.amount > 0 ? `$${policy.amount.toFixed(2)} ${policy.period === 'day' ? 'per day' : (policy.period === 'total' ? 'in total' : 'per transfer')}` : 'no amount cap'}${policy.note ? ` (${policy.note})` : ''}`}`,
+          `User #${user.id} send-to-refer -> ${policy.mode === 'off' ? 'released' : `${policy.mode === 'l1' ? 'direct refer only' : 'refer + team'}, ${policy.amount > 0 ? `$${policy.amount.toFixed(2)} ${policy.period === 'day' ? 'per day' : (policy.period === 'total' ? 'in total' : 'per transfer')}` : 'no amount cap'}${policy.inherit ? ' + follows the money to the receiver' : ''}${policy.note ? ` (${policy.note})` : ''}`}`,
           String(user.id)
         );
       } catch { /* audit must not break the action */ }
@@ -7839,6 +7887,9 @@ async function startServer() {
         mode: policy.mode,
         amount: policy.amount,
         period: policy.period,
+        inherit: policy.inherit,
+        inherited: policy.source === 'INHERIT',
+        inheritedFrom: policy.inheritedFrom || null,
         note: policy.note,
         restricted: policy.mode !== 'off',
         label: policy.mode === 'off' ? '' : referSendLabel(policy.mode),

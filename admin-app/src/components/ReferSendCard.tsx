@@ -29,10 +29,11 @@ export function ReferSendCard({
   const [amount, setAmount] = useState('');
   const [period, setPeriod] = useState<'day' | 'send' | 'total'>('day');
   const [note, setNote] = useState('');
+  const [inherit, setInherit] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [ok, setOk] = useState('');
-  const [server, setServer] = useState<{ mode: string; amount: number; period: string; allowedRecipients?: number; used?: number } | null>(null);
+  const [server, setServer] = useState<{ mode: string; amount: number; period: string; inherit?: boolean; allowedRecipients?: number; used?: number } | null>(null);
 
   const live = server || (policy ? { mode: policy.mode, amount: Number(policy.amount) || 0, period: policy.period } : null);
   const current = live?.mode || 'off';
@@ -43,6 +44,7 @@ export function ReferSendCard({
     setAmount(live && live.amount > 0 ? String(live.amount) : '');
     setPeriod((live?.period as any) || 'day');
     setNote(policy?.note || '');
+    setInherit(!!(policy as any)?.inherit);
     setError('');
     setOk('');
     setServer(null);
@@ -55,10 +57,10 @@ export function ReferSendCard({
       const res = await BoostPayStore.adminSetReferSend(userId, payload as any);
       if (!res.success) throw new Error(res.error || 'Could not save the rule.');
       const saved: any = (res as any).referSend || null;
-      if (saved) setServer({ mode: saved.mode, amount: Number(saved.amount) || 0, period: saved.period, allowedRecipients: saved.allowedRecipients, used: saved.used });
+      if (saved) setServer({ mode: saved.mode, amount: Number(saved.amount) || 0, period: saved.period, inherit: !!saved.inherit, allowedRecipients: saved.allowedRecipients, used: saved.used });
       setOk(
         saved
-          ? `${okText} Server confirms: ${saved.mode === 'off' ? 'no restriction' : `${saved.mode === 'l1' ? 'direct refer only' : 'refer + team'} · ${saved.allowedRecipients ?? 0} allowed recipient(s)${saved.amount > 0 ? ` · cap $${Number(saved.amount).toFixed(2)} ${saved.period === 'day' ? 'per day' : saved.period === 'total' ? 'in total' : 'per transfer'}` : ' · no cap'}`}.`
+          ? `${okText} Server confirms: ${saved.mode === 'off' ? 'no restriction' : `${saved.mode === 'l1' ? 'direct refer only' : 'refer + team'} · ${saved.allowedRecipients ?? 0} allowed recipient(s)${saved.amount > 0 ? ` · cap $${Number(saved.amount).toFixed(2)} ${saved.period === 'day' ? 'per day' : saved.period === 'total' ? 'in total' : 'per transfer'}` : ' · no cap'}${saved.inherit ? ' · also applies to the receiver' : ''}`}.`
           : okText
       );
       onChanged?.((res as any).user);
@@ -73,7 +75,7 @@ export function ReferSendCard({
     if (amount !== '' && (!Number.isFinite(value) || value < 0)) { setError('Enter a limit of 0 or more (0 = no cap).'); return; }
     const finalMode = team ? 'team' : 'l1';
     return post(
-      { mode: finalMode, amount: Number.isFinite(value) ? value : 0, period, note },
+      { mode: finalMode, amount: Number.isFinite(value) ? value : 0, period, inherit, note },
       finalMode === 'l1'
         ? `User #${userId} can now send only to their direct referrer.`
         : `User #${userId} can now send only to their referrer and team members.`
@@ -101,6 +103,14 @@ export function ReferSendCard({
               {(live?.amount || 0) > 0
                 ? `$${(live?.amount || 0).toFixed(2)} ${live?.period === 'day' ? 'per day' : live?.period === 'total' ? 'in total' : 'per transfer'}`
                 : 'no amount cap'}
+            </span>
+          </div>
+        )}
+        {current !== 'off' && (
+          <div className="flex justify-between text-zinc-500">
+            <span>Receiver</span>
+            <span className={live?.inherit ? 'text-sky-300' : 'text-zinc-300'}>
+              {live?.inherit ? 'same rule applies' : 'free to send anywhere'}
             </span>
           </div>
         )}
@@ -140,6 +150,22 @@ export function ReferSendCard({
               Also allow <b>team members under them</b>
               <span className="block text-[10px] text-zinc-500">
                 Unticked = the tick means <b>only the L1 (direct) refer</b> can receive money.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-2 text-[11px] text-zinc-300 cursor-pointer rounded-lg border border-sky-500/25 bg-sky-500/[0.05] p-2">
+            <input
+              type="checkbox"
+              checked={inherit}
+              onChange={(e) => setInherit(e.target.checked)}
+              className="mt-0.5 accent-sky-500"
+            />
+            <span>
+              Also apply to whoever receives the money
+              <span className="block text-[10px] text-zinc-500">
+                Off = the receiver can send to anyone. On = the receiver gets the same rule, and it keeps following the
+                money if they pass it on. An admin rule set on a receiver is never overwritten.
               </span>
             </span>
           </label>

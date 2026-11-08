@@ -1188,6 +1188,90 @@ sx, badmode = req('/api/admin/users/refer-send', {'userId': _up1, 'mode': 'every
 ck('an unknown mode is refused', sx == 400, f"{sx} {badmode.get('error')}", 'MEDIUM',
    'An unknown mode silently becomes something else.')
 
+
+# ── 21. "also apply to the receiver" — the rule follows the money ────────────
+print("\n[21. rule follows the money]")
+_rs2_s, _rs2_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rs2adm = _rs2_j.get('token') or ''
+
+# safety: make sure the earlier sections left U1 free
+req('/api/admin/users/refer-send', {'userId': 'U1', 'mode': 'off'}, token=_rs2adm, ip_addr=ip())
+
+# a fresh 3-account chain: X (under U1) → Y (under X) → Z (under Y)
+_sx_s, X, _ = signup_child('chainx@gmail.com', 'U1')
+_sy_s, Y, _ = signup_child('chainy@gmail.com', X)
+_sz_s, Z, _ = signup_child('chainz@gmail.com', Y)
+_x_tok, _ = login((f'chainx-{_RUN_TAG}@gmail.com', 'Staging123!'), ip_addr=ip())
+_y_tok, _ = login((f'chainy-{_RUN_TAG}@gmail.com', 'Staging123!'), ip_addr=ip())
+_u1_tok, _ = login(U1, ip_addr=ip())
+for _a in (5, 5):
+    req('/api/transfer', {'senderId': 'U1', 'recipientId': X, 'amount': _a,
+                          'idempotencyKey': f'chf{_RUN_TAG}{_a}'}, _u1_tok, ip_addr=ip())
+ck('the money chain exists', bool(X and Y and Z), f'{X}/{Y}/{Z}', 'HIGH', 'Could not build the chain for the receiver test.')
+
+# tick OFF: the receiver stays free
+sx, noinh = req('/api/admin/users/refer-send', {'userId': X, 'mode': 'team', 'amount': 0, 'inherit': False},
+                token=_rs2adm, ip_addr=ip())
+ck('the receiver tick starts off', sx == 200 and (noinh.get('referSend') or {}).get('inherit') is False,
+   f"{sx} {(noinh.get('referSend') or {}).get('inherit')}", 'MEDIUM', 'The receiver tick cannot be turned off.')
+sx, moved = req('/api/transfer', {'senderId': X, 'recipientId': Y, 'amount': 1,
+                                  'idempotencyKey': f'noinh{_RUN_TAG}'}, _x_tok, ip_addr=ip())
+ck('with the tick off the money still moves', sx == 200, f"{sx} {(moved or {}).get('error')}", 'HIGH',
+   'The rule blocks an allowed transfer.')
+sx, yfree = req('/api/user/refer-send', token=_y_tok, ip_addr=ip())
+ck('with the tick off the receiver can send to anyone', yfree.get('restricted') is False,
+   f"restricted={yfree.get('restricted')} mode={yfree.get('mode')}", 'CRITICAL',
+   'The receiver is restricted even though the admin did not ask for it.')
+
+# tick ON: the receiver inherits the same rule
+# team mode, so X may pay its own downline (Y) — and that payment carries the rule
+sx, inh = req('/api/admin/users/refer-send', {'userId': X, 'mode': 'team', 'amount': 0, 'inherit': True},
+              token=_rs2adm, ip_addr=ip())
+ck('the admin can tick "also apply to the receiver"', sx == 200 and (inh.get('referSend') or {}).get('inherit') is True,
+   f"{sx} {(inh.get('referSend') or {}).get('inherit')}", 'CRITICAL', 'The receiver tick cannot be set.')
+req('/api/admin/users/refer-send', {'userId': Y, 'mode': 'off'}, token=_rs2adm, ip_addr=ip())
+sx, moved2 = req('/api/transfer', {'senderId': X, 'recipientId': Y, 'amount': 1,
+                                   'idempotencyKey': f'inh{_RUN_TAG}'}, _x_tok, ip_addr=ip())
+ck('the allowed transfer goes through with the tick on', sx == 200, f"{sx} {(moved2 or {}).get('error')}", 'HIGH',
+   'The rule blocks the transfer that should inherit.')
+sx, ynow = req('/api/user/refer-send', token=_y_tok, ip_addr=ip())
+ck('the receiver is now under the same rule', ynow.get('restricted') is True and ynow.get('mode') == 'team',
+   f"restricted={ynow.get('restricted')} mode={ynow.get('mode')}", 'CRITICAL',
+   'The same rule does not follow the money to the receiver.')
+ck('the receiver is told where the rule came from', ynow.get('inherited') is True and str(ynow.get('inheritedFrom')) == str(X),
+   f"inherited={ynow.get('inherited')} from={ynow.get('inheritedFrom')}", 'HIGH',
+   'The receiver cannot tell why they are restricted.')
+
+# the chain keeps going: Y (now restricted) pays Z → Z inherits as well
+sx, yz = req('/api/transfer', {'senderId': Y, 'recipientId': Z, 'amount': 1,
+                               'idempotencyKey': f'chainyz{_RUN_TAG}'}, _y_tok, ip_addr=ip())
+ck('the newly restricted receiver can still pay down the chain', sx == 200,
+   f"{sx} {(yz or {}).get('error')}", 'CRITICAL', 'The inherited rule blocks the user own downline.')
+sx, znow = req('/api/user/refer-send', token=login((f'chainz-{_RUN_TAG}@gmail.com', 'Staging123!'), ip_addr=ip())[0], ip_addr=ip())
+ck('the rule keeps following the money to the next hop', znow.get('restricted') is True,
+   f"restricted={znow.get('restricted')} mode={znow.get('mode')}", 'CRITICAL',
+   'The rule stops following the money after one hop.')
+
+# an inherited rule never overwrites an explicit admin rule
+sx, _ = req('/api/admin/users/refer-send', {'userId': Z, 'mode': 'team', 'amount': 99, 'period': 'day', 'inherit': False},
+            token=_rs2adm, ip_addr=ip())
+sx, _z2 = req('/api/admin/users/refer-send', {'userId': Y, 'mode': 'l1', 'amount': 0, 'inherit': True}, token=_rs2adm, ip_addr=ip())
+sx, zview = req('/api/user/refer-send', token=login((f'chainz-{_RUN_TAG}@gmail.com', 'Staging123!'), ip_addr=ip())[0], ip_addr=ip())
+ck('an admin rule on the receiver is never overwritten by an inherited one',
+   zview.get('inherited') is False and zview.get('mode') == 'team' and num(zview.get('amount')) == 99,
+   f"mode={zview.get('mode')} amount={zview.get('amount')} inherited={zview.get('inherited')}", 'CRITICAL',
+   'Inheritance silently replaces a rule the admin set by hand.')
+
+sx, au = req('/api/admin/audit-logs', token=_rs2adm, ip_addr=ip())
+_rows2 = au.get('logs') if isinstance(au.get('logs'), list) else (au.get('auditLogs') or [])
+ck('every inheritance is written to the audit log',
+   any('REFER_SEND_INHERIT' in str(r.get('action') or '') for r in _rows2), f"rows={len(_rows2)}", 'HIGH',
+   'Money changing who may send leaves no audit trail.')
+
+# clean up so a re-run starts from a clean state
+for _uid in (X, Y, Z, 'U1'):
+    req('/api/admin/users/refer-send', {'userId': _uid, 'mode': 'off'}, token=_rs2adm, ip_addr=ip())
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
