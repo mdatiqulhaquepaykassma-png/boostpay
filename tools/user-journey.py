@@ -1562,6 +1562,8 @@ sx, bw2 = req('/api/user/bonus', token=_u2tok, ip_addr=ip())
 ck('the dry run pays nobody', num((bw2.get('wallet') or {}).get('granted')) == 0,
    f"granted={(bw2.get('wallet') or {}).get('granted')}", 'CRITICAL', 'A dry run moved real money.')
 
+sx, _lb1 = req('/api/admin/promo/campaigns', token=_rs5, ip_addr=ip())
+_wu_b = int(((next((c for c in (_lb1.get('campaigns') or []) if c.get('id') == _wcid), {}) or {}).get('stats') or {}).get('joins') or 0)
 sx, one = req('/api/admin/promo/welcome/backfill', {'campaignId': _wcid, 'userIds': ['U2'], 'confirm': True}, token=_rs5, ip_addr=ip())
 ck('a targeted backfill pays exactly that account', sx == 200 and int(one.get('paid') or 0) == 1,
    f"{sx} paid={one.get('paid')} total={one.get('total')}", 'CRITICAL',
@@ -1569,6 +1571,12 @@ ck('a targeted backfill pays exactly that account', sx == 200 and int(one.get('p
 sx, bw3 = req('/api/user/bonus', token=_u2tok, ip_addr=ip())
 ck('the money really lands in that user wallet', num((bw3.get('wallet') or {}).get('granted')) > 0,
    f"granted={(bw3.get('wallet') or {}).get('granted')}", 'CRITICAL', 'The backfill reports success but pays nothing.')
+
+sx, _lb2 = req('/api/admin/promo/campaigns', token=_rs5, ip_addr=ip())
+_wu_a = int(((next((c for c in (_lb2.get('campaigns') or []) if c.get('id') == _wcid), {}) or {}).get('stats') or {}).get('joins') or 0)
+ck('the campaign counts one slot per paid user, not two', _wu_a - _wu_b == 1,
+   f"used {_wu_b} → {_wu_a} for 1 paid user", 'HIGH',
+   'The backfill double-counts slot usage, so real users lose available slots.')
 
 sx, again = req('/api/admin/promo/welcome/backfill', {'campaignId': _wcid, 'userIds': ['U2'], 'confirm': True}, token=_rs5, ip_addr=ip())
 ck('running it twice never pays the same account twice', int(again.get('paid') or 0) == 0,

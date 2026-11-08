@@ -9913,10 +9913,10 @@ async function startServer() {
       for (const u of capped) {
         // an admin-driven grant skips only the duplicate-device hold; caps, dates
         // and budget are still enforced by the engine itself
+        // creditCampaignBonus already bumps camp.used / camp.budgetUsed — counting
+        // here as well would double the campaign's slot usage on every backfill
         const r = creditCampaignBonus(db, { campaign: camp, userId: String(u.id), user: u, bypassFraud: true });
         if (r.paid) paid += 1; else failed.push({ id: String(u.id), reason: r.reason });
-        camp.used = Math.max(0, Math.trunc(Number(camp.used) || 0)) + (r.paid ? 1 : 0);
-        if (r.paid) camp.budgetUsed = referRound2((Number(camp.budgetUsed) || 0) + amount);
       }
       try {
         recordAuditLog(db, 'WELCOME_BACKFILL', String(req.authAdmin || 'admin'),
