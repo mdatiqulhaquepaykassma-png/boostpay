@@ -230,6 +230,19 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
         </div>
       </div>
 
+      {/* ── Promotion bonus send rule (who may receive that money) ───────── */}
+      {bonus && bonus.wallet && Number(bonus.wallet.bonusRestricted) > 0 && (
+        <div className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.05] px-3 py-2">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-amber-400">🎁 Promotion bonus in your balance</div>
+          <p className="mt-1 text-[10px] leading-relaxed text-zinc-400">
+            <span className="font-mono text-emerald-300">${Number(bonus.wallet.bonusRestricted).toFixed(2)}</span> of your balance is bonus money.
+            It can be sent to <span className="text-zinc-200">{bonus.wallet.bonusSendLabel || 'anyone'}</span>.
+            Your own money — <span className="font-mono text-zinc-200">${Number(bonus.wallet.ownSendable).toFixed(2)}</span> — can go to anyone.
+            Boosting is always allowed.
+          </p>
+        </div>
+      )}
+
       {/* ── Promotion bonus: it is real money in the main balance now ────── */}
       {bonus && (bonus.pendingReviews?.length > 0 || bonus.waitingDeposit?.length > 0) && (
         <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3">

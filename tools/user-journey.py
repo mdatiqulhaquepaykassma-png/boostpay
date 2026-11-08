@@ -1801,6 +1801,101 @@ req('/api/admin/promo/campaigns/save', {
     'bonusLockDays': 0, 'status': 'ACTIVE', 'stackWithCode': True,
 }, token=_rs8, ip_addr=ip())
 
+
+# ── 29. who the bonus money may be sent to (per-campaign tick) ───────────────
+print("\n[29. bonus send recipients]")
+_rs9_s, _rs9_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rs9 = _rs9_j.get('token') or ''
+
+
+def _welcome_tick(mode, amount=3, lock=0):
+    return req('/api/admin/promo/campaigns/save', {
+        'id': _wid, 'kind': 'WELCOME', 'name': 'Journey welcome', 'bonusPerUser': amount, 'maxUses': 0,
+        'bonusLockDays': lock, 'bonusSend': mode, 'status': 'ACTIVE', 'stackWithCode': True,
+    }, token=_rs9, ip_addr=ip())
+
+
+def _send(token, sid, rid, amount, tag):
+    return req('/api/transfer', {'senderId': str(sid), 'recipientId': str(rid), 'amount': amount,
+                                 'idempotencyKey': f'{tag}{_RUN_TAG}'}, token=token, ip_addr=ip())
+
+
+# NONE: the bonus may only be boosted
+sx, _ = _welcome_tick('NONE')
+ck('the campaign can say "boost only, nobody may receive it"', sx == 200, f"{sx}", 'HIGH',
+   'The bonus send tick cannot be configured.')
+sx, _pubN = req('/api/promo/welcome', ip_addr=ip())
+ck('the signup screen shows the send rule', (_pubN.get('welcome') or {}).get('bonusSend') == 'NONE',
+   f"send={(_pubN.get('welcome') or {}).get('bonusSend')}", 'HIGH', 'The send rule is not advertised.')
+_s, nid, nj = signup_child('bsend1@gmail.com', 'U1')
+ntok, _ = login((nj.get('_email'), 'Staging123!'), ip_addr=ip())
+_bnk = req('/api/user/bonus', token=ntok, ip_addr=ip())[1].get('wallet') or {}
+ck('a bonus-only account still has the money in its balance',
+   num(_bnk.get('mainBalance')) >= 3 and num(_bnk.get('bonusRestricted')) >= 3,
+   f"main={_bnk.get('mainBalance')} restricted={_bnk.get('bonusRestricted')}", 'CRITICAL',
+   'The bonus is not in the balance, or the send rule is not tracked.')
+sx, r1 = _send(ntok, nid, 'U2', 1, 'bsN')
+ck('"boost only" refuses every transfer of bonus money',
+   sx == 403 and 'promotion bonus' in str(r1.get('error') or '').lower(),
+   f"{sx} {r1.get('error')}", 'CRITICAL', 'A boost-only bonus can be sent out.')
+sx, _b = req('/api/boost/start', {'userId': str(nid)}, token=ntok, ip_addr=ip())
+ck('"boost only" still allows boosting', sx == 200, f"{sx} {_b.get('error')}", 'CRITICAL',
+   'A boost-only bonus cannot even be boosted.')
+
+# L1: only the referrer may receive bonus money
+sx, _ = _welcome_tick('L1')
+_s, lid, lj = signup_child('bsend2@gmail.com', 'U1')
+ltok, _ = login((lj.get('_email'), 'Staging123!'), ip_addr=ip())
+sx, r2 = _send(ltok, lid, 'U2', 1, 'bsL1x')
+ck('"referrer only" refuses a stranger', sx == 403 and 'referrer' in str(r2.get('error') or '').lower(),
+   f"{sx} {r2.get('error')}", 'CRITICAL', 'Bonus money still goes to strangers.')
+sx, r3 = _send(ltok, lid, 'U1', 1, 'bsL1y')
+ck('"referrer only" lets the bonus reach the referrer', sx == 200, f"{sx} {r3.get('error')}", 'CRITICAL',
+   'The referrer cannot receive the bonus money.')
+
+# own money is never restricted (U1 has an active boost, so U2 funds this account)
+_fund_tok, _ = login(U2, ip_addr=ip())
+sx, _fund = _send(_fund_tok, 'U2', lid, 5, 'bsfund')
+ck('a second wallet can top up the account for the own-money test', sx == 200,
+   f"{sx} {_fund.get('error')}", 'HIGH', 'The own-money part of the rule could not be tested.')
+sx, r4 = _send(ltok, lid, 'U2', 1, 'bsown')
+ck('their own money can still be sent to anyone', sx == 200, f"{sx} {r4.get('error')}", 'CRITICAL',
+   'The bonus rule also blocks the user own money.')
+
+# TEAM: referrer + the whole downline, nothing outside it
+sx, _ = _welcome_tick('TEAM')
+_s, tid, tj = signup_child('bsend3@gmail.com', 'U1')
+ttok, _ = login((tj.get('_email'), 'Staging123!'), ip_addr=ip())
+_s2, kid, kj = signup_child('bsend4@gmail.com', 'U1')
+sx, r5 = _send(ttok, tid, 'U2', 1, 'bsTeamx')
+ck('"team only" refuses somebody outside the team', sx == 403, f"{sx} {r5.get('error')}", 'CRITICAL',
+   'Bonus money leaves the team.')
+_s3, dchild, _dcj = signup_child(f'bsd-{_RUN_TAG}@gmail.com', str(tid))
+sx, r6 = _send(ttok, tid, dchild, 1, 'bsTeamOk')
+ck('"team only" lets the bonus reach their own downline', sx == 200, f"{sx} {r6.get('error')}", 'CRITICAL',
+   'A team member cannot receive the bonus money.')
+
+# ALL: no restriction at all
+sx, _ = _welcome_tick('ALL')
+_s, aid, aj = signup_child('bsend5@gmail.com', 'U1')
+atok, _ = login((aj.get('_email'), 'Staging123!'), ip_addr=ip())
+sx, r7 = _send(atok, aid, 'U2', 1, 'bsAll')
+ck('"anyone" lets the bonus go to any user', sx == 200, f"{sx} {r7.get('error')}", 'HIGH',
+   'The "anyone" setting still blocks the send.')
+
+# the restriction shrinks as the bonus is spent
+sx, _ = _welcome_tick('TEAM')
+_s, sid2, sj2 = signup_child('bsend6@gmail.com', 'U1')
+stok, _ = login((sj2.get('_email'), 'Staging123!'), ip_addr=ip())
+_b1 = num((req('/api/user/bonus', token=stok, ip_addr=ip())[1].get('wallet') or {}).get('bonusRestricted'))
+_send(stok, sid2, 'U1', 1, 'bsconsume')
+_b2 = num((req('/api/user/bonus', token=stok, ip_addr=ip())[1].get('wallet') or {}).get('bonusRestricted'))
+ck('sending bonus money lowers the restricted amount', _b2 < _b1, f"{_b1} → {_b2}", 'HIGH',
+   'The bonus restriction never goes away, so the account stays limited forever.')
+
+# state back to normal for any later section
+sx, _ = _welcome_tick('ALL')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

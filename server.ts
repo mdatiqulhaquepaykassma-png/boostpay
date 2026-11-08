@@ -1100,6 +1100,8 @@ function campaignPublicView(db: any, c: any): any {
     // The bonus is real money in the main balance. It never expires; `bonusLockDays`
     // only keeps that slice out of transfers/withdrawals (boost is always allowed).
     bonusLockDays: Math.max(0, Math.trunc(Number(c.bonusLockDays) || 0)),
+    bonusSend: campaignBonusSend(c),
+    bonusSendLabel: BONUS_SEND_LABEL[campaignBonusSend(c)],
     creditedTo: 'BALANCE',
     endAt: Number(c.endAt) || 0,
     firstDepositBonus: Number(c.firstDepositBonus) || 0,
@@ -1141,6 +1143,10 @@ function bonusWalletOf(db: any, userId: string, now = Date.now()): any {
     canTransfer: false, canWithdraw: false, grants: [],
     mainBalance: Math.round((Number(user && user.balance) || 0) * 1e8) / 1e8,
     lockedPromo: promoBonusLockOf(user),
+    bonusRestricted: promoBonusRestrictionOf(db, user).amount,
+    bonusSendMode: promoBonusRestrictionOf(db, user).mode,
+    bonusSendLabel: BONUS_SEND_LABEL[promoBonusRestrictionOf(db, user).mode] || BONUS_SEND_LABEL.ALL,
+    ownSendable: ownSendable(user, db),
     creditedTo: 'BALANCE',
     notice: 'Promotion bonuses are added straight to your main balance.',
   };
@@ -2711,6 +2717,115 @@ function promoBonusLockOf(u: any): number {
   if (until && Date.now() > until) return 0;
   const balance = lockMoney(Number(u.balance) || 0);
   return lockMoney(Math.min(raw, balance));
+}
+
+/**
+ * WHO the money from a promotion bonus may be sent to — a per-campaign tick
+ * (owner request 2026-11-08). The bonus itself is ordinary main-balance money, so
+ * the rule only bites while the user still holds unspent bonus: money above
+ * "own money" may only go to the allowed people.
+ *   NONE  → boost only, it may not be sent at all
+ *   L1    → the direct referrer (the person who referred them)
+ *   DOWN  → their own downline, at any depth
+ *   TEAM  → the referrer + the whole downline
+ *   ALL   → anyone (no restriction)
+ */
+const BONUS_SEND_MODES = ['NONE', 'L1', 'DOWN', 'TEAM', 'ALL'];
+const BONUS_SEND_LABEL: Record<string, string> = {
+  NONE: 'boost only — it cannot be sent to anyone',
+  L1: 'your direct referrer only',
+  DOWN: 'your own team members only',
+  TEAM: 'your referrer and your own team members only',
+  ALL: 'anyone',
+};
+
+function campaignBonusSend(c: any): string {
+  const m = String((c && c.bonusSend) || '').toUpperCase();
+  return BONUS_SEND_MODES.includes(m) ? m : 'ALL';   // legacy campaigns keep the old freedom
+}
+
+/** The people a bonus may be paid to under one mode. */
+function bonusRecipientsOf(db: any, userId: string, mode: string): Set<string> {
+  const out = new Set<string>();
+  const uid = String(userId);
+  if (mode === 'NONE' || mode === 'ALL') return out;
+  if (mode === 'L1' || mode === 'TEAM') {
+    const uplink = (db.referrals || []).find((r: any) => String(r.referredId) === uid);
+    if (uplink) out.add(String(uplink.referrerId));
+  }
+  if (mode === 'DOWN' || mode === 'TEAM') {
+    const walk = walkTeam(buildReferralIndex(db), uid);
+    for (const id of walk.level.keys()) out.add(String(id));
+  }
+  out.delete(uid);
+  return out;
+}
+
+/** How much of this user's balance is still bonus money that carries a send rule. */
+function promoBonusRestrictionOf(db: any, u: any): { amount: number; mode: string } {
+  const byId = new Map<string, any>((db.campaigns || []).map((c: any) => [String(c.id), c]));
+  const rank: Record<string, number> = { ALL: 0, TEAM: 1, DOWN: 2, L1: 3, NONE: 4 };
+  let amount = 0;
+  let mode = 'ALL';
+  const sendable = sendableBalance(u);
+  for (const g of (db.bonusGrants || [])) {
+    if (String(g.userId) !== String(u.id) || g.status !== 'ACTIVE') continue;
+    const left = Number(g.remaining) || 0;
+    if (!(left > 0)) continue;
+    const m = campaignBonusSend(byId.get(String(g.campaignId)));
+    if (m === 'ALL') continue;
+    amount += left;
+    if ((rank[m] || 0) > (rank[mode] || 0)) mode = m;
+  }
+  return { amount: Math.round(Math.min(amount, Math.max(0, sendable)) * 1e8) / 1e8, mode };
+}
+
+/** Money the user may send to anybody, because it is not bonus money. */
+function ownSendable(u: any, db: any): number {
+  const sendable = sendableBalance(u);
+  const restricted = promoBonusRestrictionOf(db, u).amount;
+  return Math.round(Math.max(0, sendable - restricted) * 1e8) / 1e8;
+}
+
+/**
+ * Would sending `amount` to `recipientId` spend bonus money that is not allowed
+ * to go there? Returns the refusal text, or null when the send may proceed.
+ */
+function bonusSendRefusal(db: any, sender: any, recipientId: string, amount: number): string | null {
+  const restriction = promoBonusRestrictionOf(db, sender);
+  if (!(restriction.amount > 0)) return null;
+  const own = ownSendable(sender, db);
+  if (amount <= own + 1e-9) return null;                 // paid from their own money
+  if (restriction.mode === 'NONE') {
+    return `$${restriction.amount.toFixed(2)} of your balance is a promotion bonus that can only be used for boosting — it cannot be sent to anyone. Boost it and the profit you earn on top is free to send.`;
+  }
+  const allowed = bonusRecipientsOf(db, String(sender.id), restriction.mode);
+  if (allowed.has(String(recipientId))) return null;
+  return `$${restriction.amount.toFixed(2)} of your balance is a promotion bonus that can be sent to ${BONUS_SEND_LABEL[restriction.mode]}. You can send up to $${own.toFixed(2)} to other users.`;
+}
+
+/** Book the part of a send that came out of bonus money (reporting + later release). */
+function consumeBonusForSend(db: any, userId: string, amount: number, note: string) {
+  let left = Math.round((Number(amount) || 0) * 1e8) / 1e8;
+  if (!(left > 0)) return 0;
+  let used = 0;
+  for (const g of (db.bonusGrants || [])) {
+    if (left <= 1e-9) break;
+    if (String(g.userId) !== String(userId) || g.status !== 'ACTIVE') continue;
+    const rem = Number(g.remaining) || 0;
+    if (!(rem > 0)) continue;
+    const take = Math.min(left, rem);
+    g.remaining = Math.round((rem - take) * 1e8) / 1e8;
+    if (g.remaining <= 1e-9) { g.status = 'USED'; g.closedAt = Date.now(); }
+    left = Math.round((left - take) * 1e8) / 1e8;
+    used = Math.round((used + take) * 1e8) / 1e8;
+    bonusLedgerRow(db, {
+      id: 'BL-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(userId),
+      grantId: g.id, campaignId: g.campaignId, type: 'BONUS_SENT_FROM_BALANCE', amount: take,
+      timestamp: Date.now(), notes: note,
+    });
+  }
+  return used;
 }
 
 function sendableWith(u: any, lock: LockView): number {
@@ -6723,6 +6838,13 @@ async function startServer() {
         return res.status(403).json({ ...referBlock, referSendLimited: true });
       }
 
+      // Who may receive promotion-bonus money (per-campaign tick).
+      const bonusBlock = bonusSendRefusal(db, sender, String(recipient.id), numAmount);
+      if (bonusBlock) {
+        refundRateLimit(req);
+        return res.status(403).json({ error: bonusBlock, bonusSendLimited: true, ownSendable: ownSendable(sender, db) });
+      }
+
       const senderSendable = sendableBalance(sender);
       if (senderSendable <= 0) {
         return res.status(403).json({ error: sendLockError(sender), sendLocked: sendLockOf(sender), sendable: senderSendable });
@@ -6743,9 +6865,15 @@ async function startServer() {
         return res.status(400).json({ error: 'Active boost running! You must pause your boost before sending money.' });
       }
 
+      // How much of this send comes out of their own money vs. bonus money
+      const ownBefore = ownSendable(sender, db);
       // Debit sender and credit recipient
       sender.balance = Math.max(0, (Number(sender.balance) || 0) - numAmount);
       recipient.balance = (Number(recipient.balance) || 0) + numAmount;
+      try {
+        const bonusPart = Math.round(Math.max(0, numAmount - ownBefore) * 1e8) / 1e8;
+        if (bonusPart > 0) consumeBonusForSend(db, String(sender.id), bonusPart, `$${bonusPart.toFixed(2)} of promotion bonus sent to #${recipient.id}`);
+      } catch { /* reporting only — never break a transfer */ }
       // a deposit can release a promotion bonus that was waiting for it
       try { releasePendingBonuses(db, String(recipient.id), numAmount); } catch { /* never break a transfer */ }
 
@@ -9667,6 +9795,11 @@ async function startServer() {
     // `bonusLockDays` keeps the bonus slice locked for transfers/withdrawals only
     // (0 = no lock). The old burn/expiry policy is dead — existing data is zeroed.
     c.bonusLockDays = Math.min(365, Math.max(0, Math.trunc(num(body.bonusLockDays, num(c.bonusLockDays)))));
+    // who the bonus money may be sent to (NONE / L1 / DOWN / TEAM / ALL)
+    {
+      const _m = String(body.bonusSend || c.bonusSend || 'ALL').toUpperCase();
+      c.bonusSend = BONUS_SEND_MODES.includes(_m) ? _m : 'ALL';
+    }
     c.bonusExpiryDays = 0;
     c.expiryAction = 'NONE';
     c.bonusTransfer = true;
@@ -9753,7 +9886,7 @@ async function startServer() {
       }
       const saved = existing || candidate;
       recordAuditLog(db, 'CAMPAIGN_SAVED', String(req.authAdmin || 'admin'),
-        `Campaign ${saved.code}: $${saved.bonusPerUser} × ${saved.maxUses || '∞'}, ${saved.status}, transfer=${saved.bonusTransfer}, withdraw=${saved.bonusWithdraw}`, saved.code);
+        `Campaign ${saved.code}: $${saved.bonusPerUser} × ${saved.maxUses || '∞'}, ${saved.status}, lock=${saved.bonusLockDays || 0}d, send=${saved.bonusSend || 'ALL'}`, saved.code);
       writeDb(db);
       res.json({ success: true, campaign: { ...campaignPublicView(db, saved), id: saved.id, stats: campaignStats(db, saved) } });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save the campaign.' }); }
@@ -11674,6 +11807,24 @@ async function startServer() {
         }
         if (round2(user.balance || 0) < total) {
           return { status: 400, body: { error: `Insufficient balance. Amount ${parsed.value.toFixed(2)} + fee ${fee.toFixed(2)} = ${total.toFixed(2)} required.` } };
+        }
+        // Promotion-bonus money may only go to the people the campaign allows; an
+        // agent payout is not one of them, so it may only be paid from own money.
+        const _ownPay = ownSendable(user, db);
+        if (total > _ownPay + 1e-9) {
+          const _r = promoBonusRestrictionOf(db, user);
+          if (_r.amount > 0) {
+            return {
+              status: 403,
+              body: {
+                error: _r.mode === 'NONE'
+                  ? `$${_r.amount.toFixed(2)} of your balance is a promotion bonus that can only be boosted — it cannot be paid to an agent. Boost it and the profit you earn on top becomes payable.`
+                  : `$${_r.amount.toFixed(2)} of your balance is a promotion bonus that can be sent to ${BONUS_SEND_LABEL[_r.mode]}. You can pay up to $${_ownPay.toFixed(2)} to an agent.`,
+                ownSendable: _ownPay,
+                bonusRestricted: _r.amount,
+              },
+            };
+          }
         }
         // ── OWNER RULE: only boosted dollars can be withdrawn through an agent.
         const withdrawable = boostWithdrawable(user);

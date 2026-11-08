@@ -20,6 +20,7 @@ type Campaign = {
   kind?: 'CODE' | 'WELCOME'; stackWithCode?: boolean; dupIp?: boolean; dupDevice?: boolean;
   status: 'ACTIVE' | 'PAUSED' | 'INACTIVE';
   remainingSlots: number | null; minDeposit: number; bonusLockDays?: number; creditedTo?: string;
+  bonusSend?: 'NONE' | 'L1' | 'DOWN' | 'TEAM' | 'ALL';
   startAt: number; endAt: number; budgetLimit: number;
   firstDepositBonus: number; firstDepositMin: number; audience: 'NEW' | 'ALL';
   countries?: string[]; note: string;
@@ -85,7 +86,7 @@ export function App() {
   const [form, setForm] = useState<any>({
     code: '', name: '', bonusPerUser: 1, maxUses: 500, minDeposit: 0,
     status: 'ACTIVE', startAt: '', endAt: '', budgetLimit: 0,
-    bonusLockDays: 0,
+    bonusLockDays: 0, bonusSend: 'TEAM',
     audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0, kind: 'CODE', stackWithCode: true,
     dupIp: true, dupDevice: true, countries: '', note: '',
   });
@@ -216,7 +217,7 @@ export function App() {
     setForm({
       code: '', name: '', bonusPerUser: 1, maxUses: 500, minDeposit: 0,
       status: 'ACTIVE', startAt: '', endAt: '', budgetLimit: 0,
-      bonusLockDays: 0,
+      bonusLockDays: 0, bonusSend: 'TEAM',
       audience: 'NEW', firstDepositBonus: 0, firstDepositMin: 0, kind: 'CODE', stackWithCode: true,
       dupIp: true, dupDevice: true, countries: '', note: '',
     });
@@ -228,7 +229,8 @@ export function App() {
     setForm({
       code: c.code, name: c.name || '', bonusPerUser: c.bonusPerUser, maxUses: c.remainingSlots === null ? 0 : (Number(c.remainingSlots) + Number(c.stats?.joins || 0)),
       minDeposit: c.minDeposit, status: c.status, startAt: day(c.startAt), endAt: day(c.endAt),
-      budgetLimit: c.budgetLimit, bonusLockDays: c.bonusLockDays || 0, audience: c.audience,
+      budgetLimit: c.budgetLimit, bonusLockDays: c.bonusLockDays || 0, bonusSend: c.bonusSend || 'ALL',
+      audience: c.audience,
       firstDepositBonus: c.firstDepositBonus, firstDepositMin: c.firstDepositMin,
       kind: c.kind || 'CODE', stackWithCode: c.stackWithCode !== false,
       dupIp: c.dupIp !== false, dupDevice: c.dupDevice !== false,
@@ -248,6 +250,7 @@ export function App() {
       startAt: fromDay(form.startAt), endAt: fromDay(form.endAt),
       budgetLimit: Number(form.budgetLimit),
       bonusLockDays: Number(form.bonusLockDays) || 0,
+      bonusSend: form.bonusSend || 'ALL',
       kind: form.kind === 'WELCOME' ? 'WELCOME' : 'CODE',
       stackWithCode: !!form.stackWithCode,
       dupIp: !!form.dupIp,
@@ -348,6 +351,10 @@ export function App() {
                   </span>
                   <span className="pill sky">→ balance</span>
                   {Number(c.bonusLockDays) > 0 && <span className="pill violet">{c.bonusLockDays}d boost-only</span>}
+                  <span className={`pill ${(c.bonusSend || 'ALL') === 'ALL' ? 'sky' : 'off'}`}>
+                    send: {(c.bonusSend || 'ALL') === 'NONE' ? 'boost only' : (c.bonusSend || 'ALL') === 'L1' ? 'referrer only'
+                      : (c.bonusSend || 'ALL') === 'DOWN' ? 'team below' : (c.bonusSend || 'ALL') === 'TEAM' ? 'team' : 'anyone'}
+                  </span>
                   {(c.dupIp === false || c.dupDevice === false) && (
                     <span className="pill off">
                       dup: {c.dupIp === false ? 'no IP' : 'IP'}{c.dupDevice === false ? ' · no device' : ' · device'}
@@ -450,8 +457,17 @@ export function App() {
                 <option value={30}>30 days</option>
               </select>
             </label>
+            <label className="f">Bonus money can be sent to
+              <select value={form.bonusSend || 'ALL'} onChange={(e) => setForm({ ...form, bonusSend: e.target.value })}>
+                <option value="NONE">Nobody — boost only</option>
+                <option value="L1">Their direct referrer only</option>
+                <option value="DOWN">Their own team members only (downline)</option>
+                <option value="TEAM">Their referrer + own team (whole downline)</option>
+                <option value="ALL">Anyone</option>
+              </select>
+            </label>
             <div className="f" style={{ gridColumn: '1 / -1' }}>
-              <span className="dim">The bonus is added straight to the user's <b>main balance</b> (no separate bonus wallet) and never expires. A lock only keeps that slice out of transfers and withdrawals — boosting is always allowed.</span>
+              <span className="dim">The bonus is added straight to the user's <b>main balance</b> (no separate bonus wallet) and never expires. A lock keeps that slice out of transfers/withdrawals until it ends — boosting is always allowed. The send rule only bites while unspent bonus money is still in the balance: their own money can always be sent anywhere.</span>
             </div>
             <label className="f">Status
               <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
