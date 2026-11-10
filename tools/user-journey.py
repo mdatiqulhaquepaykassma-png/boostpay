@@ -2020,6 +2020,141 @@ ck('the refresh endpoint always answers with the freshness of the table',
    f"{sx} stale={_refresh.get('stale')} err={_refresh.get('error')}", 'HIGH',
    'A provider failure would leave the apps with no rate timestamp.')
 
+
+# ── 31. country-based automatic currency (first run only, then permanent) ────
+print("\n[31. automatic currency by country]")
+_rs31_s, _rs31_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rs31 = _rs31_j.get('token') or ''
+
+
+def _signup_cc(email, country=None, body_country=None, referrer='U1'):
+    """Register with a Cloudflare-style country header."""
+    local, _, domain = email.partition('@')
+    addr = f'{local}-{_RUN_TAG}@{domain or "gmail.com"}'
+    payload = {'email': addr, 'password': 'Staging123!', 'referralCode': referrer}
+    if body_country:
+        payload['country'] = body_country
+    data = json.dumps(payload).encode()
+    hdrs = {'content-type': 'application/json', 'x-forwarded-for': ip()}
+    if country:
+        hdrs['cf-ipcountry'] = country
+    r = urllib.request.Request(API + '/api/users/register', data=data, method='POST', headers=hdrs)
+    try:
+        with urllib.request.urlopen(r, timeout=25) as x:
+            j = json.loads(x.read() or b'{}')
+    except urllib.error.HTTPError as e:
+        j = json.loads(e.read() or b'{}')
+    j['_email'] = addr
+    return str(((j.get('user') or {}).get('id')) or ''), j
+
+
+# 1) the country decides on signup
+_bd_id, _bd_j = _signup_cc('cc1@gmail.com', 'BD')
+ck('a signup from Bangladesh starts in BDT',
+   (_bd_j.get('user') or {}).get('currency') == 'BDT' and (_bd_j.get('user') or {}).get('currencySource') == 'COUNTRY',
+   f"currency={(_bd_j.get('user') or {}).get('currency')} source={(_bd_j.get('user') or {}).get('currencySource')}", 'CRITICAL',
+   'The country does not pick the currency at signup.')
+_us_id, _us_j = _signup_cc('cc2@gmail.com', 'US')
+ck('a signup from the USA starts in USD', (_us_j.get('user') or {}).get('currency') == 'USD',
+   f"currency={(_us_j.get('user') or {}).get('currency')}", 'HIGH', 'US signups do not start in USD.')
+_ae_id, _ae_j = _signup_cc('cc3@gmail.com', 'AE')
+ck('the UAE maps to AED and Saudi Arabia to SAR (spot check)',
+   (_ae_j.get('user') or {}).get('currency') == 'AED',
+   f"AE={( _ae_j.get('user') or {}).get('currency')}", 'HIGH', 'The country→currency table is wrong for the Gulf.')
+
+# 2) unknown country → the admin default
+sx, _ = req('/api/admin/currency/config', {'default': 'EUR'}, token=_rs31, ip_addr=ip())
+_xx_id, _xx_j = _signup_cc('cc4@gmail.com', 'XX')
+ck('an unknown country falls back to the admin default currency',
+   (_xx_j.get('user') or {}).get('currency') == 'EUR' and (_xx_j.get('user') or {}).get('currencySource') == 'DEFAULT',
+   f"currency={(_xx_j.get('user') or {}).get('currency')} source={(_xx_j.get('user') or {}).get('currencySource')}", 'CRITICAL',
+   'A failed country detection does not fall back to the admin default.')
+req('/api/admin/currency/config', {'default': 'USD'}, token=_rs31, ip_addr=ip())
+
+# 3) a body country hint is used when the header is missing
+_in_id, _in_j = _signup_cc('cc5@gmail.com', None, body_country='IN')
+ck('the app-sent country is used when there is no CF header',
+   (_in_j.get('user') or {}).get('currency') == 'INR', f"currency={(_in_j.get('user') or {}).get('currency')}", 'HIGH',
+   'The country hint from the app is ignored.')
+
+# 4) a manual choice is permanent — a later login from another country never overrides it
+_bdtok, _ = login((_bd_j.get('_email'), 'Staging123!'), ip_addr=ip())
+sx, _manual = req('/api/user/currency', {'code': 'GBP'}, token=_bdtok, ip_addr=ip())
+ck('the user can still change it by hand', sx == 200 and _manual.get('currency') == 'GBP',
+   f"{sx} {_manual.get('currency')} {_manual.get('error')}", 'CRITICAL', 'A manual change is refused.')
+data = json.dumps({'email': _bd_j.get('_email'), 'password': 'Staging123!'}).encode()
+_r = urllib.request.Request(API + '/api/users/login', data=data, method='POST',
+                            headers={'content-type': 'application/json', 'x-forwarded-for': ip(), 'cf-ipcountry': 'US'})
+with urllib.request.urlopen(_r, timeout=25) as _x:
+    _relog = json.loads(_x.read() or b'{}')
+ck('logging in from another country never overwrites the saved currency',
+   (_relog.get('user') or {}).get('currency') == 'GBP' and (_relog.get('user') or {}).get('currencySource') == 'MANUAL',
+   f"currency={(_relog.get('user') or {}).get('currency')} source={(_relog.get('user') or {}).get('currencySource')}", 'CRITICAL',
+   'Country detection keeps changing the currency on every login (the VPN problem).')
+
+# 5) an older account without a currency gets one exactly once
+try:
+    _raw = json.load(open(DB_PATH))
+    _old = next((u for u in _raw.get('users', []) if str(u.get('id')) == 'U3'), None)
+    _old_email = (_old or {}).get('email') or ''
+    if _old is not None:
+        _old['currency'] = None
+        _old.pop('currencySource', None)
+        _old['password'] = _old.get('password')  # untouched
+        json.dump(_raw, open(DB_PATH, 'w'), indent=1)
+except Exception:
+    _old_email = ''
+ck('an older account can be stripped for the migration test', bool(_old_email), f"email_set={bool(_old_email)}", 'MEDIUM',
+   'The legacy-account path cannot be exercised.')
+if _old_email:
+    data = json.dumps({'email': _old_email, 'password': 'Staging123!'}).encode()
+    _r = urllib.request.Request(API + '/api/users/login', data=data, method='POST',
+                                headers={'content-type': 'application/json', 'x-forwarded-for': ip(), 'cf-ipcountry': 'BD'})
+    with urllib.request.urlopen(_r, timeout=25) as _x:
+        _legacy = json.loads(_x.read() or b'{}')
+    ck('an older account is detected once, on its next login',
+       (_legacy.get('user') or {}).get('currency') == 'BDT' and (_legacy.get('user') or {}).get('currencySource') == 'COUNTRY',
+       f"currency={(_legacy.get('user') or {}).get('currency')} source={(_legacy.get('user') or {}).get('currencySource')}", 'HIGH',
+       'Existing accounts never get a country-based currency.')
+
+# 6) a country whose currency is disabled falls back to the default
+sx, _ = req('/api/admin/currency/config', {'disabled': ['BDT'], 'default': 'USD'}, token=_rs31, ip_addr=ip())
+_bd2_id, _bd2_j = _signup_cc('cc6@gmail.com', 'BD')
+ck('a disabled currency is never auto-selected (falls back to the default)',
+   (_bd2_j.get('user') or {}).get('currency') == 'USD',
+   f"currency={(_bd2_j.get('user') or {}).get('currency')}", 'HIGH',
+   'Auto-detection can pick a currency the admin switched off.')
+sx, _ = req('/api/admin/currency/config', {'disabled': []}, token=_rs31, ip_addr=ip())
+
+# 7) the auto-detect switch
+sx, _ = req('/api/admin/currency/config', {'autoDetect': False, 'default': 'EUR'}, token=_rs31, ip_addr=ip())
+_off_id, _off_j = _signup_cc('cc7@gmail.com', 'BD')
+ck('turning auto-detect off means everyone starts in the default currency',
+   (_off_j.get('user') or {}).get('currency') == 'EUR', f"currency={(_off_j.get('user') or {}).get('currency')}", 'CRITICAL',
+   'The auto-detect switch does nothing.')
+req('/api/admin/currency/config', {'autoDetect': True, 'default': 'USD'}, token=_rs31, ip_addr=ip())
+
+# 8) an agent gets the same treatment, independently of any user
+sx, _ag2 = req('/api/agent/login', {'email': 'agent1@gmail.com', 'password': 'Staging123!'}, ip_addr=ip())
+_ag24 = _ag2.get('token') or ''
+ck('an agent account also carries a detected currency', (_ag2.get('agent') or {}).get('currency') in ('USD', 'BDT', None),
+   f"currency={(_ag2.get('agent') or {}).get('currency')} source={(_ag2.get('agent') or {}).get('currencySource')}", 'HIGH',
+   'Agents have no country-based currency.')
+sx, _agset2 = req('/api/agent/currency', {'code': 'SAR'}, token=_ag24, ip_addr=ip())
+ck('the agent manual choice wins and is marked manual', sx == 200 and _agset2.get('currency') == 'SAR',
+   f"{sx} {_agset2.get('error')}", 'HIGH', 'An agent cannot pin their currency.')
+sx, _agreset = req('/api/agent/currency', {'code': 'USD'}, token=_ag24, ip_addr=ip())
+
+# 9) the country is stored on the account (the campaign country filter uses it)
+try:
+    _raw = json.load(open(DB_PATH))
+    _bdrow = next((u for u in _raw.get('users', []) if str(u.get('id')) == str(_bd2_id)), None)
+    _stored_cc = (_bdrow or {}).get('country')
+except Exception:
+    _stored_cc = None
+ck('the detected country is stored with the account', bool(_stored_cc), f"country={_stored_cc}", 'MEDIUM',
+   'The signup country is not stored, so country-targeted campaigns cannot work.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

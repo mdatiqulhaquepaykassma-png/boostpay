@@ -10,7 +10,7 @@ import { createServer as createViteServer } from 'vite';
 import nodemailer from 'nodemailer';
 import QRCode from 'qrcode';
 import webpush from 'web-push';
-import { CURRENCIES } from './currency-data';
+import { CURRENCIES, currencyForCountry, isCurrencyCode } from './currency-data';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1346,8 +1346,97 @@ function currencyOptionsPayload(db: any, forCode?: string) {
     stale: !!cache.stale || !Number(cache.fetchedAt),
     source: cache.source || '',
     refreshMinutes: cfg.refreshMinutes,
+    autoDetect: geoConfigOf(db).autoDetect !== false,
     currencies: rows.filter((r) => r.enabled || r.code === 'USD'),
   };
+}
+
+/**
+ * Country detection for the first-time currency pick.
+ *
+ * Priority (owner spec 2026-11-08):
+ *   1. a currency the account already chose (manual or already detected) wins — always
+ *   2. otherwise the country of THIS request: Cloudflare's CF-IPCountry header, then
+ *      the country the app sent, then a cached IP-geo lookup
+ *   3. otherwise the admin's default currency
+ * Detection happens once per account and is stored; a later login — even from a
+ * different country or through a VPN — never changes it.
+ */
+function geoConfigOf(db: any): any {
+  const cfg = currencyConfigOf(db);
+  if (cfg.autoDetect === undefined) cfg.autoDetect = true;
+  if (!cfg.geoProvider) cfg.geoProvider = 'https://ip-api.com/json/';
+  if (!db.geoCache || typeof db.geoCache !== 'object') db.geoCache = {};
+  return cfg;
+}
+
+/** Country of the caller without any network call (header / client hint / cache). */
+function countryHintOf(req: any, db?: any): string {
+  const hdr = String(req?.headers?.['cf-ipcountry'] || '').toUpperCase();
+  if (/^[A-Z]{2}$/.test(hdr) && hdr !== 'XX' && hdr !== 'T1') return hdr;
+  const posted = String(req?.body?.country || '').toUpperCase();
+  if (/^[A-Z]{2}$/.test(posted)) return posted;
+  const ip = clientIp(req);
+  if (db && db.geoCache && db.geoCache[ip] && Date.now() - Number(db.geoCache[ip].at || 0) < 30 * 86400000) {
+    return String(db.geoCache[ip].country || '').toUpperCase();
+  }
+  return '';
+}
+
+/** Optional IP-geo lookup (best effort, 3s timeout, cached 30 days). */
+async function geoLookupCountry(req: any, db: any): Promise<string> {
+  const hint = countryHintOf(req, db);
+  if (hint) return hint;
+  const cfg = geoConfigOf(db);
+  if (!cfg.geoProvider) return '';
+  const ip = clientIp(req);
+  if (!ip || /^(10\.|127\.|::1|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(ip)) return '';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const res = await fetch(`${cfg.geoProvider}${encodeURIComponent(ip)}?fields=countryCode`, { signal: controller.signal });
+    if (!res.ok) return '';
+    const body: any = await res.json().catch(() => ({}));
+    const cc = String(body.countryCode || body.country_code || body.country || '').toUpperCase();
+    if (!/^[A-Z]{2}$/.test(cc)) return '';
+    if (!db.geoCache) db.geoCache = {};
+    db.geoCache[ip] = { country: cc, at: Date.now() };
+    return cc;
+  } catch {
+    return '';
+  } finally { clearTimeout(timer); }
+}
+
+/**
+ * Pick the display currency for a brand-new (or not-yet-set) account.
+ * An unknown/geo-failed country, or a currency the admin disabled, falls back to
+ * the platform default. Returns the ISO code and where it came from.
+ */
+function autoCurrencyForCountry(db: any, country: string): { code: string; source: 'COUNTRY' | 'DEFAULT'; country: string } {
+  const cfg = geoConfigOf(db);
+  const enabled = enabledCurrencyCodes(db);
+  const byCountry = currencyForCountry(country);
+  if (cfg.autoDetect && byCountry && enabled.includes(byCountry)) {
+    return { code: byCountry, source: 'COUNTRY', country: String(country).toUpperCase() };
+  }
+  const def = enabled.includes(cfg.default) ? cfg.default : 'USD';
+  return { code: def, source: 'DEFAULT', country: String(country || '').toUpperCase() };
+}
+
+/** Apply the auto pick to an account that has no currency yet. Returns true when set. */
+function applyAutoCurrency(db: any, owner: any, country: string): boolean {
+  if (!owner || owner.currency) return false;      // an existing choice is never overwritten
+  const pick = autoCurrencyForCountry(db, country);
+  owner.currency = pick.code;
+  owner.currencySource = pick.source;
+  owner.currencyCountry = pick.country;
+  owner.currencySetAt = Date.now();
+  try {
+    recordAuditLog(db, 'CURRENCY_AUTO_SET', 'system',
+      `Auto currency for ${owner.email ? 'account' : 'agent'} #${owner.id}: ${pick.code} (${pick.source}${pick.country ? `, country ${pick.country}` : ''})`,
+      String(owner.id));
+  } catch { /* audit must not break signup */ }
+  return true;
 }
 
 /** Store a preference on a user / agent / admin row (audited, ISO validated). */
@@ -1357,6 +1446,8 @@ function setCurrencyPref(db: any, owner: any, code: string, who: string, kind: s
   if (!enabledCurrencyCodes(db).includes(upper)) return { ok: false, error: `${upper} is not available right now.` };
   const before = String(owner.currency || 'USD');
   owner.currency = upper;
+  owner.currencySource = 'MANUAL';       // permanent: auto-detection must never override this
+  owner.currencySetAt = Date.now();
   recordAuditLog(db, 'CURRENCY_PREF_CHANGED', who, `${kind} #${owner.id} display currency ${before} → ${upper}`, String(owner.id));
   return { ok: true };
 }
@@ -2718,6 +2809,8 @@ function publicUser(u: any): any {
     agentLock: { full: pay.full, amount: agentLock.amount, sendable: pay.cap, cause: pay.cause },
     // Display currency (money is always USD underneath).
     currency: entryCurrencyOf(u),
+    currencySource: (u as any).currencySource || 'DEFAULT',
+    currencyCountry: (u as any).currencyCountry || null,
     baseCurrency: 'USD',
     // A "boost only" signup bonus is visible but cannot leave the wallet.
     signupBonusLocked: signupBonusLockOf(u),
@@ -4543,6 +4636,8 @@ async function startServer() {
         createdAt: Date.now(),
         // anti-fraud signals for the promotion engine (never shown to users)
         signupIp: clientIp(req),
+        // country of the first visit — also used by the campaign country filter
+        country: countryHintOf(req, db) || undefined,
         signupDevice: String(req.headers['x-device-id'] || '').slice(0, 180),
         boostState: {
           isActive: false,
@@ -4555,6 +4650,10 @@ async function startServer() {
           accumulatedYield: 0
         }
       };
+
+      // First-run currency: the country decides (owner spec 2026-11-08). The user can
+      // change it later and that manual choice is never overwritten.
+      try { applyAutoCurrency(db, newUser, String((newUser as any).country || '')); } catch { /* never block signup */ }
 
       // create referral link if valid and not self — CRITICAL: limit 20 referrals per referrer per day to prevent wash-trading tier boost
       if (referrerForNew && String(referrerForNew.id) !== String(userId)) {
@@ -4699,7 +4798,7 @@ async function startServer() {
   });
 
   // 5b. User authentication login endpoint (strictly Email & Password)
-  app.post('/api/users/login', (req, res) => {
+  app.post('/api/users/login', async (req, res) => {
     try {
       const { email, password } = req.body;
       if (!email || typeof email !== 'string' || !email.trim()) {
@@ -4834,6 +4933,15 @@ async function startServer() {
       if (user.isTempLocked) {
         return res.status(403).json({ error: 'Account is temporarily locked. Contact support.' });
       }
+
+      // Accounts created before currency selection existed get their country-based
+      // currency exactly once, on this login, and it is saved permanently.
+      try {
+        if (!user.currency) {
+          const cc = countryHintOf(req, db) || (await geoLookupCountry(req, db));
+          if (applyAutoCurrency(db, user, cc)) writeDb(db);
+        }
+      } catch { /* never block a login */ }
 
       const sess = createSession(db, user.id, 'USER', clientIp(req), String(req.headers['user-agent'] || ''));
       writeDb(db);
@@ -10355,7 +10463,7 @@ async function startServer() {
       const out = setCurrencyPref(db, user, (req.body || {}).code, String(req.authUserId), 'User');
       if (!out.ok) return res.status(400).json({ error: out.error });
       writeDb(db);
-      res.json({ success: true, currency: user.currency, options: currencyOptionsPayload(db, user.currency) });
+      res.json({ success: true, currency: user.currency, currencySource: user.currencySource || 'MANUAL', options: currencyOptionsPayload(db, user.currency) });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save your currency.' }); }
   });
 
@@ -10367,7 +10475,7 @@ async function startServer() {
       const out = setCurrencyPref(db, agent, (req.body || {}).code, String(agent.id), 'Agent');
       if (!out.ok) return res.status(400).json({ error: out.error });
       writeDb(db);
-      res.json({ success: true, currency: agent.currency, options: currencyOptionsPayload(db, agent.currency) });
+      res.json({ success: true, currency: agent.currency, currencySource: agent.currencySource || 'MANUAL', options: currencyOptionsPayload(db, agent.currency) });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save your currency.' }); }
   });
 
@@ -10394,6 +10502,7 @@ async function startServer() {
         config: {
           default: cfg.default, providerUrl: cfg.providerUrl, refreshMinutes: cfg.refreshMinutes,
           disabled: cfg.disabled, manualRates: cfg.manualRates,
+          autoDetect: geoConfigOf(db).autoDetect !== false, geoProvider: geoConfigOf(db).geoProvider,
         },
         cache: { fetchedAt: cache.fetchedAt, source: cache.source, stale: !!cache.stale, lastError: cache.lastError || '' },
         currencies: CURRENCIES.map((c) => ({ ...c, enabled: !cfg.disabled.includes(c.code), rate: fxRate(db, c.code) })),
@@ -10424,6 +10533,12 @@ async function startServer() {
       if (Array.isArray(body.disabled)) {
         cfg.disabled = [...new Set(body.disabled.map((x: any) => String(x).toUpperCase()).filter((c: string) => CURRENCY_CODES.has(c)))];
         if (cfg.disabled.includes('USD')) cfg.disabled = cfg.disabled.filter((c: string) => c !== 'USD'); // base is always on
+      }
+      if (body.autoDetect !== undefined) cfg.autoDetect = body.autoDetect === true;
+      if (body.geoProvider !== undefined) {
+        const g = String(body.geoProvider || '').trim();
+        if (g && !/^https:\/\/[^\s]+$/i.test(g)) return res.status(400).json({ error: 'The geo provider must be an https URL.' });
+        cfg.geoProvider = g || 'https://ip-api.com/json/';
       }
       if (body.manualRates && typeof body.manualRates === 'object') {
         const next: any = {};
@@ -11548,6 +11663,8 @@ async function startServer() {
     emailVerified: !!a.emailVerified,
     emailVerifiedAt: a.emailVerifiedAt || 0,
     currency: entryCurrencyOf(a),
+    currencySource: a.currencySource || (a.currency ? 'MANUAL' : 'DEFAULT'),
+    currencyCountry: a.currencyCountry || null,
     baseCurrency: 'USD'
   });
 
@@ -11675,7 +11792,7 @@ async function startServer() {
   }
 
   // ── Auth: agent app ────────────────────────────────────────────────────────
-  app.post('/api/agent/login', rateLimit(10), (req: any, res) => {
+  app.post('/api/agent/login', rateLimit(10), async (req: any, res) => {
     try {
       const rawEmail = (req.body && req.body.email) || '';
       const email = String(rawEmail).includes('@') ? toGmailEmail(rawEmail) : toGmailEmail(rawEmail);
@@ -11692,6 +11809,13 @@ async function startServer() {
       if (agent.isActive === false) return res.status(403).json({ error: 'This agent account is disabled. Contact management.' });
       if (needsRehash(agent.passwordHash)) agent.passwordHash = hashPassword(password);
       agent.lastLoginAt = Date.now();
+      // Agent accounts get their country-based display currency once, then it is fixed.
+      try {
+        if (!agent.currency) {
+          const cc = countryHintOf(req, db) || (await geoLookupCountry(req, db));
+          if (applyAutoCurrency(db, agent, cc)) writeDb(db);
+        }
+      } catch { /* never block an agent login */ }
       const sess = createSession(db, String(agent.id), 'AGENT' as any, clientIp(req), String(req.headers['user-agent'] || ''));
       try { recordAuditLog(db, 'AGENT_LOGIN', agent.email, `Agent ${agent.id} signed in`); } catch { /* ignore */ }
       res.json({ success: true, token: issueToken(String(agent.id), 'AGENT' as any, sess.id), sessionId: sess.id, agent: publicAgent(agent) });

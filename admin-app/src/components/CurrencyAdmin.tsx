@@ -10,7 +10,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 
 type Row = { code: string; name: string; symbol: string; flag: string; country: string; decimals: number; enabled: boolean; rate: number };
 type Cfg = {
-  config: { default: string; providerUrl: string; refreshMinutes: number; disabled: string[]; manualRates: Record<string, number> };
+  config: { default: string; providerUrl: string; refreshMinutes: number; disabled: string[]; manualRates: Record<string, number>; autoDetect?: boolean; geoProvider?: string };
   cache: { fetchedAt: number; source: string; stale: boolean; lastError: string };
   currencies: Row[];
 };
@@ -29,6 +29,8 @@ export const CurrencyAdmin: React.FC = () => {
   const [refresh, setRefresh] = useState(60);
   const [def, setDef] = useState('USD');
   const [disabled, setDisabled] = useState<string[]>([]);
+  const [autoDetect, setAutoDetect] = useState(true);
+  const [geoProvider, setGeoProvider] = useState('');
 
   const load = async () => {
     try {
@@ -40,6 +42,8 @@ export const CurrencyAdmin: React.FC = () => {
       setRefresh(j.config.refreshMinutes);
       setDef(j.config.default);
       setDisabled(j.config.disabled || []);
+      setAutoDetect(j.config.autoDetect !== false);
+      setGeoProvider(j.config.geoProvider || '');
     } catch { setNote('Network error.'); }
   };
 
@@ -118,6 +122,25 @@ export const CurrencyAdmin: React.FC = () => {
             Rate provider (USD base)
             <input value={provider} onChange={(e) => setProvider(e.target.value)} onBlur={() => void save({ providerUrl: provider })}
               className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-[10px] text-zinc-200" />
+          </label>
+        </div>
+
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <label className="flex items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-950 p-2.5 text-[11px] text-zinc-300">
+            <input type="checkbox" checked={autoDetect} onChange={(e) => { setAutoDetect(e.target.checked); void save({ autoDetect: e.target.checked }); }}
+              className="mt-0.5 accent-amber-500" />
+            <span>
+              <b>Auto-select the currency by country</b>
+              <span className="mt-0.5 block text-[10px] text-zinc-500">
+                On signup (and the first login of an older account) the country decides — 🇧🇩 → BDT, 🇺🇸 → USD, 🇬🇧 → GBP … A manual change by the user is permanent and is never overwritten. Off = everyone starts with the default below.
+              </span>
+            </span>
+          </label>
+          <label className="text-[11px] text-zinc-400">
+            Country lookup (IP geo, HTTPS)
+            <input value={geoProvider} onChange={(e) => setGeoProvider(e.target.value)} onBlur={() => void save({ geoProvider })}
+              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-[10px] text-zinc-200" />
+            <span className="mt-1 block text-[10px] text-zinc-600">Cloudflare&apos;s CF-IPCountry header is used first; this lookup only runs when the header is missing.</span>
           </label>
         </div>
 

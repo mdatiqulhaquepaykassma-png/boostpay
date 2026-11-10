@@ -167,3 +167,43 @@ export const CURRENCIES: CurrencyRow[] = [
   { code: 'XPF', name: 'CFP Franc', symbol: '₣', flag: '🇵🇫', country: 'French Pacific', decimals: 0 },
   { code: 'BTN', name: 'Bhutanese Ngultrum', symbol: 'Nu.', flag: '🇧🇹', country: 'Bhutan', decimals: 2 },
 ];
+
+/**
+ * ISO 3166-1 alpha-2 country → ISO 4217 currency. Used once, at signup (or the
+ * first login of an older account), to pick a sensible default display currency
+ * from the visitor's country. A manual choice by the user always wins and is
+ * never overwritten afterwards.
+ */
+export const COUNTRY_CURRENCY: Record<string, string> = {
+  BD: 'BDT', US: 'USD', GB: 'GBP', IN: 'INR', PK: 'PKR', LK: 'LKR', NP: 'NPR', MV: 'MVR', BT: 'BTN', AF: 'AFN',
+  AE: 'AED', SA: 'SAR', QA: 'QAR', KW: 'KWD', BH: 'BHD', OM: 'OMR', JO: 'JOD', IQ: 'IQD', IR: 'IRR', IL: 'ILS',
+  EG: 'EGP', LY: 'LYD', TN: 'TND', DZ: 'DZD', MA: 'MAD', SD: 'SDG', SS: 'SSP', ET: 'ETB', KE: 'KES', TZ: 'TZS',
+  UG: 'UGX', RW: 'RWF', BI: 'BIF', SO: 'SOS', DJ: 'DJF', ER: 'ERN', NG: 'NGN', GH: 'GHS', GM: 'GMD', GN: 'GNF',
+  SL: 'SLE', LR: 'LRD', CI: 'XOF', SN: 'XOF', ML: 'XOF', BF: 'XOF', NE: 'XOF', TG: 'XOF', BJ: 'XOF', GW: 'XOF',
+  CM: 'XAF', CF: 'XAF', TD: 'XAF', CG: 'XAF', GA: 'XAF', GQ: 'XAF', AO: 'AOA', MZ: 'MZN', ZM: 'ZMW', ZW: 'ZWL',
+  ZA: 'ZAR', NA: 'NAD', BW: 'BWP', MW: 'MWK', SZ: 'SZL', LS: 'LSL', MG: 'MGA', MU: 'MUR', SC: 'SCR', KM: 'KMF',
+  CV: 'CVE', ST: 'STN', MR: 'MRU', CD: 'CDF', MY: 'MYR', SG: 'SGD', ID: 'IDR', TH: 'THB', PH: 'PHP',
+  VN: 'VND', KH: 'KHR', LA: 'LAK', MM: 'MMK', BN: 'BND', MO: 'MOP', CN: 'CNY', JP: 'JPY', KR: 'KRW', HK: 'HKD',
+  TW: 'TWD', MN: 'MNT', KZ: 'KZT', UZ: 'UZS', KG: 'KGS', TJ: 'TJS', TM: 'TMT', AZ: 'AZN', AM: 'AMD', GE: 'GEL',
+  RU: 'RUB', UA: 'UAH', BY: 'BYN', MD: 'MDL', RO: 'RON', BG: 'BGN', RS: 'RSD', BA: 'BAM', MK: 'MKD', AL: 'ALL',
+  HR: 'EUR', SI: 'EUR', SK: 'EUR', CZ: 'CZK', HU: 'HUF', PL: 'PLN', LT: 'EUR', LV: 'EUR', EE: 'EUR', FI: 'EUR',
+  SE: 'SEK', NO: 'NOK', DK: 'DKK', IS: 'ISK', IE: 'EUR', NL: 'EUR', BE: 'EUR', LU: 'EUR', FR: 'EUR', DE: 'EUR',
+  AT: 'EUR', CH: 'CHF', IT: 'EUR', ES: 'EUR', PT: 'EUR', GR: 'EUR', CY: 'EUR', MT: 'EUR', TR: 'TRY', GI: 'GIP',
+  CA: 'CAD', MX: 'MXN', GT: 'GTQ', BZ: 'BZD', SV: 'USD', HN: 'HNL', NI: 'NIO', CR: 'CRC', PA: 'PAB', CU: 'CUP',
+  HT: 'HTG', DO: 'DOP', JM: 'JMD', TT: 'TTD', BB: 'BBD', BS: 'BSD', BM: 'BMD', KY: 'KYD', AW: 'AWG', CW: 'ANG',
+  SX: 'ANG', BQ: 'USD', PR: 'USD', VI: 'USD', GU: 'USD', CO: 'COP', VE: 'VES', EC: 'USD', PE: 'PEN', BO: 'BOB',
+  BR: 'BRL', PY: 'PYG', UY: 'UYU', AR: 'ARS', CL: 'CLP', FK: 'FKP', GY: 'GYD', SR: 'SRD', FJ: 'FJD', PG: 'PGK',
+  SB: 'SBD', VU: 'VUV', WS: 'WST', TO: 'TOP', NZ: 'NZD', AU: 'AUD', NC: 'XPF', PF: 'XPF', SH: 'SHP',
+};
+
+/** Fallback currency for a country (null when the country is unknown). */
+export function currencyForCountry(country: string | undefined): string | null {
+  const cc = String(country || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(cc)) return null;
+  return COUNTRY_CURRENCY[cc] || null;
+}
+
+/** ISO 4217 validation helper shared by the server and the tests. */
+export function isCurrencyCode(code: string | undefined): boolean {
+  return CURRENCIES.some((c) => c.code === String(code || '').toUpperCase());
+}
