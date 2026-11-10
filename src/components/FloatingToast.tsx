@@ -1,6 +1,7 @@
 import { FC, useEffect, useState } from 'react';
 import { ArrowDownLeft, X, ExternalLink, Sparkles, ShieldCheck, MessageSquare } from 'lucide-react';
 import { ToastData } from '../services/store';
+import { useCurrency } from '../lib/currency';
 
 interface ToastItemProps {
   toast: ToastData;
@@ -10,6 +11,7 @@ interface ToastItemProps {
 }
 
 const ToastItem: FC<ToastItemProps> = ({ toast, onDismiss, onViewInbox, onOpenChat }) => {
+  const { price, text: moneyText } = useCurrency();
   const [progress, setProgress] = useState(100);
 
   useEffect(() => {
@@ -76,13 +78,13 @@ const ToastItem: FC<ToastItemProps> = ({ toast, onDismiss, onViewInbox, onOpenCh
             </span>
             {toast.amount !== undefined && (
               <span className="font-mono font-bold text-sm text-emerald-400 tabular-nums">
-                +{Number(toast.amount).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}
+                +{price(Number(toast.amount))}
               </span>
             )}
           </div>
 
           <p className="mt-0.5 text-xs text-zinc-200 font-medium truncate">
-            {toast.message}
+            {moneyText(toast.message)}
           </p>
 
           <div className="mt-1.5 flex items-center justify-between text-[11px] text-zinc-400 font-mono">

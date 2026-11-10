@@ -46,14 +46,20 @@ type Plan = {
   };
 };
 
-const money = (n: number | undefined): string => {
-  const v = Number(n) || 0;
-  if (v === 0) return '$0';
-  if (v < 0.01) return '$' + v.toFixed(4);
-  if (v < 1) return '$' + v.toFixed(3);
-  if (v < 100) return '$' + v.toFixed(2);
-  return '$' + Math.round(v).toLocaleString();
-};
+/**
+ * Projected/earned figures in the user's display currency. The precision follows
+ * the size of the amount, so a 0.0006 profit still reads as something.
+ */
+function usePlanMoney(): (n: number | undefined) => string {
+  const { price } = useCurrency();
+  return (n: number | undefined) => {
+    const v = Number(n) || 0;
+    if (v === 0) return price(0);
+    if (v < 0.01) return price(v, 4);
+    if (v < 1) return price(v, 3);
+    return price(v, 2);
+  };
+}
 
 const clock = (ms: number): string => {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -81,6 +87,7 @@ type Props = {
 };
 
 export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
+  const money = usePlanMoney();
   const { currency, fmt } = useCurrency();
   const [plan, setPlan] = useState<Plan | null>(null);
   const [open, setOpen] = useState(false);
@@ -153,7 +160,7 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
               <div className={`font-mono text-[11px] font-bold ${running ? 'text-amber-300' : 'text-zinc-400'}`}>
                 {running ? clock(remaining) : paused ? 'paused' : 'idle'}
               </div>
-              <div className="font-mono text-[9px] text-zinc-500">≈{money(cycleTotal)}</div>
+              <div className="font-mono text-[9px] text-zinc-500">{money(cycleTotal)}</div>
             </div>
           </div>
 
@@ -200,13 +207,13 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
           </span>
           {Number(t.missedIncome) > 0 && (
             <span className="whitespace-nowrap rounded-full bg-rose-500/10 px-1.5 py-[3px] font-bold text-rose-300">
-              ≈{money(t.missedIncome)} profit miss
+              {money(t.missedIncome)} profit miss
             </span>
           )}
           {life && (
             <span className="whitespace-nowrap rounded-full bg-zinc-800/70 px-1.5 py-[3px] text-zinc-400">
               life <span className="font-bold text-emerald-300">{money(life.income)}</span> in
-              {Number(life.missedIncome) > 0 && <span className="font-bold text-rose-400"> · ≈{money(life.missedIncome)} profit miss</span>}
+              {Number(life.missedIncome) > 0 && <span className="font-bold text-rose-400"> · {money(life.missedIncome)} profit miss</span>}
             </span>
           )}
         </div>
@@ -249,7 +256,7 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
           />
           <Row
             label="Profit missed today"
-            value={`${t.missed ?? 0} ${(t.missed ?? 0) === 1 ? 'cycle' : 'cycles'} → ≈${money(t.missedIncome ?? 0)}`}
+            value={`${t.missed ?? 0} ${(t.missed ?? 0) === 1 ? 'cycle' : 'cycles'} → ${money(t.missedIncome ?? 0)}`}
           />
           {life && (
             <>
@@ -260,7 +267,7 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
               />
               <Row
                 label="Profit missed lifetime"
-                value={`${life.missed} ${life.missed === 1 ? 'cycle' : 'cycles'} → ≈${money(life.missedIncome)}`}
+                value={`${life.missed} ${life.missed === 1 ? 'cycle' : 'cycles'} → ${money(life.missedIncome)}`}
               />
               {Array.isArray(life.series) && life.series.length > 0 && (
                 <div className="mt-1.5 rounded-lg border border-zinc-800/80 bg-zinc-950/60">
@@ -286,7 +293,7 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
                           +{money(d.earned)}
                         </span>
                         <span className={`ml-auto shrink-0 font-bold ${d.missedIncome > 0 ? 'text-rose-300' : 'text-zinc-600'}`}>
-                          {d.missed > 0 ? `≈${money(d.missedIncome)} miss` : 'no miss'}
+                          {d.missed > 0 ? `${money(d.missedIncome)} miss` : 'no miss'}
                         </span>
                         <span className="w-[26px] shrink-0 text-right text-zinc-500">{d.cycles}/{d.slots}</span>
                       </div>

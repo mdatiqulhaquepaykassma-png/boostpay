@@ -1,5 +1,6 @@
 import { User, Transaction, Conversation, Message, SystemConfig, InboxNotification, AuditLog, SessionDevice } from '../types';
 import { copyToClipboard as clipboardHelper } from '../utils/clipboard';
+import { formatGlobalMoney } from '../lib/currency';
 
 const STORAGE_USERS = 'boostpay_users_v4';
 const STORAGE_CURRENT_USER = 'boostpay_current_user_v4';
@@ -855,7 +856,7 @@ export class BoostPayStore {
                 id: 'toast-cyc-' + Date.now(),
                 type: 'SUCCESS',
                 title: 'Boosting Cycle Complete',
-                message: `Yield reward of $${Number(data.reward || 0).toFixed(8)} was credited to your wallet.`
+                message: `Yield reward of ${formatGlobalMoney(Number(data.reward || 0), 8)} was credited to your wallet.`
               } as any);
             } else if (data.type === 'typing' && data.conversationId) {
               for (const cb of this.typingListeners) {
@@ -1487,7 +1488,7 @@ export class BoostPayStore {
                     senderId: t.senderId,
                     referenceId: t.id,
                     timestamp: t.timestamp,
-                    message: `Received $${Number(t.amount).toFixed(2)} from #${t.senderId || 'Peer'}`
+                    message: `Received ${formatGlobalMoney(Number(t.amount))} from #${t.senderId || 'Peer'}`
                   });
                 }
               } else {

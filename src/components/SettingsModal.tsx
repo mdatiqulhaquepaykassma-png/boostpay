@@ -4,6 +4,7 @@ import { BoostPayStore } from '../services/store';
 import { User } from '../types';
 import { InboxView } from './InboxView';
 import { SecurityModal } from './SecurityModal';
+import { useCurrency } from '../lib/currency';
 
 interface Props {
   isOpen: boolean;
@@ -15,6 +16,7 @@ interface Props {
 }
 
 export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserUpdated, onLogout, inboxUnread }) => {
+  const { price } = useCurrency();
   const [tab, setTab] = useState<'GENERAL' | 'SECURITY' | 'INBOX' | 'VERIFY' | 'PASSWORD'>('GENERAL');
   const [showSecurity, setShowSecurity] = useState(false);
 
@@ -153,7 +155,7 @@ export const SettingsModal: FC<Props> = ({ isOpen, onClose, currentUser, onUserU
                 <div className="mt-2 space-y-1.5 text-xs">
                   <div className="flex justify-between"><span className="text-zinc-500">User ID</span><span className="font-mono font-bold text-amber-400">#{currentUser.id}</span></div>
                   <div className="flex justify-between"><span className="text-zinc-500">Email</span><span className="text-white truncate max-w-[160px]">{currentUser.email || '—'}</span></div>
-                  <div className="flex justify-between"><span className="text-zinc-500">Balance</span><span className="font-mono text-emerald-400">${Number(currentUser.balance||0).toFixed(2)}</span></div>
+                  <div className="flex justify-between"><span className="text-zinc-500">Balance</span><span className="font-mono text-emerald-400">{price(Number(currentUser.balance||0))}</span></div>
                   <div className="flex justify-between"><span className="text-zinc-500">Verified</span><span className={`font-mono text-xs ${emailVerified ? 'text-emerald-400' : 'text-zinc-400'}`}>{emailVerified ? '✓ Verified' : 'Not verified (optional)'}</span></div>
                   <div className="flex justify-between"><span className="text-zinc-500">Build</span><span className="font-mono text-[11px] text-zinc-500">{buildInfo?.version ? `v${String(buildInfo.version).slice(-6)}` : buildInfo?.bootTime ? `b${String(buildInfo.bootTime).slice(-7)}` : '—'}</span></div>
                 </div>

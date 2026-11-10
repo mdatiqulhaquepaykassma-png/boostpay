@@ -142,7 +142,7 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   ]);
 
   const currentTotal = baseBalance + liveAccrued;
-  const { currency, money, fmt, rateNote } = useCurrency();
+  const { currency, money, fmt, price, rateNote } = useCurrency();
   const showingConverted = !!currency && currency.code !== 'USD' && currency.rate > 0;
 
   return (
@@ -199,19 +199,19 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
           {boostState.isActive && (
             <span
               className="flex items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold text-amber-300"
-              title={"Yield accrued in the current boosting cycle: +$" + formatPrecisionAmount(liveAccrued, 8)}
+              title={"Yield accrued in the current boosting cycle: +" + price(liveAccrued)}
             >
               <TrendingUp className="w-3 h-3 text-amber-400" />
-              <span className="font-mono">+${formatPrecisionAmount(liveAccrued, 6)}</span>
+              <span className="font-mono">+{price(liveAccrued)}</span>
               <span className="text-amber-400/70 font-medium">yield</span>
             </span>
           )}
           {Number(bonusLocked) > 0 && (
             <span
               className="flex items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/[0.08] px-2.5 py-1 text-[10px] font-semibold text-amber-300/90"
-              title={`$${formatPrecisionAmount(Number(bonusLocked), 2)} of your balance was a signup bonus (code ${bonusCode || ''}) and can only be boosted — it cannot be sent, paid to an agent or withdrawn. Profit you earn on top of it can be.`}
+              title={`${price(Number(bonusLocked))} of your balance was a signup bonus (code ${bonusCode || ''}) and can only be boosted — it cannot be sent, paid to an agent or withdrawn. Profit you earn on top of it can be.`}
             >
-              🎁 <span className="font-mono">${formatPrecisionAmount(Number(bonusLocked), 2)}</span>
+              🎁 <span className="font-mono">{price(Number(bonusLocked))}</span>
               <span className="text-amber-400/70 font-medium">boost only</span>
             </span>
           )}
@@ -302,6 +302,8 @@ const IsolatedBoostingCard: FC<BoostingCardProps> = memo(({
   onBoostFinished,
   isFrozen
 }) => {
+  const { currency } = useCurrency();
+  const fxRate = currency && currency.rate > 0 ? currency.rate : 1;
   const isRunning = boostState.isActive && !boostState.isPaused;
   const isPaused = boostState.isActive && boostState.isPaused;
 
@@ -426,10 +428,10 @@ const IsolatedBoostingCard: FC<BoostingCardProps> = memo(({
         </div>
         <div className="mt-1">
           <SmoothNumericTicker
-            value={liveYield}
+            value={liveYield * fxRate}
             decimals={8}
-            prefix="+$"
-            suffix="USD"
+            prefix={`+${currency && currency.code !== 'USD' ? currency.symbol : '$'}`}
+            suffix={currency?.code || 'USD'}
             size="lg"
             intColor="text-amber-400"
             decColor="text-amber-400"
@@ -523,6 +525,7 @@ export const WalletView: FC<Props> = ({
   inboxUnread = 0,
   config
 }) => {
+  const { price } = useCurrency();
   // walletTab removed per user request — single view only
   const [zeroBalanceWarning, setZeroBalanceWarning] = useState(false);
   const [completionBanner, setCompletionBanner] = useState<{ amount: number } | null>(null);
@@ -598,7 +601,7 @@ export const WalletView: FC<Props> = ({
             <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
             <div className="text-xs text-zinc-200">
               <span className="font-bold text-emerald-400 block">Boosting Completed!</span>
-              +${formatPrecisionAmount(completionBanner.amount, 8)} USD added to main balance.
+              +{price(completionBanner.amount)} added to main balance.
             </div>
           </div>
           <button
@@ -615,7 +618,7 @@ export const WalletView: FC<Props> = ({
         <div className="rounded-2xl border border-red-500/30 bg-red-950/40 p-3.5 flex items-center gap-2.5 shadow-lg">
           <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
           <div className="text-xs text-red-200">
-            Minimum 0.1 balance required to start boosting. Current ${Number(user.balance||0).toFixed(2)} — receive a transfer to begin.
+            Minimum {price(0.1)} balance required to start boosting. Current {price(Number(user.balance||0))} — receive a transfer to begin.
           </div>
         </div>
       )}

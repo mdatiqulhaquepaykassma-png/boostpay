@@ -22,7 +22,7 @@ export const P2PTransferModal: FC<Props> = ({
   recipientPrefill,
   onOpenQR
 }) => {
-  const { currency, fmt } = useCurrency();
+  const { currency, fmt, price } = useCurrency();
   const entryCode = currency && currency.code !== 'USD' ? currency.code : 'USD';
   const [recipientId, setRecipientId] = useState('');
   const [amount, setAmount] = useState('');
@@ -95,8 +95,8 @@ export const P2PTransferModal: FC<Props> = ({
     if (ruleRemaining !== null && amt > ruleRemaining + 1e-9) {
       const per = rule?.period === 'day' ? ' per day' : rule?.period === 'total' ? ' in total' : ' per transfer';
       return ruleRemaining <= 0
-        ? `You have used your whole sending limit of $${Number(rule.amount).toFixed(2)}${per} for sending to ${who}.`
-        : `Your sending limit is $${Number(rule.amount).toFixed(2)}${per} to ${who} — you can send at most $${ruleRemaining.toFixed(2)} right now.`;
+        ? `You have used your whole sending limit of ${price(Number(rule.amount))}${per} for sending to ${who}.`
+        : `Your sending limit is ${price(Number(rule.amount))}${per} to ${who} — you can send at most ${price(ruleRemaining)} right now.`;
     }
     return null;
   };
@@ -129,8 +129,8 @@ export const P2PTransferModal: FC<Props> = ({
 
     if (lockCap !== null && numAmount > lockCap) {
       setLockNotice(lockCap > 0
-        ? `$${lockHeld.toFixed(2)} of your balance is temporarily held by support. You can send up to $${lockCap.toFixed(2)} right now.`
-        : `$${lockHeld.toFixed(2)} is temporarily held on your account by support, which currently covers your whole balance. You cannot send money right now. Please contact support.`);
+        ? `${price(lockHeld)} of your balance is temporarily held by support. You can send up to ${price(lockCap)} right now.`
+        : `${price(lockHeld)} is temporarily held on your account by support, which currently covers your whole balance. You cannot send money right now. Please contact support.`);
       return;
     }
 
@@ -269,7 +269,7 @@ export const P2PTransferModal: FC<Props> = ({
                 <p className="mt-0.5 text-emerald-200/80">
                   {rule?.referrerId ? `Referrer: #${rule.referrerId}${rule?.allowUpline === false ? ' (sending to them is off)' : ''}. ` : ''}
                   {Number(rule?.amount) > 0
-                    ? `Limit $${Number(rule.amount).toFixed(2)} ${rule?.period === 'day' ? 'per day' : rule?.period === 'total' ? 'in total' : 'per transfer'} — $${Number(rule?.remaining ?? 0).toFixed(2)} left.`
+                    ? `Limit ${price(Number(rule.amount))} ${rule?.period === 'day' ? 'per day' : rule?.period === 'total' ? 'in total' : 'per transfer'} — ${price(Number(rule?.remaining ?? 0))} left.`
                     : 'No amount limit.'}
                 </p>
                 {rule?.inherited ? (
@@ -383,7 +383,7 @@ export const P2PTransferModal: FC<Props> = ({
             <div>
               <h4 className="text-lg font-bold text-white">Transfer Completed</h4>
               <p className="text-xs text-zinc-400 mt-1">
-                Successfully sent <strong className="text-emerald-400 font-mono">${parseFloat(amount).toFixed(2)} USD</strong> to User <strong className="font-mono text-white">#{recipientId}</strong>.
+                Successfully sent <strong className="text-emerald-400 font-mono">{parseFloat(amount).toFixed(2)} {entryCode}</strong> to User <strong className="font-mono text-white">#{recipientId}</strong>.
               </p>
             </div>
             <div className="pt-2">

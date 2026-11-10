@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { InboxNotification, NotificationType } from '../types';
-import { formatPrecisionAmount } from '../utils/format';
+import { useCurrency } from '../lib/currency';
 
 interface Props {
   userId: string;
@@ -24,6 +24,7 @@ interface Props {
 type FilterCategory = 'ALL' | 'CREDITS' | 'DEBITS' | 'REWARDS' | 'SYSTEM';
 
 export const InboxView: FC<Props> = ({ userId }) => {
+  const { price, text: moneyText } = useCurrency();
   const [notifications, setNotifications] = useState<InboxNotification[]>(() => 
     BoostPayStore.getNotifications(userId)
   );
@@ -266,7 +267,7 @@ export const InboxView: FC<Props> = ({ userId }) => {
 
                 {/* SMS Body */}
                 <p className="text-xs font-mono text-zinc-200 leading-relaxed pl-1 border-l-2 border-zinc-800 py-0.5">
-                  {notif.message}
+                  {moneyText(notif.message)}
                 </p>
 
                 {/* Bottom Receipt Bar */}
@@ -303,8 +304,8 @@ export const InboxView: FC<Props> = ({ userId }) => {
                             : 'text-zinc-300'
                         }`}
                       >
-                        {isCredit || isYield ? '+' : isDebit ? '-' : ''}$
-                        {formatPrecisionAmount(notif.amount, 8)}
+                        {isCredit || isYield ? '+' : isDebit ? '-' : ''}
+                        {price(notif.amount).replace(/^≈ ?/, '')}
                       </span>
                     )}
 

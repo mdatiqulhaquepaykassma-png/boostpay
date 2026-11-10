@@ -2,7 +2,7 @@ import { FC, useEffect, useState } from 'react';
 import { Gift, Users, Copy, Check, TrendingUp, Zap, Share2, Award, Clock, DollarSign, Activity, MessageCircle } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { ReferralTree } from './ReferralTree';
-import { formatPrecisionAmount } from '../utils/format';
+import { useCurrency } from '../lib/currency';
 
 function formatDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms/1000));
@@ -15,6 +15,7 @@ function formatDuration(ms: number): string {
 }
 
 export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }> = ({ userId, onMessageUser }) => {
+  const { price } = useCurrency();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState<'code'|'link'|null>(null);
@@ -235,9 +236,9 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
         <div className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.05] px-3 py-2">
           <div className="text-[10px] font-bold uppercase tracking-wider text-amber-400">🎁 Promotion bonus in your balance</div>
           <p className="mt-1 text-[10px] leading-relaxed text-zinc-400">
-            <span className="font-mono text-emerald-300">${Number(bonus.wallet.bonusRestricted).toFixed(2)}</span> of your balance is bonus money.
+            <span className="font-mono text-emerald-300">{price(Number(bonus.wallet.bonusRestricted))}</span> of your balance is bonus money.
             It can be sent to <span className="text-zinc-200">{bonus.wallet.bonusSendLabel || 'anyone'}</span>.
-            Your own money — <span className="font-mono text-zinc-200">${Number(bonus.wallet.ownSendable).toFixed(2)}</span> — can go to anyone.
+            Your own money — <span className="font-mono text-zinc-200">{price(Number(bonus.wallet.ownSendable))}</span> — can go to anyone.
             Boosting is always allowed.
           </p>
         </div>
@@ -248,7 +249,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
         <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3">
           {bonus.waitingDeposit?.length > 0 && (
             <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-300">
-              ⏳ ${Number(bonus.waitingDeposit[0].amount).toFixed(2)} bonus is released once you deposit ${Number(bonus.waitingDeposit[0].minDeposit).toFixed(2)}.
+              ⏳ {price(Number(bonus.waitingDeposit[0].amount))} bonus is released once you deposit {price(Number(bonus.waitingDeposit[0].minDeposit))}.
             </p>
           )}
           {bonus.pendingReviews?.length > 0 && (
@@ -270,12 +271,12 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-500 text-white font-mono font-bold text-sm">#{data.upline.referrerId}</div>
             <div className="flex-1">
               <div className="text-xs font-bold text-white font-mono">User #{data.upline.referrerId}</div>
-              <div className="text-[11px] text-zinc-400">Referrals: {data.upline.referralsCount} · Rate {data.upline.referRate}% · Lifetime ${formatPrecisionAmount(data.upline.referLifetime||0,6)}</div>
+              <div className="text-[11px] text-zinc-400">Referrals: {data.upline.referralsCount} · Rate {data.upline.referRate}% · Lifetime {price(data.upline.referLifetime||0)}</div>
             </div>
           </div>
           <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 flex items-center justify-between">
             <span className="text-[11px] text-zinc-400">Upline earned from you</span>
-            <span className="font-mono text-xs font-bold text-emerald-400">+${formatPrecisionAmount(data.upline.earnedFromMe||0,8)}</span>
+            <span className="font-mono text-xs font-bold text-emerald-400">+{price(data.upline.earnedFromMe||0)}</span>
           </div>
           <p className="text-[10px] text-zinc-500 mt-1">Your boosting rewards give your upline {data.upline.referRate}% commission (global tier).</p>
           <button onClick={()=> onMessageUser?.(String(data.upline.referrerId))} className="mt-2 w-full rounded-xl bg-sky-500/15 border border-sky-500/20 py-2 text-[11px] font-bold text-sky-300 hover:bg-sky-500/25 transition cursor-pointer flex items-center justify-center gap-1.5"><MessageCircle className="w-3.5 h-3.5"/> Message Upline</button>
@@ -310,7 +311,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-3 flex items-center justify-between">
         <div>
           <div className="text-[11px] font-semibold text-zinc-400">Lifetime Referral Earnings</div>
-          <div className="font-mono text-sm font-bold text-emerald-400">+${formatPrecisionAmount(data.lifetime||0,8)} USD</div>
+          <div className="font-mono text-sm font-bold text-emerald-400">+{price(data.lifetime||0)}</div>
         </div>
         <TrendingUp className="w-5 h-5 text-emerald-400"/>
       </div>
@@ -357,7 +358,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
                 <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
                   <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-2">
                     <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Balance</div>
-                    <div className="font-mono text-xs font-bold text-white">${formatPrecisionAmount(r.balance,4)}</div>
+                    <div className="font-mono text-xs font-bold text-white">{price(r.balance)}</div>
                   </div>
                   <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-2">
                     <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Cycle</div>
@@ -371,7 +372,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
                   </div>
                   <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-2">
                     <div className="text-[9px] uppercase tracking-wider text-zinc-500 font-semibold">Earned</div>
-                    <div className="font-mono text-xs font-bold text-emerald-400">+${formatPrecisionAmount(r.earnedFromThis||0,6)}</div>
+                    <div className="font-mono text-xs font-bold text-emerald-400">+{price(r.earnedFromThis||0)}</div>
                   </div>
                 </div>
                 <div className="mt-2 h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden">
@@ -412,7 +413,7 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
             {recent.slice(recentPage*recentPageSize, (recentPage+1)*recentPageSize).map((c:any)=>(
               <button key={c.id} onClick={()=> setSelectedCommission(c)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 hover:border-amber-500/30 hover:bg-zinc-900 transition text-left cursor-pointer">
                 <div>
-                  <div className="text-xs font-mono font-bold text-emerald-400">+${formatPrecisionAmount(c.amount,8)}</div>
+                  <div className="text-xs font-mono font-bold text-emerald-400">+{price(c.amount)}</div>
                   <div className="text-[10px] text-zinc-500">
                     From #{c.referredId} @ {c.rate}%{Number(c.level) > 1 ? ` · L${c.level}` : ' · L1'} • {new Date(c.timestamp).toLocaleString()}
                   </div>
@@ -443,14 +444,14 @@ export const ReferView: FC<{ userId: string; onMessageUser?: (id:string)=>void }
             </div>
             <div className="space-y-2 text-xs">
               <div className="flex justify-between gap-2"><span className="text-zinc-500 shrink-0">Commission ID</span><span className="font-mono text-[10px] text-zinc-400 break-all text-right">{selectedCommission.id}</span></div>
-              <div className="flex justify-between"><span className="text-zinc-500">Amount</span><span className="font-mono font-bold text-emerald-400">+${formatPrecisionAmount(selectedCommission.amount,8)}</span></div>
+              <div className="flex justify-between"><span className="text-zinc-500">Amount</span><span className="font-mono font-bold text-emerald-400">+{price(selectedCommission.amount)}</span></div>
               <div className="flex justify-between"><span className="text-zinc-500">Level</span><span className="font-mono text-white">L{Number(selectedCommission.level) || 1}</span></div>
               <div className="flex justify-between"><span className="text-zinc-500">Rate</span><span className="font-mono text-amber-400">{selectedCommission.rate}%</span></div>
               <div className="flex justify-between"><span className="text-zinc-500">From User</span><span className="font-mono text-white">#{selectedCommission.referredId}</span></div>
               <div className="flex justify-between gap-2"><span className="text-zinc-500 shrink-0">Date &amp; Time</span><span className="text-zinc-300 text-right">{new Date(selectedCommission.timestamp).toLocaleString()}</span></div>
               {selectedCommission.sourceTxId && <div className="flex justify-between gap-2"><span className="text-zinc-500 shrink-0">Source TX</span><span className="font-mono text-[11px] text-zinc-400 break-all text-right">{selectedCommission.sourceTxId}</span></div>}
               {selectedCommission.dayKey && <div className="flex justify-between"><span className="text-zinc-500">Day Key</span><span className="font-mono text-zinc-400">{selectedCommission.dayKey}</span></div>}
-              {selectedCommission.balanceAfter != null && <div className="flex justify-between"><span className="text-zinc-500">Balance After</span><span className="font-mono text-zinc-300">${formatPrecisionAmount(selectedCommission.balanceAfter,6)}</span></div>}
+              {selectedCommission.balanceAfter != null && <div className="flex justify-between"><span className="text-zinc-500">Balance After</span><span className="font-mono text-zinc-300">{price(selectedCommission.balanceAfter)}</span></div>}
               <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-[11px] text-zinc-400">This commission was earned when User #{selectedCommission.referredId} completed a boosting cycle. Your rate {selectedCommission.rate}% was applied to their yield. Duplicate commission IDs are blocked server-side.</div>
             </div>
             <button onClick={()=> setSelectedCommission(null)} className="w-full rounded-xl bg-zinc-800 py-2 text-xs font-semibold text-white hover:bg-zinc-700 cursor-pointer">Close</button>

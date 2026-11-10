@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { User } from '../types';
-import { formatPrecisionAmount } from '../utils/format';
+import { useCurrency } from '../lib/currency';
 
 function formatDuration(ms:number): string {
   const totalSecs = Math.max(0, Math.floor(ms/1000));
@@ -48,6 +48,7 @@ interface UserRowProps {
 }
 
 const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, copyId, copiedId, getRankBadge, onOpenDetail }: UserRowProps & { onOpenDetail: (id:string)=>void }) => {
+  const { price, currency } = useCurrency();
 
   return (
     <div
@@ -110,7 +111,7 @@ const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, c
             </span>
           </div>
           <span className="text-[10px] text-zinc-500 font-mono sm:hidden block truncate">
-            Profit: +${formatPrecisionAmount(u.lifetimeProfit, 8)}
+            Profit: +{price(u.lifetimeProfit)}
           </span>
         </div>
       </div>
@@ -118,15 +119,15 @@ const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, c
       <div className="flex items-center gap-3 sm:gap-8 font-mono shrink-0">
         <div className="hidden sm:block text-right">
           <span className="text-xs font-semibold text-emerald-400">
-            +${formatPrecisionAmount(u.lifetimeProfit, 8)}
+            +{price(u.lifetimeProfit)}
           </span>
           <span className="text-[10px] text-zinc-500 block font-sans">Yield</span>
         </div>
         <div className="text-right">
           <span className="text-xs sm:text-sm font-bold text-white">
-            ${formatPrecisionAmount(u.balance, 8)}
+            {price(u.balance)}
           </span>
-          <span className="text-[10px] text-zinc-500 block font-sans">USD</span>
+          <span className="text-[10px] text-zinc-500 block font-sans">{currency?.code || 'USD'}</span>
         </div>
         <div className="w-14 sm:w-16 flex justify-end">
           {isMe ? (
@@ -152,6 +153,7 @@ const UserRow = React.memo(({ u, rank, isMe, rankChanges, onSelectPeerForChat, c
 UserRow.displayName = 'UserRow';
 
 export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserId, onSelectPeerForChat }) => {
+  const { price, currency } = useCurrency();
   const [users, setUsers] = useState<User[]>(() => {
     const all = BoostPayStore.getUsers();
     return [...all].sort((a, b) => b.balance - a.balance || b.lifetimeProfit - a.lifetimeProfit);
@@ -391,14 +393,14 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
               <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> Balance
               </div>
-              <div className="mt-1 font-mono text-sm font-bold text-white truncate">${formatPrecisionAmount(myUser.balance, 8)}</div>
-              <div className="text-[10px] font-mono text-zinc-500">USD</div>
+              <div className="mt-1 font-mono text-sm font-bold text-white truncate">{price(myUser.balance)}</div>
+              <div className="text-[10px] font-mono text-zinc-500">{currency?.code || 'USD'}</div>
             </div>
             <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-3">
               <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-amber-400/80">
                 <Sparkles className="w-3 h-3 text-amber-400" /> Profit
               </div>
-              <div className="mt-1 font-mono text-sm font-bold text-emerald-400 truncate">+${formatPrecisionAmount(myUser.lifetimeProfit, 8)}</div>
+              <div className="mt-1 font-mono text-sm font-bold text-emerald-400 truncate">+{price(myUser.lifetimeProfit)}</div>
               <div className="text-[10px] font-mono text-zinc-500">Lifetime</div>
             </div>
           </div>
@@ -490,19 +492,19 @@ export const LeaderboardView: FC<Props> = ({ currentUser: userProp, currentUserI
                     </div>
                     <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3">
                       <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Lifetime Referral Earned</div>
-                      <div className="font-mono text-sm font-bold text-white">+${formatPrecisionAmount(Number(selectedDetail.lifetime ?? selectedDetail._referLifetime ?? 0),8)}</div>
+                      <div className="font-mono text-sm font-bold text-white">+{price(Number(selectedDetail.lifetime ?? selectedDetail._referLifetime ?? 0))}</div>
                     </div>
                   </div>
                   <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
                     <div className="text-[11px] font-semibold text-zinc-400">Balance & Profit</div>
-                    <div className="font-mono text-xs text-white">Balance: ${formatPrecisionAmount(Number(selectedDetail.user?.balance ?? 0),8)} • Profit: +${formatPrecisionAmount(Number(selectedDetail.user?.lifetimeProfit ?? 0),8)}</div>
+                    <div className="font-mono text-xs text-white">Balance: {price(Number(selectedDetail.user?.balance ?? 0))} • Profit: +{price(Number(selectedDetail.user?.lifetimeProfit ?? 0))}</div>
                   </div>
                   {selectedDetail.recentCommissions && selectedDetail.recentCommissions.length>0 && (
                     <div className="space-y-1.5">
                       <div className="text-[11px] font-bold text-zinc-300">Recent refer earnings</div>
                       {selectedDetail.recentCommissions.slice(0,5).map((c:any)=>(
                         <div key={c.id} className="flex justify-between rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono">
-                          <span className="text-emerald-400">+${formatPrecisionAmount(c.amount,8)}</span>
+                          <span className="text-emerald-400">+{price(c.amount)}</span>
                           <span className="text-zinc-500">{c.rate}% from #{c.referredId}</span>
                         </div>
                       ))}

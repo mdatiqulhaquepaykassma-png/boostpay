@@ -23,6 +23,7 @@ import { BoostPayStore, copyToClipboard } from '../services/store';
 import { startCallTo } from './CallOverlay';
 import { AgentMessageSheet } from './AgentMessageSheet';
 import { User, Conversation, Message } from '../types';
+import { useCurrency } from '../lib/currency';
 
 /** In-chat voice note player */
 const VoiceNotePlayer: FC<{ data: string; durationMs?: number; isMe: boolean }> = ({ data, durationMs, isMe }) => {
@@ -426,6 +427,7 @@ const MessageItem = memo(({
 MessageItem.displayName = 'MessageItem';
 
 export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPeerId }) => {
+  const { price } = useCurrency();
   const [conversations, setConversations] = useState<Conversation[]>(() => BoostPayStore.getConversations());
   const [messages, setMessages] = useState<Message[]>(() => BoostPayStore.getMessages());
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
@@ -2457,7 +2459,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
                   <div key={u.id} className="flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 p-3">
                     <div>
                       <div className="text-xs font-bold text-amber-400 font-mono">#{u.id}</div>
-                      <div className="text-[10px] text-zinc-500">Balance ${Number(u.balance||0).toFixed(2)} • Last seen {u.lastSeen ? new Date(u.lastSeen).toLocaleDateString() : '—'} {u.allowMessages===false ? '• Msg OFF' : ''} {u.allowVoiceCall===false ? '• Call OFF' : ''}</div>
+                      <div className="text-[10px] text-zinc-500">Balance {price(Number(u.balance||0))} • Last seen {u.lastSeen ? new Date(u.lastSeen).toLocaleDateString() : '—'} {u.allowMessages===false ? '• Msg OFF' : ''} {u.allowVoiceCall===false ? '• Call OFF' : ''}</div>
                     </div>
                     <button onClick={()=> { setShowNearby(false); openConversationWithPeer(String(u.id)); }} className="rounded-xl bg-amber-500 px-3 py-1.5 text-xs font-bold text-zinc-950 hover:bg-amber-400 cursor-pointer">Message</button>
                   </div>

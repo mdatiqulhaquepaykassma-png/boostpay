@@ -25,7 +25,7 @@ interface Props {
 }
 
 export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initialTransactions, userId }) => {
-  const { currency, fmt } = useCurrency();
+  const { currency, fmt, price } = useCurrency();
   const [liveTransactions, setLiveTransactions] = useState<Transaction[]>(() => {
     return initialTransactions && initialTransactions.length > 0
       ? initialTransactions
@@ -216,7 +216,7 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
           <div>
             <span className="text-[10px] text-zinc-400 uppercase font-mono block">Total Received</span>
             <span className="text-sm font-bold text-emerald-400 font-mono">
-              +${formatPrecisionAmount(volumes.inflow, 2)}
+              +{price(volumes.inflow, 2)}
             </span>
           </div>
         </div>
@@ -228,7 +228,7 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
           <div>
             <span className="text-[10px] text-zinc-400 uppercase font-mono block">Total Sent</span>
             <span className="text-sm font-bold text-rose-400 font-mono">
-              -${formatPrecisionAmount(volumes.outflow, 2)}
+              -{price(volumes.outflow, 2)}
             </span>
           </div>
         </div>
@@ -370,9 +370,7 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
                   {/* Formatted Amount */}
                   <div className="text-right shrink-0 font-mono">
                     <span className={`text-xs sm:text-sm font-bold ${cfg.amountColor}`}>
-                      {currency && currency.code !== 'USD'
-                        ? `${cfg.amountSign}≈ ${currency.symbol}${fmt(tx.amount, { decimals: currency.decimals })}`
-                        : `${cfg.amountSign}$${formatPrecisionAmount(tx.amount, 8)}`}
+                      {cfg.amountSign}{price(tx.amount)}
                     </span>
                     <span className="text-[9px] text-zinc-500 block font-sans">
                       {currency && currency.code !== 'USD' ? `$${formatPrecisionAmount(tx.amount, 8)} USD` : 'USD'}
@@ -458,7 +456,7 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
               <div className="flex justify-between py-1 border-b border-zinc-800/60">
                 <span className="text-zinc-500">Amount:</span>
                 <span className={`text-base font-bold ${getTxConfig(selectedTx).amountColor}`}>
-                  {getTxConfig(selectedTx).amountSign}${formatPrecisionAmount(selectedTx.amount, 8)} USD
+                  {getTxConfig(selectedTx).amountSign}{price(selectedTx.amount)}
                 </span>
               </div>
               <div className="flex justify-between py-1 border-b border-zinc-800/60 items-center">

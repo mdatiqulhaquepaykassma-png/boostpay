@@ -37,7 +37,7 @@ export default function CurrencyPicker({ compact = false }: { compact?: boolean 
       <button
         onClick={() => setOpen((v) => !v)}
         className={`flex w-full items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-950/80 px-2.5 py-1.5 text-[11px] text-zinc-300 hover:border-amber-500/40 active:scale-[0.99] transition ${compact ? '' : 'mb-1'}`}
-        title="Display currency — your wallet stays in USD"
+        title="Display currency for every amount in the app"
       >
         <span className="flex items-center gap-1.5 truncate">
           <span className="text-[13px] leading-none">{currency?.flag || '🌐'}</span>
@@ -86,7 +86,7 @@ export default function CurrencyPicker({ compact = false }: { compact?: boolean 
             <div className="border-t border-zinc-800 px-2 py-1 text-[9px] leading-relaxed text-zinc-500">{rateNote()}</div>
           )}
           <div className="border-t border-zinc-800 px-2 py-1 text-[9px] text-zinc-600">
-            Display only — your wallet, sends and boosts stay in USD.
+            Every amount in the app (balance, sends, boosts, referrals, history) is shown in this currency. Your money itself is stored in USD.
           </div>
         </div>
       )}

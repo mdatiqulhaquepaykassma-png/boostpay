@@ -27,6 +27,16 @@ type Ctx = {
   fmt: (usd: number, opts?: { decimals?: number; withSymbol?: boolean }) => string;
   /** "≈ ৳1,028.16" style label, USD shown as-is when the currency is USD. */
   money: (usd: number) => string;
+  /** Converted amount with no symbol, trailing zeroes trimmed (min 2 places). */
+  amount: (usd: number, maxDecimals?: number) => string;
+  /** Converted amount with its symbol — "≈ ৳1,234.56", "$12.50" in USD. */
+  price: (usd: number, maxDecimals?: number) => string;
+  /**
+   * Notification / toast bodies are written by the server in USD ("$12.50 has been
+   * credited…"). This rewrites the dollar figures inside that text into the display
+   * currency, so the inbox reads correctly end to end. USD leaves the text as-is.
+   */
+  text: (message: string) => string;
   /** Rate line under a converted amount. */
   rateNote: () => string;
   reload: () => Promise<void>;
@@ -56,6 +66,52 @@ function authHeaders(): Record<string, string> {
   return t ? { authorization: `Bearer ${t}` } : {};
 }
 
+/** Pure converters — also unit-tested directly (tools/currency-client-check.tsx). */
+export function convertAmount(usd: number, cur: CurrencyRow | null, maxDecimals = 8): string {
+  const rate = cur && cur.rate > 0 ? cur.rate : 1;
+  const value = (Number(usd) || 0) * rate;
+  const fixed = value.toFixed(Math.min(Math.max(maxDecimals, 2), 8));
+  const [intPart, decPart = ''] = fixed.split('.');
+  let dec = decPart.replace(/0+$/, '');
+  if (dec.length < 2) dec = decPart.slice(0, 2);
+  return `${Number(intPart).toLocaleString('en-US')}.${dec}`;
+}
+
+export function convertPrice(usd: number, cur: CurrencyRow | null, maxDecimals = 8): string {
+  const body = convertAmount(usd, cur, maxDecimals);
+  if (!cur || cur.code === 'USD') return `$${body}`;
+  return `≈ ${cur.symbol}${body}`;
+}
+
+/** Rewrites the dollar figures inside a server-written sentence. */
+export function convertText(message: string, cur: CurrencyRow | null): string {
+  const src = String(message || '');
+  if (!cur || cur.code === 'USD' || !src.includes('$')) return src;
+  const rate = cur.rate > 0 ? cur.rate : 1;
+  return src.replace(/\$\s?([0-9][0-9,]*(?:\.[0-9]+)?)/g, (_m, num: string) => {
+    const usd = Number(String(num).replace(/,/g, '')) || 0;
+    const value = usd * rate;
+    const decimals = usd !== 0 && Math.abs(value) < 1 ? 4 : 2;
+    return `${cur.symbol}${value.toLocaleString('en-US', {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    })}`;
+  });
+}
+
+/**
+ * A tiny module-level mirror of the selected currency, for the few non-component
+ * places (store.ts toasts, for example) that also print an amount. The provider
+ * keeps it in step; nothing here decides anything, it only converts for display.
+ */
+let globalMoney = { rate: 1, symbol: '$', code: 'USD' };
+
+export function formatGlobalMoney(usd: number, decimals = 2): string {
+  const value = (Number(usd) || 0) * (globalMoney.rate > 0 ? globalMoney.rate : 1);
+  const body = value.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  return globalMoney.code === 'USD' ? `$${body}` : `${globalMoney.symbol}${body} ${globalMoney.code}`;
+}
+
 export function CurrencyProvider({ children, token }: { children: React.ReactNode; token?: string | null }) {
   const [options, setOptions] = useState<Options | null>(null);
 
@@ -81,6 +137,12 @@ export function CurrencyProvider({ children, token }: { children: React.ReactNod
       || options.currencies.find((c) => c.code === 'USD')
       || null;
   }, [options]);
+
+  // keep the module-level mirror in step with the selection
+  useEffect(() => {
+    if (!currency) { globalMoney = { rate: 1, symbol: '$', code: 'USD' }; return; }
+    globalMoney = { rate: currency.rate > 0 ? currency.rate : 1, symbol: currency.symbol || '$', code: currency.code };
+  }, [currency]);
 
   const setCurrency = useCallback(async (code: string) => {
     try {
@@ -116,13 +178,23 @@ export function CurrencyProvider({ children, token }: { children: React.ReactNod
     return `≈ ${cur.symbol}${fmt(usd, { decimals: cur.decimals })}`;
   }, [currency, fmt]);
 
+  /**
+   * Amounts such as micro-profit (0.00000125) must not be rounded away, so this
+   * converts and then trims: at least 2 decimals, never more than `maxDecimals`.
+   */
+  const amount = useCallback((usd: number, maxDecimals = 8) => convertAmount(usd, currency, maxDecimals), [currency]);
+
+  const price = useCallback((usd: number, maxDecimals = 8) => convertPrice(usd, currency, maxDecimals), [currency]);
+
+  const text = useCallback((message: string) => convertText(message, currency), [currency]);
+
   const rateNote = useCallback(() => {
     if (!options || !currency || currency.code === 'USD') return '';
     const when = options.refreshedAt ? new Date(options.refreshedAt).toLocaleString() : 'not yet';
     return `1 USD = ${currency.rate.toLocaleString('en-US', { maximumFractionDigits: 4 })} ${currency.code}${options.stale ? ' (last known rate)' : ''} · updated ${when}`;
   }, [options, currency]);
 
-  const value: Ctx = { options, currency, setCurrency, fmt, money, rateNote, reload };
+  const value: Ctx = { options, currency, setCurrency, fmt, money, amount, price, text, rateNote, reload };
   return <CurrencyCtx.Provider value={value}>{children}</CurrencyCtx.Provider>;
 }
 
@@ -136,6 +208,9 @@ export function useCurrency(): Ctx {
     setCurrency: async () => false,
     fmt: (usd: number) => (Number(usd) || 0).toFixed(2),
     money: (usd: number) => `$${(Number(usd) || 0).toFixed(2)}`,
+    amount: (usd: number) => (Number(usd) || 0).toFixed(2),
+    price: (usd: number) => `$${(Number(usd) || 0).toFixed(2)}`,
+    text: (message: string) => String(message || ''),
     rateNote: () => '',
     reload: async () => {},
   };

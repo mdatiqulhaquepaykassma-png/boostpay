@@ -2,12 +2,16 @@ import { FC, useState, useEffect } from 'react';
 import { ArrowRight, Eye, EyeOff, Mail, Lock, Loader2, Gift, Users, KeyRound, Check, AlertTriangle } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User } from '../types';
+import { useCurrency } from '../lib/currency';
 
 interface Props {
   onLoginUser: (user: User) => void;
 }
 
 export const AuthGate: FC<Props> = ({ onLoginUser }) => {
+  // Bonus amounts are stored in USD; show them in the visitor's display currency
+  // (the picker is reachable after sign-in, the rate table is public).
+  const { price } = useCurrency();
   const [tab, setTab] = useState<'LOGIN' | 'SIGNUP'>('LOGIN');
 
   // Login form state (strictly Email and Password)
@@ -370,7 +374,7 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
             <div>
               {welcomeOffer && (
                 <div className="mb-2 rounded-xl border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-2 text-[10px] font-mono text-emerald-300">
-                  🎁 New account welcome bonus ${Number(welcomeOffer.bonusPerUser).toFixed(2)}
+                  🎁 New account welcome bonus {price(Number(welcomeOffer.bonusPerUser))}
                   {Number(welcomeOffer.bonusLockDays) > 0 ? ` · boost only for ${welcomeOffer.bonusLockDays}d` : ' · added to your balance'}
                 </div>
               )}
@@ -397,14 +401,14 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                     </p>
                     {refCheck.campaign && refCheck.campaign.valid && Number(refCheck.campaign.bonusPerUser) > 0 && (
                       <p className="text-[10px] font-mono text-amber-300">
-                        🎁 ${Number(refCheck.campaign.bonusPerUser).toFixed(2)} join bonus
+                        🎁 {price(Number(refCheck.campaign.bonusPerUser))} join bonus
                         {Number(refCheck.campaign.bonusLockDays) > 0 ? ` · boost only for ${refCheck.campaign.bonusLockDays}d` : ' → added to your balance'}
                         {Number(refCheck.campaign.remainingSlots) > 0 ? ` · ${refCheck.campaign.remainingSlots} slots left` : ''}
                       </p>
                     )}
                     {refCheck.bonus && refCheck.bonus.active && (
                       <p className="text-[10px] font-mono text-amber-300">
-                        🎁 ${Number(refCheck.bonus.amount).toFixed(2)} signup bonus
+                        🎁 {price(Number(refCheck.bonus.amount))} signup bonus
                         {refCheck.bonus.transferable ? '' : ' (boost only — cannot be sent out)'}
                       </p>
                     )}
@@ -412,7 +416,7 @@ export const AuthGate: FC<Props> = ({ onLoginUser }) => {
                 ) : refCheck && !refCheck.resolves && ((refCheck.bonus && refCheck.bonus.active) || (refCheck.campaign && refCheck.campaign.valid && Number(refCheck.campaign.bonusPerUser) > 0)) ? (
                   <div className="mt-1 space-y-0.5">
                     <p className="text-[10px] font-mono text-amber-300">
-                      🎁 Code {refCheck.code} gives a ${Number((refCheck.campaign && refCheck.campaign.valid ? refCheck.campaign.bonusPerUser : refCheck.bonus.amount) || 0).toFixed(2)} signup bonus
+                      🎁 Code {refCheck.code} gives a {price(Number((refCheck.campaign && refCheck.campaign.valid ? refCheck.campaign.bonusPerUser : refCheck.bonus.amount) || 0))} signup bonus
 
                     </p>
                     <p className="text-[10px] font-mono text-zinc-500">no personal referrer on this code</p>

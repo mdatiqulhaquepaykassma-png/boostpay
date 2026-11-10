@@ -1,4 +1,5 @@
 import { FC, useCallback, useEffect, useState } from 'react';
+import { useCurrency } from '../lib/currency';
 import { createPortal } from 'react-dom';
 import { ChevronRight, Zap, Layers, RefreshCw, MessageCircle, CornerDownRight, X } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
@@ -44,15 +45,22 @@ type Member = {
   incomeTeam?: number;
 };
 
-const refMoney = (n: number | undefined): string => {
-  const v = Number(n) || 0;
-  if (v === 0) return '$0';
-  if (v < 0.0001) return '$' + v.toFixed(8);
-  if (v < 0.01) return '$' + v.toFixed(5);
-  if (v < 1) return '$' + v.toFixed(3);
-  if (v < 100) return '$' + v.toFixed(2);
-  return '$' + Math.round(v).toLocaleString();
-};
+/**
+ * Team income in the user's display currency. Small amounts keep their precision
+ * (micro-commission must not show as 0.00); everything converts through the same
+ * server-provided rate table as the rest of the app.
+ */
+function useRefMoney(): (n: number | undefined) => string {
+  const { price } = useCurrency();
+  return (n: number | undefined) => {
+    const v = Number(n) || 0;
+    if (v === 0) return price(0);
+    if (v < 0.0001) return price(v, 8);
+    if (v < 0.01) return price(v, 5);
+    if (v < 100) return price(v, 3);
+    return price(v, 2);
+  };
+}
 
 const since = (ts: number | null | undefined): string => {
   if (!ts) return '';
@@ -68,6 +76,7 @@ const since = (ts: number | null | undefined): string => {
 };
 
 export const ReferralTree: FC<{ onMessageUser?: (id: string) => void }> = ({ onMessageUser }) => {
+  const refMoney = useRefMoney();
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -306,6 +315,7 @@ const TreeNodeList: FC<{
   onLoadMore: (id: string) => void;
   onMessageUser?: (id: string) => void;
 }> = ({ parentId, depth, branches, counts, open, busy, onToggle, onLoadMore, onMessageUser }) => {
+  const refMoney = useRefMoney();
   const rowList = branches[parentId];
   if (!rowList) {
     return (

@@ -14,7 +14,7 @@ interface Props {
 type FilterTab = 'ALL' | 'REWARD' | 'P2P' | 'REFERRAL';
 
 export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId, onViewAllTransactions }) => {
-  const { currency, fmt } = useCurrency();
+  const { currency, fmt, price } = useCurrency();
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [copiedTx, setCopiedTx] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
@@ -85,7 +85,7 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
         };
       case 'AGENT_TRANSFER_SENT':
         return {
-          label: `Agent payment ${tx.recipientId ? `to ${tx.recipientId}` : ''}${(tx as any).fee ? ` (fee ${Number((tx as any).fee).toFixed(2)})` : ''}`.trim(),
+          label: `Agent payment ${tx.recipientId ? `to ${tx.recipientId}` : ''}${(tx as any).fee ? ` (fee ${price(Number((tx as any).fee))})` : ''}`.trim(),
           icon: ArrowUpRight,
           color: 'text-amber-400 bg-amber-500/10 border-amber-500/20',
           amountSign: '-',
@@ -203,9 +203,7 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
 
               <div className="text-right">
                 <div className={`text-xs font-bold font-mono ${detail.amountColor}`}>
-                  {currency && currency.code !== 'USD'
-                    ? `${detail.amountSign}≈ ${currency.symbol}${fmt(tx.amount, { decimals: currency.decimals })}`
-                    : `${detail.amountSign}$${formatPrecisionAmount(tx.amount, 8)}`}
+                  {detail.amountSign}{price(tx.amount)}
                 </div>
                 <div className="text-[10px] text-zinc-500 font-mono">
                   {currency && currency.code !== 'USD' ? `$${formatPrecisionAmount(tx.amount, 8)} USD` : 'USD'}
@@ -267,7 +265,7 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
             <div className="text-center pb-3 border-b border-zinc-800 mb-3">
               <span className="text-[11px] font-mono text-zinc-400 uppercase">Transaction Details</span>
               <div className="text-2xl font-black font-mono text-white mt-1">
-                ${formatPrecisionAmount(selectedTx.amount, 8)} <span className="text-xs font-sans text-zinc-400">USD</span>
+                {price(selectedTx.amount)} <span className="text-xs font-sans text-zinc-400">{currency?.code || 'USD'}</span>
               </div>
             </div>
 
