@@ -107,6 +107,8 @@ async function main() {
     /^\s*\{\/\*/,                          // JSX comment
     /suffix="USD"/,                          // USD branch of the balance ticker
     /suffix=\{currency\?\.code \|\| 'USD'\}/, // ticker default when no table is loaded
+    /title=\{/,                                // prose tooltip
+    /\|\| 'USD'/,                              // fallback label, not a money figure
   ];
   for (const f of readdirSync(dir)) {
     if (!f.endsWith('.tsx')) continue;
