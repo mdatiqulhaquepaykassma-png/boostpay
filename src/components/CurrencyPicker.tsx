@@ -34,22 +34,20 @@ export default function CurrencyPicker({ compact = false }: { compact?: boolean 
 
   return (
     <div className="relative">
+      {/* Exactly the size and shape of the ID chip next to it (owner request 2026-11-10) */}
       <button
         onClick={() => setOpen((v) => !v)}
-        className={`flex w-full items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-950/80 px-2.5 py-1.5 text-[11px] text-zinc-300 hover:border-amber-500/40 active:scale-[0.99] transition ${compact ? '' : 'mb-1'}`}
-        title="Display currency for every amount in the app"
+        disabled={busy}
+        className={`inline-flex h-6 w-full min-w-[84px] items-center justify-center gap-1 rounded-full border border-zinc-800 bg-zinc-950/80 px-2.5 font-mono text-[10px] leading-none text-zinc-300 hover:border-amber-500/40 hover:text-amber-400 active:scale-95 transition cursor-pointer disabled:opacity-60 ${compact ? '' : ''}`}
+        title={`Display currency: ${currency?.code || 'USD'} — ${currency?.name || 'US Dollar'}`}
       >
-        <span className="flex items-center gap-1.5 truncate">
-          <span className="text-[13px] leading-none">{currency?.flag || '🌐'}</span>
-          <span className="font-mono">{currency?.code || 'USD'}</span>
-          <span className="text-zinc-500">{currency?.symbol}</span>
-          <span className="truncate text-zinc-500">{currency?.country}</span>
-        </span>
+        <span className="text-[11px] leading-none">{currency?.flag || '🌐'}</span>
+        <span className="font-mono">{currency?.code || 'USD'}</span>
         <ChevronDown className={`h-3 w-3 shrink-0 text-zinc-500 transition ${open ? 'rotate-180' : ''}`} />
       </button>
 
       {open && (
-        <div className="absolute left-0 right-0 z-50 mt-1 max-h-[300px] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+        <div className="absolute right-0 z-50 mt-1 w-[262px] max-h-[300px] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl">
           <div className="flex items-center gap-1.5 border-b border-zinc-800 px-2 py-1.5">
             <Search className="h-3 w-3 text-zinc-500" />
             <input

@@ -151,24 +151,24 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
       <div className="pointer-events-none absolute inset-x-12 top-0 h-px bg-gradient-to-r from-transparent via-amber-500/50 to-transparent" />
 
       <div className="relative p-6">
-        {/* Display currency — sits above the ID chip, wallet stays in USD */}
-        <div className="mb-2 max-w-[240px]">
-          <CurrencyPicker />
-        </div>
-        <div className="flex items-center justify-between">
-          <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Available Balance</span>
-          <button
-            onClick={() => {
-              navigator.clipboard?.writeText(String(userId)).catch(() => {});
-              setIdCopied(true);
-              setTimeout(() => setIdCopied(false), 1200);
-            }}
-            className="flex items-center gap-1 rounded-full border border-zinc-800 bg-zinc-950/80 px-2.5 py-1 font-mono text-[10px] text-zinc-300 hover:border-amber-500/40 hover:text-amber-400 active:scale-95 transition cursor-pointer"
-            title="Tap to copy your ID"
-          >
-            ID: {userId}
-            {idCopied ? <CheckCircle2 className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-zinc-500" />}
-          </button>
+        <div className="flex items-start justify-between gap-3">
+          <span className="pt-[7px] text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Available Balance</span>
+          {/* The currency chip sits directly above the ID chip and is the same size as it */}
+          <div className="flex shrink-0 flex-col items-end gap-1.5">
+            <CurrencyPicker />
+            <button
+              onClick={() => {
+                navigator.clipboard?.writeText(String(userId)).catch(() => {});
+                setIdCopied(true);
+                setTimeout(() => setIdCopied(false), 1200);
+              }}
+              className="inline-flex h-6 min-w-[84px] items-center justify-center gap-1 rounded-full border border-zinc-800 bg-zinc-950/80 px-2.5 font-mono text-[10px] leading-none text-zinc-300 hover:border-amber-500/40 hover:text-amber-400 active:scale-95 transition cursor-pointer"
+              title="Tap to copy your ID"
+            >
+              ID: {userId}
+              {idCopied ? <CheckCircle2 className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-zinc-500" />}
+            </button>
+          </div>
         </div>
 
         <div className="mt-2.5">
