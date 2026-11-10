@@ -315,7 +315,7 @@ export const P2PTransferModal: FC<Props> = ({
                   Transfer Amount ({entryCode})
                 </label>
                 <div className="flex items-center gap-1.5 text-zinc-500 font-mono text-[11px]">
-                  <span>Available: <strong className="text-emerald-400 font-bold">{entryCode === 'USD' ? `$${currentUser.balance.toFixed(2)}` : `≈ ${currency!.symbol}${fmt(currentUser.balance, { decimals: currency!.decimals })}`}</strong>
+                  <span>Available: <strong className="text-emerald-400 font-bold">{entryCode === 'USD' ? `$${currentUser.balance.toFixed(2)}` : price(currentUser.balance)}</strong>
                     {entryCode !== 'USD' && <span className="ml-1 text-zinc-600">(${currentUser.balance.toFixed(2)})</span>}
                   </span>
                   <button

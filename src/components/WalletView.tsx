@@ -175,7 +175,7 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
           {showingConverted ? (
             <>
               <div className="font-mono text-3xl font-black tracking-tight text-white sm:text-4xl">
-                ≈ {currency!.symbol}{fmt(currentTotal, { decimals: currency!.decimals })}
+                {price(currentTotal)}
                 <span className="ml-1.5 text-[11px] font-bold text-zinc-500">{currency!.code}</span>
               </div>
               <div className="mt-1 text-[9px] leading-relaxed text-zinc-500">

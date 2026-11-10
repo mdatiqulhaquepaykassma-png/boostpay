@@ -190,7 +190,7 @@ export function CurrencyProvider({ children, token }: { children: React.ReactNod
   const money = useCallback((usd: number) => {
     const cur = currency;
     if (!cur || cur.code === 'USD') return `$${(Number(usd) || 0).toFixed(2)}`;
-    return `≈ ${cur.symbol}${fmt(usd, { decimals: cur.decimals })}`;
+    return `≈ ${cur.symbol}${convertAmount(usd, cur, cur.decimals)}`;
   }, [currency, fmt]);
 
   /**

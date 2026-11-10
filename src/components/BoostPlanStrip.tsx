@@ -88,7 +88,7 @@ type Props = {
 
 export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
   const money = usePlanMoney();
-  const { currency, fmt } = useCurrency();
+  const { price } = useCurrency();
   const [plan, setPlan] = useState<Plan | null>(null);
   const [open, setOpen] = useState(false);
   const [skew, setSkew] = useState(0);           // serverTime - phoneTime
@@ -287,7 +287,7 @@ export const BoostPlanStrip: FC<Props> = ({ refreshKey, onOpenBoosting }) => {
                       <div key={d.ts} className="flex items-center gap-1.5 border-t border-zinc-900/80 py-[5px] font-mono text-[9px] leading-none first:border-0">
                         <span className="w-[46px] shrink-0 text-zinc-400">{d.day.slice(5)}</span>
                         <span className="w-[52px] shrink-0 text-zinc-500">
-                          {currency && currency.code !== 'USD' ? `${currency.symbol}${fmt(d.balance, { decimals: 0, withSymbol: false })}` : `$${d.balance.toFixed(2)}`}
+                          {price(d.balance, 2)}
                         </span>
                         <span className={`w-[54px] shrink-0 font-bold ${d.earned > 0 ? 'text-emerald-400' : 'text-zinc-600'}`}>
                           +{money(d.earned)}

@@ -77,6 +77,11 @@ async function main() {
   ck('amount() converts without a symbol', convertAmount(12.5, BDT) === '1,250.00', convertAmount(12.5, BDT));
   ck('a micro amount keeps at least 2 decimals', convertAmount(0, BDT) === '0.00', convertAmount(0, BDT));
   ck('USD still reads as dollars', convertPrice(12.5, USD) === '$12.50', convertPrice(12.5, USD));
+  // the symbol must appear exactly once — it used to be glued on twice in the
+  // balance header and in the send modal ("≈ ৳৳1,234.56")
+  const once = (s2: string, sym: string) => s2.split(sym).length - 1 === 1;
+  ck('price() prints the symbol exactly once', once(convertPrice(1234.56, BDT), '৳'), convertPrice(1234.56, BDT));
+  ck('price() USD prints the dollar sign exactly once', once(convertPrice(12.5, USD), '$'), convertPrice(12.5, USD));
   ck('a server notification is rewritten into taka',
     convertText('CREDIT ALERT: $12.50 credited. Ref: ABC', BDT) === 'CREDIT ALERT: ৳1,250.00 credited. Ref: ABC',
     convertText('CREDIT ALERT: $12.50 credited. Ref: ABC', BDT));
@@ -122,6 +127,20 @@ async function main() {
       if (hitsDollar || hitsUsdLabel) offenders.push(`${f}:${i + 1}: ${line.trim().slice(0, 110)}`);
     });
   }
+  const doubled: string[] = [];
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.tsx')) continue;
+    const src = readFileSync(join(dir, f), 'utf8');
+    src.split('\n').forEach((line, i) => {
+      // `${currency.symbol}${fmt(...)}` / `{currency.symbol}{price(...)}`: the helper already prints it
+      if (/\$\{\s*(currency|c|cur)\??\.symbol\s*\}\$\{\s*(fmt|price|money)\s*\(/.test(line)
+        || /\{\s*currency\??\.symbol\s*\}\{\s*(fmt|price|money)\s*\(/.test(line)) {
+        doubled.push(`${f}:${i + 1}: ${line.trim().slice(0, 100)}`);
+      }
+    });
+  }
+  ck('no screen stacks the currency symbol on top of fmt()/price()', doubled.length === 0, doubled.join(' | '), 'HIGH');
+
   ck('no user-app screen still prints a hard-coded dollar amount', offenders.length === 0,
     offenders.slice(0, 8).join(' | '), 'HIGH');
 
