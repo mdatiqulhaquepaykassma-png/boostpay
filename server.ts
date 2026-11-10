@@ -11,6 +11,10 @@ import nodemailer from 'nodemailer';
 import QRCode from 'qrcode';
 import webpush from 'web-push';
 import { CURRENCIES, currencyForCountry, isCurrencyCode } from './currency-data';
+import {
+  PAYMENT_CATEGORIES, defaultPaymentMethods, ensurePaymentCollections, findMethod,
+  methodAvailable, limitsFor, toPublicMethod, withdrawFieldsFor,
+} from './payments';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1701,6 +1705,7 @@ function readDb() {
   if (pgDoc) {
     if (pgDoc.config) lastKnownConfig = pgDoc.config;
     ensureSmtpDefaults(pgDoc);
+    ensurePaymentCollections(pgDoc);
     return pgDoc;
   }
   try {
@@ -1730,6 +1735,7 @@ function readDb() {
     if (!Array.isArray(parsed.referrals)) parsed.referrals = [];
     if (!Array.isArray(parsed.referCommissions)) parsed.referCommissions = [];
     if (!Array.isArray(parsed.antifraudLogs)) parsed.antifraudLogs = [];
+    ensurePaymentCollections(parsed);   // payment methods + deposit/withdraw queues
     // ensure config.referral + antifraud defaults
     if (!parsed.config) parsed.config = INITIAL_DB.config;
     if (!parsed.config.referral) parsed.config.referral = (INITIAL_DB as any).config.referral;
@@ -10565,6 +10571,465 @@ async function startServer() {
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not refresh the rates.' }); }
   });
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  Deposit / Withdraw — payment methods, requests, admin review
+  //
+  //  Money rules (owner policy, unchanged):
+  //   • a deposit NEVER credits a balance by itself — an admin approves it;
+  //   • a withdrawal debits the wallet when it is requested and is refunded if the
+  //     admin rejects it, so a pending request can never be spent twice;
+  //   • only boosted profit is withdrawable, exactly like the agent cash-out.
+  // ═══════════════════════════════════════════════════════════════════════════
+  
+// ── Shared money helpers (used by the agent cash-out AND the deposit/withdraw block)
+const floor2 = (n: number) => Math.floor((Number(n) || 0) * 100 + 1e-9) / 100;
+const round2Money = (n: number) => Math.round(((Number(n) || 0) + Number.EPSILON) * 100) / 100;
+/**
+ * OWNER RULE: only boosted dollars can leave the wallet through a payout.
+ *   withdrawable = min(current balance, lifetimeProfit − already withdrawn profit)
+ * `lifetimeProfit` grows only from boost rewards + referral commission on boost
+ * yield, so a plain deposit is NOT withdrawable until it has boosted.
+ */
+function boostWithdrawable(user: any): number {
+  if (!user) return 0;
+  const balance = floor2(user.balance);
+  const profitLeft = floor2((Number(user.lifetimeProfit) || 0) - (Number(user.boostProfitWithdrawn) || 0));
+  return floor2(Math.max(0, Math.min(balance, profitLeft)));
+}
+/** Take `amount` out of the withdrawable profit bucket (called once per payout). */
+function holdBoostProfit(user: any, amount: number) {
+  user.boostProfitWithdrawn = round2Money((Number(user.boostProfitWithdrawn) || 0) + (Number(amount) || 0));
+}
+/** Give it back when a payout is cancelled, rejected or expires (idempotent). */
+function releaseBoostProfit(user: any, amount: number) {
+  user.boostProfitWithdrawn = round2Money(Math.max(0, (Number(user.boostProfitWithdrawn) || 0) - (Number(amount) || 0)));
+}
+
+const paymentLocks = new Map<string, Promise<any>>();
+  function withPaymentLock<T>(key: string, fn: () => Promise<T> | T): Promise<T> {
+    const prev = paymentLocks.get(key) || Promise.resolve();
+    let release!: () => void;
+    const cur = new Promise<void>((r) => { release = r; });
+    paymentLocks.set(key, prev.then(() => cur) as any);
+    return prev.then(async () => {
+      try { return await fn(); } finally {
+        release();
+        if (paymentLocks.get(key) === (cur as any)) paymentLocks.delete(key);
+      }
+    }) as Promise<T>;
+  }
+  const paymentDedupe = new Map<string, number>();
+  function paymentDedupeHit(key: string): boolean {
+    if (!key) return false;
+    const at = paymentDedupe.get(key);
+    const nowTs = Date.now();
+    for (const [k, v] of paymentDedupe) if (nowTs - v > 10 * 60 * 1000) paymentDedupe.delete(k);
+    if (at && nowTs - at < 10 * 60 * 1000) return true;
+    paymentDedupe.set(key, nowTs);
+    return false;
+  }
+  function newPaymentId(prefix: string) {
+    return `${prefix}-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 46656).toString(36).toUpperCase().padStart(3, '0')}`;
+  }
+  function reviewAudience(role: 'user' | 'agent') { return role === 'agent' ? 'AGENT' : 'USER'; }
+
+  /** Everything the user app needs to paint the payment screen. */
+  app.get('/api/payment/methods', rateLimit(120), requireUser, async (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const mode = String(req.query.mode || 'deposit').toLowerCase() === 'withdraw' ? 'withdraw' : 'deposit';
+      const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      const currency = entryCurrencyOf(user);
+      const country = String((user as any).country || '');
+      const rows = (db.paymentMethods as any[])
+        .filter((m) => m.enabled && methodAvailable(m, mode, 'user', currency, country).ok)
+        .sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
+        .map((m) => toPublicMethod(db, m, mode));
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        success: true, mode, currency, role: 'user',
+        categories: PAYMENT_CATEGORIES,
+        methods: rows,
+        withdrawable: mode === 'withdraw' ? boostWithdrawable(user) : null,
+        limits: { min: 0.1, max: 1000000 },
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load the payment methods.' }); }
+  });
+
+  /** Submit a deposit — pending until an admin verifies the money actually arrived. */
+  app.post('/api/user/deposit-request', rateLimit(20), requireUser, async (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const idem = String(body.idempotencyKey || '').trim();
+      // Only an EXPLICIT key is deduplicated. Without this guard every second
+      // deposit inside ten minutes matched the empty-key bucket and returned the
+      // previous request instead of creating a new one.
+      if (idem) {
+        const db0 = ensurePaymentCollections(readDb());
+        const mine = (db0.depositRequests || []).find((d: any) => String(d.userId) === String(req.authUserId) && d.idempotencyKey === idem);
+        if (mine) return res.json({ success: true, duplicate: true, request: mine });
+        paymentDedupeHit(`DEP:${req.authUserId}:${idem}`);
+      }
+      const db = ensurePaymentCollections(readDb());
+      const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      if (user.isBlocked) return res.status(403).json({ error: 'Your account is suspended.' });
+
+      const m = findMethod(db, String(body.methodId || ''));
+      if (!m) return res.status(404).json({ error: 'That payment method does not exist.' });
+      const currency = entryCurrencyOf(user);
+      const avail = methodAvailable(m, 'deposit', 'user', currency, String((user as any).country || ''));
+      if (!avail.ok) return res.status(400).json({ error: avail.reason });
+      if (m.category === 'AGENT') return res.status(400).json({ error: 'Use the agent screen for agent deposits.' });
+
+      const entryCode = String(body.currency || currency).toUpperCase();
+      const conv = entryAmountToUsd(db, user, Number(body.amount), entryCode);
+      if (conv.error) return res.status(400).json({ error: conv.error });
+      const lim = limitsFor(m, 'deposit');
+      if (!(conv.usd > 0)) return res.status(400).json({ error: 'Enter an amount greater than 0.' });
+      if (conv.usd < lim.min) return res.status(400).json({ error: `The minimum deposit for ${m.name} is $${lim.min.toFixed(2)}.` });
+      if (conv.usd > lim.max) return res.status(400).json({ error: `The maximum deposit for ${m.name} is $${lim.max.toFixed(2)}.` });
+
+      const reference = sanitizeText(body.reference, 80).trim();
+      if (reference.length < 4) return res.status(400).json({ error: 'Enter the transaction ID or reference from your payment.' });
+      const dupRef = (db.depositRequests || []).find((d: any) => String(d.userId) === String(user.id)
+        && String(d.methodId) === m.id && String(d.reference || '').toLowerCase() === reference.toLowerCase()
+        && Date.now() - Number(d.createdAt || 0) < 7 * 24 * 3600 * 1000);
+      if (dupRef) return res.status(409).json({ error: `That reference was already submitted (${dupRef.id}). Please wait for the review.` });
+
+      const request: any = {
+        id: newPaymentId('DEP'),
+        userId: String(user.id),
+        methodId: m.id,
+        methodName: m.name,
+        category: m.category,
+        amountUsd: Number(conv.usd.toFixed(8)),
+        entryAmount: Number(body.amount),
+        entryCurrency: conv.code,
+        feeUsd: Number((conv.usd * (Number(m.depositFeePercent) || 0) / 100).toFixed(8)),
+        reference,
+        note: sanitizeText(body.note, 200).trim(),
+        status: 'PENDING',
+        idempotencyKey: idem,
+        createdAt: Date.now(),
+        reviewedAt: 0,
+        reviewedBy: '',
+        reason: '',
+        txId: '',
+      };
+      db.depositRequests.unshift(request);
+      if (db.depositRequests.length > 20000) db.depositRequests.length = 20000;
+      recordAuditLog(db, 'DEPOSIT_REQUEST', 'user:' + user.id, `Deposit ${request.id}: $${request.amountUsd.toFixed(2)} via ${m.name} (ref ${reference})`, String(user.id));
+      pushNotification(db, {
+        id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+        userId: String(user.id), type: 'SYSTEM_ALERT', title: 'BOOSTPAY-DEPOSIT',
+        message: `Deposit request ${request.id} for $${request.amountUsd.toFixed(2)} received via ${m.name}. It is credited once the payment is verified.`,
+        timestamp: Date.now(), isRead: false, metadata: { depositId: request.id },
+      } as any);
+      writeDb(db);
+      res.json({ success: true, request });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not submit the deposit.' }); }
+  });
+
+  app.get('/api/user/deposit-requests', rateLimit(120), requireUser, (req: any, res) => {
+    const db = ensurePaymentCollections(readDb());
+    const rows = (db.depositRequests || []).filter((d: any) => String(d.userId) === String(req.authUserId)).slice(0, 50);
+    res.json({ success: true, requests: rows });
+  });
+
+  /** Request a withdrawal — the money leaves the wallet now and is refunded on reject. */
+  app.post('/api/user/withdraw-request', rateLimit(20), requireUser, async (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const idem = String(body.idempotencyKey || '').trim();
+      const out = await withPaymentLock('WITHDRAW:' + req.authUserId, () => {
+        const db = ensurePaymentCollections(readDb());
+        const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+        if (!user) return { status: 404, body: { error: 'User not found.' } };
+        if (user.isBlocked) return { status: 403, body: { error: 'Your account is suspended.' } };
+        if (user.isFrozen) return { status: 403, body: { error: 'Your account is frozen.' } };
+        if (user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
+          return { status: 400, body: { error: 'Pause your boost before withdrawing.' } };
+        }
+        if (idem) {
+          const existing = (db.withdrawRequests || []).find((w: any) => String(w.userId) === String(user.id) && w.idempotencyKey === idem);
+          if (existing) return { status: 200, body: { success: true, duplicate: true, request: existing } };
+        }
+        const m = findMethod(db, String(body.methodId || ''));
+        if (!m) return { status: 404, body: { error: 'That payment method does not exist.' } };
+        const currency = entryCurrencyOf(user);
+        const avail = methodAvailable(m, 'withdraw', 'user', currency, String((user as any).country || ''));
+        if (!avail.ok) return { status: 400, body: { error: avail.reason } };
+        if (m.category === 'AGENT') return { status: 400, body: { error: 'Use the agent screen for agent withdrawals.' } };
+
+        const entryCode = String(body.currency || currency).toUpperCase();
+        const conv = entryAmountToUsd(db, user, Number(body.amount), entryCode);
+        if (conv.error) return { status: 400, body: { error: conv.error } };
+        const lim = limitsFor(m, 'withdraw');
+        if (!(conv.usd > 0)) return { status: 400, body: { error: 'Enter an amount greater than 0.' } };
+        if (conv.usd < lim.min) return { status: 400, body: { error: `The minimum withdrawal for ${m.name} is $${lim.min.toFixed(2)}.` } };
+        if (conv.usd > lim.max) return { status: 400, body: { error: `The maximum withdrawal for ${m.name} is $${lim.max.toFixed(2)}.` } };
+
+        const dest: Record<string, string> = {};
+        for (const f of withdrawFieldsFor(m)) {
+          const v = sanitizeText((body.destination || {})[f.key], 120).trim();
+          if (v.length < 3) return { status: 400, body: { error: `Please fill in: ${f.label}.` } };
+          dest[f.key] = v;
+        }
+
+        const amount = Number(conv.usd.toFixed(8));
+        const fee = Number((amount * (Number(m.withdrawFeePercent) || 0) / 100).toFixed(8));
+        const net = Number((amount - fee).toFixed(8));
+        if (net <= 0) return { status: 400, body: { error: 'The amount is too small to cover the fee.' } };
+        const balance = Math.floor((Number(user.balance) || 0) * 100 + 1e-9) / 100;
+        if (amount > balance + 1e-9) return { status: 400, body: { error: `Insufficient balance. You have $${balance.toFixed(2)}.` } };
+        const withdrawable = boostWithdrawable(user);
+        if (amount > withdrawable + 1e-9) {
+          return { status: 400, body: { error: `Only boosted dollars can be withdrawn. Available boosted withdraw amount: $${withdrawable.toFixed(2)}.` } };
+        }
+
+        const requestId = newPaymentId('WDR');
+        const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+        user.balance = Math.floor((balance - amount) * 100 + 1e-9) / 100;
+        holdBoostProfit(user, amount);
+        db.transactions.unshift({
+          id: txId, userId: user.id, type: 'WITHDRAW_REQUEST', amount, fee,
+          timestamp: Date.now(), notes: `Withdrawal ${requestId} via ${m.name} (pending review)`,
+          referenceId: requestId,
+        });
+        const request: any = {
+          id: requestId, userId: String(user.id), methodId: m.id, methodName: m.name, category: m.category,
+          amountUsd: amount, feeUsd: fee, netUsd: net,
+          entryAmount: Number(body.amount), entryCurrency: conv.code,
+          destination: dest, status: 'PENDING', idempotencyKey: idem,
+          balanceAfter: user.balance, txId,
+          createdAt: Date.now(), reviewedAt: 0, reviewedBy: '', reason: '', payoutRef: '',
+        };
+        db.withdrawRequests.unshift(request);
+        if (db.withdrawRequests.length > 20000) db.withdrawRequests.length = 20000;
+        recordAuditLog(db, 'WITHDRAW_REQUEST', 'user:' + user.id, `Withdrawal ${requestId}: $${amount.toFixed(2)} via ${m.name}`, String(user.id));
+        pushNotification(db, {
+          id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+          userId: String(user.id), type: 'SYSTEM_ALERT', title: 'BOOSTPAY-WITHDRAW',
+          message: `Withdrawal request ${requestId} for $${amount.toFixed(2)} via ${m.name} received. Balance now $${user.balance.toFixed(2)}. Ref: ${txId}`,
+          amount, referenceId: txId, timestamp: Date.now(), isRead: false, metadata: { withdrawId: requestId },
+        } as any);
+        writeDb(db);
+        return { status: 200, body: { success: true, request } };
+      });
+      res.status(out.status).json(out.body);
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not submit the withdrawal.' }); }
+  });
+
+  app.get('/api/user/withdraw-requests', rateLimit(120), requireUser, (req: any, res) => {
+    const db = ensurePaymentCollections(readDb());
+    const rows = (db.withdrawRequests || []).filter((w: any) => String(w.userId) === String(req.authUserId)).slice(0, 50);
+    res.json({ success: true, requests: rows });
+  });
+
+  // ── Admin: method configuration ────────────────────────────────────────────
+  app.get('/api/admin/payment-methods', rateLimit(120), requireAdmin, (req: any, res) => {
+    const db = ensurePaymentCollections(readDb());
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      categories: PAYMENT_CATEGORIES,
+      methods: (db.paymentMethods as any[]).slice().sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0)),
+    });
+  });
+
+  /** Create or update a method. Every field is coerced server-side. */
+  app.post('/api/admin/payment-methods', rateLimit(60), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const body = req.body || {};
+      const num = (v: any, d = 0) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
+      const bool = (v: any, d = true) => (v === undefined ? d : v === true || v === 'true' || v === 1);
+      const id = String(body.id || '').trim().toUpperCase() || newPaymentId('PM');
+      let row: any = (db.paymentMethods as any[]).find((m) => m.id === id);
+      const isNew = !row;
+      if (isNew) {
+        if (!String(body.name || '').trim()) return res.status(400).json({ error: 'A name is required.' });
+        row = {
+          id, createdAt: Date.now(),
+          accountName: '', accountNumber: '', instructions: '',
+          minDeposit: 1, maxDeposit: 100000, minWithdraw: 1, maxWithdraw: 100000,
+          depositFeePercent: 0, withdrawFeePercent: 0, processingTime: 'Usually within 5–30 minutes',
+          logo: '💳', order: 100, recommendedOrder: 0, currencies: ['*'], countries: [],
+          maintenanceMessage: '',
+          // a fresh method is usable by everyone until the admin narrows it down
+          name: String(body.name || '').trim(),
+          enabled: true, recommended: false, depositEnabled: true, withdrawEnabled: true,
+          userDeposit: true, userWithdraw: true, agentDeposit: true, agentWithdraw: true,
+          maintenance: false,
+        };
+        db.paymentMethods.push(row);
+      }
+      const cat = String(body.category || row.category || 'EWALLET').toUpperCase();
+      if (!PAYMENT_CATEGORIES.some((c) => c.id === cat)) return res.status(400).json({ error: 'Unknown category.' });
+      const setStr = (k: string, max = 200) => { if (body[k] !== undefined) row[k] = sanitizeText(body[k], max); };
+      setStr('name', 60); setStr('logo', 8); setStr('processingTime', 120); setStr('maintenanceMessage', 200);
+      setStr('accountName', 80); setStr('accountNumber', 120); setStr('instructions', 400);
+      row.category = cat;
+      for (const k of ['enabled', 'recommended', 'depositEnabled', 'withdrawEnabled', 'userDeposit', 'userWithdraw', 'agentDeposit', 'agentWithdraw', 'maintenance']) {
+        if (body[k] !== undefined) row[k] = bool(body[k], row[k]);
+      }
+      if (body.order !== undefined) row.order = Math.round(num(body.order, row.order || 100));
+      if (body.recommendedOrder !== undefined) row.recommendedOrder = Math.round(num(body.recommendedOrder, 0));
+      for (const k of ['minDeposit', 'maxDeposit', 'minWithdraw', 'maxWithdraw']) {
+        if (body[k] !== undefined) row[k] = num(body[k], row[k]);
+      }
+      for (const k of ['depositFeePercent', 'withdrawFeePercent']) {
+        if (body[k] !== undefined) row[k] = Math.min(50, num(body[k], 0));
+      }
+      if (row.minDeposit > row.maxDeposit) return res.status(400).json({ error: 'The minimum deposit is above the maximum.' });
+      if (row.minWithdraw > row.maxWithdraw) return res.status(400).json({ error: 'The minimum withdrawal is above the maximum.' });
+      if (body.currencies !== undefined) {
+        const list = Array.isArray(body.currencies) ? body.currencies : String(body.currencies).split(',');
+        const clean = list.map((c: any) => String(c).trim().toUpperCase()).filter(Boolean);
+        row.currencies = clean.includes('*') || clean.length === 0 ? (clean.length ? ['*'] : []) : clean.filter((c: string) => CURRENCY_CODES.has(c));
+        if (row.currencies.length === 0) return res.status(400).json({ error: 'Pick at least one currency (or * for all).' });
+      }
+      if (body.countries !== undefined) {
+        const list = Array.isArray(body.countries) ? body.countries : String(body.countries).split(',');
+        row.countries = list.map((c: any) => String(c).trim().toUpperCase()).filter((c: string) => /^[A-Z]{2}$/.test(c));
+      }
+      row.updatedAt = Date.now();
+      if (isNew) row.enabled = row.enabled !== false;
+      recordAuditLog(db, isNew ? 'PAYMENT_METHOD_CREATED' : 'PAYMENT_METHOD_UPDATED', String(req.authAdmin),
+        `${isNew ? 'Created' : 'Updated'} method ${row.id} (${row.name}) cat=${row.category}`);
+      writeDb(db);
+      res.json({ success: true, method: row });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save the method.' }); }
+  });
+
+  app.post('/api/admin/payment-methods/delete', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const id = String((req.body || {}).id || '');
+      const row = (db.paymentMethods as any[]).find((m) => m.id === id);
+      if (!row) return res.status(404).json({ error: 'That method does not exist.' });
+      const pending = (db.depositRequests || []).some((d: any) => d.methodId === id && d.status === 'PENDING')
+        || (db.withdrawRequests || []).some((w: any) => w.methodId === id && w.status === 'PENDING');
+      if (pending) return res.status(400).json({ error: 'This method still has pending requests. Disable it instead.' });
+      db.paymentMethods = (db.paymentMethods as any[]).filter((m) => m.id !== id);
+      recordAuditLog(db, 'PAYMENT_METHOD_DELETED', String(req.authAdmin), `Deleted method ${id} (${row.name})`);
+      writeDb(db);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not delete the method.' }); }
+  });
+
+  // ── Admin: deposit / withdrawal queues ─────────────────────────────────────
+  app.get('/api/admin/payment-requests', rateLimit(120), requireAdmin, (req: any, res) => {
+    const db = ensurePaymentCollections(readDb());
+    const type = String(req.query.type || 'deposit') === 'withdraw' ? 'withdraw' : 'deposit';
+    const status = String(req.query.status || '').toUpperCase();
+    const src = type === 'deposit' ? db.depositRequests : db.withdrawRequests;
+    const rows = (src || []).filter((r: any) => !status || String(r.status) === status).slice(0, 300);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, type, requests: rows });
+  });
+
+  app.post('/api/admin/payment-requests/deposit/review', rateLimit(60), requireAdmin, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const id = String(body.id || '');
+      const action = String(body.action || '').toUpperCase();
+      if (action !== 'APPROVE' && action !== 'REJECT') return res.status(400).json({ error: 'Action must be APPROVE or REJECT.' });
+      const out = await withPaymentLock('DEPREVIEW:' + id, () => {
+        const db = ensurePaymentCollections(readDb());
+        const r = (db.depositRequests || []).find((d: any) => d.id === id);
+        if (!r) return { status: 404, body: { error: 'That deposit does not exist.' } };
+        if (r.status !== 'PENDING') return { status: 409, body: { error: `This deposit is already ${r.status}.` } };
+        const user = (db.users || []).find((u: any) => String(u.id) === String(r.userId));
+        if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
+        if (action === 'APPROVE') {
+          const credit = Number(Number(r.amountUsd).toFixed(8));
+          if (!(credit > 0)) return { status: 400, body: { error: 'The stored amount is not usable.' } };
+          user.balance = Math.floor(((Number(user.balance) || 0) + credit) * 100 + 1e-9) / 100;
+          const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+          db.transactions.unshift({
+            id: txId, userId: user.id, type: 'DEPOSIT', amount: credit, timestamp: Date.now(),
+            notes: `Deposit ${r.id} approved · ${r.methodName} · ref ${r.reference}`, referenceId: r.id,
+          });
+          r.status = 'APPROVED'; r.txId = txId;
+          pushNotification(db, {
+            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+            userId: String(user.id), type: 'TRANSFER_RECEIVED', title: 'BOOSTPAY-DEPOSIT',
+            message: `DEPOSIT CONFIRMED: $${credit.toFixed(2)} credited via ${r.methodName}. Balance: $${user.balance.toFixed(2)}. Ref: ${txId}`,
+            amount: credit, referenceId: txId, timestamp: Date.now(), isRead: false, metadata: { depositId: r.id },
+          } as any);
+        } else {
+          r.status = 'REJECTED';
+          pushNotification(db, {
+            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+            userId: String(user.id), type: 'SYSTEM_ALERT', title: 'BOOSTPAY-DEPOSIT',
+            message: `Deposit ${r.id} could not be verified and was not credited. ${sanitizeText(body.reason, 160) || 'Contact support.'}`,
+            timestamp: Date.now(), isRead: false, metadata: { depositId: r.id },
+          } as any);
+        }
+        r.reviewedAt = Date.now();
+        r.reviewedBy = String(req.authAdmin);
+        r.reason = sanitizeText(body.reason, 200).trim();
+        recordAuditLog(db, `DEPOSIT_${r.status}`, String(req.authAdmin), `Deposit ${r.id} $${Number(r.amountUsd).toFixed(2)} ${r.status.toLowerCase()}`, String(user.id));
+        writeDb(db);
+        return { status: 200, body: { success: true, request: r } };
+      });
+      res.status(out.status).json(out.body);
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not review the deposit.' }); }
+  });
+
+  app.post('/api/admin/payment-requests/withdraw/review', rateLimit(60), requireAdmin, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const id = String(body.id || '');
+      const action = String(body.action || '').toUpperCase();
+      if (action !== 'APPROVE' && action !== 'REJECT') return res.status(400).json({ error: 'Action must be APPROVE or REJECT.' });
+      const out = await withPaymentLock('WDRREVIEW:' + id, () => {
+        const db = ensurePaymentCollections(readDb());
+        const r = (db.withdrawRequests || []).find((w: any) => w.id === id);
+        if (!r) return { status: 404, body: { error: 'That withdrawal does not exist.' } };
+        if (r.status !== 'PENDING') return { status: 409, body: { error: `This withdrawal is already ${r.status}.` } };
+        const user = (db.users || []).find((u: any) => String(u.id) === String(r.userId));
+        if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
+        if (action === 'APPROVE') {
+          r.status = 'COMPLETED';
+          r.payoutRef = sanitizeText(body.payoutRef, 80).trim();
+          pushNotification(db, {
+            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+            userId: String(user.id), type: 'SYSTEM_ALERT', title: 'BOOSTPAY-WITHDRAW',
+            message: `WITHDRAWAL PAID: $${Number(r.netUsd).toFixed(2)} sent via ${r.methodName}. Ref: ${r.id}`,
+            timestamp: Date.now(), isRead: false, metadata: { withdrawId: r.id },
+          } as any);
+        } else {
+          const refund = Number(Number(r.amountUsd).toFixed(8));
+          user.balance = Math.floor(((Number(user.balance) || 0) + refund) * 100 + 1e-9) / 100;
+          releaseBoostProfit(user, refund);
+          const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+          db.transactions.unshift({
+            id: txId, userId: user.id, type: 'WITHDRAW_REFUND', amount: refund, timestamp: Date.now(),
+            notes: `Withdrawal ${r.id} rejected — refunded`, referenceId: r.id,
+          });
+          r.status = 'REJECTED'; r.txId = txId;
+          pushNotification(db, {
+            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+            userId: String(user.id), type: 'TRANSFER_RECEIVED', title: 'BOOSTPAY-WITHDRAW',
+            message: `Withdrawal ${r.id} was rejected and $${refund.toFixed(2)} returned to your balance. ${sanitizeText(body.reason, 160) || 'Contact support.'} Balance: $${user.balance.toFixed(2)}`,
+            amount: refund, referenceId: txId, timestamp: Date.now(), isRead: false, metadata: { withdrawId: r.id },
+          } as any);
+        }
+        r.reviewedAt = Date.now();
+        r.reviewedBy = String(req.authAdmin);
+        r.reason = sanitizeText(body.reason, 200).trim();
+        recordAuditLog(db, `WITHDRAW_${r.status}`, String(req.authAdmin), `Withdrawal ${r.id} $${Number(r.amountUsd).toFixed(2)} ${r.status.toLowerCase()}`, String(user.id));
+        writeDb(db);
+        return { status: 200, body: { success: true, request: r } };
+      });
+      res.status(out.status).json(out.body);
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not review the withdrawal.' }); }
+  });
+
   // One-off (and re-runnable) move of bonuses that still sit in the retired bonus
   // wallet into the main balance. Dry-run by default.
   app.post('/api/admin/promo/bonus/to-main', rateLimit(20), requireAdmin, requireSuperAdmin, (req: any, res) => {
@@ -11561,21 +12026,9 @@ async function startServer() {
    * `lifetimeProfit` grows only from boost rewards + referral commission on boost
    * yield, so a plain agent deposit is NOT withdrawable until it has boosted.
    * The fee is charged on top and comes from the balance, never from this cap. */
-  const floor2 = (n: number) => Math.floor((Number(n) || 0) * 100 + 1e-9) / 100;
-  function boostWithdrawable(user: any): number {
-    if (!user) return 0;
-    const balance = floor2(user.balance);
-    const profitLeft = floor2((Number(user.lifetimeProfit) || 0) - (Number(user.boostProfitWithdrawn) || 0));
-    return floor2(Math.max(0, Math.min(balance, profitLeft)));
-  }
-  /** Take `amount` out of the withdrawable profit bucket (called once per payout). */
-  function holdBoostProfit(user: any, amount: number) {
-    user.boostProfitWithdrawn = round2((Number(user.boostProfitWithdrawn) || 0) + (Number(amount) || 0));
-  }
-  /** Give it back when a claim code is cancelled or expires (idempotent per payout). */
-  function releaseBoostProfit(user: any, amount: number) {
-    user.boostProfitWithdrawn = round2(Math.max(0, (Number(user.boostProfitWithdrawn) || 0) - (Number(amount) || 0)));
-  }
+  // floor2 / boostWithdrawable / holdBoostProfit / releaseBoostProfit are defined once
+  // at module scope (above), so the deposit-withdraw block and the agent cash-out
+  // share exactly the same rule.
   function makeClaimCode(db: any): string {
     for (let attempt = 0; attempt < 50; attempt++) {
       let code = '';

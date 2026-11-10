@@ -39,6 +39,35 @@ def ip():
     return f'10.9.{_ip_counter[0] // 250}.{_ip_counter[0] % 250 + 1}'
 
 
+def grant_boost_profit(amount):
+    """Local test fixture: make boosted profit available so a withdrawal is legal."""
+    import json as _json
+    path = '/home/user/boostpay/data/boostpay_db.json'
+    data = _json.load(open(path))
+    for u in data.get('users', []):
+        if str(u.get('id')) == str(my_id):
+            u['lifetimeProfit'] = float(u.get('lifetimeProfit') or 0) + float(amount)
+    _json.dump(data, open(path, 'w'), indent=1)
+
+
+def set_withdraw_enabled(method_id, flag, admin_token):
+    return req('/api/admin/payment-methods',
+               {'id': method_id, 'withdrawEnabled': flag}, token=admin_token, ip_addr=ip())
+
+
+def wallet_balance():
+    """Reads the signed-in journey account straight from the local JSON db."""
+    import json as _json
+    try:
+        data = _json.load(open('/home/user/boostpay/data/boostpay_db.json'))
+    except Exception:
+        return None
+    for u in data.get('users', []):
+        if str(u.get('id')) == str(my_id):
+            return float(u.get('balance') or 0)
+    return None
+
+
 def req(path, body=None, token=None, ip_addr=None):
     data = json.dumps(body).encode() if body is not None else None
     headers = {'content-type': 'application/json'}
@@ -2191,6 +2220,106 @@ s, j = req('/api/user/send-to-agent',
 ck('an amount in someone else\'s currency is refused',
    s == 400 and 'Switch your display currency' in str(j.get('error') or ''), f"{s} {str(j.get('error') or '')[:60]}",
    'HIGH', 'A request can pick its own exchange rate.')
+
+# ---------------------------------------------------------------------------
+# 33. money in and out: deposit requests, withdrawals and the admin queue
+# ---------------------------------------------------------------------------
+print("\n[33. deposits and withdrawals end to end]")
+
+_pm = f'PM-J33-{_RUN_TAG}'
+s, j = req('/api/admin/payment-methods',
+           {'id': _pm, 'name': 'Journey Wallet', 'category': 'EWALLET',
+            'currencies': ['*'], 'accountNumber': '01712345678', 'accountName': 'BoostPay',
+            'minDeposit': 5, 'maxDeposit': 500, 'minWithdraw': 5, 'maxWithdraw': 500,
+            'feePercent': 1, 'processingTime': 'Within 30 minutes'},
+           token=_rs31, ip_addr=ip())
+ck('an admin can publish a payment method', s == 200, f"{s} {j}", 'HIGH', 'Methods cannot be configured.')
+
+s, j = req('/api/payment/methods?mode=deposit', token=tok_new, ip_addr=ip())
+_listed = [m for m in j.get('methods', []) if m.get('id') == _pm]
+ck('the published method reaches the deposit catalogue', s == 200 and len(_listed) == 1,
+   f"{s} {len(_listed)}", 'HIGH', 'Users cannot deposit through the new method.')
+_m = _listed[0] if _listed else {}
+ck('the catalogue card carries everything the user must see',
+   bool(_m.get('payTo', {}).get('accountNumber')) and _m.get('min') == 5
+   and _m.get('processingTime') and _m.get('recommended') is not None,
+   f"{_m.get('min')} {_m.get('processingTime')}", 'HIGH',
+   'The card is missing limits / pay-to / processing time.')
+
+s, j = req('/api/payment/methods?mode=withdraw', token=tok_new, ip_addr=ip())
+ck('the method is offered for withdrawal while withdrawals are open',
+   _pm in [m.get('id') for m in j.get('methods', [])], f"{s}", 'LOW',
+   'A withdrawal-enabled method is missing from the payout catalogue.')
+set_withdraw_enabled(_pm, False, _rs31)
+s, j = req('/api/payment/methods?mode=withdraw', token=tok_new, ip_addr=ip())
+ck('closing withdrawals on a method hides it from the payout tab only',
+   _pm not in [m.get('id') for m in j.get('methods', [])], f"{s}", 'HIGH',
+   'The withdraw switch does not hide the method.')
+s, j = req('/api/payment/methods?mode=deposit', token=tok_new, ip_addr=ip())
+ck('the same method still accepts deposits after its withdraw switch is closed',
+   _pm in [m.get('id') for m in j.get('methods', [])], f"{s}", 'HIGH',
+   'The withdraw switch also closed deposits.')
+set_withdraw_enabled(_pm, True, _rs31)
+
+_dep_bal = wallet_balance()
+s, j = req('/api/user/deposit-request',
+           {'methodId': _pm, 'amount': 20, 'reference': f'JR33{_RUN_TAG}',
+            'idempotencyKey': f'j33-{_RUN_TAG}'}, tok_new, ip_addr=ip())
+_dep_id = (j.get('request') or {}).get('id')
+ck('a deposit becomes a PENDING request without touching the balance',
+   s == 200 and (j.get('request') or {}).get('status') == 'PENDING' and wallet_balance() == _dep_bal,
+   f"{s} status={(j.get('request') or {}).get('status')} bal={wallet_balance()}", 'CRITICAL',
+   'A deposit credited the wallet before any verification.')
+
+s, j = req('/api/admin/payment-requests?type=deposit&status=PENDING', token=_rs31, ip_addr=ip())
+ck('the deposit lands in the admin queue', any((r.get('id') == _dep_id) for r in (j.get('requests') or [])),
+   f"{s} {_dep_id}", 'HIGH', 'Admins cannot see pending deposits.')
+
+s, j = req('/api/admin/payment-requests/deposit/review', {'id': _dep_id, 'action': 'APPROVE'}, _rs31, ip_addr=ip())
+ck('approving a deposit credits the wallet exactly once',
+   s == 200 and abs(wallet_balance() - (_dep_bal + 20)) < 1e-6, f"{s} bal={wallet_balance()}", 'CRITICAL',
+   'Approved deposits do not credit, or credit twice.')
+s, j = req('/api/admin/payment-requests/deposit/review', {'id': _dep_id, 'action': 'APPROVE'}, _rs31, ip_addr=ip())
+ck('a second approval is refused and credits nothing',
+   s == 409 and abs(wallet_balance() - (_dep_bal + 20)) < 1e-6, f"{s} bal={wallet_balance()}", 'CRITICAL',
+   'Double approval creates money.')
+
+s, j = req('/api/user/deposit-request',
+           {'methodId': _pm, 'amount': 20, 'reference': f'JR33{_RUN_TAG}', 'idempotencyKey': f'j33b-{_RUN_TAG}'},
+           tok_new, ip_addr=ip())
+ck('the same reference cannot be reused for a second deposit', s == 409, f"{s} {j}", 'CRITICAL',
+   'The same bank reference can be claimed twice.')
+
+grant_boost_profit(100)
+s, j = req('/api/user/withdraw-request',
+           {'methodId': _pm, 'amount': 15, 'destination': {'accountNumber': '01799999999', 'accountName': 'Journey'},
+            'idempotencyKey': f'j33w-{_RUN_TAG}'}, tok_new, ip_addr=ip())
+_wd_id = (j.get('request') or {}).get('id')
+ck('a withdrawal is accepted, debited and held as PENDING',
+   s == 200 and (j.get('request') or {}).get('status') == 'PENDING'
+   and abs(wallet_balance() - (_dep_bal + 20 - 15)) < 1e-6,
+   f"{s} bal={wallet_balance()} err={str(j.get('error') or '')[:90]}", 'CRITICAL', 'Withdrawals are not debited atomically.')
+
+s, j = req('/api/user/withdraw-request',
+           {'methodId': _pm, 'amount': 15, 'destination': {'accountNumber': '01799999999', 'accountName': 'Journey'},
+            'idempotencyKey': f'j33w-{_RUN_TAG}'}, tok_new, ip_addr=ip())
+ck('the same withdrawal key cannot debit twice',
+   abs(wallet_balance() - (_dep_bal + 20 - 15)) < 1e-6, f"{s} bal={wallet_balance()}", 'CRITICAL',
+   'A retried withdrawal debits twice.')
+
+s, j = req('/api/admin/payment-requests/withdraw/review',
+           {'id': _wd_id, 'action': 'REJECT', 'reason': 'journey check'}, _rs31, ip_addr=ip())
+ck('a rejected withdrawal refunds the held amount',
+   s == 200 and abs(wallet_balance() - (_dep_bal + 20)) < 1e-6, f"{s} bal={wallet_balance()}", 'CRITICAL',
+   'Rejected withdrawals keep the money.')
+s, j = req('/api/admin/payment-requests/withdraw/review',
+           {'id': _wd_id, 'action': 'REJECT', 'reason': 'twice'}, _rs31, ip_addr=ip())
+ck('the same rejection cannot refund twice',
+   s == 409 and abs(wallet_balance() - (_dep_bal + 20)) < 1e-6, f"{s} bal={wallet_balance()}", 'CRITICAL',
+   'A repeated rejection refunds twice.')
+
+s, j = req('/api/admin/payment-methods/delete', {'id': _pm}, _rs31, ip_addr=ip())
+ck('the temporary method can be removed again', s == 200, f"{s} {j}", 'LOW', 'Methods cannot be deleted.')
 
 req('/api/admin/currency/config', {'manualRates': {}}, token=_rs31, ip_addr=ip())
 

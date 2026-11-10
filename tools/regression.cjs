@@ -158,6 +158,43 @@ const ck = (name, ok, extra = '') => {
   const wait = await req('/api/admin/login', { email: ADMIN.email, password: ADMIN.password });
   ck('admin login still works', !!wait.d.token);
 
+  // ── 8. Deposit / withdrawal pipeline (Job 8) ───────────────────────────────
+  console.log('\n[8] deposits and withdrawals');
+  // the MFA section above invalidates earlier admin sessions, so sign in again
+  const aTok8 = ((await req('/api/admin/login', ADMIN)).d || {}).token;
+  const balance = async () => {
+    const r = await req('/api/db?slim=1&only=stream', null, t1());
+    return Number(((r.d && r.d.me) || {}).balance || 0);
+  };
+  const mid = 'PM-REG-' + Date.now();
+  const mk = await req('/api/admin/payment-methods', {
+    id: mid, name: 'Regression Wallet', category: 'EWALLET', currencies: ['*'],
+    accountNumber: '01700000001', accountName: 'BoostPay', minDeposit: 1, maxDeposit: 100,
+    minWithdraw: 1, maxWithdraw: 100, feePercent: 1
+  }, aTok8);
+  ck('an admin can create a payment method', mk.s === 200, `status=${mk.s}`);
+  const b0 = await balance();
+  const dep = await req('/api/user/deposit-request', { methodId: mid, amount: 10, reference: 'REG' + Date.now() }, t1());
+  ck('a deposit is pending and does not move the balance yet', dep.s === 200 && (await balance()) === b0, `status=${dep.s} bal=${await balance()}`);
+  const dupRef = await req('/api/user/deposit-request', { methodId: mid, amount: 10, reference: (dep.d.request || {}).reference || '' }, t1());
+  ck('the same deposit reference is refused the second time', dupRef.s === 409, `status=${dupRef.s}`);
+  const appr = await req('/api/admin/payment-requests/deposit/review', { id: (dep.d.request || {}).id, action: 'APPROVE' }, aTok8);
+  ck('approving credits the wallet once', appr.s === 200 && Math.abs((await balance()) - (b0 + 10)) < 1e-6, `status=${appr.s} bal=${await balance()}`);
+  const appr2 = await req('/api/admin/payment-requests/deposit/review', { id: (dep.d.request || {}).id, action: 'APPROVE' }, aTok8);
+  ck('a second approval is refused', appr2.s === 409, `status=${appr2.s}`);
+  const wd = await req('/api/user/withdraw-request', {
+    methodId: mid, amount: 5, destination: { accountName: 'Regression', accountNumber: '01700000009' }
+  }, t1());
+  const bAfterWd = await balance();
+  ck('a withdrawal debits immediately', wd.s === 200 && Math.abs(bAfterWd - (b0 + 5)) < 1e-6, `status=${wd.s} bal=${bAfterWd}`);
+  const rej = await req('/api/admin/payment-requests/withdraw/review', { id: (wd.d.request || {}).id, action: 'REJECT', reason: 'regression' }, aTok8);
+  ck('rejecting a withdrawal refunds it', rej.s === 200 && Math.abs((await balance()) - (b0 + 10)) < 1e-6, `status=${rej.s} bal=${await balance()}`);
+  const rej2 = await req('/api/admin/payment-requests/withdraw/review', { id: (wd.d.request || {}).id, action: 'REJECT' }, aTok8);
+  ck('a second rejection cannot refund twice', rej2.s === 409 && Math.abs((await balance()) - (b0 + 10)) < 1e-6, `status=${rej2.s} bal=${await balance()}`);
+  ck('a normal user cannot review requests', (await req('/api/admin/payment-requests/deposit/review', { id: 'x', action: 'APPROVE' }, t1())).s === 401);
+  const del = await req('/api/admin/payment-methods/delete', { id: mid }, aTok8);
+  ck('the temporary method can be deleted', del.s === 200, `status=${del.s}`);
+
   console.log(`\nRESULT ${pass} pass / ${fail} fail`);
   process.exit(fail ? 1 : 0);
 })().catch((e) => {

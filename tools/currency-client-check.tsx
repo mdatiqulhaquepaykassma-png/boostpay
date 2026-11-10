@@ -105,8 +105,9 @@ async function main() {
    *  "which currency am I typing in" branch, and explanatory comments. */
   const ALLOW = [
     /^\s*(\/\/|\*|\/\*)/,                 // comment
-    /\.code !== 'USD'/,                      // converted-vs-USD branch
-    /=== 'USD'/,                             // entry-currency branch
+    /(code|entryCode) !== 'USD'/,            // converted-vs-USD branch
+    /(code|entryCode) === 'USD'/,            // entry-currency branch
+    /kept in USD/,                           // explanatory prose
     /USD in your wallet/,                    // the intentionally kept USD base line
     /`\$\$\{formatPrecisionAmount\(tx\.amount, 8\)\} USD`/, // small USD reference under a converted row
     /stored in USD|converts to USD/,         // prose

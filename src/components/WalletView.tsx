@@ -1,5 +1,5 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
-import { Zap, Pause, Play, Send, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut, Settings, Store
+import { Zap, Pause, Play, Send, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut, Settings, Store, ArrowDownToLine
 } from 'lucide-react';
 import { BoostPlanStrip } from './BoostPlanStrip';
 import { BoostPayStore } from '../services/store';
@@ -40,6 +40,8 @@ interface BalanceCardProps {
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
   onOpenAgentPay?: () => void;
+  onOpenDeposit?: () => void;
+  onOpenWithdraw?: () => void;
 }
 
 const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
@@ -53,6 +55,8 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   onOpenSendMoney,
   onOpenQR,
   onOpenAgentPay,
+  onOpenDeposit,
+  onOpenWithdraw,
 }) => {
   const isRunning = boostState.isActive && !boostState.isPaused;
   const [liveAccrued, setLiveAccrued] = useState(0);
@@ -233,24 +237,36 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
           )}
         </div>
 
-        {onOpenAgentPay && (
-          <button
-            onClick={onOpenAgentPay}
-            disabled={isRunning}
-            className={`mt-2 w-full h-10 rounded-2xl text-[11px] font-bold transition flex items-center justify-center gap-2 cursor-pointer border ${
-              isRunning
-                ? 'border-zinc-800 bg-zinc-950 text-zinc-600 cursor-not-allowed'
-                : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/15 active:scale-[0.99]'
-            }`}
-          >
-            <Store className="w-3.5 h-3.5" />
-            Withdraw
-            {agentUnread > 0 && (
-              <span className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-sky-400 px-1 text-[9px] font-black text-zinc-950">
-                {agentUnread > 9 ? '9+' : agentUnread}
-              </span>
-            )}
-          </button>
+        {/* Deposit sits immediately to the left of Withdraw, same size (owner request).
+            Both open the full payment page. */}
+        {(onOpenDeposit || onOpenWithdraw || onOpenAgentPay) && (
+          <div className="mt-2 grid grid-cols-2 gap-2.5">
+            <button
+              onClick={onOpenDeposit}
+              disabled={!onOpenDeposit}
+              className="h-10 rounded-2xl border border-sky-500/30 bg-sky-500/10 text-[11px] font-bold text-sky-200 transition flex items-center justify-center gap-2 cursor-pointer hover:bg-sky-500/15 active:scale-[0.99] disabled:opacity-40"
+            >
+              <ArrowDownToLine className="w-3.5 h-3.5" />
+              Deposit
+            </button>
+            <button
+              onClick={onOpenWithdraw || onOpenAgentPay}
+              disabled={isRunning}
+              className={`h-10 rounded-2xl text-[11px] font-bold transition flex items-center justify-center gap-2 cursor-pointer border ${
+                isRunning
+                  ? 'border-zinc-800 bg-zinc-950 text-zinc-600 cursor-not-allowed'
+                  : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/15 active:scale-[0.99]'
+              }`}
+            >
+              <Store className="w-3.5 h-3.5" />
+              Withdraw
+              {agentUnread > 0 && (
+                <span className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-sky-400 px-1 text-[9px] font-black text-zinc-950">
+                  {agentUnread > 9 ? '9+' : agentUnread}
+                </span>
+              )}
+            </button>
+          </div>
         )}
       </div>
     </div>
@@ -489,6 +505,8 @@ interface Props {
   onOpenSendMoney: () => void;
   onOpenQR?: () => void;
   onOpenAgentPay?: () => void;
+  onOpenDeposit?: () => void;
+  onOpenWithdraw?: () => void;
   onOpenSecurity?: () => void;
   onOpenInbox?: () => void;
   onOpenSettings?: () => void;
@@ -503,6 +521,8 @@ export const WalletView: FC<Props> = ({
   onOpenSendMoney,
   onOpenQR,
   onOpenAgentPay,
+  onOpenDeposit,
+  onOpenWithdraw,
   onOpenSecurity,
   onOpenInbox,
   onOpenSettings,
@@ -620,6 +640,8 @@ export const WalletView: FC<Props> = ({
         onOpenSendMoney={onOpenSendMoney}
         onOpenQR={onOpenQR}
         onOpenAgentPay={onOpenAgentPay}
+        onOpenDeposit={onOpenDeposit}
+        onOpenWithdraw={onOpenWithdraw}
       />
 
       {/* Compact "today" strip: cycle countdown + income projection in one row */}

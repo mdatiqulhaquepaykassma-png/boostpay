@@ -20,6 +20,7 @@ import { PWAInstallHelp } from './components/PWAInstallHelp';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import { P2PTransferModal } from './components/P2PTransferModal';
 import { AgentPayModal } from './components/AgentPayModal';
+import { PaymentsPage } from './components/PaymentsPage';
 import { WalletSkeleton } from './components/WalletSkeleton';
 import { SecurityModal } from './components/SecurityModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -47,6 +48,9 @@ function AppInner() {
 
   // Modals state
   const [isSendMoneyOpen, setIsSendMoneyOpen] = useState(false);
+  // Full-page Deposit / Withdraw. The open tab lives in the URL (#/deposit, #/withdraw)
+  // so the browser back button closes it instead of leaving the wallet.
+  const [paymentsMode, setPaymentsMode] = useState<'deposit' | 'withdraw' | null>(null);
   const [isAgentPayOpen, setIsAgentPayOpen] = useState(false);
   const [agentPayView, setAgentPayView] = useState<'PAY' | 'CHAT'>('PAY');
 
@@ -360,6 +364,37 @@ function AppInner() {
     return () => { window.fetch = origFetch; };
   }, []);
 
+  const paymentsModeRef = useRef<'deposit' | 'withdraw' | null>(null);
+  paymentsModeRef.current = paymentsMode;
+
+  const openPayments = (m: 'deposit' | 'withdraw') => {
+    setPaymentsMode(m);
+    try { history.pushState({ payments: m }, '', `#/${m}`); } catch { /* ignore */ }
+  };
+  const closePayments = () => {
+    setPaymentsMode(null);
+    try {
+      if (location.hash === '#/deposit' || location.hash === '#/withdraw') history.back();
+      else history.replaceState(null, '', location.pathname + location.search);
+    } catch { /* ignore */ }
+  };
+
+  // deep link + browser back/forward
+  useEffect(() => {
+    const sync = () => {
+      const h = String(location.hash || '');
+      if (h === '#/deposit' || h === '#/withdraw') setPaymentsMode(h === '#/deposit' ? 'deposit' : 'withdraw');
+      else setPaymentsMode(null);
+    };
+    sync();
+    window.addEventListener('popstate', sync);
+    window.addEventListener('hashchange', sync);
+    return () => {
+      window.removeEventListener('popstate', sync);
+      window.removeEventListener('hashchange', sync);
+    };
+  }, []);
+
   const handleUserLogin = (user: User) => {
     BoostPayStore.setCurrentUser(user);
     setCurrentUser(user);
@@ -524,6 +559,8 @@ function AppInner() {
                   onOpenSendMoney={() => setIsSendMoneyOpen(true)}
                   onOpenQR={() => setIsQROpen(true)}
                   onOpenAgentPay={() => { setAgentPayView('PAY'); setIsAgentPayOpen(true); }}
+                  onOpenDeposit={() => openPayments('deposit')}
+                  onOpenWithdraw={() => openPayments('withdraw')}
                   onOpenSecurity={() => setIsSecurityOpen(true)}
                   onOpenSettings={() => setIsSettingsOpen(true)}
                   onOpenInbox={() => {
@@ -651,6 +688,17 @@ function AppInner() {
             </div>
           </nav>
         </div>
+      )}
+
+      {paymentsMode && (
+        <PaymentsPage
+          isOpen={!!paymentsMode}
+          initialMode={paymentsMode}
+          onClose={closePayments}
+          onOpenAgentPay={() => { setAgentPayView('PAY'); setIsAgentPayOpen(true); }}
+          onOpenAgentChat={() => { setAgentPayView('CHAT'); setIsAgentPayOpen(true); }}
+          onModeChange={(m) => { setPaymentsMode(m); try { history.pushState({ payments: m }, '', `#/${m}`); } catch { /* ignore */ } }}
+        />
       )}
 
       {/* Withdraw — cash out through a BoostPay agent */}
