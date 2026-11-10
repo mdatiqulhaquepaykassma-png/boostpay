@@ -33,10 +33,26 @@ type Ctx = {
 };
 
 const CurrencyCtx = createContext<Ctx | null>(null);
-const TOKEN_KEY = 'boostpay_token';
+
+/**
+ * The user app keeps its API token in `boostpay_auth_token_v1` (see
+ * services/store.ts → STORAGE_AUTH_TOKEN). Reading the wrong key here meant the
+ * preference POST went out unauthenticated, the server answered 401, and the
+ * global "any 401 = session expired" handler signed the user out mid-tap.
+ * The old names are kept as fallbacks only.
+ */
+const TOKEN_KEYS = ['boostpay_auth_token_v1', 'boostpay_token', 'token'];
+
+function authToken(): string {
+  for (const k of TOKEN_KEYS) {
+    const v = localStorage.getItem(k);
+    if (v) return v;
+  }
+  return '';
+}
 
 function authHeaders(): Record<string, string> {
-  const t = localStorage.getItem(TOKEN_KEY) || localStorage.getItem('token') || '';
+  const t = authToken();
   return t ? { authorization: `Bearer ${t}` } : {};
 }
 
@@ -68,6 +84,8 @@ export function CurrencyProvider({ children, token }: { children: React.ReactNod
 
   const setCurrency = useCallback(async (code: string) => {
     try {
+      // Signed out: never fire the call — a 401 would bounce the app to login.
+      if (!authToken()) return false;
       const r = await fetch('/api/user/currency', {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...authHeaders() },

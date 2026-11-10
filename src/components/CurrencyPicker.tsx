@@ -11,6 +11,7 @@ export default function CurrencyPicker({ compact = false }: { compact?: boolean 
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
 
   const list = useMemo(() => {
     const rows = (options?.currencies || []).filter((c) => c.enabled);
@@ -24,10 +25,11 @@ export default function CurrencyPicker({ compact = false }: { compact?: boolean 
   }, [options, q]);
 
   const pick = async (code: string) => {
-    setBusy(true);
+    setBusy(true); setErr('');
     const ok = await setCurrency(code);
     setBusy(false);
     if (ok) { setOpen(false); setQ(''); }
+    else setErr('Could not save. Please try again.');
   };
 
   return (
@@ -79,6 +81,7 @@ export default function CurrencyPicker({ compact = false }: { compact?: boolean 
               </button>
             ))}
           </div>
+          {err && <div className="border-t border-zinc-800 px-2 py-1 text-[10px] text-red-400">{err}</div>}
           {rateNote() && (
             <div className="border-t border-zinc-800 px-2 py-1 text-[9px] leading-relaxed text-zinc-500">{rateNote()}</div>
           )}

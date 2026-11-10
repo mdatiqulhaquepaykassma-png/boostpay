@@ -90,3 +90,46 @@ BD হেডার → BDT (`source=COUNTRY`); US → USD; AE → AED; অজা
 2. Leaderboard / Referral tree / Inbox+chat / Agent-pay স্ক্রিন এখনো USD ফরম্যাটে (REPORT_68 §6-এর তালিকা)। আপনি বললেই একই `useCurrency()` দিয়ে কনভার্ট করব।
 3. Promotion কনসোল এখনো USD-তে।
 4. রোলব্যাক পথ: `git revert` এই কমিট; ডেটাবেসে কোনো স্কিমা বদল নেই (শুধু `currencySource`, `currencyCountry`, `currencySetAt`, `db.geoCache`, `db.currencyConfig.autoDetect/geoProvider` — সবই অ্যাডিটিভ ফিল্ড)।
+
+---
+
+## ১০. হটফিক্স — "কারেন্সি সিলেক্ট করলে লগআউট হয়ে সাইনআপ পেজে চলে যাচ্ছে" (2026-11-10)
+
+**আপনার রিপোর্ট:** কারেন্সি বেছে নেওয়া মাত্র লগআউট হয়ে সাইনআপ/লগইন পেজে চলে যাচ্ছে।
+
+**কারণ (Confirmed):** ইউজার অ্যাপের নতুন `src/lib/currency.tsx` টোকেন পড়ছিল `boostpay_token` কী থেকে, কিন্তু অ্যাপ আসলে টোকেন রাখে `boostpay_auth_token_v1`-এ (`services/store.ts` → `STORAGE_AUTH_TOKEN`)। ফলে:
+
+1. `POST /api/user/currency` হেডারে কোনো টোকেন ছাড়াই যাচ্ছিল,
+2. সার্ভার `requireUser` → **401** ফিরিয়ে দিচ্ছিল,
+3. `App.tsx`-এর গ্লোবাল "যেকোনো 401 = সেশন শেষ" হ্যান্ডলার সাথে সাথে `setCurrentUser(null)` করে টোস্ট দেখিয়ে লগইন স্ক্রিনে পাঠাচ্ছিল।
+
+অর্থাৎ কারেন্সি সেভ হচ্ছিল না, আর ৪০১-এর কারণে ইউজার লগআউট হয়ে যাচ্ছিল। সার্ভার সাইড ঠিকই ছিল — লোকাল journey §30/§31-এ টোকেন দিয়ে POST 200-ই দিচ্ছিল।
+
+**সেইম ধরনের আরেকটি বাগ (একই রিলিজে ধরা পড়েছে):** অ্যাডমিন কনসোলের `CurrencyAdmin.tsx` টোকেন খুঁজছিল `admin_token` / `token`-এ — এই কী দুটো কোথাও লেখা হয় না। ফলে Currency ট্যাবের সব কল ৪০১-এ যাচ্ছিল (লোড/সেভ দুটোই)।
+
+**ফিক্স (Confirmed, লোকাল টেস্টে প্রমাণিত):**
+
+| ফাইল | পরিবর্তন |
+|---|---|
+| `src/lib/currency.tsx` | টোকেন কী ক্রম: `boostpay_auth_token_v1` → `boostpay_token` → `token` (পুরোনো সেশনও কাজ করবে)। টোকেন না থাকলে POST **একেবারে পাঠানো হয় না** — ৪০১ ঘটা অসম্ভব। |
+| `src/components/CurrencyPicker.tsx` | সেভ ব্যর্থ হলে চুপচাপ না থেকে "Could not save. Please try again." দেখায়। |
+| `admin-app/src/components/CurrencyAdmin.tsx` | একই কী-ঠিক: `boostpay_auth_token_v1` → `admin_token` → `token`। |
+| `agent-app/src/lib-currency.tsx` | চেক করা হয়েছে — `bpa_token_v1`, যা এজেন্ট অ্যাপ আসলেই লেখে। ঠিক আছে, বদলানো হয়নি। |
+
+**নতুন রিগ্রেশন টেস্ট:** `tools/currency-client-check.tsx` (react-dom/server দিয়ে প্রোভাইডার রেন্ডার করে সত্যিকারের হেডার যাচাই):
+
+```
+./node_modules/.bin/tsx tools/currency-client-check.tsx
+  PASS  choosing a currency posts to /api/user/currency
+  PASS  the request carries the real session token
+  PASS  the choice is sent as JSON
+  PASS  a successful save returns true
+  PASS  with no session the call is skipped entirely
+  PASS  and the picker is told it failed
+  PASS  an older session key still authenticates
+RESULT 8 pass / 0 fail
+```
+
+পুরোনো কোড ফিরিয়ে দিলে এই টেস্টই **4 fail** দেয় — অর্থাৎ বাগটি ধরা পড়ে (যাচাই করা হয়েছে)।
+
+**সাইড ইফেক্ট নেই:** শুধু টোকেন কী ও এরর মেসেজ বদলেছে; ওয়ালেট, লেজার, রেট, অটো-ডিটেকশন লজিকে হাত দেওয়া হয়নি। journey **389/0**, regression **42/0**, তিনটি বিল্ড ক্লিন।

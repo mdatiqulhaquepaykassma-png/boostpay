@@ -15,8 +15,16 @@ type Cfg = {
   currencies: Row[];
 };
 
+/**
+ * The console stores its bearer token under `boostpay_auth_token_v1`
+ * (services/store.ts → STORAGE_AUTH_TOKEN). The old names never existed, so every
+ * call on this screen went out unauthenticated and the API answered 401.
+ */
+const TOKEN_KEYS = ['boostpay_auth_token_v1', 'admin_token', 'token'];
+
 function authHeaders(): Record<string, string> {
-  const t = localStorage.getItem('admin_token') || localStorage.getItem('token') || '';
+  let t = '';
+  for (const k of TOKEN_KEYS) { const v = localStorage.getItem(k); if (v) { t = v; break; } }
   return { 'content-type': 'application/json', ...(t ? { authorization: `Bearer ${t}` } : {}) };
 }
 
