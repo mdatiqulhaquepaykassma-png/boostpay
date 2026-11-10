@@ -25,7 +25,12 @@ export default defineConfig(() => {
           // public/sw.js at all.
           importScripts: ['push-sw.js'],
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          // /app is the installable entry point and must ALWAYS come from the
+          // server (its HTML links /app/manifest.json). Letting the worker's
+          // navigation fallback answer it returned the cached "/" page, so the
+          // browser installed the root manifest and the icon opened "/".
           navigateFallback: '/index.html',
+          navigateFallbackDenylist: [/^\/app(\/|$)/],
           clientsClaim: true,
           skipWaiting: true,
           cleanupOutdatedCaches: true

@@ -7,23 +7,37 @@
   "scope": "/",
   "display": "standalone",
   "display_override": [
-    "window-controls-overlay",
-    "standalone"
+    "standalone",
+    "minimal-ui"
   ],
-  "prefer_related_applications": false,
+  "orientation": "portrait",
   "background_color": "#09090b",
   "theme_color": "#09090b",
-  "orientation": "portrait-primary",
+  "lang": "en",
+  "dir": "ltr",
+  "prefer_related_applications": false,
+  "categories": [
+    "finance",
+    "utilities"
+  ],
   "icons": [
     {
       "src": "/pwa-192x192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
-  ],
-  "categories": [
-    "finance",
-    "utilities"
   ]
 }

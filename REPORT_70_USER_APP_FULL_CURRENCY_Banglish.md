@@ -295,3 +295,55 @@ journey **389/0**, regression **42/0**, tsc ও build clean। লাইভ ব�
 
 ### ১৪.৫ সার্বিক টেস্ট (এই পরিবর্তনের পর)
 payments-check **40/0** · payments-ui-check **18/0** · user-journey **409/0** · regression **52/0** · currency-client-check **23/0** · system-check ক্লিন · user/admin/agent তিন বিল্ড ক্লিন।
+
+---
+
+## ১৫. প্রতিটা অ্যাপের জন্য `/app` লিংক — সেখান থেকে সোজা PWA ইনস্টল (2026-11-10)
+
+### ১৫.১ এখন যে যে লিংক কাজ করে
+| অ্যাপ | ইনস্টল লিংক |
+|---|---|
+| ইউজার অ্যাপ | `https://boostpay.online/app` |
+| অ্যাডমিন কনসোল | `https://admin.boostpay.online/app` |
+| এজেন্ট কনসোল | `https://agent.boostpay.online/app` |
+| ম্যানেজমেন্ট | `https://management.boostpay.online/app` |
+| সাপোর্ট চ্যাট | `https://supportchat.boostpay.online/app` |
+| প্রমোশন | `https://promotion.boostpay.online/app` |
+| ডিবি স্টুডিও (ইন্টারনাল) | `https://db.boostpay.online/app` |
+
+লিংকটা খুললেই ফোনে/ডেস্কটপে **"Install app"** শীট আসে (Chrome/Edge/Android) বা iOS Safari-তে **Share → Add to Home Screen**। ইনস্টল হওয়া আইকনে চাপলে অ্যাপ `/app` থেকেই খোলে, ব্রাউজার বার ছাড়া (standalone)।
+
+### ১৫.২ কীভাবে কাজ করে (মূল ফাইলগুলো)
+- **`GET /app`** — অ্যাপটার নিজের পেজ (SPA)। নতুন সার্ভার কোড কনসোল ৬টার `server.ts`-এ, আর ইউজার অ্যাপের `server.ts`-এ (`/app` + `/app/manifest.json`)।
+- **`GET /app/manifest.json`** — আসল ম্যানিফেস্টের কপি, শুধু `start_url` = `/app`। `scope` আগের মতোই `/`, আর `id` অপরিবর্তিত — তাই আগে যারা ইনস্টল করেছেন তাদের অ্যাপ **আপডেট** হয় (হোম স্ক্রিনে ডাবল আইকন তৈরি হয় না)।
+- **`dist/app.html`** — বিল্ডের সময় তৈরি হয়: `index.html`-এর ম্যানিফেস্ট লিংক `/app/manifest.json`-এ ঘুরিয়ে দেওয়া হয় (`tools/make-app-files.mjs`, প্রতিটা কনসোলের `npm run build`-এ স্বয়ংক্রিয়)।
+- **আইকন:** প্রতিটা অ্যাপে এখন সত্যিকারের **192×192 ও 512×512 PNG** (`tools/make-app-icons.py` আইকন SVG থেকে রেন্ডার করে)। আগে agent/management/support/db-studio-তে শুধু SVG ছিল — সেটা অনেক ফোনে ইনস্টল শীটই দেখাত না। db-studio-তে সার্ভিস ওয়ার্কারও ছিল না, যোগ করা হয়েছে (`db-studio/public/sw.js` + রেজিস্ট্রেশন)।
+- সার্ভিস ওয়ার্কার আগের `/sw.js`-ই থাকে, স্কোপ `/`; `/app`-ও তার আওতায়, তাই নতুন কোনো দ্বিতীয় ওয়ার্কার নেই।
+
+### ১৫.৩ পথে যে আসল বাগটা ধরা পড়ল
+প্রথম চেষ্টায় `/app` ঠিক দেখাচ্ছিল, কিন্তু ব্রাউজার ইনস্টল করছিল **পুরোনো `/manifest.json`** (start_url `/`)। কারণ ইউজার অ্যাপের workbox সার্ভিস ওয়ার্কারের navigate-fallback `/app`-কেও ধরে ক্যাশ করা `/` পেজটা ফেরত দিচ্ছিল — তাই আমাদের `/app` HTML-ই ব্রাউজার পর্যন্ত পৌঁছাত না।
+**সমাধান:** `vite.config.ts`-এ `navigateFallbackDenylist: [/^\/app(\/|$)/]` — এখন `/app` সবসময় সার্ভার থেকেই আসে (ইনস্টল করা ম্যানিফেস্ট = `/app/manifest.json`)।
+
+### ১৫.৪ নতুন টেস্ট — `tools/install-app-check.py` (৭ অ্যাপে **105/0**)
+JSON চোখে দেখে নয়, **Chromium-কেই জিজ্ঞেস** করা হয় (CDP `Page.getAppManifest` + `Page.getInstallabilityErrors`)। প্রতিটা অ্যাপে ১৫টা চেক:
+1. `/app` → 200 HTML, পেজটা `/app/manifest.json`-এ পয়েন্ট করে
+2. ম্যানিফেস্ট ভ্যালিড, `start_url=/app`, `display=standalone`, নাম+শর্ট নাম আছে
+3. 192 ও 512 PNG আইকন **আসলেই ডাউনলোড হয়** (image/png)
+4. সার্ভিস ওয়ার্কার রেজিস্টার্ড ও active (scope `/`)
+5. Chromium-এর ম্যানিফেস্ট পার্স এরর = ০, **installability errors = ০**
+6. লোডের সময় কোনো আনকট এরর নেই
+
+চালানো:
+```
+sh tools/pwlibs-link.sh
+LD_LIBRARY_PATH=/home/user/pwlibs/root/usr/lib/x86_64-linux-gnu python3 tools/install-app-check.py
+# লাইভে: python3 tools/install-app-check.py https://boostpay.online https://agent.boostpay.online …
+```
+
+### ১৫.৫ সীমাবদ্ধতা (সত্যি কথা)
+- **iOS Safari**-তে স্বয়ংক্রিয় ইনস্টল প্রম্পট নেই (অ্যাপলের নিয়ম) — Share → Add to Home Screen করতে হবে। ম্যানিফেস্ট ও আইকন ঠিক থাকায় সেটাও কাজ করে।
+- ইনস্টল প্রম্পট আসতে **HTTPS লাগে** (লাইভে আছে); ইনকগনিটোতে বা "already installed" অবস্থায় প্রম্পট আসে না।
+- পুরোনো ইনস্টলের ক্ষেত্রে ব্রাউজার কিছু সময় ধরে আগের start_url ব্যবহার করতে পারে; একবার আনইনস্টল করে নতুন করে ইনস্টল করলে `/app` থেকেই খুলবে।
+
+### ১৫.৬ সার্বিক টেস্ট
+install-app-check **105/0** · payments-ui-check **18/0** · payments-check **40/0** · user-journey **409/0** · regression **52/0** · currency-client-check **23/0** · system-check ক্লিন · ৭ অ্যাপের বিল্ড ক্লিন।

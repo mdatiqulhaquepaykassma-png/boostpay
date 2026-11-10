@@ -58,6 +58,27 @@ app.use('/api', async (req, res) => {
 });
 
 const distDir = path.resolve(process.cwd(), 'dist');
+
+/**
+ * GET /app — the installable entry point (owner request 2026-11-10).
+ *
+ * Opening https://<host>/app gives the phone's native "Install app" sheet: the
+ * page is this app's normal SPA, and /app-manifest.json is a copy of the real
+ * manifest whose start_url is /app, so the installed icon opens /app. The scope
+ * stays "/" and the existing service worker (/sw.js) already covers it, so an
+ * older install keeps working and nothing else on the host changes.
+ */
+app.get('/app', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  // app.html is index.html with the manifest link pointed at /app/manifest.json
+  res.sendFile(path.join(distDir, 'app.html'));
+});
+app.get('/app/manifest.json', (_req, res) => {
+  res.setHeader('Content-Type', 'application/manifest+json; charset=UTF-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(distDir, 'app-manifest.json'));
+});
+
 app.use(express.static(distDir));
 app.get('*', (_req, res) => {
   res.sendFile(path.join(distDir, 'index.html'));

@@ -13860,6 +13860,47 @@ const paymentLocks = new Map<string, Promise<any>>();
   const isProduction = process.env.NODE_ENV !== 'development';
   const server = http.createServer(app);
 
+  /**
+   * GET /app — installable entry point (owner request 2026-11-10).
+   *
+   * https://boostpay.online/app serves the normal user app, and
+   * /app/manifest.json is the app manifest with start_url "/app", so the phone
+   * offers the native "Install app" sheet and the installed icon opens /app.
+   * The scope stays "/" and the existing service worker keeps covering it, so
+   * current installs are upgraded rather than duplicated.
+   */
+  app.get('/app/manifest.json', (_req, res) => {
+    try {
+      const raw = fs.readFileSync(path.join(__dirname, 'public', 'manifest.json'), 'utf8');
+      const m = JSON.parse(raw);
+      m.start_url = '/app';
+      m.scope = '/';
+      res.setHeader('Content-Type', 'application/manifest+json; charset=UTF-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      return res.send(JSON.stringify(m));
+    } catch {
+      return res.status(500).json({ error: 'Manifest unavailable.' });
+    }
+  });
+  let appHtmlCache: { html: string; mtime: number } | null = null;
+  app.get('/app', (_req, res) => {
+    const built = path.join(__dirname, 'dist', 'index.html');
+    res.setHeader('Cache-Control', 'no-cache');
+    try {
+      const mtime = fs.statSync(built).mtimeMs;
+      if (!appHtmlCache || appHtmlCache.mtime !== mtime) {
+        // point the page at the /app manifest so the install launches /app
+        const html = fs.readFileSync(built, 'utf8')
+          .replace(/<link[^>]+rel=["']manifest["'][^>]*>/gi, '<link rel="manifest" href="/app/manifest.json" />');
+        appHtmlCache = { html, mtime };
+      }
+      res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+      return res.send(appHtmlCache.html);
+    } catch {
+      return res.redirect('/');   // development: no dist/, the normal app is fine
+    }
+  });
+
   if (!isProduction) {
     const vite = await createViteServer({
       server: {
