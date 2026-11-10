@@ -1,5 +1,5 @@
 import React, { FC, useState, useEffect, useRef, useMemo, memo, useCallback } from 'react';
-import { Zap, Pause, Play, Send, TrendingUp, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut, Settings, Store
+import { Zap, Pause, Play, Send, AlertCircle, Sparkles, History, QrCode, Copy, ShieldCheck, CheckCircle2, Inbox, LogOut, Settings, Store
 } from 'lucide-react';
 import { BoostPlanStrip } from './BoostPlanStrip';
 import { BoostPayStore } from '../services/store';
@@ -195,18 +195,10 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
           )}
         </div>
 
-        <div className="mt-2 flex items-center gap-2 min-h-[24px] flex-wrap">
-          {boostState.isActive && (
-            <span
-              className="flex items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold text-amber-300"
-              title={"Yield accrued in the current boosting cycle: +" + price(liveAccrued)}
-            >
-              <TrendingUp className="w-3 h-3 text-amber-400" />
-              <span className="font-mono">+{price(liveAccrued)}</span>
-              <span className="text-amber-400/70 font-medium">yield</span>
-            </span>
-          )}
-          {Number(bonusLocked) > 0 && (
+        {/* Owner request 2026-11-10: the live-yield chip and the Live/Paused badge are
+            gone from under the balance — the boosting card below already shows both. */}
+        {Number(bonusLocked) > 0 && (
+          <div className="mt-2 flex items-center gap-2 flex-wrap">
             <span
               className="flex items-center gap-1.5 rounded-full border border-amber-500/25 bg-amber-500/[0.08] px-2.5 py-1 text-[10px] font-semibold text-amber-300/90"
               title={`${price(Number(bonusLocked))} of your balance was a signup bonus (code ${bonusCode || ''}) and can only be boosted — it cannot be sent, paid to an agent or withdrawn. Profit you earn on top of it can be.`}
@@ -214,15 +206,8 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
               🎁 <span className="font-mono">{price(Number(bonusLocked))}</span>
               <span className="text-amber-400/70 font-medium">boost only</span>
             </span>
-          )}
-          {isRunning ? (
-            <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-400">
-              <span className="h-1 w-1 rounded-full bg-emerald-400 animate-pulse" /> Live
-            </span>
-          ) : boostState.isActive && boostState.isPaused ? (
-            <span className="rounded-full border border-zinc-700 bg-zinc-950 px-2 py-0.5 text-[9px] font-semibold text-zinc-400">Paused</span>
-          ) : null}
-        </div>
+          </div>
+        )}
 
         <div className="mt-5 grid grid-cols-2 gap-2.5">
           <button
