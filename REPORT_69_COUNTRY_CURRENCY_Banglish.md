@@ -1,6 +1,6 @@
 # REPORT 69 — দেশ অনুযায়ী অটোমেটিক কারেন্সি সিলেকশন (Banglish)
 
-তারিখ: 2026-11-10 · স্ট্যাটাস: কোড + টেস্ট + বিল্ড সম্পূর্ণ, ডিপ্লয়ের পথে
+তারিখ: 2026-11-10 · স্ট্যাটাস: **লাইভ** — কমিট `39a6ad6`, বিল্ড `v1.2.1794337299`
 আগের রিপোর্ট: `REPORT_68_CURRENCY_SYSTEM_Banglish.md` (গ্লোবাল কারেন্সি সিলেকশন, লাইভ)
 
 ---
@@ -70,7 +70,21 @@ BD হেডার → BDT (`source=COUNTRY`); US → USD; AE → AED; অজা
 - অ্যাডমিন প্যানেল USD-তেই থাকে।
 - ইউজার অ্যাপে কোনো অ্যাডমিন লিংক নেই, আইডি ছাড়া নাম/ইমেইল নেই — আগের নিয়ম অটুট।
 
-## ৮. বাকি কাজ (আলাদা অনুমোদন সাপেক্ষ)
+## ৮. লাইভ যাচাই (ডিপ্লয়ের পরে)
+
+| চেক | ফল |
+|---|---|
+| কনটেইনারে কমিট | `39a6ad6`, `server.ts`-এ `applyAutoCurrency` আছে, `currency-data.ts` উপস্থিত |
+| `/api/health` | `v1.2.1794337299` (নতুন বিল্ড) |
+| `/api/currency/options` | 200, base USD, default USD, `autoDetect: true`, ১৫০ কারেন্সি, BDT 124.258644 |
+| `/api/admin/currency/config` (টোকেন ছাড়া) | 401 |
+| Admin কনসোল `admin.boostpay.online` | নতুন বান্ডল `assets/index-BD1RGmxT.js`-এ "Auto-select the currency by country" + `geoProvider` আছে |
+| Agent অ্যাপ `agent.boostpay.online` | নতুন বান্ডল সার্ভ হচ্ছে (`assets/index-DbhIL6VT.js`) |
+| User অ্যাপ | বান্ডল অপরিবর্তিত (`assets/index-CqS4ZPq4.js`) — এই রিলিজে user-app ফাইল বদলায়নি |
+
+প্রোডাকশনে ইচ্ছাকৃতভাবে কোনো টেস্ট-একাউন্ট তৈরি করা হয়নি — দেশ-ভিত্তিক সিলেকশন লোকাল journey §31-এ পুরোপুরি যাচাই করা হয়েছে (উপরে §৬)।
+
+## ৯. বাকি কাজ (আলাদা অনুমোদন সাপেক্ষ)
 
 1. Android APK রিবিল্ড — নতুন পিকার + `currencySource` টেক্সট দেখাতে।
 2. Leaderboard / Referral tree / Inbox+chat / Agent-pay স্ক্রিন এখনো USD ফরম্যাটে (REPORT_68 §6-এর তালিকা)। আপনি বললেই একই `useCurrency()` দিয়ে কনভার্ট করব।
