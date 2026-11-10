@@ -10,6 +10,7 @@ import { User, SystemConfig } from './types';
 import { Navbar } from './components/Navbar';
 import { AuthGate } from './components/AuthGate';
 import { WalletView } from './components/WalletView';
+import { CurrencyProvider } from './lib/currency';
 const LeaderboardView = lazy(()=> import('./components/LeaderboardView').then(m=> ({ default: m.LeaderboardView })));
 const ReferView = lazy(()=> import('./components/ReferView').then(m=> ({ default: m.ReferView })));
 const MessengerView = lazy(()=> import('./components/MessengerView').then(m=> ({ default: m.MessengerView })));
@@ -26,7 +27,7 @@ import { QRPayModal } from './components/QRPayModal';
 import { CallManager } from './components/CallOverlay';
 import { AlertTriangle, X, QrCode } from 'lucide-react';
 
-export default function App() {
+function AppInner() {
   const [currentUser, setCurrentUser] = useState<User | null>(() => BoostPayStore.getCurrentUser());
   const [isInitialSyncing, setIsInitialSyncing] = useState<boolean>(true);
   const [isSecurityOpen, setIsSecurityOpen] = useState(false);
@@ -672,5 +673,18 @@ export default function App() {
       )}
 
     </div>
+  );
+}
+
+/**
+ * The currency provider only converts what is *displayed*: the wallet, the ledger
+ * and every API amount stay in USD. The token is passed so the provider reloads
+ * the saved preference after a sign-in.
+ */
+export default function App() {
+  return (
+    <CurrencyProvider>
+      <AppInner />
+    </CurrencyProvider>
   );
 }

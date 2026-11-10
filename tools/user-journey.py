@@ -1907,6 +1907,119 @@ ck('sending bonus money lowers the restricted amount', _b2 < _b1, f"{_b1} → {_
 # state back to normal for any later section
 sx, _ = _welcome_tick('ALL')
 
+
+# ── 30. global currency selection (display only, USD wallet) ─────────────────
+print("\n[30. currency selection]")
+_rs30_s, _rs30_j = req('/api/admin/login', ADMIN, ip_addr=ip())
+_rs30 = _rs30_j.get('token') or ''
+sx, _opts = req('/api/currency/options', ip_addr=ip())
+_codes = {c.get('code') for c in (_opts.get('currencies') or [])}
+ck('the currency list is ISO 4217 with symbol and flag',
+   _opts.get('base') == 'USD' and {'USD', 'BDT', 'EUR', 'GBP', 'INR', 'SAR', 'AED'} <= _codes
+   and all(c.get('symbol') and c.get('flag') and c.get('country') for c in (_opts.get('currencies') or [])),
+   f"codes={len(_codes)} base={_opts.get('base')}", 'CRITICAL',
+   'The selector has no usable currency list.')
+ck('the USD rate is always exactly 1', next((c.get('rate') for c in (_opts.get('currencies') or []) if c.get('code') == 'USD'), None) == 1,
+   'usd=1', 'HIGH', 'USD is not the base of the rate table.')
+ck('the rate table reports when it was refreshed', 'refreshedAt' in _opts and 'stale' in _opts,
+   f"refreshedAt={_opts.get('refreshedAt')} stale={_opts.get('stale')}", 'MEDIUM',
+   'The apps cannot show the age of the rate.')
+
+# a manual rate keeps the test deterministic (and is the offline fallback anyway)
+sx, _cfg0 = req('/api/admin/currency/config', token=_rs30, ip_addr=ip())
+_origDisabled = (_cfg0.get('config') or {}).get('disabled') or []
+sx, _cfgset = req('/api/admin/currency/config', {'manualRates': {'BDT': 100}, 'default': 'USD', 'refreshMinutes': 60},
+                  token=_rs30, ip_addr=ip())
+ck('an admin can pin a manual exchange rate', sx == 200, f"{sx} {_cfgset.get('error')}", 'HIGH',
+   'Manual rates cannot be configured.')
+
+u30tok, _ = login(U2, ip_addr=ip())
+# make sure the account can actually send (earlier sections may have spent it)
+_u3tok, _ = login(U3, ip_addr=ip())
+req('/api/transfer', {'senderId': 'U3', 'recipientId': 'U2', 'amount': 5,
+                      'idempotencyKey': 'cfund' + str(int(time.time()))}, token=_u3tok, ip_addr=ip())
+sx, _before_me = req('/api/user/bonus', token=u30tok, ip_addr=ip())
+_bal_before = num((_before_me.get('wallet') or {}).get('mainBalance'))
+sx, _setc = req('/api/user/currency', {'code': 'BDT'}, token=u30tok, ip_addr=ip())
+ck('a user can switch their display currency', sx == 200 and _setc.get('currency') == 'BDT',
+   f"{sx} {_setc.get('currency')} {_setc.get('error')}", 'CRITICAL', 'The currency cannot be changed.')
+sx, _after_me = req('/api/user/bonus', token=u30tok, ip_addr=ip())
+_bal_after = num((_after_me.get('wallet') or {}).get('mainBalance'))
+ck('changing the currency never touches the wallet', abs(_bal_after - _bal_before) < 1e-9,
+   f"{_bal_before} → {_bal_after}", 'CRITICAL', 'The display currency moved real money.')
+sx, _opts2 = req('/api/currency/options', token=u30tok, ip_addr=ip())
+ck('the saved currency comes back with the next login', _opts2.get('selected') == 'BDT',
+   f"selected={_opts2.get('selected')}", 'CRITICAL', 'The preference is not persisted.')
+sx, _bad = req('/api/user/currency', {'code': 'XXX'}, token=u30tok, ip_addr=ip())
+ck('a non-ISO code is rejected', sx == 400, f"{sx} {_bad.get('error')}", 'CRITICAL',
+   'An unknown currency is accepted.')
+
+# another user is unaffected
+u30tok2, _ = login(U1, ip_addr=ip())
+sx, _opts3 = req('/api/currency/options', token=u30tok2, ip_addr=ip())
+ck('one user\'s currency does not change another\'s', _opts3.get('selected') == 'USD',
+   f"other={_opts3.get('selected')}", 'CRITICAL', 'The preference leaked between accounts.')
+
+# admin enable/disable
+sx, _ = req('/api/admin/currency/config', {'disabled': ['ZAR']}, token=_rs30, ip_addr=ip())
+sx, _opts4 = req('/api/currency/options', ip_addr=ip())
+ck('a disabled currency disappears from the list',
+   'ZAR' not in {c.get('code') for c in (_opts4.get('currencies') or [])},
+   f"codes={len(_opts4.get('currencies') or [])}", 'HIGH', 'Disabled currencies are still offered.')
+sx, _dis = req('/api/user/currency', {'code': 'ZAR'}, token=u30tok, ip_addr=ip())
+ck('a disabled currency cannot be selected', sx == 400, f"{sx} {_dis.get('error')}", 'CRITICAL',
+   'A disabled currency is still selectable.')
+sx, _ = req('/api/admin/currency/config', {'disabled': _origDisabled}, token=_rs30, ip_addr=ip())
+
+# entry in the display currency: the SERVER converts, never the client
+# (a fresh account, so the send is not limited by an unspent bonus rule)
+_s30, _cid30, _j30 = signup_child('cur1@gmail.com', 'U1')
+_c30tok, _ = login((_j30.get('_email'), 'Staging123!'), ip_addr=ip())
+req('/api/user/currency', {'code': 'BDT'}, token=_c30tok, ip_addr=ip())
+sx, _me = req('/api/user/bonus', token=_c30tok, ip_addr=ip())
+_b1 = num((_me.get('wallet') or {}).get('mainBalance'))
+sx, _sendBdt = req('/api/transfer', {'senderId': str(_cid30), 'recipientId': 'U3', 'amount': 100, 'currency': 'BDT',
+                                    'idempotencyKey': 'cc' + str(int(time.time()))}, token=_c30tok, ip_addr=ip())
+sx2, _j2 = req('/api/user/bonus', token=_c30tok, ip_addr=ip())
+_b2 = num((_j2.get('wallet') or {}).get('mainBalance'))
+ck('typing the amount in the display currency sends the right USD amount',
+   sx == 200 and abs((_b1 - _b2) - 1) < 1e-6,
+   f"{sx} ${round(_b1 - _b2, 6)} for 100 BDT @100", 'CRITICAL',
+   'The server converts the typed amount wrongly (or trusts the client).')
+sx, _mismatch = req('/api/transfer', {'senderId': str(_cid30), 'recipientId': 'U3', 'amount': 10, 'currency': 'EUR',
+                                      'idempotencyKey': 'cm' + str(int(time.time()))}, token=_c30tok, ip_addr=ip())
+ck('a currency other than the saved one is refused for entry', sx == 400,
+   f"{sx} {_mismatch.get('error')}", 'CRITICAL', 'A client can pick the currency the amount is read in.')
+sx, _tiny = req('/api/transfer', {'senderId': str(_cid30), 'recipientId': 'U3', 'amount': 1, 'currency': 'BDT',
+                                  'idempotencyKey': 'ct' + str(int(time.time()))}, token=_c30tok, ip_addr=ip())
+ck('a converted amount below the USD minimum is refused', sx == 400 and 'minimum' in str(_tiny.get('error') or '').lower(),
+   f"{sx} {_tiny.get('error')}", 'HIGH', 'A sub-cent transfer gets through.')
+req('/api/user/currency', {'code': 'USD'}, token=u30tok, ip_addr=ip())
+
+# agent preference is separate
+sx, _ag = req('/api/agent/login', {'email': 'agent1@gmail.com', 'password': 'Staging123!'}, ip_addr=ip())
+_agtok = _ag.get('token') or ''
+ck('an agent has their own currency setting', sx == 200 and bool(_agtok)
+   and (_ag.get('agent') or {}).get('currency') in (None, 'USD'),
+   f"{sx} currency={(_ag.get('agent') or {}).get('currency')}", 'HIGH', 'The agent has no currency preference.')
+sx, _agset = req('/api/agent/currency', {'code': 'BDT'}, token=_agtok, ip_addr=ip())
+ck('the agent can change it independently', sx == 200 and _agset.get('currency') == 'BDT',
+   f"{sx} {_agset.get('error')}", 'CRITICAL', 'The agent currency cannot be saved.')
+sx, _opts5 = req('/api/currency/options', token=u30tok2, ip_addr=ip())
+ck('the agent change does not touch user preferences', _opts5.get('selected') == 'USD',
+   f"user={_opts5.get('selected')}", 'CRITICAL', 'Agent and user preferences are shared.')
+sx, _agreset = req('/api/agent/currency', {'code': 'USD'}, token=_agtok, ip_addr=ip())
+sx, _nonadmin = req('/api/admin/currency/config', {'default': 'EUR'}, token=u30tok, ip_addr=ip())
+ck('a normal user cannot change the platform currency settings', sx in (401, 403),
+   f"{sx}", 'CRITICAL', 'Any user can rewrite the currency configuration.')
+
+# stale-rate fallback is visible, never silent
+sx, _refresh = req('/api/admin/currency/refresh', {}, token=_rs30, ip_addr=ip())
+ck('the refresh endpoint always answers with the freshness of the table',
+   sx == 200 and 'fetchedAt' in _refresh and 'stale' in _refresh,
+   f"{sx} stale={_refresh.get('stale')} err={_refresh.get('error')}", 'HIGH',
+   'A provider failure would leave the apps with no rate timestamp.')
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}

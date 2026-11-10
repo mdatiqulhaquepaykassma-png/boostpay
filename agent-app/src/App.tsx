@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { ChatComposer, ChatList, chatDay, ChatMessageLike, ChatSendPayload } from './ChatKit';
 import { AgentCallManager, startCallTo } from './CallOverlay';
+import { useCurrency } from './lib-currency';
 
 /* ── API client ─────────────────────────────────────────────────────────── */
 const TOKEN_KEY = 'bpa_token_v1';
@@ -244,12 +245,72 @@ const LoginScreen: React.FC<{ onDone: (agent: Agent) => void; toast: (t: { type:
   );
 };
 
+
+/* ── currency picker (agent) ─────────────────────────────────────────────── */
+const AgentCurrencyPicker: React.FC = () => {
+  const { options, currency, setCurrency, rateNote } = useCurrency();
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const [busy, setBusy] = useState(false);
+  const list = (options?.currencies || []).filter((c) => c.enabled).filter((c) => {
+    const n = q.trim().toLowerCase();
+    if (!n) return true;
+    return c.code.toLowerCase().includes(n) || c.name.toLowerCase().includes(n) || c.country.toLowerCase().includes(n) || c.symbol.includes(q.trim());
+  });
+  const pick = async (code: string) => {
+    setBusy(true); const ok = await setCurrency(code); setBusy(false);
+    if (ok) { setOpen(false); setQ(''); }
+  };
+  return (
+    <div className="relative">
+      <button onClick={() => setOpen((v) => !v)} className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-[11px] text-zinc-300">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="text-[13px] leading-none">{currency?.flag || '🌐'}</span>
+          <span className="font-mono">{currency?.code || 'USD'}</span>
+          <span className="truncate text-zinc-500">{currency?.country}</span>
+        </span>
+        <ChevronRight className={`h-3 w-3 shrink-0 text-zinc-500 transition ${open ? 'rotate-90' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute left-0 right-0 z-50 mt-1 max-h-[280px] overflow-hidden rounded-xl border border-zinc-700 bg-zinc-950 shadow-2xl">
+          <div className="flex items-center gap-1.5 border-b border-zinc-800 px-2 py-1.5">
+            <Search className="h-3 w-3 text-zinc-500" />
+            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search currency"
+              className="min-w-0 flex-1 bg-transparent text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600" />
+            <button onClick={() => { setOpen(false); setQ(''); }} className="text-zinc-500"><X className="h-3 w-3" /></button>
+          </div>
+          <div className="max-h-[220px] overflow-y-auto">
+            {list.map((c) => (
+              <button key={c.code} disabled={busy} onClick={() => void pick(c.code)}
+                className={`flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-[11px] hover:bg-zinc-900 ${c.code === currency?.code ? 'bg-amber-500/10' : ''}`}>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <span className="text-[13px] leading-none">{c.flag}</span>
+                  <span className="truncate text-zinc-300">{c.country}</span>
+                  <span className="font-mono text-zinc-500">{c.code}</span>
+                </span>
+                <span className="shrink-0 font-mono text-zinc-400">{c.symbol}</span>
+              </button>
+            ))}
+            {list.length === 0 && <div className="px-2 py-3 text-center text-[10px] text-zinc-500">No currency matches.</div>}
+          </div>
+          <div className="border-t border-zinc-800 px-2 py-1 text-[9px] text-zinc-500">{rateNote() || 'Display only — your wallet stays in USD.'}</div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 /* ── home ───────────────────────────────────────────────────────────────── */
 const HomeScreen: React.FC<{
   agent: Agent; settings: Settings; platform: any; onCopy: (v: string) => void; onGoto: (t: Tab) => void;
-}> = ({ agent, settings, platform, onCopy, onGoto }) => (
+}> = ({ agent, settings, platform, onCopy, onGoto }) => {
+  const cur = useCurrency();
+  return (
   <div className="space-y-3">
     <div className="relative overflow-hidden rounded-3xl border border-amber-500/30 bg-gradient-to-br from-amber-500/20 via-zinc-900 to-zinc-950 p-5">
+      <div className="mb-2 max-w-[220px] rounded-xl border border-zinc-700/70 bg-zinc-950/60">
+        <AgentCurrencyPicker />
+      </div>
       <div className="flex items-center justify-between">
         <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300/90">Available balance</span>
         <button onClick={() => onCopy(agent.id)} className="flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-950/70 px-2 py-1 text-[10px] font-mono font-bold text-zinc-300">
@@ -257,7 +318,9 @@ const HomeScreen: React.FC<{
         </button>
       </div>
       <div className="mt-2 flex items-end gap-1">
-        <span className="text-3xl font-black tracking-tight text-white">${money(agent.balance)}</span>
+        <span className="text-3xl font-black tracking-tight text-white">
+          {cur && cur.currency && cur.currency.code !== 'USD' ? cur.money(agent.balance) : `$${money(agent.balance)}`}
+        </span>
       </div>
       <div className="mt-4 flex gap-2">
         <button onClick={() => onGoto('SEND')} className="flex h-10 flex-1 items-center justify-center gap-1.5 rounded-2xl bg-zinc-100 text-[11px] font-black text-zinc-950 active:scale-[0.99]">
@@ -320,7 +383,8 @@ const HomeScreen: React.FC<{
       </Card>
     ) : null}
   </div>
-);
+  );
+};
 
 /* ── send to user ───────────────────────────────────────────────────────── */
 const SendScreen: React.FC<{

@@ -2,6 +2,7 @@ import { FC, useState, useEffect } from 'react';
 import { Send, X, AlertTriangle, CheckCircle2, ArrowRight, QrCode } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User } from '../types';
+import { useCurrency } from '../lib/currency';
 
 interface Props {
   isOpen: boolean;
@@ -21,6 +22,8 @@ export const P2PTransferModal: FC<Props> = ({
   recipientPrefill,
   onOpenQR
 }) => {
+  const { currency, fmt } = useCurrency();
+  const entryCode = currency && currency.code !== 'USD' ? currency.code : 'USD';
   const [recipientId, setRecipientId] = useState('');
   const [amount, setAmount] = useState('');
   const [error, setError] = useState('');
@@ -158,7 +161,9 @@ export const P2PTransferModal: FC<Props> = ({
         body: JSON.stringify({
           senderId: currentUser.id,
           recipientId: cleanRecipient,
-          amount: numAmount
+          amount: numAmount,
+          // typed in the display currency — the server converts to USD itself
+          currency: entryCode
         })
       });
 
@@ -307,13 +312,15 @@ export const P2PTransferModal: FC<Props> = ({
             <div>
               <div className="flex justify-between items-center text-xs mb-1">
                 <label className="font-medium text-zinc-400">
-                  Transfer Amount ($)
+                  Transfer Amount ({entryCode})
                 </label>
                 <div className="flex items-center gap-1.5 text-zinc-500 font-mono text-[11px]">
-                  <span>Available: <strong className="text-emerald-400 font-bold">${currentUser.balance.toFixed(2)}</strong></span>
+                  <span>Available: <strong className="text-emerald-400 font-bold">{entryCode === 'USD' ? `$${currentUser.balance.toFixed(2)}` : `≈ ${currency!.symbol}${fmt(currentUser.balance, { decimals: currency!.decimals })}`}</strong>
+                    {entryCode !== 'USD' && <span className="ml-1 text-zinc-600">(${currentUser.balance.toFixed(2)})</span>}
+                  </span>
                   <button
                     type="button"
-                    onClick={() => setAmount(currentUser.balance.toFixed(2))}
+                    onClick={() => setAmount(entryCode === 'USD' ? currentUser.balance.toFixed(2) : fmt(currentUser.balance, { decimals: currency!.decimals, withSymbol: false }).replace(/,/g, ''))}
                     className="ml-1 px-1.5 py-0.5 rounded bg-zinc-800 text-amber-400 hover:bg-zinc-700 font-bold text-[10px] cursor-pointer"
                   >
                     MAX

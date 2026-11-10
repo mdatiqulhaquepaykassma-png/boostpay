@@ -7,6 +7,8 @@ import { User, BoostState, SystemConfig } from '../types';
 import { RecentTransactionsSection } from './RecentTransactionsSection';
 import { PaginatedTransactionsView } from './PaginatedTransactionsView';
 import { SmoothNumericTicker } from './SmoothNumericTicker';
+import CurrencyPicker from './CurrencyPicker';
+import { useCurrency } from '../lib/currency';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
 
 function formatDuration(ms: number): string {
@@ -140,6 +142,8 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
   ]);
 
   const currentTotal = baseBalance + liveAccrued;
+  const { currency, money, fmt, rateNote } = useCurrency();
+  const showingConverted = !!currency && currency.code !== 'USD' && currency.rate > 0;
 
   return (
     <div className="relative overflow-hidden rounded-[26px] border border-zinc-800/80 bg-zinc-900 shadow-2xl">
@@ -147,6 +151,10 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
       <div className="pointer-events-none absolute inset-x-12 top-0 h-px bg-gradient-to-r from-transparent via-amber-500/50 to-transparent" />
 
       <div className="relative p-6">
+        {/* Display currency — sits above the ID chip, wallet stays in USD */}
+        <div className="mb-2 max-w-[240px]">
+          <CurrencyPicker />
+        </div>
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Available Balance</span>
           <button
@@ -164,15 +172,27 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
         </div>
 
         <div className="mt-2.5">
-          <SmoothNumericTicker
-            value={currentTotal}
-            decimals={8}
-            prefix="$"
-            suffix="USD"
-            size="xl"
-            intColor="text-white"
-            decColor="text-amber-400"
-          />
+          {showingConverted ? (
+            <>
+              <div className="font-mono text-3xl font-black tracking-tight text-white sm:text-4xl">
+                ≈ {currency!.symbol}{fmt(currentTotal, { decimals: currency!.decimals })}
+                <span className="ml-1.5 text-[11px] font-bold text-zinc-500">{currency!.code}</span>
+              </div>
+              <div className="mt-1 text-[9px] leading-relaxed text-zinc-500">
+                ${formatPrecisionAmount(currentTotal, 8)} USD in your wallet · {rateNote()}
+              </div>
+            </>
+          ) : (
+            <SmoothNumericTicker
+              value={currentTotal}
+              decimals={8}
+              prefix="$"
+              suffix="USD"
+              size="xl"
+              intColor="text-white"
+              decColor="text-amber-400"
+            />
+          )}
         </div>
 
         <div className="mt-2 flex items-center gap-2 min-h-[24px] flex-wrap">

@@ -17,6 +17,7 @@ import {
 import { Transaction } from '../types';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { formatPrecisionAmount } from '../utils/format';
+import { useCurrency } from '../lib/currency';
 
 interface Props {
   transactions: Transaction[];
@@ -24,6 +25,7 @@ interface Props {
 }
 
 export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initialTransactions, userId }) => {
+  const { currency, fmt } = useCurrency();
   const [liveTransactions, setLiveTransactions] = useState<Transaction[]>(() => {
     return initialTransactions && initialTransactions.length > 0
       ? initialTransactions
@@ -368,9 +370,13 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
                   {/* Formatted Amount */}
                   <div className="text-right shrink-0 font-mono">
                     <span className={`text-xs sm:text-sm font-bold ${cfg.amountColor}`}>
-                      {cfg.amountSign}${formatPrecisionAmount(tx.amount, 8)}
+                      {currency && currency.code !== 'USD'
+                        ? `${cfg.amountSign}≈ ${currency.symbol}${fmt(tx.amount, { decimals: currency.decimals })}`
+                        : `${cfg.amountSign}$${formatPrecisionAmount(tx.amount, 8)}`}
                     </span>
-                    <span className="text-[9px] text-zinc-500 block font-sans">USD</span>
+                    <span className="text-[9px] text-zinc-500 block font-sans">
+                      {currency && currency.code !== 'USD' ? `$${formatPrecisionAmount(tx.amount, 8)} USD` : 'USD'}
+                    </span>
                   </div>
                 </div>
               );

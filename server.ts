@@ -10,6 +10,7 @@ import { createServer as createViteServer } from 'vite';
 import nodemailer from 'nodemailer';
 import QRCode from 'qrcode';
 import webpush from 'web-push';
+import { CURRENCIES } from './currency-data';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1189,6 +1190,175 @@ function migrateBonusWalletToBalance(db: any, opts: { userId?: string } = {}): {
     });
   }
   return { grants: rows.length, users: [...touched], total: movedTotal };
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Global currency display system.
+ *
+ * The wallet, the ledger and every transaction stay in USD. A user (or agent)
+ * picks a display currency; the server converts with its own cached rate and the
+ * apps only ever show what the server sends. Entry fields (send / withdraw /
+ * boost) may be typed in the selected currency — the conversion back to USD is
+ * always done here, never trusted from the client.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+const CURRENCY_CODES = new Set(CURRENCIES.map((c) => c.code));
+const CURRENCY_BY_CODE = new Map(CURRENCIES.map((c) => [c.code, c]));
+const FX_DEFAULT_URL = 'https://open.er-api.com/v6/latest/USD';
+const FX_DEFAULT_REFRESH_MIN = 60;
+
+function currencyConfigOf(db: any): any {
+  if (!db.currencyConfig || typeof db.currencyConfig !== 'object') db.currencyConfig = {};
+  const c = db.currencyConfig;
+  if (!Array.isArray(c.disabled)) c.disabled = [];
+  if (!c.default || !CURRENCY_CODES.has(String(c.default))) c.default = 'USD';
+  if (!c.providerUrl) c.providerUrl = FX_DEFAULT_URL;
+  const mins = Math.trunc(Number(c.refreshMinutes));
+  c.refreshMinutes = mins >= 5 && mins <= 1440 ? mins : FX_DEFAULT_REFRESH_MIN;
+  if (!c.manualRates || typeof c.manualRates !== 'object') c.manualRates = {};
+  return c;
+}
+
+function enabledCurrencyCodes(db: any): string[] {
+  const cfg = currencyConfigOf(db);
+  const off = new Set(cfg.disabled.map((x: any) => String(x).toUpperCase()));
+  return CURRENCIES.map((c) => c.code).filter((code) => !off.has(code));
+}
+
+/** The cached USD→X table plus when it was fetched and where it came from. */
+function fxCacheOf(db: any): any {
+  if (!db.fxCache || typeof db.fxCache !== 'object') db.fxCache = {};
+  const c = db.fxCache;
+  if (!c.rates || typeof c.rates !== 'object') c.rates = { USD: 1 };
+  if (!c.fetchedAt) c.fetchedAt = 0;
+  if (!c.source) c.source = '';
+  return c;
+}
+
+function fxRate(db: any, code: string): number {
+  const upper = String(code || 'USD').toUpperCase();
+  if (upper === 'USD') return 1;
+  const cfg = currencyConfigOf(db);
+  const manual = Number(cfg.manualRates[upper]);
+  if (manual > 0) return manual;
+  const rate = Number(fxCacheOf(db).rates[upper]);
+  return rate > 0 ? rate : 0;
+}
+
+/** USD → display currency. Never writes anything; display only. */
+function toDisplay(db: any, usdAmount: number, code: string): number | null {
+  const r = fxRate(db, code);
+  if (!(r > 0)) return null;
+  return Math.round((Number(usdAmount) || 0) * r * 1e6) / 1e6;
+}
+
+/**
+ * Display currency → USD for an amount the user typed. Returns null when the
+ * currency has no rate (the caller must refuse, never guess).
+ */
+function toUsd(db: any, amount: number, code: string): number | null {
+  const r = fxRate(db, code);
+  if (!(r > 0)) return null;
+  return Math.round(((Number(amount) || 0) / r) * 100) / 100;
+}
+
+/** The currency a request may use for entry: the caller's saved preference, else USD. */
+function entryCurrencyOf(owner: any): string {
+  const code = String((owner && owner.currency) || 'USD').toUpperCase();
+  return CURRENCY_CODES.has(code) ? code : 'USD';
+}
+
+/** Convert a typed amount into USD using the server's own rate table. */
+function entryAmountToUsd(db: any, owner: any, amount: number, sentCode?: string): { usd: number; code: string; error?: string } {
+  const saved = entryCurrencyOf(owner);
+  const asked = String(sentCode || saved).toUpperCase();
+  if (!CURRENCY_CODES.has(asked)) return { usd: 0, code: asked, error: 'Unknown currency code.' };
+  if (asked !== saved && asked !== 'USD') {
+    return { usd: 0, code: asked, error: 'Switch your display currency first, then enter the amount.' };
+  }
+  const cfg = currencyConfigOf(db);
+  if (asked !== 'USD' && cfg.disabled.includes(asked)) {
+    return { usd: 0, code: asked, error: `${asked} is not available right now.` };
+  }
+  const usd = toUsd(db, amount, asked);
+  if (usd === null) return { usd: 0, code: asked, error: `No exchange rate for ${asked} yet — please enter the amount in USD.` };
+  return { usd, code: asked };
+}
+
+/** Fetch fresh rates from the configured provider (server side, cached in the db). */
+async function refreshFxRates(db: any, force = false): Promise<{ ok: boolean; fetchedAt: number; source: string; stale: boolean; error?: string }> {
+  const cfg = currencyConfigOf(db);
+  const cache = fxCacheOf(db);
+  const ageMs = Date.now() - (Number(cache.fetchedAt) || 0);
+  if (!force && cache.fetchedAt && ageMs < cfg.refreshMinutes * 60000) {
+    return { ok: true, fetchedAt: cache.fetchedAt, source: cache.source, stale: false };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(cfg.providerUrl, { signal: controller.signal, headers: { accept: 'application/json' } });
+    if (!res.ok) throw new Error(`Provider HTTP ${res.status}`);
+    const body: any = await res.json();
+    const table: any = body && (body.rates || (body.data && body.data.rates) || body.conversion_rates);
+    if (!table || typeof table !== 'object') throw new Error('Provider returned no rates');
+    let n = 0;
+    for (const cur of CURRENCIES) {
+      const v = Number(table[cur.code]);
+      if (v > 0) { cache.rates[cur.code] = v; n += 1; }
+    }
+    if (!n) throw new Error('Provider returned no usable rates');
+    cache.rates.USD = 1;
+    cache.fetchedAt = Date.now();
+    cache.source = String(cfg.providerUrl);
+    cache.stale = false;
+    cache.lastError = '';
+    writeDb(db);
+    return { ok: true, fetchedAt: cache.fetchedAt, source: cache.source, stale: false };
+  } catch (err: any) {
+    cache.stale = true;
+    cache.lastError = String(err?.message || err).slice(0, 200);
+    // Last known good rate stays in place — the apps show it with its timestamp.
+    try { writeDb(db); } catch { /* ignore */ }
+    return { ok: false, fetchedAt: Number(cache.fetchedAt) || 0, source: cache.source, stale: true, error: cache.lastError };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** What the apps render: the enabled list + rates + freshness. */
+function currencyOptionsPayload(db: any, forCode?: string) {
+  const cfg = currencyConfigOf(db);
+  const cache = fxCacheOf(db);
+  const enabled = new Set(enabledCurrencyCodes(db));
+  const rows = CURRENCIES.map((c) => ({
+    code: c.code, name: c.name, symbol: c.symbol, flag: c.flag, country: c.country,
+    decimals: c.decimals, enabled: enabled.has(c.code),
+    rate: enabled.has(c.code) ? fxRate(db, c.code) : 0,
+  }));
+  const selected = String(forCode || cfg.default || 'USD').toUpperCase();
+  const ageMin = cache.fetchedAt ? Math.floor((Date.now() - cache.fetchedAt) / 60000) : 0;
+  return {
+    base: 'USD',
+    default: cfg.default,
+    selected: CURRENCY_CODES.has(selected) && enabled.has(selected) ? selected : 'USD',
+    refreshedAt: Number(cache.fetchedAt) || 0,
+    ageMinutes: ageMin,
+    stale: !!cache.stale || !Number(cache.fetchedAt),
+    source: cache.source || '',
+    refreshMinutes: cfg.refreshMinutes,
+    currencies: rows.filter((r) => r.enabled || r.code === 'USD'),
+  };
+}
+
+/** Store a preference on a user / agent / admin row (audited, ISO validated). */
+function setCurrencyPref(db: any, owner: any, code: string, who: string, kind: string): { ok: boolean; error?: string } {
+  const upper = String(code || '').toUpperCase();
+  if (!CURRENCY_CODES.has(upper)) return { ok: false, error: 'Not an ISO 4217 currency code.' };
+  if (!enabledCurrencyCodes(db).includes(upper)) return { ok: false, error: `${upper} is not available right now.` };
+  const before = String(owner.currency || 'USD');
+  owner.currency = upper;
+  recordAuditLog(db, 'CURRENCY_PREF_CHANGED', who, `${kind} #${owner.id} display currency ${before} → ${upper}`, String(owner.id));
+  return { ok: true };
 }
 
 function bonusLedgerRow(db: any, row: any) {
@@ -2546,6 +2716,9 @@ function publicUser(u: any): any {
     // The user sees their own holds (the admin note stays internal).
     sendLock: { full: lock.full, amount: lock.amount, sendable: sendableBalance(u) },
     agentLock: { full: pay.full, amount: agentLock.amount, sendable: pay.cap, cause: pay.cause },
+    // Display currency (money is always USD underneath).
+    currency: entryCurrencyOf(u),
+    baseCurrency: 'USD',
     // A "boost only" signup bonus is visible but cannot leave the wallet.
     signupBonusLocked: signupBonusLockOf(u),
     signupBonus: Number((u as any).signupBonus) || 0,
@@ -6803,7 +6976,7 @@ async function startServer() {
     }
     try {
       const { senderId, recipientId } = req.body as any;
-      const numAmount = Number(rawAmount);
+      let numAmount = Number(rawAmount);
       if (!isFinite(numAmount) || isNaN(numAmount) || numAmount < 0.1 || numAmount > 100000) {
         refundRateLimit(req);
         return res.status(400).json({ error: 'Minimum transfer is 0.1 — enter 0.1 ≤ x ≤ 100,000.' });
@@ -6812,6 +6985,27 @@ async function startServer() {
       if (!/^\d+(\.\d{1,2})?$/.test(String(rawAmount).trim())) {
         refundRateLimit(req);
         return res.status(400).json({ error: 'Amount must have at most 2 decimal places.' });
+      }
+      // The sender may type the amount in their display currency (owner decision
+      // 2026-11-08). The conversion uses the SERVER's rate — a client-sent USD
+      // figure is never trusted.
+      const _entryCode = String((req.body as any)?.currency || '').toUpperCase();
+      if (_entryCode && _entryCode !== 'USD') {
+        const dbx = readDb();
+        const senderRow = (dbx.users || []).find((u: any) => String(u.id) === String(senderId));
+        const conv = entryAmountToUsd(dbx, senderRow, numAmount, _entryCode);
+        if (conv.error) {
+          refundRateLimit(req);
+          return res.status(400).json({ error: conv.error });
+        }
+        if (!(conv.usd >= 0.1)) {
+          refundRateLimit(req);
+          return res.status(400).json({ error: `That is $${conv.usd.toFixed(2)} — the minimum transfer is $0.10.` });
+        }
+        (req.body as any).entryAmount = { amount: numAmount, code: _entryCode, usd: conv.usd };
+        (req.body as any).amount = conv.usd.toFixed(2);
+        rawAmount = (req.body as any).amount;
+        numAmount = conv.usd;                       // everything below works in USD
       }
       if (String(senderId) === String(recipientId)) {
         refundRateLimit(req);
@@ -10130,6 +10324,132 @@ async function startServer() {
     }
   });
 
+  // ── Global currency selection ───────────────────────────────────────────
+  // The list + rates every app renders (public: the signup screen shows them too).
+  app.get('/api/currency/options', async (req: any, res) => {
+    try {
+      const db = readDb();
+      // Lazy refresh: only hits the provider when the cache is older than the interval.
+      await refreshFxRates(db);
+      // Optional auth: this route is public (the signup screen needs the list), so
+      // resolve the caller from the token directly instead of relying on middleware.
+      let uid = String(req.authUserId || '');
+      if (!uid) {
+        try {
+          const payload: any = verifyToken(getBearerToken(req));
+          if (payload && payload.role !== 'AGENT' && payload.role !== 'ADMIN') uid = String(payload.sub || '');
+        } catch { /* anonymous */ }
+      }
+      const me = uid ? (db.users || []).find((u: any) => String(u.id) === uid) : null;
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(currencyOptionsPayload(db, me ? entryCurrencyOf(me) : undefined));
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load currencies.' }); }
+  });
+
+  // User / agent / admin display preference. Display only — no money moves.
+  app.post('/api/user/currency', rateLimit(30), requireUser, (req: any, res) => {
+    try {
+      const db = readDb();
+      const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      const out = setCurrencyPref(db, user, (req.body || {}).code, String(req.authUserId), 'User');
+      if (!out.ok) return res.status(400).json({ error: out.error });
+      writeDb(db);
+      res.json({ success: true, currency: user.currency, options: currencyOptionsPayload(db, user.currency) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save your currency.' }); }
+  });
+
+  app.post('/api/agent/currency', rateLimit(30), requireAgent, (req: any, res) => {
+    try {
+      const db = readDb();
+      const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId || ''));
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      const out = setCurrencyPref(db, agent, (req.body || {}).code, String(agent.id), 'Agent');
+      if (!out.ok) return res.status(400).json({ error: out.error });
+      writeDb(db);
+      res.json({ success: true, currency: agent.currency, options: currencyOptionsPayload(db, agent.currency) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save your currency.' }); }
+  });
+
+  app.post('/api/admin/currency', rateLimit(30), requireAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const admins = ensureAdminAccounts(db);
+      const admin = admins.find((a: any) => String(a.email || '').toLowerCase() === String(req.authAdmin || '').toLowerCase());
+      if (!admin) return res.status(404).json({ error: 'Admin not found.' });
+      const out = setCurrencyPref(db, admin, (req.body || {}).code, String(req.authAdmin || ''), 'Admin');
+      if (!out.ok) return res.status(400).json({ error: out.error });
+      writeDb(db);
+      res.json({ success: true, currency: admin.currency });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save your currency.' }); }
+  });
+
+  // Admin: enable/disable currencies, default, provider, refresh interval.
+  app.get('/api/admin/currency/config', requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const cfg = currencyConfigOf(db);
+      const cache = fxCacheOf(db);
+      res.json({
+        config: {
+          default: cfg.default, providerUrl: cfg.providerUrl, refreshMinutes: cfg.refreshMinutes,
+          disabled: cfg.disabled, manualRates: cfg.manualRates,
+        },
+        cache: { fetchedAt: cache.fetchedAt, source: cache.source, stale: !!cache.stale, lastError: cache.lastError || '' },
+        currencies: CURRENCIES.map((c) => ({ ...c, enabled: !cfg.disabled.includes(c.code), rate: fxRate(db, c.code) })),
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load the currency settings.' }); }
+  });
+
+  app.post('/api/admin/currency/config', rateLimit(60), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = readDb();
+      const body = req.body || {};
+      const cfg = currencyConfigOf(db);
+      if (body.default !== undefined) {
+        const d = String(body.default).toUpperCase();
+        if (!CURRENCY_CODES.has(d)) return res.status(400).json({ error: 'Default must be an ISO 4217 code.' });
+        cfg.default = d;
+      }
+      if (body.providerUrl !== undefined) {
+        const url = String(body.providerUrl || '').trim();
+        if (url && !/^https:\/\/[^\s]+$/i.test(url)) return res.status(400).json({ error: 'The rate provider must be an https URL.' });
+        cfg.providerUrl = url || FX_DEFAULT_URL;
+      }
+      if (body.refreshMinutes !== undefined) {
+        const m = Math.trunc(Number(body.refreshMinutes));
+        if (!(m >= 5 && m <= 1440)) return res.status(400).json({ error: 'Refresh interval must be 5–1440 minutes.' });
+        cfg.refreshMinutes = m;
+      }
+      if (Array.isArray(body.disabled)) {
+        cfg.disabled = [...new Set(body.disabled.map((x: any) => String(x).toUpperCase()).filter((c: string) => CURRENCY_CODES.has(c)))];
+        if (cfg.disabled.includes('USD')) cfg.disabled = cfg.disabled.filter((c: string) => c !== 'USD'); // base is always on
+      }
+      if (body.manualRates && typeof body.manualRates === 'object') {
+        const next: any = {};
+        for (const [k, v] of Object.entries(body.manualRates)) {
+          const code = String(k).toUpperCase();
+          const rate = Number(v);
+          if (CURRENCY_CODES.has(code) && rate > 0) next[code] = rate;
+        }
+        cfg.manualRates = next;
+      }
+      if (cfg.disabled.includes(cfg.default)) cfg.default = 'USD';
+      recordAuditLog(db, 'CURRENCY_CONFIG_CHANGED', String(req.authAdmin || 'admin'),
+        `Currency settings: default ${cfg.default}, refresh ${cfg.refreshMinutes}m, ${cfg.disabled.length} disabled, provider ${cfg.providerUrl}`);
+      writeDb(db);
+      res.json({ success: true, config: cfg });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save the currency settings.' }); }
+  });
+
+  app.post('/api/admin/currency/refresh', rateLimit(20), requireAdmin, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const db = readDb();
+      const out = await refreshFxRates(db, true);
+      res.json({ ...out, options: currencyOptionsPayload(db) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not refresh the rates.' }); }
+  });
+
   // One-off (and re-runnable) move of bonuses that still sit in the retired bonus
   // wallet into the main balance. Dry-run by default.
   app.post('/api/admin/promo/bonus/to-main', rateLimit(20), requireAdmin, requireSuperAdmin, (req: any, res) => {
@@ -11226,7 +11546,9 @@ async function startServer() {
     lastLoginAt: a.lastLoginAt || 0,
     createdBy: a.createdBy || '',
     emailVerified: !!a.emailVerified,
-    emailVerifiedAt: a.emailVerifiedAt || 0
+    emailVerifiedAt: a.emailVerifiedAt || 0,
+    currency: entryCurrencyOf(a),
+    baseCurrency: 'USD'
   });
 
   const publicManagement = (m: any) => ({
@@ -11775,7 +12097,17 @@ async function startServer() {
       const db0 = ensureAgentCollections(readDb());
       const settings = agentSettingsOf(db0);
       if (!settings.enabled) return res.status(403).json({ error: 'Agent payments are currently disabled.' });
-      const parsed = parseAgentAmount(req.body && req.body.amount, settings.minUserSend, settings.maxUserSend);
+      // The user may type the amount in their display currency; the server converts.
+      const entryCode = String((req.body && req.body.currency) || '').toUpperCase();
+      let entryAmount = req.body && req.body.amount;
+      if (entryCode && entryCode !== 'USD') {
+        const dbPay = ensureAgentCollections(readDb());
+        const payer = (dbPay.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+        const conv = entryAmountToUsd(dbPay, payer, Number(entryAmount), entryCode);
+        if (conv.error) return res.status(400).json({ error: conv.error });
+        entryAmount = conv.usd.toFixed(2);
+      }
+      const parsed = parseAgentAmount(entryAmount, settings.minUserSend, settings.maxUserSend);
       if (!parsed.ok) return res.status(400).json({ error: parsed.error });
       const agentId = String((req.body && req.body.agentId) || '').trim();
       if (!agentId) return res.status(400).json({ error: 'Choose an agent first.' });
@@ -13157,6 +13489,18 @@ async function startServer() {
       console.log(`[boot] moved $${out.total.toFixed(2)} of promotion bonus into ${out.users.length} main balance(s)`);
     }
   } catch (err) { console.error('[boot] bonus→balance migration skipped:', err); }
+
+  // Warm the exchange-rate cache once at boot (and then lazily per request when
+  // the cache is older than the configured interval). Failure is harmless: the
+  // apps fall back to the last known rate with its timestamp.
+  try {
+    const dbFx = readDb();
+    currencyConfigOf(dbFx);
+    refreshFxRates(dbFx, false).then((out) => {
+      if (out.ok) console.log(`[boot] exchange rates refreshed (${new Date(out.fetchedAt).toISOString()})`);
+      else console.warn(`[boot] exchange rates unavailable — using the last known table (${out.error})`);
+    }).catch(() => { /* never block boot */ });
+  } catch { /* ignore */ }
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`BoostPay Server listening on port ${PORT} [Version: ${SERVER_VERSION}]`);

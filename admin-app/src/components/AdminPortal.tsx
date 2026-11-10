@@ -3,6 +3,7 @@ import { ReferSendCard } from './ReferSendCard';
 import { SendLockCard } from './SendLockCard';
 import { MoneyFlowView } from './MoneyFlowView';
 import { ReferCodesView } from './ReferCodesView';
+import { CurrencyAdmin } from './CurrencyAdmin';
 import { PushBell } from '../push/PushBell';
 import {
   ShieldCheck,
@@ -49,6 +50,7 @@ import {
   X,
   Mail,
   Network,
+  CircleDollarSign,
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { AgentAdminView } from './AgentAdminView';
@@ -133,6 +135,7 @@ const MobileBottomNav: FC<{ activeTab: string; setActiveTab: (t: any) => void; u
     { id: 'ADMINS', label: 'Admins', icon: Users2 },
     { id: 'AGENTS', label: 'Agents', icon: Building2 },
     { id: 'MONEY', label: 'Money Flow', icon: Network },
+    { id: 'CURRENCY', label: 'Currency', icon: CircleDollarSign },
   ];
   return (
     <>
@@ -202,7 +205,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // 2. Admin Portal Views
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'SMTP' | 'SETTINGS' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS' | 'AGENTS' | 'MONEY'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'ANALYTICS' | 'USERS' | 'AUDIT' | 'TRANSACTIONS' | 'BROADCAST' | 'FRAUD' | 'REFER' | 'SMTP' | 'SETTINGS' | 'DATABASE' | 'ENGINE' | 'SUPPORT' | 'ADMINS' | 'AGENTS' | 'MONEY' | 'CURRENCY'>('OVERVIEW');
 
   // MFA master switch (read once, refreshed when the tab changes) — drives the banner.
   const [mfaOff, setMfaOff] = useState(false);
@@ -1345,6 +1348,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         )}
         {activeTab === 'SMTP' && <SmtpAdminView />}
         {activeTab === 'SETTINGS' && <AdminSystemSettingsView />}
+        {activeTab === 'CURRENCY' && <CurrencyAdmin />}
         {activeTab === 'ADMINS' && (
           <div className="space-y-5">
             <AdminMfaView myEmail={(adminSession && adminSession.email) || ''} />

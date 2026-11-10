@@ -1,3 +1,4 @@
+import { useCurrency } from '../lib/currency';
 import React, { FC, useState, useEffect, memo } from 'react';
 import { ArrowUpRight, ArrowDownLeft, Zap, ShieldAlert, X, Clock, Copy, Check, ChevronDown } from 'lucide-react';
 import { Transaction } from '../types';
@@ -13,6 +14,7 @@ interface Props {
 type FilterTab = 'ALL' | 'REWARD' | 'P2P' | 'REFERRAL';
 
 export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId, onViewAllTransactions }) => {
+  const { currency, fmt } = useCurrency();
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
   const [copiedTx, setCopiedTx] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
@@ -201,9 +203,13 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
 
               <div className="text-right">
                 <div className={`text-xs font-bold font-mono ${detail.amountColor}`}>
-                  {detail.amountSign}${formatPrecisionAmount(tx.amount, 8)}
+                  {currency && currency.code !== 'USD'
+                    ? `${detail.amountSign}≈ ${currency.symbol}${fmt(tx.amount, { decimals: currency.decimals })}`
+                    : `${detail.amountSign}$${formatPrecisionAmount(tx.amount, 8)}`}
                 </div>
-                <div className="text-[10px] text-zinc-500 font-mono">USD</div>
+                <div className="text-[10px] text-zinc-500 font-mono">
+                  {currency && currency.code !== 'USD' ? `$${formatPrecisionAmount(tx.amount, 8)} USD` : 'USD'}
+                </div>
               </div>
             </button>
           );

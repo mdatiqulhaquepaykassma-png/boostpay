@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["server.ts", "currency-data.ts", "src/**/*.ts", "src/**/*.tsx"],
+  "exclude": ["admin-app", "agent-app", "promo-app", "management-app", "support-app", "db-studio", "mobile", "node_modules", "dist"]
+}
