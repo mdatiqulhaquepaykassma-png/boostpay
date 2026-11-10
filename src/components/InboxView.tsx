@@ -305,7 +305,7 @@ export const InboxView: FC<Props> = ({ userId }) => {
                         }`}
                       >
                         {isCredit || isYield ? '+' : isDebit ? '-' : ''}
-                        {price(notif.amount).replace(/^≈ ?/, '')}
+                        {price(notif.amount)}
                       </span>
                     )}
 

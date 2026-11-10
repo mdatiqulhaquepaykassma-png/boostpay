@@ -25,11 +25,15 @@ type Ctx = {
   setCurrency: (code: string) => Promise<boolean>;
   /** Format a USD amount in the selected display currency. */
   fmt: (usd: number, opts?: { decimals?: number; withSymbol?: boolean }) => string;
-  /** "≈ ৳1,028.16" style label, USD shown as-is when the currency is USD. */
+  /** "৳1,028.16" style label, USD shown as-is when the currency is USD. */
   money: (usd: number) => string;
   /** Converted amount with no symbol, trailing zeroes trimmed (min 2 places). */
   amount: (usd: number, maxDecimals?: number) => string;
-  /** Converted amount with its symbol — "≈ ৳1,234.56", "$12.50" in USD. */
+  /**
+   * Converted amount with its symbol — "৳1,234.56", "$12.50" in USD.
+   * No "≈" marker: the whole app is in this currency, so the figure is simply the
+   * amount in the currency you selected (owner request 2026-11-10).
+   */
   price: (usd: number, maxDecimals?: number) => string;
   /**
    * Notification / toast bodies are written by the server in USD ("$12.50 has been
@@ -80,7 +84,7 @@ export function convertAmount(usd: number, cur: CurrencyRow | null, maxDecimals 
 export function convertPrice(usd: number, cur: CurrencyRow | null, maxDecimals = 8): string {
   const body = convertAmount(usd, cur, maxDecimals);
   if (!cur || cur.code === 'USD') return `$${body}`;
-  return `≈ ${cur.symbol}${body}`;
+  return `${cur.symbol}${body}`;
 }
 
 /** Rewrites the dollar figures inside a server-written sentence. */
@@ -190,7 +194,7 @@ export function CurrencyProvider({ children, token }: { children: React.ReactNod
   const money = useCallback((usd: number) => {
     const cur = currency;
     if (!cur || cur.code === 'USD') return `$${(Number(usd) || 0).toFixed(2)}`;
-    return `≈ ${cur.symbol}${convertAmount(usd, cur, cur.decimals)}`;
+    return `${cur.symbol}${convertAmount(usd, cur, cur.decimals)}`;
   }, [currency, fmt]);
 
   /**

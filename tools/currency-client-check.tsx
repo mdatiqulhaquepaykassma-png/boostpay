@@ -72,8 +72,9 @@ async function main() {
   // 4. display helpers convert every amount, not just the wallet header
   const BDT = { code: 'BDT', name: 'Bangladeshi Taka', symbol: '৳', flag: '🇧🇩', country: 'Bangladesh', decimals: 2, enabled: true, rate: 100 };
   const USD = { code: 'USD', name: 'US Dollar', symbol: '$', flag: '🇺🇸', country: 'United States', decimals: 2, enabled: true, rate: 1 };
-  ck('price(1) shows taka, not dollars', convertPrice(1, BDT) === '≈ ৳100.00', convertPrice(1, BDT));
-  ck('price keeps micro-profit precision', convertPrice(0.00000125, BDT) === '≈ ৳0.000125', convertPrice(0.00000125, BDT));
+  ck('price(1) shows taka, not dollars', convertPrice(1, BDT) === '৳100.00', convertPrice(1, BDT));
+  ck('no "≈" marker in front of the amount', !convertPrice(1, BDT).includes('≈'), convertPrice(1, BDT));
+  ck('price keeps micro-profit precision', convertPrice(0.00000125, BDT) === '৳0.000125', convertPrice(0.00000125, BDT));
   ck('amount() converts without a symbol', convertAmount(12.5, BDT) === '1,250.00', convertAmount(12.5, BDT));
   ck('a micro amount keeps at least 2 decimals', convertAmount(0, BDT) === '0.00', convertAmount(0, BDT));
   ck('USD still reads as dollars', convertPrice(12.5, USD) === '$12.50', convertPrice(12.5, USD));
@@ -140,6 +141,15 @@ async function main() {
     });
   }
   ck('no screen stacks the currency symbol on top of fmt()/price()', doubled.length === 0, doubled.join(' | '), 'HIGH');
+
+  const approx: string[] = [];
+  for (const f of readdirSync(join(process.cwd(), 'src', 'components'))) {
+    if (!f.endsWith('.tsx')) continue;
+    readFileSync(join(process.cwd(), 'src', 'components', f), 'utf8').split('\n').forEach((line, i) => {
+      if (line.includes('≈') && !/^\s*(\/\/|\*)/.test(line)) approx.push(`${f}:${i + 1}`);
+    });
+  }
+  ck('no screen prints the "≈" approximation marker before an amount', approx.length === 0, approx.join(', '));
 
   ck('no user-app screen still prints a hard-coded dollar amount', offenders.length === 0,
     offenders.slice(0, 8).join(' | '), 'HIGH');
