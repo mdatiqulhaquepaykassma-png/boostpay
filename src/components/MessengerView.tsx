@@ -2050,7 +2050,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             {listItems.length === 0 && (
               <div className="py-10 text-center text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-2xl">
                 {msgFilter === 'agent'
-                  ? 'No agent chats yet. Open “Pay an Agent” on the wallet, pick an agent and tap Message.'
+                  ? 'No agent chats yet. Open “Withdraw” on the wallet, pick an agent and tap Message.'
                   : searchTerm.trim() || unreadOnly
                     ? 'Nothing matches this filter.'
                     : 'No conversations yet.'}
@@ -2058,7 +2058,7 @@ export const MessengerView: FC<Props> = ({ currentUser, initialPeerId, targetPee
             )}
           </div>
 
-          {/* Agent conversation opened from the chat list (same sheet as Pay an Agent) */}
+          {/* Agent conversation opened from the chat list (same sheet as Withdraw) */}
           <AgentMessageSheet
             isOpen={!!openAgentId}
             agentId={openAgentId || ''}

@@ -653,7 +653,7 @@ function AppInner() {
         </div>
       )}
 
-      {/* Pay an Agent (cash in / cash out with a BoostPay agent) */}
+      {/* Withdraw — cash out through a BoostPay agent */}
       {currentUser && (
         <AgentPayModal
           isOpen={isAgentPayOpen}

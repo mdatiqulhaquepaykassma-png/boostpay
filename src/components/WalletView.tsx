@@ -244,7 +244,7 @@ const IsolatedLiveBalanceCard: FC<BalanceCardProps> = memo(({
             }`}
           >
             <Store className="w-3.5 h-3.5" />
-            Pay an Agent
+            Withdraw
             {agentUnread > 0 && (
               <span className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-sky-400 px-1 text-[9px] font-black text-zinc-950">
                 {agentUnread > 9 ? '9+' : agentUnread}

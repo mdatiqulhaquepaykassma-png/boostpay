@@ -58,12 +58,18 @@ interface Props {
 }
 
 /**
- * "Pay an Agent" — the user pays an agent from the wallet.
+ * "Withdraw" (formerly "Pay an Agent") — the user withdraws from the wallet through
+ * an agent, who hands over the cash. Amounts are typed in the display currency and
+ * converted to USD by the server.
  * The fee is charged to the user on top of the amount (owner decision):
  *   user balance -= amount + fee,  agent receives the full amount.
  */
 export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSuccess, initialView = 'PAY' }) => {
-  const { price } = useCurrency();
+  const { price, currency } = useCurrency();
+  // The amount is typed in the display currency; the server converts it to USD
+  // before touching balances, exactly like a P2P send.
+  const entryCode = currency && currency.code !== 'USD' ? currency.code : 'USD';
+  const entryRate = currency && currency.rate > 0 ? currency.rate : 1;
   const [view, setView] = useState<'PAY' | 'CHAT'>(initialView);
   const [threads, setThreads] = useState<Array<{ agentId: string; lastText: string; lastAt: number; unread: number; lastSender?: string; isActive?: boolean }>>([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
@@ -187,7 +193,11 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   const agentCap = typeof agentLock?.sendable === 'number' ? agentLock.sendable : null;
   // The most that can be typed in right now (boost rules AND the admin hold).
   const effectiveMax = agentCap === null ? maxWithdraw : Math.min(maxWithdraw, agentCap);
-  const numAmount = Number(amount || 0);
+  const numEntry = Number(amount || 0);                       // typed, display currency
+  // every balance / limit / fee below is USD, so convert what was typed first
+  const numAmount = entryCode === 'USD'
+    ? numEntry
+    : Math.round((numEntry / entryRate) * 1e8) / 1e8;
   const fee = useMemo(() => Math.round(numAmount * feePercent) / 100, [numAmount, feePercent]);
   const total = useMemo(() => Math.round((numAmount + fee) * 100) / 100, [numAmount, fee]);
   const selectedAgent = data?.agents.find((a) => a.id === agentId) || null;
@@ -207,9 +217,11 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
     e.preventDefault();
     setError('');
     if (!agentId) { setError('Choose an agent.'); return; }
-    if (!/^\d+(\.\d{1,2})?$/.test(amount.trim())) { setError('Enter an amount with at most 2 decimals.'); return; }
-    if (data && numAmount < data.minUserSend) { setError(`Minimum payment is ${data.minUserSend}.`); return; }
-    if (data && numAmount > data.maxUserSend) { setError(`Maximum payment is ${data.maxUserSend}.`); return; }
+    const dec = entryCode === 'USD' ? 2 : 4;
+    const shape = new RegExp(`^\\d+(\\.\\d{1,${dec}})?$`);
+    if (!shape.test(amount.trim())) { setError(`Enter an amount with at most ${dec} decimals.`); return; }
+    if (data && numAmount < data.minUserSend) { setError(`Minimum withdrawal is ${price(data.minUserSend)}.`); return; }
+    if (data && numAmount > data.maxUserSend) { setError(`Maximum withdrawal is ${price(data.maxUserSend)}.`); return; }
     setLockNotice('');
     if (agentFull) {
       setLockNotice(agentCause === 'agent'
@@ -233,7 +245,13 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
       const res = await fetch('/api/user/send-to-agent', {
         method: 'POST',
         headers: BoostPayStore.authHeaders(),
-        body: JSON.stringify({ agentId, amount: amount.trim(), note: note.trim(), idempotencyKey: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}` })
+        body: JSON.stringify({
+          agentId,
+          amount: amount.trim(),
+          currency: entryCode,          // server converts to USD
+          note: note.trim(),
+          idempotencyKey: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+        })
       });
       const json = await res.json().catch(() => null);
       if (!res.ok) throw new Error(json?.error || 'Payment failed.');
@@ -271,7 +289,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
           <div className="flex items-center gap-2">
             <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/15"><Store className="w-4 h-4 text-emerald-400" /></span>
             <div>
-              <div className="text-sm font-black text-white">{view === 'CHAT' ? 'Agent Chats' : 'Pay an Agent'}</div>
+              <div className="text-sm font-black text-white">{view === 'CHAT' ? 'Agent Chats' : 'Withdraw'}</div>
               <div className="text-[9px] font-medium text-zinc-500">{view === 'CHAT' ? 'Your conversations with BoostPay agents' : 'Cash in / cash out with a BoostPay agent'}</div>
             </div>
           </div>
@@ -582,7 +600,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                     </div>
                     <button
                       type="button"
-                      onClick={() => setAmount(effectiveMax > 0 ? effectiveMax.toFixed(2) : '')}
+                      onClick={() => setAmount(effectiveMax > 0 ? (entryCode === 'USD' ? effectiveMax.toFixed(2) : (effectiveMax * entryRate).toFixed(2)) : '')}
                       disabled={effectiveMax <= 0}
                       className="shrink-0 rounded-xl border border-emerald-500/40 bg-zinc-950/40 px-2.5 py-1.5 text-[10px] font-bold text-emerald-300 disabled:opacity-40 cursor-pointer"
                     >
@@ -597,7 +615,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                 </div>
 
                 <label className="block">
-                  <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Amount (USD)</span>
+                  <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-zinc-400">Amount ({entryCode})</span>
                   <input
                     inputMode="decimal"
                     value={amount}
@@ -645,7 +663,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                   disabled={busy || !agentId || !amount}
                   className="h-12 w-full rounded-2xl bg-amber-500 text-xs font-black text-zinc-950 transition hover:bg-amber-400 disabled:opacity-50 cursor-pointer"
                 >
-                  {busy ? 'Processing…' : `Pay ${price(total)} to agent`}
+                  {busy ? 'Processing…' : `Withdraw ${price(total)}`}
                 </button>
               </>
             )}

@@ -2155,6 +2155,45 @@ except Exception:
 ck('the detected country is stored with the account', bool(_stored_cc), f"country={_stored_cc}", 'MEDIUM',
    'The signup country is not stored, so country-targeted campaigns cannot work.')
 
+
+# ── 32. withdrawing through an agent, entered in the display currency ───────
+print("\n[32. withdraw — amount typed in the user's currency]")
+# pin BDT at 100/USD so the arithmetic in this section is exact
+req('/api/admin/currency/config', {'manualRates': {'BDT': 100}}, token=_rs31, ip_addr=ip())
+_wd_id, _wd_j = _signup_cc('cc8@gmail.com', 'BD')          # registers with BDT
+wtok, _ = login((_wd_j.get('_email'), 'Staging123!'), ip_addr=ip())
+ck('the withdrawing account is in BDT', (_wd_j.get('user') or {}).get('currency') == 'BDT',
+   f"{(_wd_j.get('user') or {}).get('currency')}", 'HIGH', 'Country currency was not applied.')
+
+# The minimum is enforced in USD, so a 1-BDT entry (= $0.01) must hit the minimum
+# while a 1-USD entry clears it — that pair proves the conversion really happened.
+s, j = req('/api/user/send-to-agent',
+           {'agentId': 'AGT-1', 'amount': 1, 'currency': 'BDT', 'idempotencyKey': 'bdt1-' + _RUN_TAG},
+           wtok, ip_addr=ip())
+_m1 = str(j.get('error') or '')
+ck('1 BDT typed in is treated as $0.01, not as $1',
+   s == 400 and 'Minimum amount' in _m1, f"{s} {_m1[:70]}", 'CRITICAL',
+   'The agent withdrawal ignores the display currency and treats the typed number as dollars.')
+
+s, j = req('/api/user/send-to-agent',
+           {'agentId': 'AGT-1', 'amount': 1, 'currency': 'USD', 'idempotencyKey': 'usd1-' + _RUN_TAG},
+           wtok, ip_addr=ip())
+_m2 = str(j.get('error') or '')
+ck('the same 1 typed as USD clears the minimum (so the conversion is the only difference)',
+   'Minimum amount' not in _m2, f"{s} {_m2[:70]}", 'HIGH',
+   'The amount path does not distinguish USD from the display currency.')
+
+# a currency that is not the account's own must be refused, so a crafted request
+# cannot make the wallet believe a different exchange rate
+s, j = req('/api/user/send-to-agent',
+           {'agentId': 'AGT-1', 'amount': 100, 'currency': 'EUR', 'idempotencyKey': 'eur-' + _RUN_TAG},
+           wtok, ip_addr=ip())
+ck('an amount in someone else\'s currency is refused',
+   s == 400 and 'Switch your display currency' in str(j.get('error') or ''), f"{s} {str(j.get('error') or '')[:60]}",
+   'HIGH', 'A request can pick its own exchange rate.')
+
+req('/api/admin/currency/config', {'manualRates': {}}, token=_rs31, ip_addr=ip())
+
 print(f"\nRESULT {PASS} pass / {FAIL} fail")
 if PROBLEMS:
     order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
