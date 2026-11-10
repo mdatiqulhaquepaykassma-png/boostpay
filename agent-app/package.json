@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "NODE_ENV=development tsx server.ts",
-    "build": "vite build && node ../tools/make-app-files.mjs",
+    "build": "vite build && node make-app-files.mjs",
     "start": "NODE_ENV=production tsx server.ts",
     "lint": "tsc --noEmit"
   },

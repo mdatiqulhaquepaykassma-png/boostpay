@@ -347,3 +347,7 @@ LD_LIBRARY_PATH=/home/user/pwlibs/root/usr/lib/x86_64-linux-gnu python3 tools/in
 
 ### ১৫.৬ সার্বিক টেস্ট
 install-app-check **105/0** · payments-ui-check **18/0** · payments-check **40/0** · user-journey **409/0** · regression **52/0** · currency-client-check **23/0** · system-check ক্লিন · ৭ অ্যাপের বিল্ড ক্লিন।
+
+### ১৫.৭ ডিপ্লয়ে ধরা পড়া সমস্যা (সমাধান হয়েছে)
+প্রথম ডিপ্লয়ে **ইউজার অ্যাপ ঠিকই আপডেট হলো, কিন্তু ৬টা কনসোলের ডিপ্লয় "error"** হলো — কারণ কনসোলগুলোর Dokploy বিল্ড কনটেক্সট শুধু নিজের ফোল্ডার (`/admin-app`, `agent-app`, …), তাই `node ../tools/make-app-files.mjs` পাথটাই সেখানে নেই।
+**সমাধান:** জেনারেটরটার নিজের কপি (`make-app-files.mjs`) প্রতিটা অ্যাপের ভেতরে রাখা হয়েছে, বিল্ড স্ক্রিপ্ট এখন `node make-app-files.mjs`; `tools/`-এর কপিটাই মাস্টার, আর `install-app-check.py` শুরুতে ছয়টা কপির হ্যাশ মিলিয়ে দেখে (drift হলে FAIL)। আলাদা ফোল্ডারে রেখে (প্যারেন্ট ছাড়া) বিল্ড চালিয়ে যাচাই করা হয়েছে — ঠিকঠাক `dist/app.html` ও `dist/app-manifest.json` তৈরি হয়।

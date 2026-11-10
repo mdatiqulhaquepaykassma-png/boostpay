@@ -6,7 +6,7 @@
   "description": "BoostPay \u2014 Promotional & Referral Management System (standalone PWA)",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build && node ../tools/make-app-files.mjs",
+    "build": "tsc --noEmit && vite build && node make-app-files.mjs",
     "start": "tsx server.ts"
   },
   "dependencies": {

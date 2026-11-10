@@ -137,8 +137,27 @@ async def check_app(browser, base, label):
         await ctx.close()
 
 
+def check_copies():
+    """Each app ships its own copy of make-app-files.mjs (the deploy builds only
+    the app directory, so ../tools is not there). Drift would silently give one
+    app an old manifest, so compare them."""
+    import hashlib
+    master = 'tools/make-app-files.mjs'
+    if not os.path.exists(master):
+        ck('the app-file generator exists', False, master)
+        return
+    want = hashlib.sha256(open(master, 'rb').read()).hexdigest()
+    for app in ('admin-app', 'agent-app', 'management-app', 'support-app', 'promo-app', 'db-studio'):
+        f = os.path.join(app, 'make-app-files.mjs')
+        got = hashlib.sha256(open(f, 'rb').read()).hexdigest() if os.path.exists(f) else 'missing'
+        ck(f'{app} ships the generator locally', got == want, 'identical' if got == want else 'differs from tools/make-app-files.mjs')
+
+
 async def main():
     from playwright.async_api import async_playwright
+
+    print('[0. build helper copies]')
+    check_copies()
 
     targets = {}
     if len(sys.argv) > 1:
