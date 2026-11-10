@@ -351,3 +351,18 @@ install-app-check **105/0** · payments-ui-check **18/0** · payments-check **40
 ### ১৫.৭ ডিপ্লয়ে ধরা পড়া সমস্যা (সমাধান হয়েছে)
 প্রথম ডিপ্লয়ে **ইউজার অ্যাপ ঠিকই আপডেট হলো, কিন্তু ৬টা কনসোলের ডিপ্লয় "error"** হলো — কারণ কনসোলগুলোর Dokploy বিল্ড কনটেক্সট শুধু নিজের ফোল্ডার (`/admin-app`, `agent-app`, …), তাই `node ../tools/make-app-files.mjs` পাথটাই সেখানে নেই।
 **সমাধান:** জেনারেটরটার নিজের কপি (`make-app-files.mjs`) প্রতিটা অ্যাপের ভেতরে রাখা হয়েছে, বিল্ড স্ক্রিপ্ট এখন `node make-app-files.mjs`; `tools/`-এর কপিটাই মাস্টার, আর `install-app-check.py` শুরুতে ছয়টা কপির হ্যাশ মিলিয়ে দেখে (drift হলে FAIL)। আলাদা ফোল্ডারে রেখে (প্যারেন্ট ছাড়া) বিল্ড চালিয়ে যাচাই করা হয়েছে — ঠিকঠাক `dist/app.html` ও `dist/app-manifest.json` তৈরি হয়।
+
+### ১৫.৮ লাইভ যাচাই (ডিপ্লয়ের পর, আসল ডোমেইনে)
+`tools/install-app-check.py` দিয়ে সরাসরি প্রোডাকশনে চালানো হয়েছে — **117 pass / 0 fail** (৬টা পাবলিক হোস্টে ৯৬ + db.boostpay.online-এ ২১, সাথে ৬টা বিল্ড-হেল্পার কপির হ্যাশ-মিল চেক)। প্রতিটা হোস্টে Chromium নিজেই বলেছে **installability errors = ০**।
+
+| হোস্ট | `/app` | ম্যানিফেস্ট | সার্ভিস ওয়ার্কার | ইনস্টলযোগ্য |
+|---|---|---|---|---|
+| boostpay.online | 200 | `/app/manifest.json` | active (/) | ✅ |
+| admin.boostpay.online | 200 | ✅ | active | ✅ |
+| agent.boostpay.online | 200 | ✅ | active | ✅ |
+| management.boostpay.online | 200 | ✅ | active | ✅ |
+| supportchat.boostpay.online | 200 | ✅ | active | ✅ |
+| promotion.boostpay.online | 200 | ✅ | active | ✅ |
+| db.boostpay.online | 200 | ✅ | active | ✅ |
+
+**লাইভ হেলথ:** `v1.2.1794352562` · **কমিট:** `36fa3fc`
