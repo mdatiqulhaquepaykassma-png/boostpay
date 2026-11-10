@@ -3,7 +3,8 @@
  *
  * Layout follows the brief: two tabs at the top, then the method catalogue in a
  * fixed order — Recommended, E-Wallets, Internet Banking, Cryptocurrency,
- * Telegram Agent. Recommended is only a *display position*: the same method row is
+ * Telegram Agent (shown as "Cash Agent" on the withdraw side). Recommended is only a
+ * *display position*: the same method row is
  * also listed in its own category, because there is a single configuration per
  * method. Nothing here moves money: a deposit is a request an admin verifies, and
  * a withdrawal is debited server-side the moment it is submitted.
@@ -75,6 +76,23 @@ function timeAgo(ts: number) {
 
 export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, onOpenAgentPay, onOpenAgentChat, onModeChange }) => {
   const { price, currency } = useCurrency();
+  /** the card line is ~90px wide: drop trailing ".00" so the range never clips */
+  const compact = useCallback((usd: number) => price(Number(usd) || 0).replace(/\.00(?=\D*$)/, ''), [price]);
+  /** a readable tile: an admin-supplied image URL wins, otherwise the initials */
+  const logoTile = (m: Method, size: 'card' | 'sheet') => {
+    const dim = size === 'card' ? 'h-9 w-9 rounded-lg text-[12px]' : 'h-8 w-8 rounded-lg text-[11px]';
+    const url = String(m.logo || '').trim();
+    if (/^(https?:|data:image\/)/i.test(url)) {
+      return <img src={url} alt="" className={`${dim} shrink-0 object-contain`} />;
+    }
+    const words = (m.name.replace(/^the\s+/i, '').match(/[A-Za-z0-9]+/g) || [m.name]);
+    const initials = words.slice(0, 2).map((w) => w[0].toUpperCase()).join('');
+    return (
+      <span className={`${dim} flex shrink-0 items-center justify-center bg-gradient-to-br from-amber-300 to-amber-500 font-black text-zinc-950`}>
+        {initials || '•'}
+      </span>
+    );
+  };
   const [mode, setMode] = useState<Mode>(initialMode);
   const [data, setData] = useState<Resp | null>(null);
   const [loading, setLoading] = useState(false);
@@ -132,11 +150,20 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
   }, [isOpen, onClose]);
 
   const methods = data?.methods || [];
+
+  /**
+   * Owner request 2026-11-10: on the WITHDRAW side the Telegram-agent channel is
+   * called "Cash Agent". This is a display label only — the stored method keeps
+   * its real id/name, so nothing in the admin panel or the ledger changes.
+   */
+  const nameOf = useCallback((m: { name: string; category: string }) =>
+    (mode === 'withdraw' && m.category === 'AGENT' ? 'Cash Agent' : m.name), [mode]);
+
   const byQuery = useMemo(() => {
     const needle = q.trim().toLowerCase();
     if (!needle) return methods;
-    return methods.filter((m) => `${m.name} ${m.id}`.toLowerCase().includes(needle));
-  }, [methods, q]);
+    return methods.filter((m) => `${nameOf(m)} ${m.name} ${m.id}`.toLowerCase().includes(needle));
+  }, [methods, q, nameOf]);
 
   const recommended = useMemo(() => byQuery
     .filter((m) => m.recommended)
@@ -153,12 +180,13 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
     setOpenMethod(m);
   };
 
-  const Section: React.FC<{ title: string; icon: string; rows: Method[]; empty?: string; accent?: string }> = ({ title, icon, rows, empty, accent }) => {
-    const isCollapsed = !!collapsed[title];
+  const Section: React.FC<{ title: string; icon: string; rows: Method[]; empty?: string; accent?: string; stateKey?: string }> = ({ title, icon, rows, empty, accent, stateKey }) => {
+    const key = stateKey || title;
+    const isCollapsed = !!collapsed[key];
     return (
       <section className="mb-3">
         <button
-          onClick={() => setCollapsed((c) => ({ ...c, [title]: !c[title] }))}
+          onClick={() => setCollapsed((c) => ({ ...c, [key]: !c[key] }))}
           aria-expanded={!isCollapsed}
           className={`flex w-full items-center gap-2.5 rounded-t-2xl rounded-b-none border border-b-0 border-sky-900/60 px-3.5 py-2.5 text-left ${accent || 'bg-gradient-to-r from-[#0b1f3a] to-[#123a63]'}`}
         >
@@ -175,16 +203,16 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
               <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
                 {rows.map((m) => (
                   <button
-                    key={`${title}-${m.id}`}
+                    key={`${key}-${m.id}`}
                     onClick={() => openCard(m)}
                     className="group flex min-h-[64px] items-center gap-2 rounded-xl border border-zinc-800 bg-white/[0.04] p-2.5 text-left transition hover:border-amber-500/50 hover:bg-white/[0.07] active:scale-[0.98]"
-                    aria-label={`${m.name} ${mode}`}
+                    aria-label={`${nameOf(m)} ${mode}`}
                   >
-                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white/95 text-[17px] leading-none">{m.logo}</span>
+                    {logoTile(m, 'card')}
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[11px] font-bold text-zinc-100">{m.name}</span>
-                      <span className="mt-0.5 block truncate text-[9px] text-zinc-500">
-                        {price(m.min)} – {price(m.max)}
+                      <span className="line-clamp-2 text-[10.5px] font-bold leading-[1.15] text-zinc-100">{nameOf(m)}</span>
+                      <span className="mt-0.5 block whitespace-nowrap text-[8px] tabular-nums text-zinc-500">
+                        {compact(m.min)} – {compact(m.max)}
                       </span>
                     </span>
                     <ArrowRight className="h-3.5 w-3.5 shrink-0 text-zinc-600 transition group-hover:text-amber-400" />
@@ -282,7 +310,8 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
             {SECTION_ORDER.map((s) => (
               <Section
                 key={s.key}
-                title={s.label}
+                stateKey={s.key}
+                title={mode === 'withdraw' && s.key === 'AGENT' ? 'Cash Agent' : s.label}
                 icon={s.icon}
                 rows={byQuery.filter((m) => m.category === s.key)}
               />
@@ -303,7 +332,9 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
                   {history.slice(0, 8).map((r) => (
                     <div key={r.id} className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-2.5 py-2">
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[10.5px] font-semibold text-zinc-200">{r.methodName} · <span className="font-mono text-zinc-500">{r.id}</span></div>
+                        <div className="truncate text-[10.5px] font-semibold text-zinc-200">
+                          {mode === 'withdraw' && r.methodName === 'Telegram Agent' ? 'Cash Agent' : r.methodName} · <span className="font-mono text-zinc-500">{r.id}</span>
+                        </div>
                         <div className="text-[9px] text-zinc-500">{timeAgo(r.createdAt)} · {r.entryAmount} {r.entryCurrency}{r.reason ? ` · ${r.reason}` : ''}</div>
                       </div>
                       <div className="text-right">
@@ -330,6 +361,8 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
       {openMethod && (
         <MethodFlow
           method={openMethod}
+          label={nameOf(openMethod)}
+          logo={logoTile(openMethod, 'sheet')}
           mode={mode}
           entryCode={entryCode}
           entryRate={entryRate}
@@ -344,10 +377,10 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
 
 /* ── the per-method request form ─────────────────────────────────────────── */
 const MethodFlow: React.FC<{
-  method: Method; mode: Mode; entryCode: string; entryRate: number;
+  method: Method; label: string; logo: React.ReactNode; mode: Mode; entryCode: string; entryRate: number;
   price: (usd: number, d?: number) => string;
   onClose: () => void; onDone: () => void;
-}> = ({ method, mode, entryCode, entryRate, price, onClose, onDone }) => {
+}> = ({ method, label, logo, mode, entryCode, entryRate, price, onClose, onDone }) => {
   const [amount, setAmount] = useState('');
   const [reference, setReference] = useState('');
   const [note, setNote] = useState('');
@@ -407,9 +440,9 @@ const MethodFlow: React.FC<{
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-zinc-800 px-3.5 py-3">
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/95 text-[15px]">{method.logo}</span>
+          {logo}
           <div className="min-w-0 flex-1">
-            <div className="truncate text-[12px] font-bold text-white">{method.name}</div>
+            <div className="truncate text-[12px] font-bold text-white">{label}</div>
             <div className="text-[9px] uppercase tracking-wider text-zinc-500">{mode} · {entryCode}</div>
           </div>
           <button onClick={onClose} className="rounded-full p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200" aria-label="Close"><X className="h-4 w-4" /></button>

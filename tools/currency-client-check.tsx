@@ -15,7 +15,7 @@ import { renderToString } from 'react-dom/server';
 import { CurrencyProvider, useCurrency, convertAmount, convertPrice, convertText } from '../src/lib/currency';
 
 let pass = 0, fail = 0;
-function ck(name: string, ok: boolean, detail: string) {
+function ck(name: string, ok: boolean, detail: string, _sev?: string, _hint?: string) {
   if (ok) { pass++; console.log(`  PASS  ${name}`); }
   else { fail++; console.log(`  FAIL  ${name} — ${detail}`); }
 }

@@ -367,15 +367,32 @@ function AppInner() {
   const paymentsModeRef = useRef<'deposit' | 'withdraw' | null>(null);
   paymentsModeRef.current = paymentsMode;
 
+  // true once WE pushed the #/deposit|#/withdraw entry, so Back can pop it
+  // instead of leaving the app when the page was opened from a deep link
+  const paymentsEntryPushed = useRef(false);
+
   const openPayments = (m: 'deposit' | 'withdraw') => {
     setPaymentsMode(m);
-    try { history.pushState({ payments: m }, '', `#/${m}`); } catch { /* ignore */ }
+    try {
+      if (location.hash === '#/deposit' || location.hash === '#/withdraw') {
+        history.replaceState({ payments: m }, '', `#/${m}`);   // already inside: no extra entry
+      } else {
+        history.pushState({ payments: m }, '', `#/${m}`);
+        paymentsEntryPushed.current = true;
+      }
+    } catch { /* ignore */ }
   };
+  /** Back always lands on the wallet page (owner request 2026-11-10). */
   const closePayments = () => {
     setPaymentsMode(null);
+    setActiveTab('WALLET');
     try {
-      if (location.hash === '#/deposit' || location.hash === '#/withdraw') history.back();
-      else history.replaceState(null, '', location.pathname + location.search);
+      if (paymentsEntryPushed.current) {
+        paymentsEntryPushed.current = false;
+        history.back();
+      } else {
+        history.replaceState(null, '', location.pathname + location.search);
+      }
     } catch { /* ignore */ }
   };
 
@@ -383,8 +400,15 @@ function AppInner() {
   useEffect(() => {
     const sync = () => {
       const h = String(location.hash || '');
-      if (h === '#/deposit' || h === '#/withdraw') setPaymentsMode(h === '#/deposit' ? 'deposit' : 'withdraw');
-      else setPaymentsMode(null);
+      if (h === '#/deposit' || h === '#/withdraw') {
+        setPaymentsMode(h === '#/deposit' ? 'deposit' : 'withdraw');
+      } else {
+        // leaving the payment page by any route (back gesture, back button, a
+        // stray hash change) drops the user on the wallet, never on a blank tab
+        if (paymentsModeRef.current) setActiveTab('WALLET');
+        paymentsEntryPushed.current = false;
+        setPaymentsMode(null);
+      }
     };
     sync();
     window.addEventListener('popstate', sync);
@@ -697,7 +721,9 @@ function AppInner() {
           onClose={closePayments}
           onOpenAgentPay={() => { setAgentPayView('PAY'); setIsAgentPayOpen(true); }}
           onOpenAgentChat={() => { setAgentPayView('CHAT'); setIsAgentPayOpen(true); }}
-          onModeChange={(m) => { setPaymentsMode(m); try { history.pushState({ payments: m }, '', `#/${m}`); } catch { /* ignore */ } }}
+          // switching tabs rewrites the same history entry, so one Back press
+          // returns to the wallet instead of walking through the tabs
+          onModeChange={(m) => { setPaymentsMode(m); try { history.replaceState({ payments: m }, '', `#/${m}`); } catch { /* ignore */ } }}
         />
       )}
 

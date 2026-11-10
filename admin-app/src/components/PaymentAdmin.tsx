@@ -176,7 +176,9 @@ export const PaymentAdmin: React.FC = () => {
             {filtered.map((m) => (
               <div key={m.id} className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-2.5">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/90 text-[13px]">{m.logo}</span>
+                  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-400 text-[10px] font-black text-zinc-950">
+                    {/^(https?:|data:image\/)/i.test(String(m.logo || '')) ? 'IMG' : (String(m.name || '').match(/[A-Za-z0-9]+/g) || ['•']).slice(0, 2).map((w: string) => w[0].toUpperCase()).join('')}
+                  </span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[11px] font-bold text-zinc-100">{m.name || '(no name)'}</div>
                     <div className="font-mono text-[9px] text-zinc-500">{m.id} · {m.category} · order {m.order} · {m.currencies.join(',') || 'none'}</div>
@@ -296,8 +298,8 @@ export const PaymentAdmin: React.FC = () => {
                 <input value={String(shown.id || '')} onChange={(e) => set('id', e.target.value.toUpperCase())} disabled={!!methods.find((m) => m.id === editing.id)}
                   className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 font-mono text-[10px] text-zinc-100 disabled:opacity-60" />
               </label>
-              <label className="text-[9px] text-zinc-400">Logo (emoji)
-                <input value={String(shown.logo || '')} onChange={(e) => set('logo', e.target.value)} maxLength={4}
+              <label className="text-[9px] text-zinc-400">Logo image URL (blank = initials)
+                <input value={String(shown.logo || '')} onChange={(e) => set('logo', e.target.value)} maxLength={300}
                   className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[11px] text-zinc-100" />
               </label>
               <label className="text-[9px] text-zinc-400">Category
