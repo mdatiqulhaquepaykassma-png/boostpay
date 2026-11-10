@@ -125,6 +125,21 @@ export function CurrencyProvider({ children, token }: { children: React.ReactNod
   }, []);
 
   useEffect(() => { void reload(); }, [reload, token]);
+
+  // Sign-in / sign-out changes which account (and so which preference) applies.
+  // The app announces it, and the rate table is re-fetched with the new token.
+  useEffect(() => {
+    const onSession = () => { void reload(); };
+    window.addEventListener('boostpay:session-changed', onSession);
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'boostpay_auth_token_v1' || e.key === 'boostpay_token') void reload();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener('boostpay:session-changed', onSession);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, [reload]);
   // refresh the rate table every 10 minutes while the app is open
   useEffect(() => {
     const id = setInterval(() => { void reload(); }, 10 * 60 * 1000);

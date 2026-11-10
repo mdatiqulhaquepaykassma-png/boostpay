@@ -10,7 +10,7 @@ import { User, SystemConfig } from './types';
 import { Navbar } from './components/Navbar';
 import { AuthGate } from './components/AuthGate';
 import { WalletView } from './components/WalletView';
-import { CurrencyProvider } from './lib/currency';
+import { CurrencyProvider, useCurrency } from './lib/currency';
 const LeaderboardView = lazy(()=> import('./components/LeaderboardView').then(m=> ({ default: m.LeaderboardView })));
 const ReferView = lazy(()=> import('./components/ReferView').then(m=> ({ default: m.ReferView })));
 const MessengerView = lazy(()=> import('./components/MessengerView').then(m=> ({ default: m.MessengerView })));
@@ -28,6 +28,7 @@ import { CallManager } from './components/CallOverlay';
 import { AlertTriangle, X, QrCode } from 'lucide-react';
 
 function AppInner() {
+  const { reload: reloadCurrency } = useCurrency();
   const [currentUser, setCurrentUser] = useState<User | null>(() => BoostPayStore.getCurrentUser());
   const [isInitialSyncing, setIsInitialSyncing] = useState<boolean>(true);
   const [isSecurityOpen, setIsSecurityOpen] = useState(false);
@@ -185,6 +186,8 @@ function AppInner() {
 
   const handleLogout = () => {
     BoostPayStore.setCurrentUser(null);
+    try { window.dispatchEvent(new CustomEvent('boostpay:session-changed')); } catch { /* ignore */ }
+    void reloadCurrency();
     setCurrentUser(null);
     setActiveTab('WALLET');
     setChatTargetPeerId(null);
@@ -360,6 +363,9 @@ function AppInner() {
   const handleUserLogin = (user: User) => {
     BoostPayStore.setCurrentUser(user);
     setCurrentUser(user);
+    // the freshly signed-in account may have its own saved currency
+    try { window.dispatchEvent(new CustomEvent('boostpay:session-changed')); } catch { /* ignore */ }
+    void reloadCurrency();
     setActiveTab('WALLET');
   };
 
