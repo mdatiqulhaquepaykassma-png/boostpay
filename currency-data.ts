@@ -203,6 +203,23 @@ export function currencyForCountry(country: string | undefined): string | null {
   return COUNTRY_CURRENCY[cc] || null;
 }
 
+/**
+ * Every ISO-2 country that uses this currency (BDT → ['BD'], XOF → many).
+ * Used by the payment catalogue: a method is local to a country, and the user's
+ * country comes from the currency they picked when nothing more precise exists.
+ */
+export function countriesForCurrency(code: string | undefined): string[] {
+  const cc = String(code || '').trim().toUpperCase();
+  if (!cc) return [];
+  return Object.keys(COUNTRY_CURRENCY).filter((k) => COUNTRY_CURRENCY[k] === cc);
+}
+
+/** The first (canonical) country of a currency — used when one is enough. */
+export function primaryCountryForCurrency(code: string | undefined): string {
+  const list = countriesForCurrency(code);
+  return list.length ? list[0] : '';
+}
+
 /** ISO 4217 validation helper shared by the server and the tests. */
 export function isCurrencyCode(code: string | undefined): boolean {
   return CURRENCIES.some((c) => c.code === String(code || '').toUpperCase());

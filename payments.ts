@@ -104,19 +104,19 @@ function method(partial: Partial<PaymentMethod> & { id: string; name: string; ca
  */
 export function defaultPaymentMethods(): PaymentMethod[] {
   return [
-    method({ id: 'PM-BKASH', name: 'bKash', logo: '🟥', category: 'EWALLET', recommended: true, recommendedOrder: 1, order: 10 }),
-    method({ id: 'PM-NAGAD', name: 'Nagad', logo: '🟧', category: 'EWALLET', recommended: true, recommendedOrder: 2, order: 20 }),
-    method({ id: 'PM-ROCKET', name: 'Rocket', logo: '🟪', category: 'EWALLET', recommended: true, recommendedOrder: 3, order: 30 }),
-    method({ id: 'PM-UPAY', name: 'Upay', logo: '🟦', category: 'EWALLET', recommended: true, recommendedOrder: 4, order: 40 }),
-    method({ id: 'PM-NAGAD-FAST', name: 'Fast Nagad', logo: '⚡', category: 'EWALLET', order: 50, processingTime: 'Usually within 2 minutes' }),
-    method({ id: 'PM-NAGAD-LOCAL', name: 'The Local Nagad', logo: '🏪', category: 'EWALLET', order: 60 }),
-    method({ id: 'PM-BKASH-LOCAL', name: 'The Local bKash', logo: '🏬', category: 'EWALLET', order: 70 }),
-    method({ id: 'PM-BKASH-LIGHT', name: 'LightSpeed bKash', logo: '🚀', category: 'EWALLET', order: 80 }),
-    method({ id: 'PM-NAGAD-LIGHT', name: 'LightSpeed Nagad', logo: '🛰️', category: 'EWALLET', order: 90 }),
-    method({ id: 'PM-CELLFIN', name: 'CellFin', logo: '🟩', category: 'EWALLET', order: 100 }),
-    method({ id: 'PM-NEXUSPAY', name: 'NexusPay', logo: '🔷', category: 'BANK', order: 10 }),
-    method({ id: 'PM-BANK', name: 'Bank Transfer', logo: '🏦', category: 'BANK', order: 20, processingTime: '1–2 business days' }),
-    method({ id: 'PM-CELLFIN-BANK', name: 'CellFin Internet Banking', logo: '🌐', category: 'BANK', order: 30 }),
+    method({ id: 'PM-BKASH', countries: ['BD'], name: 'bKash', logo: '🟥', category: 'EWALLET', recommended: true, recommendedOrder: 1, order: 10 }),
+    method({ id: 'PM-NAGAD', countries: ['BD'], name: 'Nagad', logo: '🟧', category: 'EWALLET', recommended: true, recommendedOrder: 2, order: 20 }),
+    method({ id: 'PM-ROCKET', countries: ['BD'], name: 'Rocket', logo: '🟪', category: 'EWALLET', recommended: true, recommendedOrder: 3, order: 30 }),
+    method({ id: 'PM-UPAY', countries: ['BD'], name: 'Upay', logo: '🟦', category: 'EWALLET', recommended: true, recommendedOrder: 4, order: 40 }),
+    method({ id: 'PM-NAGAD-FAST', countries: ['BD'], name: 'Fast Nagad', logo: '⚡', category: 'EWALLET', order: 50, processingTime: 'Usually within 2 minutes' }),
+    method({ id: 'PM-NAGAD-LOCAL', countries: ['BD'], name: 'The Local Nagad', logo: '🏪', category: 'EWALLET', order: 60 }),
+    method({ id: 'PM-BKASH-LOCAL', countries: ['BD'], name: 'The Local bKash', logo: '🏬', category: 'EWALLET', order: 70 }),
+    method({ id: 'PM-BKASH-LIGHT', countries: ['BD'], name: 'LightSpeed bKash', logo: '🚀', category: 'EWALLET', order: 80 }),
+    method({ id: 'PM-NAGAD-LIGHT', countries: ['BD'], name: 'LightSpeed Nagad', logo: '🛰️', category: 'EWALLET', order: 90 }),
+    method({ id: 'PM-CELLFIN', countries: ['BD'], name: 'CellFin', logo: '🟩', category: 'EWALLET', order: 100 }),
+    method({ id: 'PM-NEXUSPAY', countries: ['BD'], name: 'NexusPay', logo: '🔷', category: 'BANK', order: 10 }),
+    method({ id: 'PM-BANK', countries: ['BD'], name: 'Bank Transfer', logo: '🏦', category: 'BANK', order: 20, processingTime: '1–2 business days' }),
+    method({ id: 'PM-CELLFIN-BANK', countries: ['BD'], name: 'CellFin Internet Banking', logo: '🌐', category: 'BANK', order: 30 }),
     method({ id: 'PM-USDT-TRC20', name: 'Tether (USDT) · TRC20', logo: '💠', category: 'CRYPTO', order: 10, currencies: ['*'] }),
     method({ id: 'PM-USDT-BEP20', name: 'Tether (USDT) · BSC', logo: '🟡', category: 'CRYPTO', order: 20 }),
     method({ id: 'PM-USDT-ERC20', name: 'Tether (USDT) · ERC20', logo: '🔵', category: 'CRYPTO', order: 30 }),
@@ -132,11 +132,43 @@ export function defaultPaymentMethods(): PaymentMethod[] {
   ];
 }
 
+
+/**
+ * One-time country migration (owner spec 2026-11-10: a user only ever sees the
+ * local methods of the country their currency belongs to).
+ *
+ * The first catalogue was seeded with `countries: []`, i.e. "everywhere", which
+ * made bKash/Nagad appear to a user in the United States. The seed rows are
+ * tagged with their real country once; a method the admin later edits is left
+ * exactly as configured, and the flag stops the migration from ever running
+ * again (so clearing a country on purpose is respected).
+ */
+const BD_SEEDED_METHODS = [
+  'PM-BKASH', 'PM-NAGAD', 'PM-ROCKET', 'PM-UPAY', 'PM-NAGAD-FAST', 'PM-NAGAD-LOCAL',
+  'PM-BKASH-LOCAL', 'PM-BKASH-LIGHT', 'PM-NAGAD-LIGHT', 'PM-CELLFIN', 'PM-NEXUSPAY',
+  'PM-BANK', 'PM-CELLFIN-BANK'
+];
+
+export function migrateDefaultCountries(db: any): void {
+  try {
+    if (!db || typeof db !== 'object') return;
+    if (db.countriesMigratedAt) return;
+    for (const m of (db.paymentMethods || [])) {
+      if (!BD_SEEDED_METHODS.includes(String(m.id))) continue;
+      if (Array.isArray(m.countries) && m.countries.length > 0) continue;
+      m.countries = ['BD'];
+      m.updatedAt = Date.now();
+    }
+    db.countriesMigratedAt = Date.now();
+  } catch { /* never block a request */ }
+}
+
 /** Adds the new collections to an existing database without touching anything else. */
 export function ensurePaymentCollections(db: any): any {
   if (!Array.isArray(db.paymentMethods) || db.paymentMethods.length === 0) {
     db.paymentMethods = defaultPaymentMethods();
   }
+  migrateDefaultCountries(db);
   if (!Array.isArray(db.depositRequests)) db.depositRequests = [];
   if (!Array.isArray(db.withdrawRequests)) db.withdrawRequests = [];
   if (!db.paymentMeta || typeof db.paymentMeta !== 'object') db.paymentMeta = { version: 1 };

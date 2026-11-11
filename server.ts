@@ -10,7 +10,7 @@ import { createServer as createViteServer } from 'vite';
 import nodemailer from 'nodemailer';
 import QRCode from 'qrcode';
 import webpush from 'web-push';
-import { CURRENCIES, currencyForCountry, isCurrencyCode } from './currency-data';
+import { CURRENCIES, COUNTRY_CURRENCY, currencyForCountry, isCurrencyCode, countriesForCurrency, primaryCountryForCurrency } from './currency-data';
 import {
   PAYMENT_CATEGORIES, defaultPaymentMethods, ensurePaymentCollections, findMethod,
   methodAvailable, limitsFor, toPublicMethod, withdrawFieldsFor,
@@ -1450,10 +1450,43 @@ function setCurrencyPref(db: any, owner: any, code: string, who: string, kind: s
   if (!enabledCurrencyCodes(db).includes(upper)) return { ok: false, error: `${upper} is not available right now.` };
   const before = String(owner.currency || 'USD');
   owner.currency = upper;
+  // the country follows the currency the user picked, so the payment catalogue
+  // immediately shows that country's local methods
+  const cc = primaryCountryForCurrency(upper);
+  if (cc) owner.currencyCountry = cc;
   owner.currencySource = 'MANUAL';       // permanent: auto-detection must never override this
   owner.currencySetAt = Date.now();
   recordAuditLog(db, 'CURRENCY_PREF_CHANGED', who, `${kind} #${owner.id} display currency ${before} → ${upper}`, String(owner.id));
   return { ok: true };
+}
+
+/**
+ * Which country's LOCAL payment methods this account may use (owner spec
+ * 2026-11-10). Priority:
+ *   1. an explicit country saved on the account (signup/geo)
+ *   2. the country stored with the auto currency pick
+ *   3. the country of the display currency the user chose (BDT → BD)
+ * Nothing is guessed from the IP here — the stored choice wins, exactly like the
+ * currency rule, so a VPN or a trip abroad never changes the payment list.
+ */
+function effectiveCountryOf(db: any, owner: any): string {
+  const explicit = String((owner && (owner.country || owner.currencyCountry)) || '').toUpperCase();
+  if (/^[A-Z]{2}$/.test(explicit)) return explicit;
+  // Only a currency the user actually chose pins a country. The legacy default
+  // (USD from an empty profile) must stay "no restriction", otherwise accounts
+  // that never used the picker would suddenly lose every local method.
+  if (String((owner && owner.currencySource) || '').toUpperCase() !== 'MANUAL') return '';
+  const cc = primaryCountryForCurrency(String((owner && owner.currency) || ''));
+  return cc || '';
+}
+
+/** Country + label for the payment catalogue header. */
+function countryLabelOf(cc: string): { code: string; label: string; flag: string } {
+  const code = String(cc || '').toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) return { code: '', label: '', flag: '' };
+  const code2 = currencyForCountry(code);
+  const row = CURRENCIES.find((c) => c.code === code2);
+  return { code, label: row ? row.country : code, flag: row ? row.flag : '' };
 }
 
 function bonusLedgerRow(db: any, row: any) {
@@ -2233,7 +2266,7 @@ function adoptPersistedApiSecret(doc: any): void {
 
 const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (was 30d — harden token theft window)
 
-function issueToken(sub: string, role: 'USER' | 'ADMIN' | 'AGENT' | 'MANAGEMENT', sid?: string, adminRole?: string): string {
+function issueToken(sub: string, role: 'USER' | 'ADMIN' | 'AGENT' | 'MANAGEMENT' | 'WALLET_AGENT', sid?: string, adminRole?: string): string {
   const payload: any = { sub: String(sub), role, exp: Date.now() + TOKEN_TTL_MS };
   if (sid) payload.sid = String(sid);
   if (adminRole) payload.adminRole = adminRole;
@@ -2428,7 +2461,7 @@ function getBearerToken(req: any): string | null {
 interface SessionRecord {
   id: string;
   userId: string;
-  role: 'USER' | 'ADMIN' | 'AGENT' | 'MANAGEMENT';
+  role: 'USER' | 'ADMIN' | 'AGENT' | 'MANAGEMENT' | 'WALLET_AGENT';
   ip: string;
   userAgent: string;
   createdAt: number;
@@ -2490,7 +2523,7 @@ function sessionBlockReason(db: any, payload: any): string | null {
   return null;
 }
 
-function createSession(db: any, userId: string, role: 'USER' | 'ADMIN' | 'AGENT' | 'MANAGEMENT', ip: string, userAgent: string): SessionRecord {
+function createSession(db: any, userId: string, role: 'USER' | 'ADMIN' | 'AGENT' | 'MANAGEMENT' | 'WALLET_AGENT', ip: string, userAgent: string): SessionRecord {
   const sess: SessionRecord = {
     id: 'SESS-' + Date.now().toString(36) + '-' + Math.floor(Math.random() * 1e9).toString(36),
     userId: String(userId),
@@ -2737,6 +2770,31 @@ function requireSuperAdmin(req: any, res: any, next: any) {
   if ((req.authAdminRole || 'SUPERADMIN') !== 'SUPERADMIN') {
     return res.status(403).json({ error: 'This action requires a SUPERADMIN account. Support admins have read-only access.' });
   }
+  next();
+}
+
+/**
+ * Guard for the wallet-agent panel (walletagent.boostpay.online).
+ *
+ * A wallet agent is NOT an admin: it can only see and action the deposit and
+ * withdrawal requests of the one payment method it was bound to when the admin
+ * created the account.
+ */
+function requireWalletAgent(req: any, res: any, next: any) {
+  const payload = verifyToken(getBearerToken(req));
+  if (!payload || payload.role !== 'WALLET_AGENT') {
+    return res.status(401).json({ error: 'Wallet agent sign-in required.' });
+  }
+  let db: any = null;
+  try { db = readDb(); } catch { /* ignore */ }
+  const blocked = sessionBlockReason(db, payload);
+  if (blocked) return res.status(401).json({ error: blocked });
+  const ag = ((db && db.walletAgents) || []).find((a: any) => String(a.id) === String(payload.sub));
+  if (!ag) return res.status(401).json({ error: 'This wallet-agent account no longer exists.' });
+  if (ag.active === false) return res.status(403).json({ error: 'This wallet-agent account is disabled.' });
+  req.authWalletAgentId = String(ag.id);
+  req.authWalletAgentEmail = String(ag.email || '');
+  req.authSid = payload.sid;
   next();
 }
 
@@ -10633,6 +10691,92 @@ const paymentLocks = new Map<string, Promise<any>>();
   }
   function reviewAudience(role: 'user' | 'agent') { return role === 'agent' ? 'AGENT' : 'USER'; }
 
+  /**
+   * The money decision for a deposit, in ONE place.
+   *
+   * Both the super-admin console and a wallet agent (walletagent.boostpay.online)
+   * come through here, so there is a single implementation of "credit exactly
+   * once" and a single audit trail. Callers own the transaction lock and the
+   * writeDb() call.
+   */
+  function reviewDepositCore(db: any, opts: { id: string; action: 'APPROVE' | 'REJECT'; actor: string; reason?: string }): { status: number; body: any } {
+    const r = (db.depositRequests || []).find((d: any) => d.id === opts.id);
+    if (!r) return { status: 404, body: { error: 'That deposit does not exist.' } };
+    if (r.status !== 'PENDING') return { status: 409, body: { error: `This deposit is already ${r.status}.` } };
+    const user = (db.users || []).find((u: any) => String(u.id) === String(r.userId));
+    if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
+    if (opts.action === 'APPROVE') {
+      const credit = Number(Number(r.amountUsd).toFixed(8));
+      if (!(credit > 0)) return { status: 400, body: { error: 'The stored amount is not usable.' } };
+      user.balance = floor2((Number(user.balance) || 0) + credit);
+      const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+      db.transactions.unshift({
+        id: txId, userId: user.id, type: 'DEPOSIT', amount: credit, timestamp: Date.now(),
+        notes: `Deposit ${r.id} approved · ${r.methodName} · ref ${r.reference}`, referenceId: r.id,
+      });
+      r.status = 'APPROVED'; r.txId = txId;
+      pushNotification(db, {
+        id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+        userId: String(user.id), type: 'TRANSFER_RECEIVED', title: 'BOOSTPAY-DEPOSIT',
+        message: `DEPOSIT CONFIRMED: $${credit.toFixed(2)} credited via ${r.methodName}. Balance: $${user.balance.toFixed(2)}. Ref: ${txId}`,
+        amount: credit, referenceId: txId, timestamp: Date.now(), isRead: false, metadata: { depositId: r.id },
+      } as any);
+    } else {
+      r.status = 'REJECTED';
+      pushNotification(db, {
+        id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+        userId: String(user.id), type: 'SYSTEM_ALERT', title: 'BOOSTPAY-DEPOSIT',
+        message: `Deposit ${r.id} could not be verified and was not credited. ${sanitizeText(opts.reason, 160) || 'Contact support.'}`,
+        timestamp: Date.now(), isRead: false, metadata: { depositId: r.id },
+      } as any);
+    }
+    r.reviewedAt = Date.now();
+    r.reviewedBy = String(opts.actor);
+    r.reason = sanitizeText(opts.reason, 200).trim();
+    recordAuditLog(db, `DEPOSIT_${r.status}`, String(opts.actor), `Deposit ${r.id} $${Number(r.amountUsd).toFixed(2)} ${r.status.toLowerCase()}`, String(user.id));
+    return { status: 200, body: { success: true, request: r } };
+  }
+
+  /** The money decision for a withdrawal — same single implementation. */
+  function reviewWithdrawCore(db: any, opts: { id: string; action: 'APPROVE' | 'REJECT'; actor: string; reason?: string; payoutRef?: string }): { status: number; body: any } {
+    const r = (db.withdrawRequests || []).find((w: any) => w.id === opts.id);
+    if (!r) return { status: 404, body: { error: 'That withdrawal does not exist.' } };
+    if (r.status !== 'PENDING') return { status: 409, body: { error: `This withdrawal is already ${r.status}.` } };
+    const user = (db.users || []).find((u: any) => String(u.id) === String(r.userId));
+    if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
+    if (opts.action === 'APPROVE') {
+      r.status = 'COMPLETED';
+      r.payoutRef = sanitizeText(opts.payoutRef, 80).trim();
+      pushNotification(db, {
+        id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+        userId: String(user.id), type: 'SYSTEM_ALERT', title: 'BOOSTPAY-WITHDRAW',
+        message: `WITHDRAWAL PAID: $${Number(r.netUsd).toFixed(2)} sent via ${r.methodName}. Ref: ${r.id}`,
+        timestamp: Date.now(), isRead: false, metadata: { withdrawId: r.id },
+      } as any);
+    } else {
+      const refund = Number(Number(r.amountUsd).toFixed(8));
+      user.balance = floor2((Number(user.balance) || 0) + refund);
+      releaseBoostProfit(user, refund);
+      const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+      db.transactions.unshift({
+        id: txId, userId: user.id, type: 'WITHDRAW_REFUND', amount: refund, timestamp: Date.now(),
+        notes: `Withdrawal ${r.id} rejected — refunded`, referenceId: r.id,
+      });
+      r.status = 'REJECTED'; r.txId = txId;
+      pushNotification(db, {
+        id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+        userId: String(user.id), type: 'TRANSFER_RECEIVED', title: 'BOOSTPAY-WITHDRAW',
+        message: `Withdrawal ${r.id} was rejected and $${refund.toFixed(2)} returned to your balance. ${sanitizeText(opts.reason, 160) || 'Contact support.'} Balance: $${user.balance.toFixed(2)}`,
+        amount: refund, referenceId: txId, timestamp: Date.now(), isRead: false, metadata: { withdrawId: r.id },
+      } as any);
+    }
+    r.reviewedAt = Date.now();
+    r.reviewedBy = String(opts.actor);
+    r.reason = sanitizeText(opts.reason, 200).trim();
+    recordAuditLog(db, `WITHDRAW_${r.status}`, String(opts.actor), `Withdrawal ${r.id} $${Number(r.amountUsd).toFixed(2)} ${r.status.toLowerCase()}`, String(user.id));
+    return { status: 200, body: { success: true, request: r } };
+  }
+
   /** Everything the user app needs to paint the payment screen. */
   app.get('/api/payment/methods', rateLimit(120), requireUser, async (req: any, res) => {
     try {
@@ -10641,16 +10785,26 @@ const paymentLocks = new Map<string, Promise<any>>();
       const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
       if (!user) return res.status(404).json({ error: 'User not found.' });
       const currency = entryCurrencyOf(user);
-      const country = String((user as any).country || '');
-      const rows = (db.paymentMethods as any[])
+      // LOCAL methods only: the country comes from the account, or from the
+      // currency the user selected (BDT → Bangladesh), so a US account never sees
+      // bKash and a BD account never sees a US-only method.
+      const country = effectiveCountryOf(db, user);
+      const all = (db.paymentMethods as any[]) || [];
+      const allowed = all
         .filter((m) => m.enabled && methodAvailable(m, mode, 'user', currency, country).ok)
         .sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
         .map((m) => toPublicMethod(db, m, mode));
+      const label = countryLabelOf(country);
       res.setHeader('Cache-Control', 'no-store');
       res.json({
         success: true, mode, currency, role: 'user',
+        country: label.code, countryLabel: label.label, countryFlag: label.flag,
         categories: PAYMENT_CATEGORIES,
-        methods: rows,
+        methods: allowed,
+        // what exists for OTHER countries — lets the app explain an empty screen
+        // ("no method for your country yet") without leaking pay-to details
+        otherCountries: Array.from(new Set(all.flatMap((m) => (Array.isArray(m.countries) ? m.countries : []))))
+          .filter((c) => c && c !== country).sort(),
         withdrawable: mode === 'withdraw' ? boostWithdrawable(user) : null,
         limits: { min: 0.1, max: 1000000 },
       });
@@ -10679,7 +10833,7 @@ const paymentLocks = new Map<string, Promise<any>>();
       const m = findMethod(db, String(body.methodId || ''));
       if (!m) return res.status(404).json({ error: 'That payment method does not exist.' });
       const currency = entryCurrencyOf(user);
-      const avail = methodAvailable(m, 'deposit', 'user', currency, String((user as any).country || ''));
+      const avail = methodAvailable(m, 'deposit', 'user', currency, effectiveCountryOf(db, user));
       if (!avail.ok) return res.status(400).json({ error: avail.reason });
       if (m.category === 'AGENT') return res.status(400).json({ error: 'Use the agent screen for agent deposits.' });
 
@@ -10759,7 +10913,7 @@ const paymentLocks = new Map<string, Promise<any>>();
         const m = findMethod(db, String(body.methodId || ''));
         if (!m) return { status: 404, body: { error: 'That payment method does not exist.' } };
         const currency = entryCurrencyOf(user);
-        const avail = methodAvailable(m, 'withdraw', 'user', currency, String((user as any).country || ''));
+        const avail = methodAvailable(m, 'withdraw', 'user', currency, effectiveCountryOf(db, user));
         if (!avail.ok) return { status: 400, body: { error: avail.reason } };
         if (m.category === 'AGENT') return { status: 400, body: { error: 'Use the agent screen for agent withdrawals.' } };
 
@@ -10939,42 +11093,9 @@ const paymentLocks = new Map<string, Promise<any>>();
       if (action !== 'APPROVE' && action !== 'REJECT') return res.status(400).json({ error: 'Action must be APPROVE or REJECT.' });
       const out = await withPaymentLock('DEPREVIEW:' + id, () => {
         const db = ensurePaymentCollections(readDb());
-        const r = (db.depositRequests || []).find((d: any) => d.id === id);
-        if (!r) return { status: 404, body: { error: 'That deposit does not exist.' } };
-        if (r.status !== 'PENDING') return { status: 409, body: { error: `This deposit is already ${r.status}.` } };
-        const user = (db.users || []).find((u: any) => String(u.id) === String(r.userId));
-        if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
-        if (action === 'APPROVE') {
-          const credit = Number(Number(r.amountUsd).toFixed(8));
-          if (!(credit > 0)) return { status: 400, body: { error: 'The stored amount is not usable.' } };
-          user.balance = Math.floor(((Number(user.balance) || 0) + credit) * 100 + 1e-9) / 100;
-          const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
-          db.transactions.unshift({
-            id: txId, userId: user.id, type: 'DEPOSIT', amount: credit, timestamp: Date.now(),
-            notes: `Deposit ${r.id} approved · ${r.methodName} · ref ${r.reference}`, referenceId: r.id,
-          });
-          r.status = 'APPROVED'; r.txId = txId;
-          pushNotification(db, {
-            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
-            userId: String(user.id), type: 'TRANSFER_RECEIVED', title: 'BOOSTPAY-DEPOSIT',
-            message: `DEPOSIT CONFIRMED: $${credit.toFixed(2)} credited via ${r.methodName}. Balance: $${user.balance.toFixed(2)}. Ref: ${txId}`,
-            amount: credit, referenceId: txId, timestamp: Date.now(), isRead: false, metadata: { depositId: r.id },
-          } as any);
-        } else {
-          r.status = 'REJECTED';
-          pushNotification(db, {
-            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
-            userId: String(user.id), type: 'SYSTEM_ALERT', title: 'BOOSTPAY-DEPOSIT',
-            message: `Deposit ${r.id} could not be verified and was not credited. ${sanitizeText(body.reason, 160) || 'Contact support.'}`,
-            timestamp: Date.now(), isRead: false, metadata: { depositId: r.id },
-          } as any);
-        }
-        r.reviewedAt = Date.now();
-        r.reviewedBy = String(req.authAdmin);
-        r.reason = sanitizeText(body.reason, 200).trim();
-        recordAuditLog(db, `DEPOSIT_${r.status}`, String(req.authAdmin), `Deposit ${r.id} $${Number(r.amountUsd).toFixed(2)} ${r.status.toLowerCase()}`, String(user.id));
-        writeDb(db);
-        return { status: 200, body: { success: true, request: r } };
+        const result = reviewDepositCore(db, { id, action, actor: String(req.authAdmin), reason: body.reason });
+        if (result.status === 200) writeDb(db);
+        return result;
       });
       res.status(out.status).json(out.body);
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not review the deposit.' }); }
@@ -10988,46 +11109,333 @@ const paymentLocks = new Map<string, Promise<any>>();
       if (action !== 'APPROVE' && action !== 'REJECT') return res.status(400).json({ error: 'Action must be APPROVE or REJECT.' });
       const out = await withPaymentLock('WDRREVIEW:' + id, () => {
         const db = ensurePaymentCollections(readDb());
-        const r = (db.withdrawRequests || []).find((w: any) => w.id === id);
-        if (!r) return { status: 404, body: { error: 'That withdrawal does not exist.' } };
-        if (r.status !== 'PENDING') return { status: 409, body: { error: `This withdrawal is already ${r.status}.` } };
-        const user = (db.users || []).find((u: any) => String(u.id) === String(r.userId));
-        if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
-        if (action === 'APPROVE') {
-          r.status = 'COMPLETED';
-          r.payoutRef = sanitizeText(body.payoutRef, 80).trim();
-          pushNotification(db, {
-            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
-            userId: String(user.id), type: 'SYSTEM_ALERT', title: 'BOOSTPAY-WITHDRAW',
-            message: `WITHDRAWAL PAID: $${Number(r.netUsd).toFixed(2)} sent via ${r.methodName}. Ref: ${r.id}`,
-            timestamp: Date.now(), isRead: false, metadata: { withdrawId: r.id },
-          } as any);
-        } else {
-          const refund = Number(Number(r.amountUsd).toFixed(8));
-          user.balance = Math.floor(((Number(user.balance) || 0) + refund) * 100 + 1e-9) / 100;
-          releaseBoostProfit(user, refund);
-          const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
-          db.transactions.unshift({
-            id: txId, userId: user.id, type: 'WITHDRAW_REFUND', amount: refund, timestamp: Date.now(),
-            notes: `Withdrawal ${r.id} rejected — refunded`, referenceId: r.id,
-          });
-          r.status = 'REJECTED'; r.txId = txId;
-          pushNotification(db, {
-            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
-            userId: String(user.id), type: 'TRANSFER_RECEIVED', title: 'BOOSTPAY-WITHDRAW',
-            message: `Withdrawal ${r.id} was rejected and $${refund.toFixed(2)} returned to your balance. ${sanitizeText(body.reason, 160) || 'Contact support.'} Balance: $${user.balance.toFixed(2)}`,
-            amount: refund, referenceId: txId, timestamp: Date.now(), isRead: false, metadata: { withdrawId: r.id },
-          } as any);
-        }
-        r.reviewedAt = Date.now();
-        r.reviewedBy = String(req.authAdmin);
-        r.reason = sanitizeText(body.reason, 200).trim();
-        recordAuditLog(db, `WITHDRAW_${r.status}`, String(req.authAdmin), `Withdrawal ${r.id} $${Number(r.amountUsd).toFixed(2)} ${r.status.toLowerCase()}`, String(user.id));
-        writeDb(db);
-        return { status: 200, body: { success: true, request: r } };
+        const result = reviewWithdrawCore(db, { id, action, actor: String(req.authAdmin), reason: body.reason, payoutRef: body.payoutRef });
+        if (result.status === 200) writeDb(db);
+        return result;
       });
       res.status(out.status).json(out.body);
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not review the withdrawal.' }); }
+  });
+
+  /* ── WALLET AGENT PANEL ─────────────────────────────────────────────────────
+   * Separate app, separate login, admin-created accounts. An account is bound to
+   * ONE country + ONE payment method; it may approve or reject the deposits and
+   * withdrawals of that method and nothing else. The money decisions reuse
+   * reviewDepositCore / reviewWithdrawCore, so the ledger rules are identical to
+   * the super-admin console — only the actor recorded in the audit trail differs.
+   */
+  function walletAgentsOf(db: any): any[] {
+    if (!Array.isArray(db.walletAgents)) db.walletAgents = [];
+    return db.walletAgents;
+  }
+
+  /** Public (panel-safe) view of an agent account — never the password hash. */
+  function publicWalletAgent(a: any) {
+    return {
+      id: a.id, name: a.name, email: a.email, country: a.country,
+      methodId: a.methodId, methodName: a.methodName, active: a.active !== false,
+      createdAt: a.createdAt, lastLoginAt: a.lastLoginAt || 0,
+      reviewedCount: Number(a.reviewedCount) || 0,
+    };
+  }
+
+  app.post('/api/walletagent/login', rateLimit(30), (req: any, res) => {
+    try {
+      const email = String((req.body || {}).email || '').trim().toLowerCase();
+      const password = String((req.body || {}).password || '').trim();
+      if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
+      const db = ensurePaymentCollections(readDb());
+      const ag = walletAgentsOf(db).find((a: any) => String(a.email).toLowerCase() === email);
+      if (!ag || !verifyPassword(ag.passwordHash, password)) {
+        return res.status(401).json({ error: 'Invalid wallet agent credentials.' });
+      }
+      if (ag.active === false) return res.status(403).json({ error: 'This wallet-agent account is disabled.' });
+      if (needsRehash(ag.passwordHash)) ag.passwordHash = hashPassword(password);
+      const sess = createSession(db, String(ag.id), 'WALLET_AGENT', clientIp(req), String(req.headers['user-agent'] || ''));
+      ag.lastLoginAt = Date.now();
+      recordAuditLog(db, 'WALLET_AGENT_LOGIN', 'walletagent:' + ag.email, `Wallet agent login from ${sess.ip}`);
+      writeDb(db);
+      return res.json({
+        success: true,
+        token: issueToken(String(ag.id), 'WALLET_AGENT', sess.id),
+        agent: publicWalletAgent(ag),
+        sessionId: sess.id,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not sign in.' }); }
+  });
+
+  app.post('/api/walletagent/logout', requireWalletAgent, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      revokeSession(db, String(req.authSid || ''));
+      writeDb(db);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not sign out.' }); }
+  });
+
+  app.get('/api/walletagent/me', rateLimit(120), requireWalletAgent, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const ag = walletAgentsOf(db).find((a: any) => a.id === req.authWalletAgentId);
+      if (!ag) return res.status(404).json({ error: 'Account not found.' });
+      const m = (db.paymentMethods || []).find((x: any) => x.id === ag.methodId) || null;
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        success: true,
+        agent: publicWalletAgent(ag),
+        method: m ? {
+          id: m.id, name: m.name, logo: m.logo, category: m.category,
+          minDeposit: m.minDeposit, maxDeposit: m.maxDeposit,
+          minWithdraw: m.minWithdraw, maxWithdraw: m.maxWithdraw,
+          depositFeePercent: m.depositFeePercent, withdrawFeePercent: m.withdrawFeePercent,
+          processingTime: m.processingTime, maintenance: !!m.maintenance,
+          depositEnabled: !!m.depositEnabled, withdrawEnabled: !!m.withdrawEnabled,
+          countries: m.countries || [],
+          accountName: m.accountName || '', accountNumber: m.accountNumber || '',
+          instructions: m.instructions || '',
+        } : null,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load the account.' }); }
+  });
+
+  /** The queue: only the bound method, newest first. */
+  function walletAgentQueue(db: any, ag: any, type: 'deposit' | 'withdraw', status: string, limit: number) {
+    const src = type === 'deposit' ? (db.depositRequests || []) : (db.withdrawRequests || []);
+    return src
+      .filter((r: any) => String(r.methodId) === String(ag.methodId))
+      .filter((r: any) => !status || String(r.status) === status)
+      .sort((a: any, b: any) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+      .slice(0, limit)
+      .map((r: any) => ({
+        id: r.id, type: type.toUpperCase(), userId: r.userId,
+        methodId: r.methodId, methodName: r.methodName,
+        amountUsd: r.amountUsd, feeUsd: r.feeUsd || 0, netUsd: r.netUsd == null ? r.amountUsd : r.netUsd,
+        entryAmount: r.entryAmount, entryCurrency: r.entryCurrency,
+        reference: r.reference || '', note: r.note || '',
+        destination: r.destination || null,
+        status: r.status, createdAt: r.createdAt, reviewedAt: r.reviewedAt || 0,
+        reviewedBy: r.reviewedBy || '', reason: r.reason || '', payoutRef: r.payoutRef || '',
+      }));
+  }
+
+  app.get('/api/walletagent/requests', rateLimit(180), requireWalletAgent, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const ag = walletAgentsOf(db).find((a: any) => a.id === req.authWalletAgentId);
+      if (!ag) return res.status(404).json({ error: 'Account not found.' });
+      const type = String(req.query.type || 'deposit').toLowerCase() === 'withdraw' ? 'withdraw' : 'deposit';
+      const status = String(req.query.status || '').toUpperCase();
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 100));
+      const rows = walletAgentQueue(db, ag, type as 'deposit' | 'withdraw', status, limit);
+      const open = walletAgentQueue(db, ag, type as 'deposit' | 'withdraw', 'PENDING', 1000).length;
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ success: true, type, status: status || 'ALL', requests: rows, pending: open });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load the queue.' }); }
+  });
+
+  app.get('/api/walletagent/stats', rateLimit(180), requireWalletAgent, async (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const ag = walletAgentsOf(db).find((a: any) => a.id === req.authWalletAgentId);
+      if (!ag) return res.status(404).json({ error: 'Account not found.' });
+      const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
+      const since = startOfDay.getTime();
+      const dep = (db.depositRequests || []).filter((r: any) => String(r.methodId) === String(ag.methodId));
+      const wdr = (db.withdrawRequests || []).filter((r: any) => String(r.methodId) === String(ag.methodId));
+      const sum = (rows: any[], st: string) => Number(rows.filter((r) => r.status === st).reduce((a, r) => a + Number(r.amountUsd || 0), 0).toFixed(2));
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        success: true,
+        pendingDeposit: dep.filter((r: any) => r.status === 'PENDING').length,
+        pendingWithdraw: wdr.filter((r: any) => r.status === 'PENDING').length,
+        todayApprovedDeposit: dep.filter((r: any) => r.status === 'APPROVED' && Number(r.reviewedAt || 0) >= since).length,
+        todayApprovedWithdraw: wdr.filter((r: any) => r.status === 'COMPLETED' && Number(r.reviewedAt || 0) >= since).length,
+        depositApprovedTotal: sum(dep, 'APPROVED'),
+        withdrawPaidTotal: sum(wdr, 'COMPLETED'),
+        reviewedCount: Number(ag.reviewedCount) || 0,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load stats.' }); }
+  });
+
+  app.post('/api/walletagent/requests/:type/review', rateLimit(120), requireWalletAgent, async (req: any, res) => {
+    try {
+      const type = String(req.params.type || '').toLowerCase();
+      if (type !== 'deposit' && type !== 'withdraw') return res.status(400).json({ error: 'Unknown request type.' });
+      const body = req.body || {};
+      const id = String(body.id || '');
+      const action = String(body.action || '').toUpperCase();
+      if (action !== 'APPROVE' && action !== 'REJECT') return res.status(400).json({ error: 'Action must be APPROVE or REJECT.' });
+      const lockKey = (type === 'deposit' ? 'DEPREVIEW:' : 'WDRREVIEW:') + id;
+      const out = await withPaymentLock(lockKey, () => {
+        const db = ensurePaymentCollections(readDb());
+        const ag = walletAgentsOf(db).find((a: any) => a.id === req.authWalletAgentId);
+        if (!ag) return { status: 401, body: { error: 'Account not found.' } };
+        const src = type === 'deposit' ? (db.depositRequests || []) : (db.withdrawRequests || []);
+        const row = src.find((r: any) => r.id === id);
+        if (!row) return { status: 404, body: { error: 'That request does not exist.' } };
+        // SCOPE: an agent may only touch its own payment method.
+        if (String(row.methodId) !== String(ag.methodId)) {
+          recordAuditLog(db, 'WALLET_AGENT_SCOPE_DENIED', 'walletagent:' + ag.email, `Attempted ${action} on ${id} (${row.methodId}) outside its scope`, String(row.userId || ''));
+          writeDb(db);
+          return { status: 403, body: { error: 'This request belongs to a payment method you do not handle.' } };
+        }
+        const actor = 'walletagent:' + ag.email;
+        const result = type === 'deposit'
+          ? reviewDepositCore(db, { id, action, actor, reason: body.reason })
+          : reviewWithdrawCore(db, { id, action, actor, reason: body.reason, payoutRef: body.payoutRef });
+        if (result.status === 200) {
+          ag.reviewedCount = (Number(ag.reviewedCount) || 0) + 1;
+          recordAuditLog(db, 'WALLET_AGENT_REVIEW', actor, `${type} ${id} ${action} via ${row.methodName} (${row.methodId})`, String(row.userId || ''));
+          writeDb(db);
+        }
+        return result;
+      });
+      res.status(out.status).json(out.body);
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not review the request.' }); }
+  });
+
+  /* ── WALLET AGENT ADMIN ──────────────────────────────────────────────────── */
+
+  app.get('/api/admin/wallet-agents', rateLimit(120), requireAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const rows = walletAgentsOf(db)
+        .map(publicWalletAgent)
+        .sort((a: any, b: any) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ success: true, agents: rows });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load wallet agents.' }); }
+  });
+
+  /** Every country the app knows (ISO code + label + flag) — used by the
+   *  payment-method editor and the wallet-agent picker. */
+  app.get('/api/admin/countries', rateLimit(120), requireAdmin, (req: any, res) => {
+    try {
+      const rows = Object.keys(COUNTRY_CURRENCY).map((code) => ({
+        ...countryLabelOf(code),
+        currency: COUNTRY_CURRENCY[code],
+      })).sort((a, b) => a.label.localeCompare(b.label));
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ success: true, countries: rows });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load countries.' }); }
+  });
+
+  /** Countries that at least one enabled method is configured for (agent picker). */
+  app.get('/api/admin/wallet-agents/options', rateLimit(120), requireAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const map = new Map<string, any>();
+      for (const m of (db.paymentMethods || [])) {
+        const list = Array.isArray(m.countries) ? m.countries : [];
+        for (const cc of list) {
+          const key = String(cc || '').toUpperCase();
+          if (!/^[A-Z]{2}$/.test(key)) continue;
+          if (!map.has(key)) map.set(key, { ...countryLabelOf(key), methods: [] });
+          map.get(key).methods.push({ id: m.id, name: m.name, logo: m.logo, category: m.category, enabled: !!m.enabled });
+        }
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ success: true, countries: Array.from(map.values()).sort((a, b) => a.code.localeCompare(b.code)) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load country options.' }); }
+  });
+
+  app.post('/api/admin/wallet-agents', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const name = sanitizeText(body.name, 80).trim();
+      const email = String(body.email || '').trim().toLowerCase();
+      const password = String(body.password || '');
+      const country = String(body.country || '').trim().toUpperCase();
+      const methodId = String(body.methodId || '').trim();
+      if (!name) return res.status(400).json({ error: 'Enter the agent name.' });
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+      if (password.length < 8) return res.status(400).json({ error: 'The password must be at least 8 characters.' });
+      if (!/^[A-Z]{2}$/.test(country)) return res.status(400).json({ error: 'Select the agent country.' });
+      if (!methodId) return res.status(400).json({ error: 'Select the payment method this agent will handle.' });
+      const db = ensurePaymentCollections(readDb());
+      const agents = walletAgentsOf(db);
+      if (agents.some((a: any) => String(a.email).toLowerCase() === email)) {
+        return res.status(409).json({ error: 'A wallet agent with this email already exists.' });
+      }
+      const m = (db.paymentMethods || []).find((x: any) => x.id === methodId);
+      if (!m) return res.status(404).json({ error: 'That payment method does not exist.' });
+      const mc = (m.countries || []).map((c: string) => String(c).toUpperCase());
+      if (mc.length && !mc.includes(country)) {
+        return res.status(400).json({ error: `${m.name} is not available in ${countryLabelOf(country).label || country}. Add the country to the method first.` });
+      }
+      const ag: any = {
+        id: 'WAG-' + Date.now().toString(36).toUpperCase() + '-' + Math.floor(Math.random() * 1296).toString(36).toUpperCase().padStart(2, '0'),
+        name, email, passwordHash: hashPassword(password),
+        country, methodId: m.id, methodName: m.name,
+        active: true, createdAt: Date.now(), createdBy: String(req.authAdmin || ''),
+        lastLoginAt: 0, reviewedCount: 0,
+      };
+      agents.push(ag);
+      recordAuditLog(db, 'WALLET_AGENT_CREATE', 'admin:' + String(req.authAdmin), `Created wallet agent ${ag.id} (${email}) for ${m.name} / ${country}`);
+      writeDb(db);
+      res.status(201).json({ success: true, agent: publicWalletAgent(ag) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not create the wallet agent.' }); }
+  });
+
+  app.patch('/api/admin/wallet-agents/:id', rateLimit(60), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const db = ensurePaymentCollections(readDb());
+      const ag = walletAgentsOf(db).find((a: any) => a.id === String(req.params.id));
+      if (!ag) return res.status(404).json({ error: 'Wallet agent not found.' });
+      const changes: string[] = [];
+      if (typeof body.active === 'boolean' && body.active !== ag.active) {
+        ag.active = body.active; changes.push(body.active ? 'enabled' : 'disabled');
+        if (!body.active) {
+          // disabling kills live sessions immediately
+          for (const s of sessionSnapshot(db)) {
+            if (String(s.userId) === String(ag.id) && s.role === 'WALLET_AGENT' && !s.revoked) { s.revoked = true; revokedSessions.add(s.id); }
+          }
+        }
+      }
+      if (body.password) {
+        const pw = String(body.password);
+        if (pw.length < 8) return res.status(400).json({ error: 'The password must be at least 8 characters.' });
+        ag.passwordHash = hashPassword(pw);
+        for (const s of sessionSnapshot(db)) {
+          if (String(s.userId) === String(ag.id) && s.role === 'WALLET_AGENT' && !s.revoked) { s.revoked = true; revokedSessions.add(s.id); }
+        }
+        changes.push('password reset');
+      }
+      if (body.name) { ag.name = sanitizeText(body.name, 80).trim(); changes.push('name'); }
+      const country = body.country ? String(body.country).toUpperCase() : ag.country;
+      const methodId = body.methodId ? String(body.methodId) : ag.methodId;
+      if (country !== ag.country || methodId !== ag.methodId) {
+        if (!/^[A-Z]{2}$/.test(country)) return res.status(400).json({ error: 'Select a valid country.' });
+        const m = (db.paymentMethods || []).find((x: any) => x.id === methodId);
+        if (!m) return res.status(404).json({ error: 'That payment method does not exist.' });
+        const mc = (m.countries || []).map((c: string) => String(c).toUpperCase());
+        if (mc.length && !mc.includes(country)) {
+          return res.status(400).json({ error: `${m.name} is not available in ${countryLabelOf(country).label || country}.` });
+        }
+        ag.country = country; ag.methodId = m.id; ag.methodName = m.name;
+        changes.push(`scope → ${m.name} / ${country}`);
+      }
+      recordAuditLog(db, 'WALLET_AGENT_UPDATE', 'admin:' + String(req.authAdmin), `Updated wallet agent ${ag.id}: ${changes.join(', ') || 'no change'}`);
+      writeDb(db);
+      res.json({ success: true, agent: publicWalletAgent(ag) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not update the wallet agent.' }); }
+  });
+
+  app.delete('/api/admin/wallet-agents/:id', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const agents = walletAgentsOf(db);
+      const idx = agents.findIndex((a: any) => a.id === String(req.params.id));
+      if (idx < 0) return res.status(404).json({ error: 'Wallet agent not found.' });
+      const [ag] = agents.splice(idx, 1);
+      for (const s of sessionSnapshot(db)) {
+        if (String(s.userId) === String(ag.id) && s.role === 'WALLET_AGENT' && !s.revoked) { s.revoked = true; revokedSessions.add(s.id); }
+      }
+      recordAuditLog(db, 'WALLET_AGENT_DELETE', 'admin:' + String(req.authAdmin), `Deleted wallet agent ${ag.id} (${ag.email})`);
+      writeDb(db);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not delete the wallet agent.' }); }
   });
 
   // One-off (and re-runnable) move of bonuses that still sit in the retired bonus

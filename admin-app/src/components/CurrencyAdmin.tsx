@@ -25,8 +25,9 @@ type Cfg = {
 // the user-app key returned nothing and every call was 401 (same bug as the
 // payments screen). Use the admin store, which also adds the MFA headers.
 function authHeaders(): Record<string, string> {
-  try { return { ...BoostPayStore.adminAuthHeaders(), 'content-type': 'application/json' }; }
-  catch { return { 'content-type': 'application/json' }; }
+  // adminAuthHeaders() already sets Content-Type — do not add a second header.
+  try { return { ...BoostPayStore.adminAuthHeaders() }; }
+  catch { return { 'Content-Type': 'application/json' }; }
 }
 
 export const CurrencyAdmin: React.FC = () => {

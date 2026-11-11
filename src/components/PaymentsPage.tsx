@@ -31,6 +31,10 @@ type Method = {
 
 type Resp = {
   success: boolean; mode: Mode; currency: string; role: string;
+  /** the country the catalogue was filtered for (derived from the account/currency) */
+  country?: string; countryLabel?: string; countryFlag?: string;
+  /** countries that DO have methods — lets an empty screen say which ones */
+  otherCountries?: string[];
   categories: Array<{ id: string; label: string; icon: string }>;
   methods: Method[];
   withdrawable: number | null;
@@ -75,9 +79,20 @@ function timeAgo(ts: number) {
 }
 
 export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, onOpenAgentPay, onOpenAgentChat, onModeChange }) => {
-  const { price, currency } = useCurrency();
-  /** the card line is ~90px wide: drop trailing ".00" so the range never clips */
-  const compact = useCallback((usd: number) => price(Number(usd) || 0).replace(/\.00(?=\D*$)/, ''), [price]);
+  const { price, currency, options: currencyOptions, setCurrency } = useCurrency();
+  /**
+   * The card line is ~90px wide. A converted range such as
+   * "৳124.610683 – ৳124,610,683.00" never fitted, so the card shows a rounded
+   * figure with the same symbol the rest of the app uses (the exact amount is
+   * always visible on the method sheet before anything is submitted).
+   */
+  const compact = useCallback((usd: number) => {
+    const rate = currency && currency.rate > 0 ? currency.rate : 1;
+    const v = (Number(usd) || 0) * rate;
+    const dec = v >= 100 ? 0 : v >= 10 ? 1 : 2;
+    const body = v.toLocaleString(undefined, { minimumFractionDigits: dec, maximumFractionDigits: dec });
+    return `${currency?.symbol || '$'}${body}`;
+  }, [currency]);
   /** a readable tile: an admin-supplied image URL wins, otherwise the initials */
   const logoTile = (m: Method, size: 'card' | 'sheet') => {
     const dim = size === 'card' ? 'h-9 w-9 rounded-lg text-[12px]' : 'h-8 w-8 rounded-lg text-[11px]';
@@ -101,6 +116,11 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [openMethod, setOpenMethod] = useState<Method | null>(null);
   const [history, setHistory] = useState<Req[]>([]);
+  /** owner request 2026-11-11: only the selected country's local methods are
+   *  listed, so the screen must also say WHICH country it is showing and let the
+   *  user switch it (switching the currency switches the country with it). */
+  const [countryOpen, setCountryOpen] = useState(false);
+  const [switching, setSwitching] = useState('');
 
   const entryCode = currency?.code || 'USD';
   const entryRate = currency && currency.rate > 0 ? currency.rate : 1;
@@ -168,6 +188,20 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
   const recommended = useMemo(() => byQuery
     .filter((m) => m.recommended)
     .sort((a, b) => (a.recommendedOrder || 0) - (b.recommendedOrder || 0)), [byQuery]);
+
+  /** Change country = change the display currency; the server stores both, so the
+   *  catalogue comes back filtered for the new country. */
+  const changeCountry = async (code: string) => {
+    if (!code || code === (currency?.code || '')) { setCountryOpen(false); return; }
+    setSwitching(code);
+    const ok = await setCurrency(code);
+    setSwitching('');
+    if (ok) {
+      setCountryOpen(false);
+      setOpenMethod(null);
+      await load(mode);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -238,7 +272,15 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
             <div className="text-[13px] font-black tracking-tight text-white">BoostPay</div>
             <div className="text-[9px] uppercase tracking-[0.18em] text-sky-200/70">Payments</div>
           </div>
-          <div className="rounded-full bg-white/10 px-2 py-1 text-[9px] font-bold text-sky-100">{entryCode}</div>
+          <button
+            onClick={() => setCountryOpen((v) => !v)}
+            className="flex items-center gap-1 rounded-full bg-white/10 px-2.5 py-1 text-[9px] font-bold text-sky-100 hover:bg-white/20"
+            aria-label="Country and currency"
+          >
+            <span className="text-[11px] leading-none">{data?.countryFlag || currency?.flag || '🌐'}</span>
+            <span className="max-w-[86px] truncate">{data?.countryLabel || data?.country || entryCode}</span>
+            <span className="text-sky-300/70">· {entryCode}</span>
+          </button>
         </div>
         {/* tabs */}
         <div className="mt-3 flex gap-1 px-3 pb-0">
@@ -282,6 +324,43 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
           {q && <button onClick={() => setQ('')} className="text-zinc-500 hover:text-zinc-300" aria-label="Clear search"><X className="h-3.5 w-3.5" /></button>}
         </div>
 
+        {countryOpen && (
+          <div className="mb-3 rounded-xl border border-zinc-800 bg-zinc-900/80 p-2.5">
+            <div className="mb-1.5 flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                Country &amp; currency
+              </span>
+              <button onClick={() => setCountryOpen(false)} className="text-zinc-500 hover:text-zinc-300" aria-label="Close">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <p className="mb-2 text-[10px] leading-relaxed text-zinc-500">
+              You see the {mode} methods of your selected country. Picking another currency shows that country's
+              local methods — your balance stays in dollars and nothing else changes.
+            </p>
+            <div className="grid max-h-56 grid-cols-2 gap-1.5 overflow-y-auto">
+              {(currencyOptions?.currencies || []).filter((c) => c.enabled).map((c) => {
+                const active = c.code === (currency?.code || '');
+                return (
+                  <button
+                    key={c.code}
+                    onClick={() => void changeCountry(c.code)}
+                    disabled={!!switching}
+                    className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-left text-[10px] transition ${
+                      active ? 'border-amber-500/60 bg-amber-500/10 text-amber-200' : 'border-zinc-800 bg-zinc-950/60 text-zinc-300 hover:border-zinc-700'
+                    } disabled:opacity-50`}
+                  >
+                    <span className="text-[12px] leading-none">{c.flag}</span>
+                    <span className="min-w-0 flex-1 truncate">{c.country}</span>
+                    <span className="font-mono text-[9px] text-zinc-500">{switching === c.code ? '…' : c.code}</span>
+                    {active ? <Check className="h-3 w-3 shrink-0" /> : null}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {loading && (
           <div className="space-y-2">
             <div className="h-10 animate-pulse rounded-t-2xl bg-zinc-900" />
@@ -317,8 +396,18 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
               />
             ))}
             {methods.length === 0 && (
-              <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 text-center text-[11px] text-zinc-400">
-                No {mode} method is available for your account right now. Please contact support.
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 text-center text-[11px] leading-relaxed text-zinc-400">
+                <div className="font-semibold text-zinc-200">
+                  No {mode} method is available for {data?.countryLabel || 'your country'} yet.
+                </div>
+                <div className="mt-1">
+                  {(data?.otherCountries || []).length > 0
+                    ? 'Methods exist for other countries — switch your country above to see them.'
+                    : 'Please contact support.'}
+                </div>
+                <button onClick={() => setCountryOpen(true)} className="mt-2 rounded-lg border border-zinc-700 px-3 py-1.5 text-[10px] font-bold text-zinc-200">
+                  Change country / currency
+                </button>
               </div>
             )}
 

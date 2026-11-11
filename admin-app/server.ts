@@ -9,13 +9,16 @@ const app = express();
 app.use(express.json({ limit: '20mb' }));
 
 // Proxy all API calls to the main BoostPay API (same-origin for the browser)
-app.use('/api', async (req, res) => {
+app.use('/api', async (req: any, res: any) => {
   try {
     const targetUrl = API_TARGET + req.originalUrl;
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.headers)) {
       const key = k.toLowerCase();
       if (['host', 'connection', 'content-length', 'transfer-encoding', 'accept-encoding'].includes(key)) continue;
+      // PROXY-CT-NORMALISE: a header sent twice arrives as "a, a" and express
+      // refuses to parse the body. Keep only the first value.
+      if (key === 'content-type' && typeof v === 'string' && v.includes(',')) { headers[key] = v.split(',')[0].trim(); continue; }
       if (typeof v === 'string') headers[key] = v;
       else if (Array.isArray(v)) headers[key] = v.join(', ');
     }

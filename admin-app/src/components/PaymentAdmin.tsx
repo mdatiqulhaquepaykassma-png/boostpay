@@ -45,7 +45,7 @@ type WdrReq = {
 function authHeaders(): Record<string, string> {
   try {
     const h = BoostPayStore.adminAuthHeaders();
-    return { ...h, 'content-type': 'application/json' };
+    return { ...h };
   } catch {
     return { 'content-type': 'application/json' };
   }
@@ -80,6 +80,21 @@ export const PaymentAdmin: React.FC = () => {
   const [editing, setEditing] = useState<Partial<Method> | null>(null);
   const [q, setQ] = useState('');
   const [counts, setCounts] = useState<{ deposit: number; withdraw: number }>({ deposit: 0, withdraw: 0 });
+  // country picker source for the method editor (ISO code + label + flag)
+  const [countryOpts, setCountryOpts] = useState<{ code: string; label: string; flag: string }[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch('/api/admin/countries', { headers: authHeaders() });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (alive && Array.isArray(j.countries)) setCountryOpts(j.countries);
+      } catch { /* the picker falls back to the chip list */ }
+    })();
+    return () => { alive = false; };
+  }, []);
 
   const loadMethods = useCallback(async () => {
     try {
@@ -377,10 +392,40 @@ export const PaymentAdmin: React.FC = () => {
                 <input value={(shown.currencies || []).join(',')} onChange={(e) => set('currencies', e.target.value.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean))}
                   className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 font-mono text-[10px] text-zinc-100" />
               </label>
-              <label className="text-[9px] text-zinc-400">Country restriction (BD,IN — empty = all)
-                <input value={(shown.countries || []).join(',')} onChange={(e) => set('countries', e.target.value.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean))}
-                  className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 font-mono text-[10px] text-zinc-100" />
-              </label>
+              <div className="text-[9px] text-zinc-400 sm:col-span-2">
+                Countries where this method is offered
+                <div className="mt-1 flex flex-wrap items-center gap-1">
+                  {(shown.countries || []).length === 0 ? (
+                    <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-300">
+                      Every country
+                    </span>
+                  ) : (shown.countries || []).map((cc) => (
+                    <span key={cc} className="inline-flex items-center gap-1 rounded-full border border-amber-700/60 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-200">
+                      {countryOpts.find((c) => c.code === cc)?.flag || ''} {cc} {countryOpts.find((c) => c.code === cc)?.label || ''}
+                      <button type="button" onClick={() => set('countries', (shown.countries || []).filter((x) => x !== cc))}
+                        className="text-amber-300/70 hover:text-rose-300">×</button>
+                    </span>
+                  ))}
+                </div>
+                <div className="mt-1 flex gap-1">
+                  <select value="" onChange={(e) => {
+                    const cc = e.target.value;
+                    if (cc && !(shown.countries || []).includes(cc)) set('countries', [...(shown.countries || []), cc]);
+                  }} className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-[10px] text-zinc-100">
+                    <option value="">+ Add a country…</option>
+                    {countryOpts.filter((c) => !(shown.countries || []).includes(c.code)).map((c) => (
+                      <option key={c.code} value={c.code}>{c.flag} {c.code} — {c.label}</option>
+                    ))}
+                  </select>
+                  {(shown.countries || []).length > 0 ? (
+                    <button type="button" onClick={() => set('countries', [])}
+                      className="shrink-0 rounded-lg border border-zinc-700 px-2 py-1 text-[10px] font-bold text-zinc-300">All</button>
+                  ) : null}
+                </div>
+                <div className="mt-0.5 text-[9px] leading-relaxed text-zinc-600">
+                  A user only sees the methods of their own country (from the currency they picked). Empty = shown everywhere.
+                </div>
+              </div>
               {(['minDeposit', 'maxDeposit', 'minWithdraw', 'maxWithdraw', 'depositFeePercent', 'withdrawFeePercent'] as const).map((k) => (
                 <label key={k} className="text-[9px] text-zinc-400">{k}
                   <input type="number" step="0.01" value={Number((shown as any)[k] ?? 0)} onChange={(e) => set(k, Number(e.target.value))}
