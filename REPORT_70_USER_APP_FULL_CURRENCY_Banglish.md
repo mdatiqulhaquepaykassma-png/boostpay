@@ -430,3 +430,7 @@ install-app-check **105/0** · payments-ui-check **18/0** · payments-check **40
 
 ### ১৭.৪ সাথে একটা ডিপ্লয়-বাগও সারানো হলো
 `promo-app`-এর বিল্ড `tsc --noEmit`-এ ফেল করছিল (`./styles.css`-এর টাইপ ডিক্লারেশন নেই — নতুন TypeScript ভার্সনে নতুন এরর)। `promo-app/src/vite-env.d.ts` (`/// <reference types="vite/client" />`) যোগ করা হয়েছে — এখন বিল্ড ক্লিন, নইলে পরের প্রমোটেশন ডিপ্লয় ফেল করত।
+
+### ১৭.৫ লাইভ প্রমাণ (স्क্রিনশট)
+`report-assets/app-install-inline.png` — প্রোডাকশনে `boostpay.online/app`-এ Install চাপার পর: **কোনো পপআপ নেই** (`overlays = 0`), গাইডটা বারটার ভেতরেই এক লাইনে দেখাচ্ছে: *"Chrome: ⋮ menu → Install app (or Add to Home screen)."*
+**লাইভ যাচাই:** ৭ হোস্টে **146 pass / 0 fail** · হেলথ `v1.2.1794364628` · কমিট `220d88c`।
