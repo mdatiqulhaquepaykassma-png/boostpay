@@ -233,6 +233,33 @@ export function usePWAInstall() {
   }, [deferredPrompt, isInstalled, isIOS]);
 
   /**
+   * Direct install — ONE tap, the browser's own install sheet, nothing else.
+   *
+   * `install()` above falls back to the step-by-step help sheet; the owner does
+   * not want that popup on /app. This one only ever triggers the native prompt
+   * and reports whether it was possible, so the caller can keep the guidance
+   * inline instead of covering the screen.
+   */
+  const installDirect = useCallback(async (): Promise<'PROMPTED' | 'UNAVAILABLE'> => {
+    const pe = deferredPrompt || (typeof window !== 'undefined' ? window.__boostpay_pwa_prompt : null);
+    if (!pe) return 'UNAVAILABLE';
+    try {
+      await pe.prompt();
+      const choice = await pe.userChoice;
+      window.__boostpay_pwa_prompt = null;
+      setDeferredPrompt(null);
+      if (choice && choice.outcome === 'accepted') {
+        setIsInstalled(true);
+        setJustInstalled(true);
+        setTimeout(() => setJustInstalled(false), 4000);
+      }
+      return 'PROMPTED';
+    } catch {
+      return 'UNAVAILABLE';
+    }
+  }, [deferredPrompt]);
+
+  /**
    * Direct app open
    */
   const openApp = useCallback(() => {
@@ -252,6 +279,8 @@ export function usePWAInstall() {
     isInstallLoading,
     justInstalled,
     install,
+    installDirect,
+    hasNativePrompt: !!(deferredPrompt || (typeof window !== 'undefined' && window.__boostpay_pwa_prompt)),
     openApp,
     installHelpMode,
     closeInstallHelp: () => publishHelpMode(null)

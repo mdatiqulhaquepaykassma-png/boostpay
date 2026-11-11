@@ -142,17 +142,30 @@ async def check_app(browser, base, label):
         ck('the Install action is visible on screen', bool(bar.get('visible')), str(bar)[:120])
         ck('the Install action has a tappable button', bool(bar.get('button')), str(bar)[:120])
 
-        # a button that does nothing is worse than no button: when the browser
-        # gives no native prompt, tapping Install must open the step-by-step help
+        # owner rule: NO popup. A tap must be a direct install; when the browser
+        # gives no prompt at all, the guidance must appear INLINE inside the
+        # install bar — never as an overlay covering the app.
         try:
+            overlays_before = await page.evaluate(
+                "() => document.querySelectorAll('[role=dialog],[aria-modal=true]').length")
             await page.get_by_role('button', name='Install').first.click()
-            await page.wait_for_timeout(4200)
-            after = (await page.inner_text('body')).lower()
-            guided = ('add to home screen' in after) or ('home screen' in after) or ('install app' in after and 'menu' in after)
-            ck('tapping Install opens real guidance when no prompt is available', guided,
-               'help sheet shown' if guided else after[:90].replace('\n', ' '))
+            await page.wait_for_timeout(4600)
+            state = await page.evaluate("""() => {
+                const region = [...document.querySelectorAll('[role=region],[aria-label]')]
+                    .find((n) => /install/i.test(n.getAttribute('aria-label') || ''));
+                return {
+                    text: region ? (region.textContent || '').trim() : '',
+                    overlays: document.querySelectorAll('[role=dialog],[aria-modal=true]').length
+                };
+            }""")
+            guided = bool(state.get('text'))
+            ck('tapping Install shows the next step inline (no dead button)', guided,
+               (state.get('text') or '')[:90])
+            ck('tapping Install opens NO popup / overlay',
+               state.get('overlays', 0) <= overlays_before,
+               f"overlays {overlays_before} -> {state.get('overlays')}")
         except Exception as exc:
-            ck('tapping Install opens real guidance when no prompt is available', False, str(exc)[:120])
+            ck('tapping Install shows the next step inline (no dead button)', False, str(exc)[:120])
 
         inst = await cdp.send('Page.getInstallabilityErrors')
         ierrs = inst.get('installabilityErrors') or []
