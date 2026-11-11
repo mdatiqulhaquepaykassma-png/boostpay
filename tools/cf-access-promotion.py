@@ -145,14 +145,48 @@ def wait_for_cert(seconds=240):
     return False
 
 
+def ensure_zero_trust(token, aid):
+    """Enable Zero Trust / Access and make sure One-time PIN exists.
+
+    A brand-new Cloudflare account answers every Access call with
+    'access.api.error.not_enabled' until an organisation exists; the dashboard
+    does that with one click, the API does it with this call."""
+    s, j = call(f'/accounts/{aid}/access/organizations', token=token)
+    if s == 200 and (j.get('result') or {}).get('auth_domain'):
+        print(f'OK    Zero Trust already enabled ({(j.get("result") or {}).get("auth_domain")})')
+    else:
+        team = (os.environ.get('CF_TEAM') or ZONE_NAME.split('.')[0] or 'team').replace('.', '-')
+        s, j = call(f'/accounts/{aid}/access/organizations', 'POST',
+                    {'name': os.environ.get('CF_ORG_NAME', 'BoostPay'),
+                     'auth_domain': f'{team}.cloudflareaccess.com', 'is_ui_read_only': False}, token=token)
+        if s not in (200, 201):
+            print('WARN  could not enable Zero Trust: ' + json.dumps(j.get('errors'))[:160])
+            return
+        print(f'OK    Zero Trust enabled ({(j.get("result") or {}).get("auth_domain")})')
+    # an e-mail OTP provider is what a one-click setup would have created
+    s, j = call(f'/accounts/{aid}/access/identity_providers', token=token)
+    have = [p for p in (j.get('result') or []) if p.get('type') == 'onetimepin']
+    if s == 200 and have:
+        print(f'OK    one-time PIN already configured')
+    elif s == 200:
+        s, j = call(f'/accounts/{aid}/access/identity_providers', 'POST',
+                    {'name': 'One-time PIN', 'type': 'onetimepin', 'config': {}}, token=token)
+        print(('OK    one-time PIN created' if s in (200, 201)
+               else 'WARN  one-time PIN could not be created: ' + json.dumps(j.get('errors'))[:140]))
+    return [(p.get('id')) for p in have][:1]
+
+
 def do_access(token, emails, domains, name):
     aid = account_id(token)
+    otp_ids = ensure_zero_trust(token, aid) or []
     s, j = call(f'/accounts/{aid}/access/apps', token=token)
     if s != 200:
         fail('cannot list Access apps — token needs Account:Access: Apps and Policies:Edit', j.get('errors'))
     existing = next((a for a in (j.get('result') or []) if a.get('domain') == HOST), None)
     app_body = {'name': name, 'domain': HOST, 'type': 'self_hosted',
                 'session_duration': '24h', 'app_launcher_visible': False}
+    if otp_ids:
+        app_body['allowed_idps'] = otp_ids
     if existing:
         app_id = existing['id']
         s, j = call(f'/accounts/{aid}/access/apps/{app_id}', 'PUT', app_body, token=token)
