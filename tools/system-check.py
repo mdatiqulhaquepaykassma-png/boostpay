@@ -36,6 +36,8 @@ APPS = {
     'admin': 'admin.boostpay.online',
     'db': 'db.boostpay.online',
     'mgmt': 'management.boostpay.online',
+    'promo': 'promotion.boostpay.online',
+    'wallet': 'walletagent.boostpay.online',
 }
 PROBLEMS = []
 

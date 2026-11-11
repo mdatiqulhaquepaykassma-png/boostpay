@@ -288,7 +288,15 @@ def main():
     elif a.no_proxied and not a.dns:
         set_proxied(token, False)
     if a.access:
-        do_access(token, a.emails, a.domain, a.name)
+        try:
+            do_access(token, a.emails, a.domain, a.name)
+        except SystemExit:
+            # Access needs Zero Trust to be enabled once in the dashboard
+            # ("access.api.error.not_enabled"). The DNS + certificate work above
+            # is already done and must not be reported as a failure.
+            print('BLOCKED Access application/policy — enable Zero Trust once at '
+                  'https://one.dash.cloudflare.com/ (Access → Enable), then re-run '
+                  'this with --access. The host itself is already live.')
     print('\nDone. Check https://one.dash.cloudflare.com/ for the Access app.')
 
 

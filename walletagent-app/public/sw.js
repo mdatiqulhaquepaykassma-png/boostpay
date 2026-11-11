@@ -1,10 +1,10 @@
-// Promotion console service worker.
+// Wallet-agent panel service worker.
 // The app shell is cached so the PWA opens instantly, but the HTML must never be
 // stale — a cached index.html pins the browser to an old JS bundle, which is how
 // new console options "disappear" after a deploy. So: network-first for the shell,
 // cache-first only for the hashed assets (their names change on every build).
-// API calls always go to the network (promotion data must be live).
-const CACHE = 'bp-promo-v2';
+// API calls always go to the network (the queue must always be live).
+const CACHE = 'bp-walletagent-v1';
 const SHELL = ['/', '/manifest.json', '/icon.svg'];
 
 self.addEventListener('install', (e) => {

@@ -24,23 +24,39 @@ KEY_PATH="$VAULT/api_key"
 
 read_file() { [ -f "$1" ] && tr -d '\r\n' < "$1" || true; }
 
-# 1) a scoped API token (past, present or future) ----------------------------
-if [ -z "${CF_API_TOKEN:-}" ] && { [ -n "${CF_API_KEY:-}" ] && [ -n "${CF_API_EMAIL:-}" ]; }; then
-  export CF_TOKEN_SOURCE="env(global key)"
-elif [ -z "${CF_API_TOKEN:-}" ] && [ -f "$TOKEN_PATH" ]; then
-  CF_API_TOKEN=$(read_file "$TOKEN_PATH")
-  export CF_API_TOKEN
-  export CF_TOKEN_SOURCE="file:$TOKEN_PATH"
-fi
+# Credential priority
+#   1. anything already exported
+#   2. the Global API Key pair (full access: DNS + SSL + Zone + Access)
+#   3. a scoped API token (DNS only)
+# Force one with CF_AUTH=key|token.
+AUTH="${CF_AUTH:-}"
+HAVE_KEY=0; HAVE_TOKEN=0
+if [ -n "${CF_API_KEY:-}" ] && [ -n "${CF_API_EMAIL:-}" ]; then HAVE_KEY=1; export CF_TOKEN_SOURCE="env(global key)"; fi
+if [ -n "${CF_API_TOKEN:-}" ]; then HAVE_TOKEN=1; export CF_TOKEN_SOURCE="${CF_TOKEN_SOURCE:-env(token)}"; fi
+[ -f "$KEY_PATH" ] && [ -f "$EMAIL_PATH" ] && HAVE_KEYFILE=1 || HAVE_KEYFILE=0
+[ -f "$TOKEN_PATH" ] && HAVE_TOKENFILE=1 || HAVE_TOKENFILE=0
 
-# 2) the Global API Key pair (email + key) -----------------------------------
-if [ -z "${CF_API_TOKEN:-}" ] && { [ -z "${CF_API_KEY:-}" ] || [ -z "${CF_API_EMAIL:-}" ]; }; then
+use_key() {
   E=$(read_file "$EMAIL_PATH"); K=$(read_file "$KEY_PATH")
-  if [ -n "$E" ] && [ -n "$K" ]; then
-    CF_API_EMAIL="$E"; CF_API_KEY="$K"
-    export CF_API_EMAIL CF_API_KEY
-    export CF_TOKEN_SOURCE="file:$VAULT/api_email+api_key"
-  fi
+  CF_API_EMAIL="$E"; CF_API_KEY="$K"; export CF_API_EMAIL CF_API_KEY
+  CF_API_TOKEN=""; export CF_API_TOKEN
+  export CF_TOKEN_SOURCE="file:$VAULT/api_email+api_key"
+}
+use_token() {
+  CF_API_TOKEN=$(read_file "$TOKEN_PATH"); export CF_API_TOKEN
+  CF_API_EMAIL=""; CF_API_KEY=""; export CF_API_EMAIL CF_API_KEY
+  export CF_TOKEN_SOURCE="file:$TOKEN_PATH"
+}
+
+if [ "$AUTH" = "token" ]; then
+  [ "$HAVE_TOKENFILE" = "1" ] && use_token || echo "[cf] no stored token" >&2
+elif [ "$AUTH" = "key" ]; then
+  [ "$HAVE_KEYFILE" = "1" ] && use_key || echo "[cf] no stored key pair" >&2
+elif [ "$HAVE_KEY" = "1" ] || [ "$HAVE_KEYFILE" = "1" ]; then
+  # global key wins: full access is what the owner asked for
+  [ "$HAVE_KEYFILE" = "1" ] && use_key
+elif [ "$HAVE_TOKENFILE" = "1" ]; then
+  use_token
 fi
 
 # Fallback 2: the token can also live on the Dokploy server (survives a sandbox
