@@ -26,3 +26,8 @@ mobile/node_modules/
 mobile/android/app/boostpay-release.keystore
 mobile/www/
 mobile/android/app/src/main/assets/public/
+
+# Cloudflare credential vault must never be committed (it lives outside the repo anyway)
+.cloudflare/
+api_token
+*.cf-token
