@@ -90,7 +90,7 @@ export const WalletAgentAdmin: React.FC = () => {
       const j = await r.json().catch(() => ({}));
       if (!r.ok) { setNote(j.error || `HTTP ${r.status}`); }
       else {
-        setNote(`Created ${j.agent.email} — ${j.agent.methodName} / ${j.agent.country}. Give the agent this e-mail + password; they sign in at walletagent.boostpay.online. The panel sits behind Cloudflare Access — that same e-mail must also be on the allow list (one command, see HOWTO_WALLET_AGENT_ACCOUNT_Banglish.md).`);
+        setNote(`Created ${j.agent.email} — ${j.agent.methodName} / ${j.agent.country}. Give the agent this e-mail + password; they sign in at walletagent.boostpay.online right away (no extra approval step).`);
         setName(''); setEmail(''); setPassword(''); setMethodId('');
         await load();
       }
@@ -157,9 +157,9 @@ export const WalletAgentAdmin: React.FC = () => {
           the deposit &amp; withdrawal queue of <b className="text-zinc-300">one payment method in one country</b>.
           Pick both here — the agent cannot see anything else, and it cannot change its own scope.
         </p>
-        <p className="mt-1.5 text-[10px] leading-relaxed text-amber-300/80">
-          After creating: the agent's e-mail must also be allowed in Cloudflare Access, otherwise the panel
-          blocks them before the login page. <span className="font-mono">sh tools/cf.sh --add-email &lt;their e-mail&gt;</span>
+        <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-500">
+          The panel has its own email + password login (no Cloudflare Access in front of it) — create the account,
+          hand over the credentials and the agent can sign in right away.
         </p>
         {note ? <div className="mt-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-[11px] text-zinc-200">{note}</div> : null}
       </div>

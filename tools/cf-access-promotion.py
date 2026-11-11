@@ -345,10 +345,35 @@ def remove_email(token, emails):
     print(f'OK    Access allow now has {len(inc)} rule(s)')
 
 
+def drop_access(token):
+    """Remove Cloudflare Access from this host — the owner's decision (2026-11-11):
+    the wallet-agent panel keeps ONLY its own e-mail + password login, like the
+    admin / management / agent consoles do. Deleting the app also deletes its
+    policies, so nothing is left half-configured."""
+    aid = account_id(token)
+    s, j = call(f'/accounts/{aid}/access/apps', token=token)
+    if s != 200:
+        fail('cannot list Access apps', j.get('errors'))
+    targets = [a for a in (j.get('result') or [])
+               if a.get('domain') == HOST or str(a.get('domain', '')).startswith(HOST + '/')]
+    if not targets:
+        print(f'...   no Access app on {HOST} — nothing to remove')
+        return
+    for a in targets:
+        s, j = call(f"/accounts/{aid}/access/apps/{a['id']}", 'DELETE', token=token)
+        if s not in (200, 202, 204):      # Cloudflare answers 202 for an async delete
+            fail(f"could not delete Access app {a.get('name')}", j.get('errors'))
+        print(f"OK    Access app removed: {a.get('name')} ({a.get('domain')})")
+    print(f'      {HOST} is now served straight through Cloudflare — the panel login is the only gate.')
+    print('      Re-enable any time: cf.sh --access --emails you@example.com')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dns', action='store_true')
     ap.add_argument('--access', action='store_true')
+    ap.add_argument('--no-access', action='store_true',
+                    help='remove Cloudflare Access from this host (panel login is then the only gate)')
     ap.add_argument('--target', default='', help='IPv4 of the Dokploy server for the A record')
     ap.add_argument('--emails', action='append', default=[],
                     help='with --access: the COMPLETE allow list (replaces the policy)')
@@ -377,13 +402,16 @@ def main():
     if a.verify:
         verify(token)
         return
+    if a.no_access:
+        drop_access(token)
+        return
     if a.add_email:
         add_email(token, a.add_email)
         return
     if a.remove_email:
         remove_email(token, a.remove_email)
         return
-    if not (a.dns or a.access or a.proxied or a.no_proxied):
+    if not (a.dns or a.access or a.proxied or a.no_proxied or a.no_access):
         fail('nothing to do — pass --full, or --dns/--access/--proxied')
     if a.dns:
         if not a.target:

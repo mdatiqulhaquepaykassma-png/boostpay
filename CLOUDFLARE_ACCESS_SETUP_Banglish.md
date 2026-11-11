@@ -90,8 +90,25 @@ CF_HOST=... sh tools/cf.sh --no-proxied   # grey
 | Zero Trust | `POST /accounts/{id}/access/organizations` → **চালু** · `auth_domain = boostpay.cloudflareaccess.com` |
 | IdP | **One-time PIN** তৈরি (`onetimepin`) — ইমেইলে কোড যায় |
 | Access app | `BoostPay Wallet Agent` (`walletagent.boostpay.online`) · 24h session |
-| Policy | Allow → `mdatiqulhaquepaykassma@gmail.com` (নতুন ইমেইল যোগ করতে: `sh tools/cf.sh --access --emails <ইমেইল>`) |
+| Policy | Allow → `mdatiqulhaquepaykassma@gmail.com` (`--add-email` / `--remove-email` দিয়ে একজন করে যোগ/বাদ; `--emails` পুরোটা রিপ্লেস করে) |
 | বাইপাস | `walletagent.boostpay.online/api/health` → **bypass** (uptime monitor/login ছাড়া) |
+
+### ৬.১ হালনাগাদ (2026-11-11, সন্ধ্যা) — walletagent থেকে Access সরানো হয়েছে
+
+মালিকের সিদ্ধান্ত: **"cloudflareaccess.com লাগবে না"**। তাই `walletagent.boostpay.online`-এর Access app ও policy সম্পূর্ণ মুছে দেওয়া হয়েছে:
+
+```bash
+CF_HOST=walletagent.boostpay.online sh tools/cf.sh --no-access     # app + policy মুছে দেয়
+```
+
+| এখন | ফল |
+|---|---|
+| `https://walletagent.boostpay.online/` | **200 — সরাসরি প্যানেলের নিজের লগইন** (আর cloudflareaccess.com-এ রিডাইরেক্ট নেই) |
+| `/api/health` | 200 (আগের মতোই) |
+| নিরাপত্তা | প্যানেলের নিজের ইমেইল+পাসওয়ার্ড লগইন (৮+ অক্ষর), লগইন rate-limit, সেশন রিভোক, প্রতিটি queue অ্যাকশন অডিটেড; API টোকেন ছাড়া কিছুই হয় না |
+| ভবিষ্যতে ফেরত আনতে | `CF_HOST=walletagent.boostpay.online sh tools/cf.sh --access --emails <ইমেইল>` (একই কমান্ড, idempotent) |
+
+Zero Trust org ও One-time PIN IdP অক্ষত আছে (অন্য কোনো হোস্টে দরকার হলে সাথে সাথে ব্যবহার করা যাবে) — শুধু এই হোস্টে আর কোনো Access app নেই।
 
 ⚠️ Cloudflare error 9999 `access.api.error.not_enabled` আসলে সমাধান `--full` নয়, বরং org তৈরি করা — `cf.sh --full` এখন আগে সেটাই চেষ্টা করে, না হলে স্পষ্ট মেসেজ দেয়।
 

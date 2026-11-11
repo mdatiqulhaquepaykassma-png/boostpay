@@ -50,37 +50,17 @@
 2. লগইন ইমেইল (যেটা আপনি সেট করেছেন)
 3. পাসওয়ার্ড (যেটা আপনি সেট করেছেন)
 
-লগইন পেজে ইমেইল দিলে **৬ ডিজিটের কোড** সেই ইমেইলে যায় (Cloudflare One-time PIN), কোড দিয়ে ঢুকে অ্যাপের ইমেইল+পাসওয়ার্ড দিতে হবে।
+সে সরাসরি `walletagent.boostpay.online` খুলে **ইমেইল + পাসওয়ার্ড** দিয়ে ঢুকবে। আর কোনো Cloudflare লগইন/ইমেইল কোড নেই (2026-11-11-এ সরানো হয়েছে)।
 
 ---
 
-## ৪. ⚠️ সবচেয়ে গুরুত্বপূর্ণ ধাপ — Cloudflare Access-এ ইমেইল যোগ করা
+## ৪. আর কোনো বাড়তি ধাপ নেই (Cloudflare Access সরানো হয়েছে)
 
-প্যানেলটি Cloudflare Access দিয়ে সুরক্ষিত। এখন allow list-এ শুধু **`mdatiqulhaquepaykassma@gmail.com`** আছে — তাই নতুন এজেন্টের ইমেইল যোগ না করলে সে **লগইন পেজই দেখতে পাবে না** (Cloudflare আটকে দেবে)।
+আগে প্যানেলের সামনে Cloudflare Access ছিল — এজেন্টের ইমেইল আলাদা করে allow করতে হতো। **এখন সেটা নেই**: মালিকের নির্দেশে Access app মুছে দেওয়া হয়েছে, তাই অ্যাকাউন্ট বানালেই এজেন্ট ঢুকতে পারবে।
 
-নতুন এজেন্টের ইমেইল যোগ করার এক লাইন (আগের সব ইমেইল অটুট থাকে):
-
-```bash
-CF_HOST=walletagent.boostpay.online sh tools/cf.sh --add-email rahim.bkash@gmail.com
-```
-
-এজেন্ট চলে গেলে সরিয়ে দেবেন:
-
-```bash
-CF_HOST=walletagent.boostpay.online sh tools/cf.sh --remove-email rahim.bkash@gmail.com
-```
-
-> **সাবধান:** `--access --emails …` (বিনা `add`) **পুরো allow list রিপ্লেস করে দেয়**। একজনকে যোগ করতে হলে সবসময় `--add-email` ব্যবহার করুন।
-
-এখন কে কে ঢুকতে পারে দেখতে:
-
-```bash
-CF_HOST=walletagent.boostpay.online sh tools/cf.sh --verify
-```
-
-**বিকল্প (আপনি চাইলে):** বাকি তিনটি প্যানেলের (admin / management / agent) মতো Access পুরো বন্ধ করে শুধু অ্যাপের নিজের ইমেইল+পাসওয়ার্ড লগইন রাখা যায় — তখন এই ধাপটি লাগবে না। বললে করে দেব।
-
----
+- চাইলে নিজে যাচাই করুন: `https://walletagent.boostpay.online` → সোজা প্যানেলের লগইন স্ক্রিন
+- নিরাপত্তা: প্যানেলের নিজের লগইন (৮+ অক্ষরের পাসওয়ার্ড) + লগইন rate-limit + সেশন রিভোক + প্রতিটি সিদ্ধান্ত অডিটে
+- আবার Access চালু করতে চাইলে এক লাইন: `CF_HOST=walletagent.boostpay.online sh tools/cf.sh --access --emails <ইমেইল>`
 
 ## ৫. বানানোর পরে কী কী করা যায়
 
@@ -105,7 +85,7 @@ CF_HOST=walletagent.boostpay.online sh tools/cf.sh --verify
 | "A wallet agent with this email already exists" | ইমেইল আগেই ব্যবহৃত | অন্য ইমেইল দিন, বা পুরোনো অ্যাকাউন্টের ইমেইল এডিট করুন |
 | "The password must be at least 8 characters" | পাসওয়ার্ড ছোট | ৮+ অক্ষর |
 | "bKash is not available in …" | মেথডে ওই দেশ নেই | মেথডে দেশ যোগ করুন বা অন্য মেথড বাছুন |
-| এজেন্ট বলছে "লগইন পেজ আসছে না / blocked" | Cloudflare Access allow list-এ তার ইমেইল নেই | উপরের ধাপ ৪ — `--add-email` |
+| এজেন্ট বলছে "লগইন হচ্ছে না" | ইমেইল/পাসওয়ার্ড ভুল, অথবা অ্যাকাউন্ট DISABLED | Admin → Wallet Agents-এ ইমেইল ও স্ট্যাটাস দেখুন, দরকারে **Edit details** দিয়ে পাসওয়ার্ড রিসেট · `Enable` করুন |
 | এজেন্ট লগইন করার পর queue খালি | তার মেথডে কোনো pending রিকোয়েস্ট নেই | স্বাভাবিক; অন্য মেথডের রিকোয়েস্ট সে দেখবে না |
 
 ---
@@ -114,6 +94,5 @@ CF_HOST=walletagent.boostpay.online sh tools/cf.sh --verify
 
 1. Payments-এ `bKash` মেথডে `BD` দেশ আছে ও enabled — যাচাই
 2. Wallet Agents → name: `Rahim bKash Dhaka`, email: `rahim.bkash@gmail.com`, password: ৮+ অক্ষর, Country: `BD`, Method: `bKash` → **Create wallet agent**
-3. `CF_HOST=walletagent.boostpay.online sh tools/cf.sh --add-email rahim.bkash@gmail.com`
-4. রহিমকে লিংক + ইমেইল + পাসওয়ার্ড দিন
-5. সে `https://walletagent.boostpay.online`-এ ইমেইল → ইমেইলে আসা ৬ ডিজিট কোড → পাসওয়ার্ড দিয়ে ঢুকবে এবং শুধু **bKash / BD**-এর deposit ও withdraw দেখবে
+3. রহিমকে লিংক + ইমেইল + পাসওয়ার্ড দিন
+4. সে `https://walletagent.boostpay.online`-এ ইমেইল + পাসওয়ার্ড দিয়ে ঢুকবে এবং শুধু **bKash / BD**-এর deposit ও withdraw দেখবে
