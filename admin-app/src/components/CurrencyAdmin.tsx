@@ -7,6 +7,7 @@
  * when the provider is down).
  */
 import React, { useEffect, useMemo, useState } from 'react';
+import { BoostPayStore } from '../services/store';
 
 type Row = { code: string; name: string; symbol: string; flag: string; country: string; decimals: number; enabled: boolean; rate: number };
 type Cfg = {
@@ -20,12 +21,12 @@ type Cfg = {
  * (services/store.ts → STORAGE_AUTH_TOKEN). The old names never existed, so every
  * call on this screen went out unauthenticated and the API answered 401.
  */
-const TOKEN_KEYS = ['boostpay_auth_token_v1', 'admin_token', 'token'];
-
+// The console's session token lives in `boostpay_admin_session_v4`; asking for
+// the user-app key returned nothing and every call was 401 (same bug as the
+// payments screen). Use the admin store, which also adds the MFA headers.
 function authHeaders(): Record<string, string> {
-  let t = '';
-  for (const k of TOKEN_KEYS) { const v = localStorage.getItem(k); if (v) { t = v; break; } }
-  return { 'content-type': 'application/json', ...(t ? { authorization: `Bearer ${t}` } : {}) };
+  try { return { ...BoostPayStore.adminAuthHeaders(), 'content-type': 'application/json' }; }
+  catch { return { 'content-type': 'application/json' }; }
 }
 
 export const CurrencyAdmin: React.FC = () => {

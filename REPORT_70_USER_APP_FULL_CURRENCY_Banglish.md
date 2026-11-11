@@ -434,3 +434,33 @@ install-app-check **105/0** · payments-ui-check **18/0** · payments-check **40
 ### ১৭.৫ লাইভ প্রমাণ (স्क্রিনশট)
 `report-assets/app-install-inline.png` — প্রোডাকশনে `boostpay.online/app`-এ Install চাপার পর: **কোনো পপআপ নেই** (`overlays = 0`), গাইডটা বারটার ভেতরেই এক লাইনে দেখাচ্ছে: *"Chrome: ⋮ menu → Install app (or Add to Home screen)."*
 **লাইভ যাচাই:** ৭ হোস্টে **146 pass / 0 fail** · হেলথ `v1.2.1794364628` · কমিট `220d88c`।
+
+---
+
+## ১৮. "Withdraw request admin panel এ যাচ্ছে না" — আসল কারণ ও সমাধান (2026-11-10)
+
+### ১৮.১ আসল কারণ (অনুমান নয়, ব্রাউজার চালিয়ে প্রমাণিত)
+অ্যাডমিন প্যানেলের Payments স্ক্রিন টোকেন খুঁজছিল **ইউজার অ্যাপের** কী-তে (`boostpay_auth_token_v1`)। কিন্তু অ্যাডমিন কনসোল নিজের সেশন রাখে **`boostpay_admin_session_v4`**-এ। ফলে:
+- প্রতিটা রিকোয়েস্ট টোকেন ছাড়াই যেত → সার্ভার **401** দিত,
+- স্ক্রিনে লেখা আসত **"Could not load the methods (HTTP 401)"**, আর ডিপোজিট/উইথড্রয়াল কিউ সবসময় **খালি** দেখাত।
+
+সার্ভারে কিছুই ভাঙা ছিল না — API-লেভেলে উইথড্রয়াল সাথে সাথে `PENDING` হিসেবে জমা হচ্ছিল এবং `/api/admin/payment-requests?type=withdraw` ঠিকঠাক ফেরত দিচ্ছিল। শুধু **অ্যাডমিন UI নিজেকে authenticate করতে পারছিল না**। এজন্যই API-টেস্টে ধরা পড়েনি — টেস্ট স্ক্রিপ্ট সরাসরি টোকেন পাঠায়।
+
+### ১৮.২ যা সারানো হলো
+- `PaymentAdmin.tsx` এখন কনসোলের নিজের স্টোর ব্যবহার করে: `BoostPayStore.adminAuthHeaders()` (সেশন টোকেন + MFA হেডার)। ফলে মেথড লিস্ট, ডিপোজিট কিউ, উইথড্রয়াল কিউ — সবই লোড হয়।
+- **একই বাগ `CurrencyAdmin.tsx`-এও ছিল** (কারেন্সি সেটিংসও 401 খেত) — সেটাও ঠিক করা হয়েছে।
+- **নতুন উইথড্রয়াল নিজে থেকেই চলে আসে:** Payments স্ক্রিন খোলা থাকলে প্রতি **১৫ সেকেন্ডে** কিউ রিফ্রেশ হয়, আর "Deposit queue / Withdraw queue" ট্যাবে **লাল ব্যাজে pending সংখ্যা** দেখায় — তাই কিউতে ঢুকেই বোঝা যায় নতুন রিকোয়েস্ট আছে কি নেই।
+- খালি অবস্থায় লেখা এখন স্পষ্ট: "No withdrawal requests in this view. New requests appear here automatically within 15 seconds."
+
+### ১৮.৩ প্রমাণ (স্ক্রিনশট + নতুন টেস্ট)
+`tools/admin-payments-ui-check.py` — আসল অ্যাডমিন কনসোল ব্রাউজারে খুলে, UI দিয়েই লগইন করে, তারপর:
+1. একজন ইউজার API দিয়ে $7 উইথড্রয়াল করে
+2. Payments → **Withdraw queue**-তে সেটা দেখা যায় (badge + সারি + destination ফিল্ড)
+3. **Mark paid** করলে সারিটা PENDING থেকে সরে যায়, ব্যালেন্স হেল্ডই থাকে (না ডাবল রিফান্ড, না ডাবল ডেবিট)
+ফলাফল: **9 pass / 0 fail**। স্ক্রিনশট: `report-assets/admin-withdraw-queue.png`।
+
+### ১৮.৪ সার্বিক টেস্ট
+admin-payments-ui-check **9/0** · payments-check **40/0** · payments-ui-check **18/0** · user-journey **409/0** · regression **52/0** · currency **23/0** · system-check ক্লিন · বিল্ড ক্লিন।
+
+### ১৮.৫ ব্যবহারকারীর জন্য
+অ্যাডমিন পোর্টাল → **Payments** → **Withdraw queue**। Pending সংখ্যা ওখানেই ব্যাজে দেখাবে; সারিতে **Mark paid** (পেমেন্ট দেওয়া হয়ে গেলে) বা **Reject + refund** (টাকা ফেরত দিতে) — রিজেক্টে ইউজারের ব্যালেন্স সাথে সাথে ফেরত যায়।

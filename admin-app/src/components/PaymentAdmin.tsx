@@ -7,6 +7,7 @@
  * does, and every decision is written to the audit log by the server.
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { BoostPayStore } from '../services/store';
 
 type Cat = { id: string; label: string; icon: string };
 type Method = {
@@ -31,11 +32,23 @@ type WdrReq = {
   reviewedBy?: string; reason?: string; payoutRef?: string;
 };
 
-const TOKEN_KEYS = ['boostpay_auth_token_v1', 'admin_token', 'token'];
+/**
+ * Auth for the payment endpoints.
+ *
+ * BUG (fixed 2026-11-10): this screen used to hunt for the user-app token
+ * (`boostpay_auth_token_v1`), but the admin console keeps ITS session in
+ * `boostpay_admin_session_v4`, so every call went out without a token and the
+ * server answered 401 — which is why withdrawal requests never appeared in the
+ * admin panel. The console's own store already knows where the token lives and
+ * also attaches the short-lived MFA headers, so use that.
+ */
 function authHeaders(): Record<string, string> {
-  let t = '';
-  for (const k of TOKEN_KEYS) { const v = localStorage.getItem(k); if (v) { t = v; break; } }
-  return { 'content-type': 'application/json', ...(t ? { authorization: `Bearer ${t}` } : {}) };
+  try {
+    const h = BoostPayStore.adminAuthHeaders();
+    return { ...h, 'content-type': 'application/json' };
+  } catch {
+    return { 'content-type': 'application/json' };
+  }
 }
 
 const money = (n: number) => `$${(Number(n) || 0).toFixed(2)}`;
@@ -66,6 +79,7 @@ export const PaymentAdmin: React.FC = () => {
   const [busy, setBusy] = useState('');
   const [editing, setEditing] = useState<Partial<Method> | null>(null);
   const [q, setQ] = useState('');
+  const [counts, setCounts] = useState<{ deposit: number; withdraw: number }>({ deposit: 0, withdraw: 0 });
 
   const loadMethods = useCallback(async () => {
     try {
@@ -87,11 +101,40 @@ export const PaymentAdmin: React.FC = () => {
     } catch { /* ignore */ }
   }, [statusFilter]);
 
-  useEffect(() => { void loadMethods(); }, [loadMethods]);
+  /** How many requests are waiting — shown on the queue tabs, so a new
+   *  withdrawal is visible from the Payments landing tab without hunting. */
+  const loadCounts = useCallback(async () => {
+    try {
+      const [d, w] = await Promise.all([
+        fetch('/api/admin/payment-requests?type=deposit&status=PENDING', { headers: authHeaders() }),
+        fetch('/api/admin/payment-requests?type=withdraw&status=PENDING', { headers: authHeaders() })
+      ]);
+      if (!d.ok || !w.ok) return;
+      const dj = await d.json(); const wj = await w.json();
+      setCounts({
+        deposit: Array.isArray(dj.requests) ? dj.requests.length : 0,
+        withdraw: Array.isArray(wj.requests) ? wj.requests.length : 0
+      });
+    } catch { /* the counter is a convenience */ }
+  }, []);
+
+  useEffect(() => { void loadMethods(); void loadCounts(); }, [loadMethods, loadCounts]);
   useEffect(() => {
     if (tab === 'DEPOSITS') void loadQueue('deposit');
     if (tab === 'WITHDRAWALS') void loadQueue('withdraw');
-  }, [tab, loadQueue]);
+    if (tab !== 'METHODS') void loadCounts();
+  }, [tab, loadQueue, loadCounts]);
+
+  // Live queue: a withdrawal submitted while this screen is open must appear by
+  // itself (owner report: "withdraw request admin panel e jacche na").
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void loadCounts();
+      if (tab === 'DEPOSITS') void loadQueue('deposit');
+      if (tab === 'WITHDRAWALS') void loadQueue('withdraw');
+    }, 15000);
+    return () => window.clearInterval(id);
+  }, [tab, loadCounts, loadQueue]);
 
   const save = async (patch: Partial<Method>) => {
     setBusy(String(patch.id || 'new'));
@@ -154,6 +197,11 @@ export const PaymentAdmin: React.FC = () => {
           <button key={t} onClick={() => setTab(t)}
             className={`rounded-lg px-2.5 py-1.5 text-[10px] font-bold ${tab === t ? 'bg-amber-500 text-zinc-950' : 'bg-zinc-900 text-zinc-400 hover:bg-zinc-800'}`}>
             {t === 'METHODS' ? 'Payment methods' : t === 'DEPOSITS' ? 'Deposit queue' : 'Withdraw queue'}
+            {t !== 'METHODS' && (t === 'DEPOSITS' ? counts.deposit : counts.withdraw) > 0 && (
+              <span className="ml-1 rounded-full bg-rose-500 px-1.5 py-[1px] text-[9px] font-black text-white">
+                {t === 'DEPOSITS' ? counts.deposit : counts.withdraw}
+              </span>
+            )}
           </button>
         ))}
         <button onClick={() => setEditing({ id: '', name: '', category: 'EWALLET', currencies: ['*'], minDeposit: 1, maxDeposit: 100000, minWithdraw: 1, maxWithdraw: 100000 })}
@@ -275,7 +323,11 @@ export const PaymentAdmin: React.FC = () => {
                   </div>
                 </div>
               ))}
-              {wdrs.length === 0 && <div className="rounded-xl border border-zinc-800 p-3 text-[10px] text-zinc-500">No withdrawal requests in this view.</div>}
+              {wdrs.length === 0 && (
+                <div className="rounded-xl border border-zinc-800 p-3 text-[10px] text-zinc-500">
+                  No withdrawal requests in this view. New requests appear here automatically within 15 seconds.
+                </div>
+              )}
             </div>
           )}
         </>
