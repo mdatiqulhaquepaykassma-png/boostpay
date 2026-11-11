@@ -276,12 +276,86 @@ def verify(token, host=HOST):
     print(f'...   https://{host}/api/health -> {code} {body[:50]}')
     print('\ncredential verified. Nothing above is secret.')
 
+def find_app(token, aid):
+    s, j = call(f'/accounts/{aid}/access/apps', token=token)
+    if s != 200:
+        fail('cannot list Access apps', j.get('errors'))
+    return next((a for a in (j.get('result') or []) if a.get('domain') == HOST), None)
+
+
+def add_email(token, emails):
+    """ADD the given e-mails to the allow policy of this host, keeping everyone
+    already allowed. This is what a new wallet agent needs — the console account
+    alone is not enough while Cloudflare Access stands in front of the panel."""
+    aid = account_id(token)
+    app = find_app(token, aid)
+    if not app:
+        fail(f'no Access app for {HOST} — create it once with --access --emails you@example.com')
+    s, j = call(f"/accounts/{aid}/access/apps/{app['id']}/policies", token=token)
+    pols = [p for p in (j.get('result') or []) if p.get('decision') == 'allow']
+    if not pols:
+        fail(f'{HOST} has no allow policy — run --access --emails you@example.com first')
+    pol = pols[0]
+    inc = list(pol.get('include') or [])
+    have = {str((i.get('email') or {}).get('email', '')).lower() for i in inc}
+    added, skipped = [], []
+    for e in emails or []:
+        e = e.strip().lower()
+        if not e or '@' not in e:
+            fail(f'not an e-mail address: {e!r}')
+        if e in have:
+            skipped.append(e)
+            continue
+        inc.append({'email': {'email': e}})
+        have.add(e)
+        added.append(e)
+    if added:
+        body = {'name': pol.get('name') or f'Allow {HOST}', 'decision': 'allow',
+                'include': inc, 'exclude': pol.get('exclude') or [], 'require': pol.get('require') or []}
+        s, j = call(f"/accounts/{aid}/access/apps/{app['id']}/policies/{pol['id']}", 'PUT', body, token=token)
+        if s != 200:
+            fail('Access policy update failed', j.get('errors'))
+    for e in added:
+        print(f'OK    Access allow + {e}')
+    for e in skipped:
+        print(f'...   Access allow already had {e}')
+    print(f'      {HOST}: {len(inc)} allow rule(s) now')
+
+
+def remove_email(token, emails):
+    """DROP e-mails from the allow policy (use when an agent leaves)."""
+    aid = account_id(token)
+    app = find_app(token, aid)
+    if not app:
+        fail(f'no Access app for {HOST}')
+    s, j = call(f"/accounts/{aid}/access/apps/{app['id']}/policies", token=token)
+    pols = [p for p in (j.get('result') or []) if p.get('decision') == 'allow']
+    if not pols:
+        fail(f'{HOST} has no allow policy')
+    pol = pols[0]
+    drop = {e.strip().lower() for e in (emails or []) if e.strip()}
+    inc = [i for i in (pol.get('include') or []) if str((i.get('email') or {}).get('email', '')).lower() not in drop]
+    if not inc:
+        fail('refusing to empty the allow policy — nobody could sign in')
+    body = {'name': pol.get('name') or f'Allow {HOST}', 'decision': 'allow',
+            'include': inc, 'exclude': pol.get('exclude') or [], 'require': pol.get('require') or []}
+    s, j = call(f"/accounts/{aid}/access/apps/{app['id']}/policies/{pol['id']}", 'PUT', body, token=token)
+    if s != 200:
+        fail('Access policy update failed', j.get('errors'))
+    print(f'OK    Access allow now has {len(inc)} rule(s)')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dns', action='store_true')
     ap.add_argument('--access', action='store_true')
     ap.add_argument('--target', default='', help='IPv4 of the Dokploy server for the A record')
-    ap.add_argument('--emails', action='append', default=[])
+    ap.add_argument('--emails', action='append', default=[],
+                    help='with --access: the COMPLETE allow list (replaces the policy)')
+    ap.add_argument('--add-email', action='append', default=[],
+                    help='append one e-mail to the allow list, keeping everyone else')
+    ap.add_argument('--remove-email', action='append', default=[],
+                    help='drop one e-mail from the allow list')
     ap.add_argument('--domain', action='append', default=[], help='allow every address on this domain')
     ap.add_argument('--name', default=os.environ.get('CF_APP_NAME', 'BoostPay Console'))
     ap.add_argument('--proxied', action='store_true', help='write/turn ON the orange cloud')
@@ -302,6 +376,12 @@ def main():
         a.access = True
     if a.verify:
         verify(token)
+        return
+    if a.add_email:
+        add_email(token, a.add_email)
+        return
+    if a.remove_email:
+        remove_email(token, a.remove_email)
         return
     if not (a.dns or a.access or a.proxied or a.no_proxied):
         fail('nothing to do — pass --full, or --dns/--access/--proxied')
