@@ -48,6 +48,32 @@ export const AgentAdminView: FC = () => {
   const [toast, setToast] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [showPw, setShowPw] = useState<Record<string, boolean>>({});
   const [adjusting, setAdjusting] = useState<{ id: string; amount: string; note: string } | null>(null);
+  // inline "edit details" editor (name / login email / new password) — one agent at a time
+  const [editing, setEditing] = useState<{ id: string; name: string; email: string; password: string } | null>(null);
+  const [editErr, setEditErr] = useState('');
+  const [editBusy, setEditBusy] = useState(false);
+
+  const openEditor = (a: Agent) => { setEditErr(''); setEditing({ id: a.id, name: a.name || '', email: a.email || '', password: '' }); };
+
+  const saveEditor = async () => {
+    if (!editing) return;
+    setEditErr('');
+    if (!editing.name.trim()) { setEditErr('The agent name cannot be empty.'); return; }
+    if (editing.password && editing.password.length < 6) { setEditErr('The password must be at least 6 characters.'); return; }
+    setEditBusy(true);
+    try {
+      const body: any = { name: editing.name.trim(), email: editing.email.trim() };
+      if (editing.password) body.password = editing.password;
+      const res = await fetch(`/api/admin/agents/${editing.id}`, {
+        method: 'PATCH', headers: BoostPayStore.adminAuthHeaders(), body: JSON.stringify(body)
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Update failed.');
+      notify('ok', `${editing.id} saved${(json.changes || []).length ? ' · ' + json.changes.join(', ') : ''}`);
+      setEditing(null);
+      void load();
+    } catch (err: any) { setEditErr(err?.message || 'Update failed.'); } finally { setEditBusy(false); }
+  };
 
   const [newAgent, setNewAgent] = useState({ name: '', email: '', password: '', openingBalance: '', ownerManagementId: '' });
   const [mgmtAdjust, setMgmtAdjust] = useState<{ id: string; amount: string; note: string } | null>(null);
@@ -317,12 +343,38 @@ export const AgentAdminView: FC = () => {
                   <button onClick={() => setShowPw((p) => ({ ...p, [a.id]: !p[a.id] }))} className="rounded-lg border border-zinc-800 p-1.5 text-zinc-400 hover:text-white" title="Show password">
                     {showPw[a.id] ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
                   </button>
-                  <button onClick={() => {
-                    const np = window.prompt(`New password for ${a.id} (min 6 characters)`);
-                    if (np && np.length >= 6) void patchAgent(a.id, { password: np });
-                  }} className="rounded-lg border border-zinc-800 px-2 py-1 text-[9px] font-bold text-zinc-300 hover:text-white">Reset</button>
+                  <button onClick={() => openEditor(a)} className="rounded-lg border border-zinc-800 px-2 py-1 text-[9px] font-bold text-zinc-300 hover:text-white">Edit details</button>
                 </div>
               </div>
+
+              {editing && editing.id === a.id ? (
+                <div className="mt-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-2.5">
+                  <div className="mb-1.5 text-[9px] font-black uppercase tracking-wider text-amber-300">Edit {a.id}</div>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <div>
+                      <div className="mb-1 text-[9px] font-bold uppercase tracking-wider text-zinc-500">Name</div>
+                      <input className={inputCls} value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+                    </div>
+                    <div>
+                      <div className="mb-1 text-[9px] font-bold uppercase tracking-wider text-zinc-500">Login email</div>
+                      <input className={inputCls} value={editing.email} onChange={(e) => setEditing({ ...editing, email: e.target.value })} placeholder="name@gmail.com" />
+                    </div>
+                    <div>
+                      <div className="mb-1 text-[9px] font-bold uppercase tracking-wider text-zinc-500">New password (blank = unchanged)</div>
+                      <input className={inputCls} type="password" autoComplete="new-password" value={editing.password} onChange={(e) => setEditing({ ...editing, password: e.target.value })} placeholder="min 6 characters" />
+                    </div>
+                  </div>
+                  <p className="mt-1.5 text-[9px] leading-relaxed text-zinc-500">
+                    This agent signs in at agent.boostpay.online. Changing the email or the password signs them out everywhere — hand them the new credentials.
+                  </p>
+                  {editErr ? <div className="mt-1.5 rounded-lg border border-red-500/40 bg-red-500/10 px-2 py-1 text-[9.5px] font-semibold text-red-200">{editErr}</div> : null}
+                  <div className="mt-2 flex gap-2">
+                    <button onClick={() => void saveEditor()} disabled={editBusy || !editing.name.trim()}
+                      className="rounded-lg bg-amber-500 px-3 py-1.5 text-[10px] font-black text-zinc-950 disabled:opacity-50">{editBusy ? 'Saving…' : 'Save'}</button>
+                    <button onClick={() => setEditing(null)} className="rounded-lg border border-zinc-700 px-3 py-1.5 text-[10px] font-bold text-zinc-300">Cancel</button>
+                  </div>
+                </div>
+              ) : null}
 
               <div className="mt-2 flex flex-wrap gap-2">
                 <button onClick={() => setAdjusting({ id: a.id, amount: '', note: '' })} className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-[10px] font-bold text-zinc-300 hover:border-amber-500/40 hover:text-amber-300">

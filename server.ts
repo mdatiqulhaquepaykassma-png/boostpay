@@ -13464,21 +13464,86 @@ const paymentLocks = new Map<string, Promise<any>>();
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  /**
+   * Edit an agent-app account (the people who sign in at agent.boostpay.online) —
+   * ONE implementation shared by the admin console and the management console.
+   * Name, login e-mail, password and the enable flag; the admin may also move the
+   * agent to another management network. A password/e-mail change or a disable
+   * revokes that agent's live AGENT sessions immediately.
+   */
+  function revokeAgentSessions(db: any, agentId: string) {
+    for (const s of sessionSnapshot(db)) {
+      if (String(s.userId) === String(agentId) && s.role === 'AGENT' && !s.revoked) {
+        s.revoked = true; revokedSessions.add(s.id);
+      }
+    }
+  }
+
+  function updateAgentCore(db: any, agent: any, body: any, actor: string, opts: { allowOwner?: boolean } = {}) {
+    const changes: string[] = [];
+
+    if (typeof body?.isActive === 'boolean' && body.isActive !== (agent.isActive !== false)) {
+      agent.isActive = body.isActive;
+      changes.push(body.isActive ? 'enabled' : 'disabled');
+      if (!body.isActive) revokeAgentSessions(db, String(agent.id));
+    }
+
+    if (typeof body?.name === 'string') {
+      const name = sanitizeText(body.name, 60).trim();
+      if (!name) return { status: 400, body: { error: 'The agent name cannot be empty.' } };
+      if (name !== agent.name) { agent.name = name; changes.push('name'); }
+    }
+
+    if (typeof body?.email === 'string' && body.email.trim()) {
+      const wanted = String(body.email).trim();
+      if (wanted.toLowerCase() !== String(agent.email || '').toLowerCase()) {
+        const resolved = resolveGmailAccountEmail(wanted);
+        if (!resolved.ok) return { status: 400, body: { error: resolved.error } };
+        if ((db.agents || []).some((a: any) => String(a.id) !== String(agent.id)
+          && String(a.email || '').toLowerCase() === resolved.email)) {
+          return { status: 409, body: { error: 'Another agent already uses this email.' } };
+        }
+        agent.email = resolved.email;
+        changes.push('email');
+        revokeAgentSessions(db, String(agent.id));   // the login identity changed
+      }
+    }
+
+    if (body?.password) {
+      const pw = String(body.password);
+      if (pw.length < 6) return { status: 400, body: { error: 'The password must be at least 6 characters.' } };
+      agent.passwordHash = hashPassword(pw);
+      agent.passwordPlain = pw;
+      changes.push('password reset');
+      revokeAgentSessions(db, String(agent.id));
+    }
+
+    if (opts.allowOwner && typeof body?.ownerManagementId === 'string') {
+      const owner = String(body.ownerManagementId).trim();
+      if (owner && !(db.management || []).some((m: any) => String(m.id) === owner)) {
+        return { status: 400, body: { error: 'That management account does not exist.' } };
+      }
+      if (owner !== String(agent.ownerManagementId || '')) {
+        agent.ownerManagementId = owner;
+        changes.push(owner ? `owner → ${owner}` : 'owner → platform');
+      }
+    }
+
+    recordAuditLog(db, 'AGENT_UPDATE', actor,
+      `Updated agent ${agent.id} (${agent.email}): ${changes.join(', ') || 'no change'}`, String(agent.id));
+    return { status: 200, body: { success: true, agent: { ...publicAgent(agent), passwordPlain: agent.passwordPlain || '' }, changes } };
+  }
+
   app.patch('/api/management/agents/:id', requireManagement, (req: any, res) => {
     try {
       const db = ensureAgentCollections(readDb());
       const found = agentForManagement(db, String(req.authManagementId), String(req.params.id));
       if (!found.ok) return res.status(found.status).json({ error: found.error });
-      const agent: any = found.agent;
-      if (typeof req.body?.isActive === 'boolean') agent.isActive = req.body.isActive;
-      if (typeof req.body?.name === 'string') agent.name = sanitizeText(req.body.name, 60);
-      if (typeof req.body?.password === 'string' && req.body.password.length >= 6) {
-        agent.passwordHash = hashPassword(req.body.password);
-        agent.passwordPlain = req.body.password;
-      }
-      recordAuditLog(db, 'AGENT_UPDATE', String(req.authManagementId), `Management updated agent ${agent.id}`);
+      // management edits name / login email / password / enable — never the ownership
+      const out = updateAgentCore(db, found.agent, req.body || {}, 'management:' + String(req.authManagementId), { allowOwner: false });
+      if (out.status !== 200) return res.status(out.status).json(out.body);
       writeDb(db);
-      res.json({ success: true, agent: publicAgent(agent) });
+      res.json(out.body);
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -13688,23 +13753,10 @@ const paymentLocks = new Map<string, Promise<any>>();
       const db = ensureAgentCollections(readDb());
       const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.params.id));
       if (!agent) return res.status(404).json({ error: 'Agent not found.' });
-      if (typeof req.body?.isActive === 'boolean') agent.isActive = req.body.isActive;
-      if (typeof req.body?.name === 'string') agent.name = sanitizeText(req.body.name, 60);
-      if (typeof req.body?.email === 'string' && req.body.email.includes('@')) agent.email = String(req.body.email).trim().toLowerCase();
-      if (typeof req.body?.ownerManagementId === 'string') {
-        const owner = String(req.body.ownerManagementId).trim();
-        if (owner && !(db.management || []).some((m: any) => String(m.id) === owner)) {
-          return res.status(400).json({ error: 'That management account does not exist.' });
-        }
-        agent.ownerManagementId = owner;
-      }
-      if (typeof req.body?.password === 'string' && req.body.password.length >= 6) {
-        agent.passwordHash = hashPassword(req.body.password);
-        agent.passwordPlain = req.body.password;
-      }
-      recordAuditLog(db, 'AGENT_UPDATE', String(req.authAdmin || 'admin'), `Admin updated agent ${agent.id}`, agent.id);
+      const out = updateAgentCore(db, agent, req.body || {}, String(req.authAdmin || 'admin'), { allowOwner: true });
+      if (out.status !== 200) return res.status(out.status).json(out.body);
       writeDb(db);
-      res.json({ success: true, agent: { ...publicAgent(agent), passwordPlain: agent.passwordPlain || '' } });
+      res.json(out.body);
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 

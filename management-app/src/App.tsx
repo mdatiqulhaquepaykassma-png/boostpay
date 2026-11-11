@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { PushBell } from './push/PushBell';
 import {
   ArrowDownLeft, ArrowUpRight, Building2, Check, ChevronRight, CircleDollarSign, Coins,
-  Copy, History, Home, KeyRound, Landmark, LogOut, MessageSquare, Plus, Receipt, Search, Send, ShieldCheck, User, Users, X
+  Copy, History, Home, KeyRound, Landmark, LogOut, MessageSquare, PenLine, Plus, Receipt, Search, Send, ShieldCheck, User, Users, X
 } from 'lucide-react';
 import { ChatComposer, ChatList, ChatMessageLike, ChatSendPayload } from './ChatKit';
 
@@ -221,6 +221,32 @@ const AgentSheet: React.FC<{
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [showPw, setShowPw] = useState(false);
+  // inline "edit details" (name / login email / new password)
+  const [editing, setEditing] = useState(false);
+  const [eName, setEName] = useState(agent.name || '');
+  const [eEmail, setEEmail] = useState(agent.email || '');
+  const [ePw, setEPw] = useState('');
+  const [eErr, setEErr] = useState('');
+  const [eBusy, setEBusy] = useState(false);
+
+  const openEdit = () => {
+    setEName(agent.name || ''); setEEmail(agent.email || ''); setEPw(''); setEErr(''); setEditing(true);
+  };
+
+  const saveEdit = async () => {
+    setEErr('');
+    if (!eName.trim()) { setEErr('The agent name cannot be empty.'); return; }
+    if (ePw && ePw.length < 6) { setEErr('The password must be at least 6 characters.'); return; }
+    setEBusy(true);
+    try {
+      const body: any = { name: eName.trim(), email: eEmail.trim() };
+      if (ePw) body.password = ePw;
+      const res = await api<any>(`/api/management/agents/${agent.id}`, { method: 'PATCH', body });
+      toast({ type: 'ok', text: `Saved${(res.changes || []).length ? ' · ' + res.changes.join(', ') : ''}` });
+      setEditing(false);
+      onChanged();
+    } catch (err: any) { setEErr(err?.message || 'Could not save.'); } finally { setEBusy(false); }
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setError('');
@@ -277,6 +303,27 @@ const AgentSheet: React.FC<{
             <Send className="h-3.5 w-3.5" /> {busy ? 'Processing…' : mode === 'CREDIT' ? 'Send to agent' : 'Receive from agent'}
           </button>
         </form>
+        <button onClick={() => (editing ? setEditing(false) : openEdit())}
+          className="mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-2xl bg-cyan-500 text-[11px] font-black text-zinc-950">
+          <PenLine className="h-3.5 w-3.5" /> {editing ? 'Close editor' : 'Edit details'}
+        </button>
+        {editing ? (
+          <div className="mt-2 space-y-2 rounded-2xl border border-cyan-700/40 bg-cyan-500/[0.06] p-2.5">
+            <div className="text-[10px] font-black uppercase tracking-wider text-cyan-300">Edit {agent.id}</div>
+            <input className={inputCls} placeholder="Agent name" value={eName} onChange={(ev) => setEName(ev.target.value)} />
+            <input className={inputCls} inputMode="email" placeholder="login email (name@gmail.com)" value={eEmail} onChange={(ev) => setEEmail(ev.target.value)} />
+            <input className={inputCls} type="password" placeholder="New password (min 6)" autoComplete="new-password" value={ePw} onChange={(ev) => setEPw(ev.target.value)} />
+            <p className="text-[9px] leading-relaxed text-zinc-500">
+              The agent signs in at agent.boostpay.online. Changing the email or the password signs them out everywhere — give them the new one.
+            </p>
+            {eErr ? <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{eErr}</div> : null}
+            <div className="flex gap-2">
+              <button onClick={() => void saveEdit()} disabled={eBusy || !eName.trim()}
+                className="flex-1 rounded-xl bg-cyan-500 px-3 py-2 text-[11px] font-black text-zinc-950 disabled:opacity-50">{eBusy ? 'Saving…' : 'Save'}</button>
+              <button onClick={() => setEditing(false)} className="rounded-xl border border-zinc-700 px-3 py-2 text-[11px] font-bold text-zinc-300">Cancel</button>
+            </div>
+          </div>
+        ) : null}
         <div className="mt-3 flex items-center justify-between rounded-2xl border border-zinc-800 bg-zinc-950 px-3 py-2.5">
           <div>
             <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Agent password</div>
@@ -479,6 +526,8 @@ export default function App() {
         api<any>('/api/management/messages')
       ]);
       setAgents(a.agents || []); setSettings(a.settings || settings); setStats(a.stats || null);
+      // keep an open agent sheet in sync after an edit (name / email / status)
+      setSelected((cur) => (cur ? ((a.agents || []).find((x: any) => x.id === cur.id) || cur) : cur));
       if (me.management) { setMgr(me.management); localStorage.setItem(MGR_KEY, JSON.stringify(me.management)); }
       setBalance(Number(me.balance ?? a.balance ?? me.management?.balance ?? 0));
       setLedger(l.ledger || []);
