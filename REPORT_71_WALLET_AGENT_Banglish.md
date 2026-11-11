@@ -95,9 +95,30 @@
 
 ---
 
-## ৫. যা এখনো বাকি (সৎ তালিকা)
+## ৫. ডিপ্লয় (Dokploy)
 
-1. **Dokploy অ্যাপ + DNS** `walletagent.boostpay.online` — কোড প্রস্তুত, পুশ হয়েছে; অ্যাপ/ডোমেইন তৈরি বাকি (ধাপ ৬)।
+| ধাপ | ফল |
+|---|---|
+| কমিট | `f86dba2` (+ হোস্ট-ট্রিগার কমিট) → `main`-এ পুশ |
+| Dokploy অ্যাপ | **`BoostPay Wallet Agent`** · id `n7lNyGlycCMhEu3zr8Cob` · appName `boostpay-walletagent-wb8fv9` |
+| সোর্স | একই রিপো, branch `main`, **buildPath `/walletagent-app`**, buildType nixpacks |
+| ডোমেইন row | `walletagent.boostpay.online` → port 3000, HTTPS, Let's Encrypt (`WADaa2kxssr0v7sb9pbmb`) |
+| সার্ভিস | `docker service ls` → **1/1** · লগ: `[boostpay-walletagent] listening on :3000 (api -> http://boostpay-l2q4ry:3000)` |
+| Traefik | হাতে লেখা `/etc/dokploy/traefik/dynamic/boostpay-walletagent-wb8fv9.yml` (promotion-এর মতোই), `docker restart dokploy-traefik` |
+| প্রি-DNS টেস্ট | `Host:` হেডার দিয়ে Traefik → **200**, `/api/health` → `v1.2.1794417381` (মূল API-র প্রোক্সি কাজ করছে) |
+| বাকি শুধু | **DNS A রেকর্ড** — `walletagent` → `72.60.42.18`, Proxied (আপনি নিজে বসাবেন বলে ঠিক করেছেন) |
+
+DNS বসার পর (৩০–৬০ সেকেন্ডে সার্টিফিকেট):
+```bash
+curl -I https://walletagent.boostpay.online/            # 200
+curl -s https://walletagent.boostpay.online/api/health   # {"status":"ok",...}
+curl -s https://walletagent.boostpay.online/api/walletagent/me   # 401 (সুরক্ষিত)
+```
+তারপর **Cloudflare Access** (আপনি "হ্যাঁ" বলেছেন) — Zero Trust → Access → Applications → Add self-hosted → `walletagent.boostpay.online` → policy Allow → Emails। টোকেন (`Zone:DNS:Edit` + `Access: Apps and Policies:Edit`) দিলে আমি `tools/cf-access-promotion.py` দিয়ে বসিয়ে দেবো (শুধু `CF_HOST=walletagent.boostpay.online` করতে হবে)।
+
+## ৫.১ যা এখনো বাকি (সৎ তালিকা)
+
+1. **DNS + Access** উপরে দেখানো ধাপ।
 2. **pay-to নম্বর**: ২০টি ডিফল্ট মেথডের `accountNumber` অ্যাডমিনকে ভরতে হবে, নাহলে ডিপোজিটে মেথড দেখাবে না (কোড আগের মতোই কঠোর থাকে)।
 3. এজেন্ট নিজের পাসওয়ার্ড বদলাতে পারবে না — ইচ্ছাকৃত; অ্যাডমিন "Reset password" দিয়ে দেয়।
 4. এজেন্টের নিজের কোনো ব্যালেন্স/কমিশন নেই — শুধু কিউ ম্যানেজ করে (আপনি এটা চাইলে পরের জব)।
