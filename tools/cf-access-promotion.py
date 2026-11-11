@@ -78,12 +78,15 @@ def account_id(token):
     return j['result'][0]['id']
 
 
-def do_dns(token, target):
+def do_dns(token, target, proxied=False):
+    """Write the A record. `proxied=False` (grey cloud) on purpose: a brand-new
+    host has no Let's Encrypt certificate yet, and Cloudflare answers 526 until
+    Traefik has one. Flip it to orange once https works."""
     zid = zone_id(token)
     s, j = call(f'/zones/{zid}/dns_records?name={HOST}', token=token)
     rows = j.get('result') or []
-    body = {'type': 'A', 'name': HOST, 'content': target, 'proxied': True, 'ttl': 1,
-            'comment': 'promotion console (PWA)'}
+    body = {'type': 'A', 'name': HOST, 'content': target, 'proxied': bool(proxied), 'ttl': 1,
+            'comment': 'BoostPay console (PWA)'}
     if rows:
         rid = rows[0]['id']
         s, j = call(f'/zones/{zid}/dns_records/{rid}', 'PUT', body, token=token)
@@ -93,7 +96,53 @@ def do_dns(token, target):
         action = 'created'
     if s != 200:
         fail('DNS record could not be written', j.get('errors'))
-    print(f'OK    DNS {HOST} {action} -> {target} (proxied)')
+    print(f'OK    DNS {HOST} {action} -> {target} ({"proxied" if proxied else "DNS only — grey cloud"})')
+    return (j.get('result') or {}).get('id')
+
+
+def set_proxied(token, proxied: bool):
+    zid = zone_id(token)
+    s, j = call(f'/zones/{zid}/dns_records?name={HOST}', token=token)
+    rows = j.get('result') or []
+    if not rows:
+        fail('there is no DNS record for ' + HOST)
+    rid = rows[0]['id']
+    body = {'type': 'A', 'name': HOST, 'content': rows[0]['content'],
+            'proxied': bool(proxied), 'ttl': 1}
+    s, j = call(f'/zones/{zid}/dns_records/{rid}', 'PATCH', body, token=token)
+    if s != 200:
+        fail('could not change the proxy status', j.get('errors'))
+    print(f'OK    Cloudflare proxy {"ON (orange)" if proxied else "OFF (grey)"} for {HOST}')
+
+
+def host_status(timeout=12):
+    """GET https://HOST/api/health with the normal certificate check."""
+    import ssl
+    ctx = ssl.create_default_context()
+    r = urllib.request.Request(f'https://{HOST}/api/health', headers={'user-agent': 'boostpay-verify'})
+    try:
+        with urllib.request.urlopen(r, timeout=timeout, context=ctx) as x:
+            return x.status, (x.read() or b'')[:120].decode('utf-8', 'replace')
+    except urllib.error.HTTPError as e:
+        return e.code, ''
+    except Exception as e:
+        return 0, str(e)[:120]
+
+
+def wait_for_cert(seconds=240):
+    """Let's Encrypt needs the record to answer before it issues. Poll until the
+    real certificate works, so we never flip the proxy on a host that would 526."""
+    import time
+    print(f'...   waiting up to {seconds}s for the certificate on {HOST}')
+    for i in range(max(1, seconds // 10)):
+        code, body = host_status()
+        if code == 200:
+            print(f'OK    https://{HOST}/api/health -> 200 {body[:60]}')
+            return True
+        time.sleep(10)
+    print(f'WARN  https://{HOST} still not answering 200 — the proxy was left OFF; '
+          f'fix the app/DNS and run with --proxied when it does')
+    return False
 
 
 def do_access(token, emails, domains, name):
@@ -147,17 +196,40 @@ def main():
     ap.add_argument('--target', default='', help='IPv4 of the Dokploy server for the A record')
     ap.add_argument('--emails', action='append', default=[])
     ap.add_argument('--domain', action='append', default=[], help='allow every address on this domain')
-    ap.add_argument('--name', default='BoostPay Promotion Console')
+    ap.add_argument('--name', default=os.environ.get('CF_APP_NAME', 'BoostPay Console'))
+    ap.add_argument('--proxied', action='store_true', help='write/turn ON the orange cloud')
+    ap.add_argument('--no-proxied', action='store_true', help='write/turn OFF the orange cloud (needed before the first certificate)')
+    ap.add_argument('--wait-cert', action='store_true', help='poll https until the certificate works')
+    ap.add_argument('--full', action='store_true',
+                    help='the whole sequence: grey-cloud A record -> wait for the certificate -> proxy on -> verify -> Access')
     a = ap.parse_args()
     token = os.environ.get('CF_API_TOKEN', '').strip()
     if not token and not (os.environ.get('CF_API_EMAIL') and os.environ.get('CF_API_KEY')):
         fail('set CF_API_TOKEN (preferred), or CF_API_EMAIL + CF_API_KEY for the legacy global key.')
-    if not (a.dns or a.access):
-        fail('nothing to do — pass --dns and/or --access')
+    if a.full:
+        a.dns = True
+        a.wait_cert = True
+        if not a.emails and not a.domain:
+            fail('--full needs --emails (or --domain) so Access has an allow policy')
+        a.access = True
+    if not (a.dns or a.access or a.proxied or a.no_proxied):
+        fail('nothing to do — pass --full, or --dns/--access/--proxied')
     if a.dns:
         if not a.target:
             fail('--dns needs --target <server IPv4>')
-        do_dns(token, a.target)
+        # with --full we start grey and switch after the certificate; otherwise
+        # honour --proxied/--no-proxied (the historical default was proxied)
+        do_dns(token, a.target, proxied=(a.proxied and not a.full) or (not a.full and not a.no_proxied and not a.wait_cert))
+    if a.wait_cert:
+        ok = wait_for_cert()
+        if ok and a.full:
+            set_proxied(token, True)
+        elif not ok and a.full:
+            fail('certificate never came up — the proxy stays OFF, nothing was locked behind a 526')
+    elif a.proxied and not a.dns:
+        set_proxied(token, True)
+    elif a.no_proxied and not a.dns:
+        set_proxied(token, False)
     if a.access:
         do_access(token, a.emails, a.domain, a.name)
     print('\nDone. Check https://one.dash.cloudflare.com/ for the Access app.')
