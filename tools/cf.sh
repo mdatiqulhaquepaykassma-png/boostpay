@@ -24,6 +24,23 @@ else
   export CF_TOKEN_SOURCE="${CF_API_TOKEN:+env}"
 fi
 
+# Fallback 2: the token can also live on the Dokploy server (survives a sandbox
+# reset). Read over the existing deploy key; nothing is echoed.
+if [ -z "${CF_API_TOKEN:-}" ] && [ -z "${CF_API_KEY:-}" ] && [ "${CF_TOKEN_SSH:-1}" = "1" ]; then
+  KEY="${CF_SSH_KEY:-/home/user/.ssh/boostpay_vps}"
+  HOST="${CF_SSH_HOST:-root@72.60.42.18}"
+  if [ -f "$KEY" ]; then
+    chmod 600 "$KEY" 2>/dev/null || true
+    REMOTE=$(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=12 -o StrictHostKeyChecking=accept-new "$HOST" \
+      'cat /root/.cloudflare/api_token 2>/dev/null' 2>/dev/null | tr -d '\r\n' || true)
+    if [ -n "$REMOTE" ]; then
+      CF_API_TOKEN="$REMOTE"
+      export CF_API_TOKEN
+      export CF_TOKEN_SOURCE="server:$HOST:/root/.cloudflare/api_token"
+    fi
+  fi
+fi
+
 if [ -z "${CF_API_TOKEN:-}" ] && [ -z "${CF_API_KEY:-}" ]; then
   echo "no Cloudflare credential found." >&2
   echo "  save one once:  sh $HERE/cf-token-save.sh   (reads it from stdin, mode 600, outside git)" >&2
