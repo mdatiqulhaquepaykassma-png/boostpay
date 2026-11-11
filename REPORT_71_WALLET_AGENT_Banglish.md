@@ -106,15 +106,21 @@
 | সার্ভিস | `docker service ls` → **1/1** · লগ: `[boostpay-walletagent] listening on :3000 (api -> http://boostpay-l2q4ry:3000)` |
 | Traefik | হাতে লেখা `/etc/dokploy/traefik/dynamic/boostpay-walletagent-wb8fv9.yml` (promotion-এর মতোই), `docker restart dokploy-traefik` |
 | প্রি-DNS টেস্ট | `Host:` হেডার দিয়ে Traefik → **200**, `/api/health` → `v1.2.1794417381` (মূল API-র প্রোক্সি কাজ করছে) |
-| বাকি শুধু | **DNS A রেকর্ড** — `walletagent` → `72.60.42.18`, Proxied (আপনি নিজে বসাবেন বলে ঠিক করেছেন) |
+| DNS | `A walletagent → 72.60.42.18` — Global API Key দিয়ে বসানো, শুরুতে grey cloud |
+| সার্টিফিকেট | Let's Encrypt · `CN=walletagent.boostpay.online` · **11 Nov 2026 → 09 Feb 2027** |
+| Proxy | কমলা মেঘ ON → `server: cloudflare` + `cf-ray` হেডার প্রমাণিত |
+| Access | Zero Trust চালু (`boostpay.cloudflareaccess.com`) · app `BoostPay Wallet Agent` · allow = `mdatiqulhaquepaykassma@gmail.com` · One-time PIN IdP · `/api/health` bypass (uptime probe) |
 
-DNS বসার পর (৩০–৬০ সেকেন্ডে সার্টিফিকেট):
-```bash
-curl -I https://walletagent.boostpay.online/            # 200
-curl -s https://walletagent.boostpay.online/api/health   # {"status":"ok",...}
-curl -s https://walletagent.boostpay.online/api/walletagent/me   # 401 (সুরক্ষিত)
+লাইভ যাচাই (Cloudflare হয়ে):
 ```
-তারপর **Cloudflare Access** (আপনি "হ্যাঁ" বলেছেন) — Zero Trust → Access → Applications → Add self-hosted → `walletagent.boostpay.online` → policy Allow → Emails। টোকেন (`Zone:DNS:Edit` + `Access: Apps and Policies:Edit`) দিলে আমি `tools/cf-access-promotion.py` দিয়ে বসিয়ে দেবো (শুধু `CF_HOST=walletagent.boostpay.online` করতে হবে)।
+https://walletagent.boostpay.online/                 → 302 → Access লগইন (সুরক্ষিত)
+https://walletagent.boostpay.online/api/health       → 200 {"status":"ok","version":"v1.2.1794432579"}
+https://walletagent.boostpay.online/manifest.json    → 200
+https://walletagent.boostpay.online/sw.js            → 200 (cache: bp-walletagent-v1)
+https://walletagent.boostpay.online/app              → 200 (ইনস্টল এন্ট্রি)
+Access লগইন পেজ                                     → "Log in to BoostPay Wallet Agent · Email · Send login code"
+Playwright: title "BoostPay Wallet Agent", login form দেখা যায়, ভুল পাসওয়ার্ডে "Invalid wallet agent credentials.", 0 page error
+```
 
 ## ৫.১ যা এখনো বাকি (সৎ তালিকা)
 

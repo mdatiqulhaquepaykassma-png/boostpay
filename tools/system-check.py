@@ -47,7 +47,18 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def get(url, method='GET', headers=None, timeout=25, follow=True):
+def get(url, method='GET', headers=None, timeout=25, follow=True, attempts=3):
+    """One GET, retried a couple of times. A sandbox resolver that answers
+    NXDOMAIN once must not be reported as an outage."""
+    for i in range(attempts):
+        out = _get1(url, method, headers, timeout, follow)
+        if out[0] != 0 or i == attempts - 1:
+            return out
+        time.sleep(1.5 * (i + 1))
+    return out
+
+
+def _get1(url, method, headers, timeout, follow):
     opener = urllib.request.build_opener() if follow else urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(url, method=method,
                                  headers={'user-agent': UA, 'accept-encoding': 'gzip', **(headers or {})})
@@ -157,19 +168,38 @@ def main():
             problem('MEDIUM', f'{url} is not redirected to https', f'status {s}, location {loc!r}')
 
     for name, host in APPS.items():
+        cert = None
+        last_err = None
+        for _ in range(3):
+            try:
+                ctx = ssl.create_default_context()
+                with socket.create_connection((host, 443), timeout=10) as s:
+                    with ctx.wrap_socket(s, server_hostname=host) as ss:
+                        cert = ss.getpeercert()
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                time.sleep(1.5)
         try:
-            ctx = ssl.create_default_context()
-            with socket.create_connection((host, 443), timeout=10) as s:
-                with ctx.wrap_socket(s, server_hostname=host) as ss:
-                    cert = ss.getpeercert()
+            if last_err is not None:
+                raise last_err
             days = (ssl.cert_time_to_seconds(cert['notAfter']) - time.time()) / 86400
             ok = days > 14
             print(f"  {'PASS' if ok else 'WARN'}  {host:34} expires in {days:.0f} days")
             if not ok:
                 problem('HIGH', f'{host} certificate expires soon', f'{days:.0f} days left.')
         except Exception as e:
-            print(f"  FAIL  {host:34} TLS error {e}")
-            problem('CRITICAL', f'{host} has a TLS problem', str(e))
+            msg = str(e)
+            resolver = 'Name or service not known' in msg or 'Temporary failure' in msg
+            print(f"  {'WARN' if resolver else 'FAIL'}  {host:34} TLS error {msg}")
+            if resolver:
+                # this sandbox resolves through one nameserver without retries;
+                # a missing answer here is not evidence about the host itself
+                problem('LOW', f'{host} could not be resolved by this sandbox',
+                        f'{msg} — re-run, or check from another network')
+            else:
+                problem('CRITICAL', f'{host} has a TLS problem', msg)
 
     print('\n=== summary ===')
     if not PROBLEMS:

@@ -80,7 +80,22 @@ CF_HOST=... sh tools/cf.sh --proxied      # orange
 CF_HOST=... sh tools/cf.sh --no-proxied   # grey
 ```
 
-## ৬. টোকেন বাতিল করতে চাইলে
+## ৬. যা ইতিমধ্যে করা হয়েছে (2026-11-11)
+
+| ধাপ | ফল |
+|---|---|
+| ভল্ট | Global API Key পেয়ার (`/home/user/.cloudflare/api_email` + `api_key`, 600) — `cf.sh` এখন key-first |
+| যাচাই | `--verify`: user, account, zone `boostpay.online`, SSL mode `strict` — সব OK |
+| DNS | `A walletagent → 72.60.42.18` (grey) → সার্টিফিকেট → **Proxied ON** |
+| Zero Trust | `POST /accounts/{id}/access/organizations` → **চালু** · `auth_domain = boostpay.cloudflareaccess.com` |
+| IdP | **One-time PIN** তৈরি (`onetimepin`) — ইমেইলে কোড যায় |
+| Access app | `BoostPay Wallet Agent` (`walletagent.boostpay.online`) · 24h session |
+| Policy | Allow → `mdatiqulhaquepaykassma@gmail.com` (নতুন ইমেইল যোগ করতে: `sh tools/cf.sh --access --emails <ইমেইল>`) |
+| বাইপাস | `walletagent.boostpay.online/api/health` → **bypass** (uptime monitor/login ছাড়া) |
+
+⚠️ Cloudflare error 9999 `access.api.error.not_enabled` আসলে সমাধান `--full` নয়, বরং org তৈরি করা — `cf.sh --full` এখন আগে সেটাই চেষ্টা করে, না হলে স্পষ্ট মেসেজ দেয়।
+
+## ৭. টোকেন বাতিল করতে চাইলে
 
 Cloudflare → API Tokens → ওই টোকেনের **Roll** (নতুন টোকেন, পুরনো সাথে সাথে মৃত) বা **Delete**।
 তারপর VPS-এর ফাইলটা মুছে দিন: `rm -f /root/.cloudflare/api_token` — ব্যস, আমার কাছে আর কোনো অ্যাক্সেস নেই।
