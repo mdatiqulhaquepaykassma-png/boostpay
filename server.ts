@@ -11296,6 +11296,82 @@ const paymentLocks = new Map<string, Promise<any>>();
 
   /* ── WALLET AGENT ADMIN ──────────────────────────────────────────────────── */
 
+  /**
+   * Edit a wallet-agent account — ONE implementation for the admin console and
+   * the management console. Everything an operator may change lives here:
+   * name, login e-mail, password, the country+method binding and the enable flag.
+   * A password change or a disable kills that agent's live sessions immediately.
+   */
+  function updateWalletAgentCore(db: any, ag: any, body: any, actor: string): { status: number; body: any } {
+    const agents = walletAgentsOf(db);
+    const changes: string[] = [];
+
+    if (typeof body.active === 'boolean' && body.active !== (ag.active !== false)) {
+      ag.active = body.active;
+      changes.push(body.active ? 'enabled' : 'disabled');
+      if (!body.active) {
+        for (const s of sessionSnapshot(db)) {
+          if (String(s.userId) === String(ag.id) && s.role === 'WALLET_AGENT' && !s.revoked) {
+            s.revoked = true; revokedSessions.add(s.id);
+          }
+        }
+      }
+    }
+
+    if (typeof body.name === 'string') {
+      const name = sanitizeText(body.name, 80).trim();
+      if (!name) return { status: 400, body: { error: 'The agent name cannot be empty.' } };
+      if (name !== ag.name) { ag.name = name; changes.push('name'); }
+    }
+
+    if (typeof body.email === 'string' && body.email.trim()) {
+      const email = body.email.trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { status: 400, body: { error: 'Enter a valid email address.' } };
+      if (email !== String(ag.email).toLowerCase()) {
+        if (agents.some((a: any) => String(a.id) !== String(ag.id) && String(a.email).toLowerCase() === email)) {
+          return { status: 409, body: { error: 'Another wallet agent already uses this email.' } };
+        }
+        ag.email = email;
+        changes.push('email');
+        // the login identity changed — force a fresh sign-in
+        for (const s of sessionSnapshot(db)) {
+          if (String(s.userId) === String(ag.id) && s.role === 'WALLET_AGENT' && !s.revoked) {
+            s.revoked = true; revokedSessions.add(s.id);
+          }
+        }
+      }
+    }
+
+    if (body.password) {
+      const pw = String(body.password);
+      if (pw.length < 8) return { status: 400, body: { error: 'The password must be at least 8 characters.' } };
+      ag.passwordHash = hashPassword(pw);
+      for (const s of sessionSnapshot(db)) {
+        if (String(s.userId) === String(ag.id) && s.role === 'WALLET_AGENT' && !s.revoked) {
+          s.revoked = true; revokedSessions.add(s.id);
+        }
+      }
+      changes.push('password reset');
+    }
+
+    const country = body.country ? String(body.country).toUpperCase() : ag.country;
+    const methodId = body.methodId ? String(body.methodId) : ag.methodId;
+    if (String(country) !== ag.country || String(methodId) !== ag.methodId) {
+      if (!/^[A-Z]{2}$/.test(country)) return { status: 400, body: { error: 'Select a valid country.' } };
+      const m = (db.paymentMethods || []).find((x: any) => x.id === methodId);
+      if (!m) return { status: 404, body: { error: 'That payment method does not exist.' } };
+      const mc = (m.countries || []).map((c: any) => String(c).toUpperCase());
+      if (mc.length && !mc.includes(country)) {
+        return { status: 400, body: { error: `${m.name} is not available in ${countryLabelOf(country).label || country}.` } };
+      }
+      ag.country = country; ag.methodId = m.id; ag.methodName = m.name;
+      changes.push(`scope → ${m.name} / ${country}`);
+    }
+
+    recordAuditLog(db, 'WALLET_AGENT_UPDATE', actor, `Updated wallet agent ${ag.id} (${ag.email}): ${changes.join(', ') || 'no change'}`);
+    return { status: 200, body: { success: true, agent: publicWalletAgent(ag), changes } };
+  }
+
   app.get('/api/admin/wallet-agents', rateLimit(120), requireAdmin, (req: any, res) => {
     try {
       const db = ensurePaymentCollections(readDb());
@@ -11320,22 +11396,26 @@ const paymentLocks = new Map<string, Promise<any>>();
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load countries.' }); }
   });
 
-  /** Countries that at least one enabled method is configured for (agent picker). */
+  /** Countries that at least one method is configured for — the agent picker tree. */
+  function walletAgentCountryTree(db: any): any[] {
+    const map = new Map<string, any>();
+    for (const m of (db.paymentMethods || [])) {
+      const list = Array.isArray(m.countries) ? m.countries : [];
+      for (const cc of list) {
+        const key = String(cc || '').toUpperCase();
+        if (!/^[A-Z]{2}$/.test(key)) continue;
+        if (!map.has(key)) map.set(key, { ...countryLabelOf(key), methods: [] });
+        map.get(key).methods.push({ id: m.id, name: m.name, logo: m.logo, category: m.category, enabled: !!m.enabled });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.code.localeCompare(b.code));
+  }
+
   app.get('/api/admin/wallet-agents/options', rateLimit(120), requireAdmin, (req: any, res) => {
     try {
       const db = ensurePaymentCollections(readDb());
-      const map = new Map<string, any>();
-      for (const m of (db.paymentMethods || [])) {
-        const list = Array.isArray(m.countries) ? m.countries : [];
-        for (const cc of list) {
-          const key = String(cc || '').toUpperCase();
-          if (!/^[A-Z]{2}$/.test(key)) continue;
-          if (!map.has(key)) map.set(key, { ...countryLabelOf(key), methods: [] });
-          map.get(key).methods.push({ id: m.id, name: m.name, logo: m.logo, category: m.category, enabled: !!m.enabled });
-        }
-      }
       res.setHeader('Cache-Control', 'no-store');
-      res.json({ success: true, countries: Array.from(map.values()).sort((a, b) => a.code.localeCompare(b.code)) });
+      res.json({ success: true, countries: walletAgentCountryTree(db) });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load country options.' }); }
   });
 
@@ -11379,46 +11459,12 @@ const paymentLocks = new Map<string, Promise<any>>();
 
   app.patch('/api/admin/wallet-agents/:id', rateLimit(60), requireAdmin, requireSuperAdmin, (req: any, res) => {
     try {
-      const body = req.body || {};
       const db = ensurePaymentCollections(readDb());
       const ag = walletAgentsOf(db).find((a: any) => a.id === String(req.params.id));
       if (!ag) return res.status(404).json({ error: 'Wallet agent not found.' });
-      const changes: string[] = [];
-      if (typeof body.active === 'boolean' && body.active !== ag.active) {
-        ag.active = body.active; changes.push(body.active ? 'enabled' : 'disabled');
-        if (!body.active) {
-          // disabling kills live sessions immediately
-          for (const s of sessionSnapshot(db)) {
-            if (String(s.userId) === String(ag.id) && s.role === 'WALLET_AGENT' && !s.revoked) { s.revoked = true; revokedSessions.add(s.id); }
-          }
-        }
-      }
-      if (body.password) {
-        const pw = String(body.password);
-        if (pw.length < 8) return res.status(400).json({ error: 'The password must be at least 8 characters.' });
-        ag.passwordHash = hashPassword(pw);
-        for (const s of sessionSnapshot(db)) {
-          if (String(s.userId) === String(ag.id) && s.role === 'WALLET_AGENT' && !s.revoked) { s.revoked = true; revokedSessions.add(s.id); }
-        }
-        changes.push('password reset');
-      }
-      if (body.name) { ag.name = sanitizeText(body.name, 80).trim(); changes.push('name'); }
-      const country = body.country ? String(body.country).toUpperCase() : ag.country;
-      const methodId = body.methodId ? String(body.methodId) : ag.methodId;
-      if (country !== ag.country || methodId !== ag.methodId) {
-        if (!/^[A-Z]{2}$/.test(country)) return res.status(400).json({ error: 'Select a valid country.' });
-        const m = (db.paymentMethods || []).find((x: any) => x.id === methodId);
-        if (!m) return res.status(404).json({ error: 'That payment method does not exist.' });
-        const mc = (m.countries || []).map((c: string) => String(c).toUpperCase());
-        if (mc.length && !mc.includes(country)) {
-          return res.status(400).json({ error: `${m.name} is not available in ${countryLabelOf(country).label || country}.` });
-        }
-        ag.country = country; ag.methodId = m.id; ag.methodName = m.name;
-        changes.push(`scope → ${m.name} / ${country}`);
-      }
-      recordAuditLog(db, 'WALLET_AGENT_UPDATE', 'admin:' + String(req.authAdmin), `Updated wallet agent ${ag.id}: ${changes.join(', ') || 'no change'}`);
-      writeDb(db);
-      res.json({ success: true, agent: publicWalletAgent(ag) });
+      const out = updateWalletAgentCore(db, ag, req.body || {}, 'admin:' + String(req.authAdmin));
+      if (out.status === 200) writeDb(db);
+      res.status(out.status).json(out.body);
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not update the wallet agent.' }); }
   });
 
@@ -13497,6 +13543,41 @@ const paymentLocks = new Map<string, Promise<any>>();
   }
   app.post('/api/management/agents/:id/credit', requireManagement, managementMoveAgentFunds('IN'));
   app.post('/api/management/agents/:id/debit', requireManagement, managementMoveAgentFunds('OUT'));
+
+  /* ── MANAGEMENT → WALLET AGENTS ────────────────────────────────────────────
+   * The wallet-agent panel has its own login; management staff keep the accounts
+   * in order (name, e-mail, password, the country+method binding, enable/disable).
+   * Create/delete stay with the super-admin; everything else is shared with the
+   * admin console through updateWalletAgentCore, so the rules cannot drift.
+   */
+  app.get('/api/management/wallet-agents', requireManagement, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const agents = walletAgentsOf(db);
+      const pending = (list: any[], methodId: string) =>
+        (list || []).filter((r: any) => String(r.methodId) === String(methodId) && r.status === 'PENDING').length;
+      const rows = agents
+        .map((a: any) => ({
+          ...publicWalletAgent(a),
+          pendingDeposit: pending(db.depositRequests, a.methodId),
+          pendingWithdraw: pending(db.withdrawRequests, a.methodId),
+        }))
+        .sort((a: any, b: any) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ success: true, agents: rows, countries: walletAgentCountryTree(db) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load wallet agents.' }); }
+  });
+
+  app.patch('/api/management/wallet-agents/:id', rateLimit(60), requireManagement, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const ag = walletAgentsOf(db).find((a: any) => a.id === String(req.params.id));
+      if (!ag) return res.status(404).json({ error: 'Wallet agent not found.' });
+      const out = updateWalletAgentCore(db, ag, req.body || {}, 'management:' + String(req.authManagementId));
+      if (out.status === 200) writeDb(db);
+      res.status(out.status).json(out.body);
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not update the wallet agent.' }); }
+  });
 
   app.get('/api/management/ledger', requireManagement, (req: any, res) => {
     const db = ensureAgentCollections(readDb());

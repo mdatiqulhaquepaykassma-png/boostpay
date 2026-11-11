@@ -423,7 +423,17 @@ const ChatSheet: React.FC<{ agent: AgentRow; onClose: () => void; onRead: () => 
 };
 
 /* ── app ────────────────────────────────────────────────────────────────── */
-type Tab = 'HOME' | 'AGENTS' | 'MESSAGES' | 'HISTORY' | 'PROFILE';
+type Tab = 'HOME' | 'AGENTS' | 'WALLET' | 'MESSAGES' | 'HISTORY' | 'PROFILE';
+
+/** A wallet-agent panel account (walletagent.boostpay.online): one country +
+ *  one payment method, created by the admin, kept in order by management. */
+type WalletAgentRow = {
+  id: string; name: string; email: string; country: string;
+  methodId: string; methodName: string; active: boolean;
+  createdAt: number; lastLoginAt: number; reviewedCount: number;
+  pendingDeposit?: number; pendingWithdraw?: number;
+};
+type CountryOpt = { code: string; label: string; flag: string; methods: Array<{ id: string; name: string; logo: string; enabled: boolean }> };
 
 export default function App() {
   const [mgr, setMgr] = useState<Mgmt | null>(() => {
@@ -451,6 +461,12 @@ export default function App() {
   const [creating, setCreating] = useState(false);
   const [busyCfg, setBusyCfg] = useState(false);
   const [toastState, setToastState] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  // wallet-agent accounts (the Job-14 panel): list + inline editor
+  const [wAgents, setWAgents] = useState<WalletAgentRow[]>([]);
+  const [wCountries, setWCountries] = useState<CountryOpt[]>([]);
+  const [wEdit, setWEdit] = useState<{ id: string; name: string; email: string; password: string; country: string; methodId: string } | null>(null);
+  const [wBusy, setWBusy] = useState(false);
+  const [wQuery, setWQuery] = useState('');
   const toast = useCallback((t: any) => setToastState(t), []);
 
   const loadAll = useCallback(async () => {
@@ -502,6 +518,45 @@ export default function App() {
     setMgr(null); setToken('');
   };
 
+  const loadWalletAgents = useCallback(async () => {
+    try {
+      const j = await api<any>('/api/management/wallet-agents');
+      setWAgents(j.agents || []);
+      setWCountries(j.countries || []);
+    } catch { /* the tab shows its own empty state */ }
+  }, []);
+  // Load the wallet-agent accounts only once we actually have a session, and refresh
+  // each time the Wallet tab is opened. (Firing this on mount hit the API before the
+  // login token existed → 401 → the tab looked empty even for existing accounts.)
+  useEffect(() => {
+    if (!token || tab !== 'WALLET') return;
+    void loadWalletAgents();
+  }, [token, tab, loadWalletAgents]);
+
+  const saveWalletAgent = async () => {
+    if (!wEdit) return;
+    setWBusy(true);
+    try {
+      const body: any = { name: wEdit.name, email: wEdit.email, country: wEdit.country, methodId: wEdit.methodId };
+      if (wEdit.password) body.password = wEdit.password;
+      const j = await api<any>(`/api/management/wallet-agents/${wEdit.id}`, { method: 'PATCH', body });
+      toast({ type: 'ok', text: `Saved ${j.agent?.email || wEdit.email}${(j.changes || []).length ? ' · ' + j.changes.join(', ') : ''}` });
+      setWEdit(null);
+      await loadWalletAgents();
+    } catch (e: any) { toast({ type: 'err', text: e?.message || 'Could not save.' }); }
+    finally { setWBusy(false); }
+  };
+
+  const toggleWalletAgent = async (a: WalletAgentRow) => {
+    setWBusy(true);
+    try {
+      await api<any>(`/api/management/wallet-agents/${a.id}`, { method: 'PATCH', body: { active: !a.active } });
+      toast({ type: 'ok', text: a.active ? `${a.email} disabled` : `${a.email} enabled` });
+      await loadWalletAgents();
+    } catch (e: any) { toast({ type: 'err', text: e?.message || 'Could not update.' }); }
+    finally { setWBusy(false); }
+  };
+
   const copy = async (v: string) => {
     try { await navigator.clipboard.writeText(v); toast({ type: 'ok', text: `Copied ${v}` }); }
     catch { toast({ type: 'err', text: v }); }
@@ -514,6 +569,7 @@ export default function App() {
   const tabs: Array<{ id: Tab; label: string; icon: any }> = [
     { id: 'HOME', label: 'Home', icon: Home },
     { id: 'AGENTS', label: 'Agents', icon: Users },
+    { id: 'WALLET', label: 'Wallet', icon: Building2 },
     { id: 'MESSAGES', label: 'Chats', icon: MessageSquare },
     { id: 'HISTORY', label: 'History', icon: History },
     { id: 'PROFILE', label: 'Profile', icon: User }
@@ -611,6 +667,104 @@ export default function App() {
                   </div>
                 </button>
               ))}
+            </div>
+          )}
+
+          {tab === 'WALLET' && (
+            <div className="space-y-3">
+              <Card>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-cyan-300/90">Wallet-agent panel accounts</div>
+                <p className="mt-1 text-[9.5px] leading-relaxed text-zinc-500">
+                  These accounts sign in at <span className="font-mono text-zinc-300">walletagent.boostpay.online</span> and handle the
+                  deposits &amp; withdrawals of one payment method in one country. You can fix the name, login email and password here;
+                  creating or deleting an account stays with the admin.
+                </p>
+              </Card>
+
+              <div className="flex items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/60 px-3 py-2">
+                <Search className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                <input value={wQuery} onChange={(e) => setWQuery(e.target.value)} placeholder="Search name, email, method"
+                  className="min-w-0 flex-1 bg-transparent text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600" />
+                {wQuery ? <button onClick={() => setWQuery('')} className="text-zinc-500"><X className="h-3.5 w-3.5" /></button> : null}
+              </div>
+
+              {wAgents.length === 0 ? (
+                <Card><p className="py-6 text-center text-[11px] text-zinc-600">No wallet-agent account yet — the admin creates them.</p></Card>
+              ) : wAgents
+                .filter((a) => {
+                  const n = wQuery.trim().toLowerCase();
+                  return !n || `${a.name} ${a.email} ${a.methodName} ${a.country} ${a.id}`.toLowerCase().includes(n);
+                })
+                .map((a) => (
+                <div key={a.id} className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-3">
+                  <div className="flex items-start gap-3">
+                    <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-sm font-black ${a.active ? 'bg-cyan-500/15 text-cyan-300' : 'bg-zinc-800 text-zinc-500'}`}>
+                      {(a.name || a.id).slice(0, 1).toUpperCase()}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[12px] font-bold text-white">{a.name}</div>
+                      <div className="truncate font-mono text-[9px] text-zinc-500">{a.email}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1">
+                        <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[9px] font-bold text-zinc-300">{a.country} · {a.methodName}</span>
+                        <span className={`rounded-full px-2 py-0.5 text-[9px] font-black ${a.active ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300'}`}>
+                          {a.active ? 'ACTIVE' : 'DISABLED'}
+                        </span>
+                        {(a.pendingDeposit || a.pendingWithdraw) ? (
+                          <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[9px] font-black text-amber-300">
+                            {a.pendingDeposit || 0} dep · {a.pendingWithdraw || 0} wdr open
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="mt-1 text-[9px] text-zinc-600">
+                        last sign-in {a.lastLoginAt ? timeAgo(a.lastLoginAt) : 'never'} · {a.reviewedCount} decisions
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button onClick={() => setWEdit({ id: a.id, name: a.name, email: a.email, password: '', country: a.country, methodId: a.methodId })}
+                      className="rounded-xl bg-cyan-500 px-3 py-1.5 text-[10px] font-black text-zinc-950">Edit details</button>
+                    <button onClick={() => void toggleWalletAgent(a)} disabled={wBusy}
+                      className="rounded-xl border border-zinc-700 px-3 py-1.5 text-[10px] font-bold text-zinc-200 disabled:opacity-50">
+                      {a.active ? 'Disable' : 'Enable'}
+                    </button>
+                    <button onClick={() => void copy(a.email)} className="rounded-xl border border-zinc-700 px-3 py-1.5 text-[10px] font-bold text-zinc-200">Copy email</button>
+                  </div>
+
+                  {wEdit && wEdit.id === a.id ? (
+                    <div className="mt-2 space-y-2 rounded-xl border border-cyan-700/40 bg-cyan-500/[0.06] p-2.5">
+                      <div className="text-[10px] font-black uppercase tracking-wider text-cyan-300">Edit {a.id}</div>
+                      <input className={inputCls} value={wEdit.name} onChange={(e) => setWEdit({ ...wEdit, name: e.target.value })} placeholder="Agent name" />
+                      <input className={inputCls} value={wEdit.email} onChange={(e) => setWEdit({ ...wEdit, email: e.target.value })} placeholder="login email" inputMode="email" />
+                      <input className={inputCls} type="password" value={wEdit.password} onChange={(e) => setWEdit({ ...wEdit, password: e.target.value })} placeholder="New password (min 8)" autoComplete="new-password" />
+                      <div className="grid grid-cols-2 gap-2">
+                        <select className={inputCls} value={wEdit.country} onChange={(e) => {
+                          const cc = e.target.value;
+                          const first = (wCountries.find((c) => c.code === cc)?.methods || [])[0];
+                          setWEdit({ ...wEdit, country: cc, methodId: first ? first.id : wEdit.methodId });
+                        }}>
+                          {wCountries.map((c) => <option key={c.code} value={c.code}>{c.flag} {c.code}</option>)}
+                        </select>
+                        <select className={inputCls} value={wEdit.methodId} onChange={(e) => setWEdit({ ...wEdit, methodId: e.target.value })}>
+                          {(wCountries.find((c) => c.code === wEdit.country)?.methods || []).map((m) => (
+                            <option key={m.id} value={m.id}>{m.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <p className="text-[9px] leading-relaxed text-zinc-500">
+                        Changing the email or password signs the agent out everywhere. Moving the country/method never moves money —
+                        pending requests stay with the method they were made for.
+                      </p>
+                      <div className="flex gap-2">
+                        <button onClick={() => void saveWalletAgent()} disabled={wBusy || !wEdit.name || !wEdit.email}
+                          className="flex-1 rounded-xl bg-cyan-500 px-3 py-2 text-[11px] font-black text-zinc-950 disabled:opacity-50">{wBusy ? 'Saving…' : 'Save'}</button>
+                        <button onClick={() => setWEdit(null)} className="rounded-xl border border-zinc-700 px-3 py-2 text-[11px] font-bold text-zinc-300">Cancel</button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+              <button onClick={() => void loadWalletAgents()} className="flex h-10 w-full items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900 text-[10px] font-bold text-zinc-300">Refresh</button>
             </div>
           )}
 

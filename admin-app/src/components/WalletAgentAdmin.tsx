@@ -51,6 +51,9 @@ export const WalletAgentAdmin: React.FC = () => {
   const [country, setCountry] = useState('');
   const [methodId, setMethodId] = useState('');
   const [open, setOpen] = useState('');
+  // inline editor — one row at a time, so a stray keystroke can never hit the
+  // wrong account
+  const [draft, setDraft] = useState<{ name: string; email: string; password: string; country: string; methodId: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -104,6 +107,31 @@ export const WalletAgentAdmin: React.FC = () => {
       const j = await r.json().catch(() => ({}));
       setNote(r.ok ? okMsg : (j.error || `HTTP ${r.status}`));
       if (r.ok) await load();
+    } catch { setNote('Network error.'); }
+    setBusy(false);
+  };
+
+  const startEdit = (a: Agent) => {
+    setOpen(a.id);
+    setDraft({ name: a.name, email: a.email, password: '', country: a.country, methodId: a.methodId });
+  };
+
+  const saveEdit = async (a: Agent) => {
+    if (!draft) return;
+    const body: any = { name: draft.name, email: draft.email, country: draft.country, methodId: draft.methodId };
+    if (draft.password) body.password = draft.password;
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/admin/wallet-agents/${a.id}`, {
+        method: 'PATCH', headers: authHeaders(), body: JSON.stringify(body),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { setNote(j.error || `HTTP ${r.status}`); }
+      else {
+        setNote(`Saved ${j.agent?.email || a.email}: ${(j.changes || []).join(', ') || 'no change'}.`);
+        setDraft(null);
+        await load();
+      }
     } catch { setNote('Network error.'); }
     setBusy(false);
   };
@@ -221,39 +249,61 @@ export const WalletAgentAdmin: React.FC = () => {
                     </div>
 
                     <div className="mt-3 flex flex-wrap gap-2">
+                      <button onClick={() => startEdit(a)} disabled={busy}
+                        className="rounded-lg bg-amber-500 px-2.5 py-1 text-[10px] font-black text-zinc-950">Edit details</button>
                       <button onClick={() => void patch(a.id, { active: !a.active }, a.active ? `${a.email} disabled — signed out everywhere.` : `${a.email} enabled again.`)}
                         disabled={busy}
                         className="rounded-lg border border-zinc-700 px-2.5 py-1 text-[10px] font-bold text-zinc-200">
                         {a.active ? 'Disable' : 'Enable'}
                       </button>
-                      <button onClick={() => {
-                        const pw = window.prompt(`New password for ${a.email} (min 8 characters)`);
-                        if (pw) void patch(a.id, { password: pw }, `Password changed for ${a.email} — they must sign in again.`);
-                      }} disabled={busy}
-                        className="rounded-lg border border-zinc-700 px-2.5 py-1 text-[10px] font-bold text-zinc-200">Reset password</button>
                       <button onClick={() => void remove(a)} disabled={busy}
                         className="rounded-lg border border-rose-900 px-2.5 py-1 text-[10px] font-bold text-rose-300">Delete</button>
                     </div>
 
-                    <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950/60 p-2">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Move to another country / method</div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <select defaultValue={a.country} onChange={(e) => {
-                          const cc = e.target.value;
-                          const first = (countries.find((c) => c.code === cc)?.methods || [])[0];
-                          void patch(a.id, { country: cc, methodId: first ? first.id : a.methodId }, `Scope moved to ${cc}.`);
-                        }} className="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200">
-                          {countries.map((c) => <option key={c.code} value={c.code}>{c.code} — {c.label}</option>)}
-                        </select>
-                        <select defaultValue={a.methodId} onChange={(e) => void patch(a.id, { methodId: e.target.value }, 'Method changed.')}
-                          className="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-200">
-                          {(countries.find((c) => c.code === a.country)?.methods || []).map((m) => (
-                            <option key={m.id} value={m.id}>{m.name}</option>
-                          ))}
-                        </select>
+                    {draft && open === a.id ? (
+                      <div className="mt-3 rounded-xl border border-amber-700/50 bg-amber-500/[0.06] p-2.5">
+                        <div className="text-[10px] font-black uppercase tracking-wider text-amber-300">Edit {a.id}</div>
+                        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                          <label className="text-[10px] text-zinc-400">Name
+                            <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[12px] text-zinc-100" />
+                          </label>
+                          <label className="text-[10px] text-zinc-400">Login email
+                            <input value={draft.email} onChange={(e) => setDraft({ ...draft, email: e.target.value })}
+                              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[12px] text-zinc-100" />
+                          </label>
+                          <label className="text-[10px] text-zinc-400">New password (blank = unchanged)
+                            <input value={draft.password} onChange={(e) => setDraft({ ...draft, password: e.target.value })}
+                              placeholder="min 8 characters" autoComplete="new-password"
+                              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[12px] text-zinc-100" />
+                          </label>
+                          <label className="text-[10px] text-zinc-400">Country
+                            <select value={draft.country} onChange={(e) => setDraft({ ...draft, country: e.target.value })}
+                              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[12px] text-zinc-100">
+                              {countries.map((c) => <option key={c.code} value={c.code}>{c.flag} {c.code} — {c.label}</option>)}
+                            </select>
+                          </label>
+                          <label className="text-[10px] text-zinc-400">Payment method
+                            <select value={draft.methodId} onChange={(e) => setDraft({ ...draft, methodId: e.target.value })}
+                              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[12px] text-zinc-100">
+                              {(countries.find((c) => c.code === draft.country)?.methods || []).map((m) => (
+                                <option key={m.id} value={m.id}>{m.logo} {m.name}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <div className="flex items-end gap-2">
+                            <button onClick={() => void saveEdit(a)} disabled={busy || !draft.name || !draft.email}
+                              className="rounded-lg bg-amber-500 px-3 py-1.5 text-[11px] font-black text-zinc-950 disabled:opacity-40">Save</button>
+                            <button onClick={() => setDraft(null)} className="rounded-lg border border-zinc-700 px-3 py-1.5 text-[11px] font-bold text-zinc-300">Cancel</button>
+                          </div>
+                        </div>
+                        <div className="mt-1.5 text-[10px] leading-relaxed text-zinc-500">
+                          Changing the e-mail or the password signs the agent out everywhere. Moving the scope never moves money —
+                          pending requests stay with the method they were made for.
+                        </div>
                       </div>
-                      <div className="mt-1 text-[10px] text-zinc-600">Moving an agent never moves money — pending requests stay with the method they were made for.</div>
-                    </div>
+                    ) : null}
+
                   </div>
                 ) : null}
               </div>
