@@ -189,6 +189,59 @@ def do_access(token, emails, domains, name):
     print('      One-time PIN (e-mail OTP) works out of the box; add Google/OTP provider in Zero Trust if you want SSO.')
 
 
+
+
+def verify(token, host=HOST):
+    """Prove the credential works and print the account/zone state — never secrets."""
+    mode = 'Global API Key' if (os.environ.get('CF_API_KEY') and not token) else 'API token'
+    print(f'credential: {mode}')
+    s, j = call('/user', token=token)
+    who = (j.get('result') or {})
+    if s == 200:
+        print(f'OK    user: {who.get("email", "—")} ({who.get("id", "")[:8]}…)')
+    else:
+        print(f'...   /user -> {s} (a scoped token cannot read /user; that is fine)')
+    s, j = call('/accounts?per_page=20', token=token)
+    accts = j.get('result') or []
+    if s != 200:
+        fail('cannot list accounts — the credential lacks Account:Read', j.get('errors'))
+    for a in accts[:5]:
+        print(f'OK    account: {a.get("name")} ({a.get("id")})')
+    s, j = call(f'/zones?name={ZONE_NAME}', token=token)
+    zones = j.get('result') or []
+    if s != 200 or not zones:
+        fail(f'cannot read zone {ZONE_NAME}', j.get('errors'))
+    z = zones[0]
+    print(f'OK    zone: {z["name"]} ({z["id"]}) status={z.get("status")}')
+    # DNS state of the target host
+    zid = z['id']
+    s, j = call(f'/zones/{zid}/dns_records?name={host}', token=token)
+    rows = j.get('result') or []
+    if rows:
+        r = rows[0]
+        print(f'OK    DNS {host} -> {r.get("content")} type={r.get("type")} proxied={r.get("proxied")}')
+    else:
+        print(f'MISS  DNS {host} has no record yet')
+    # SSL mode
+    s, j = call(f'/zones/{zid}/settings/ssl', token=token)
+    if s == 200:
+        print(f'OK    SSL mode: {(j.get("result") or {}).get("value")}')
+    # Access / Zero Trust
+    s, j = call('/accounts', token=token)
+    if accts:
+        aid = accts[0]['id']
+        s, j = call(f'/accounts/{aid}/access/apps', token=token)
+        if s == 200:
+            apps = j.get('result') or []
+            hit = [a for a in apps if a.get('domain') == host]
+            print(f'OK    Access apps: {len(apps)} total, {1 if hit else 0} for {host}')
+        else:
+            print(f'WARN  Access API -> {s}: ' + str((j.get("errors") or [{}])[0].get("message", ""))[:110])
+    # https reachability (informational)
+    code, body = host_status()
+    print(f'...   https://{host}/api/health -> {code} {body[:50]}')
+    print('\ncredential verified. Nothing above is secret.')
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dns', action='store_true')
@@ -200,6 +253,7 @@ def main():
     ap.add_argument('--proxied', action='store_true', help='write/turn ON the orange cloud')
     ap.add_argument('--no-proxied', action='store_true', help='write/turn OFF the orange cloud (needed before the first certificate)')
     ap.add_argument('--wait-cert', action='store_true', help='poll https until the certificate works')
+    ap.add_argument('--verify', action='store_true', help='prove the stored credential works and print the state')
     ap.add_argument('--full', action='store_true',
                     help='the whole sequence: grey-cloud A record -> wait for the certificate -> proxy on -> verify -> Access')
     a = ap.parse_args()
@@ -212,6 +266,9 @@ def main():
         if not a.emails and not a.domain:
             fail('--full needs --emails (or --domain) so Access has an allow policy')
         a.access = True
+    if a.verify:
+        verify(token)
+        return
     if not (a.dns or a.access or a.proxied or a.no_proxied):
         fail('nothing to do — pass --full, or --dns/--access/--proxied')
     if a.dns:
