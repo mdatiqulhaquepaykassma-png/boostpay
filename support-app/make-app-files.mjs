@@ -49,8 +49,15 @@ fs.writeFileSync(path.join(distDir, 'app-manifest.json'), JSON.stringify(appMani
 // The page at /app must POINT at that manifest, otherwise the browser installs
 // the root manifest (start_url "/") and the icon launches the wrong entry.
 const indexHtml = fs.readFileSync(path.join(distDir, 'index.html'), 'utf8');
-const appHtml = indexHtml.replace(/<link[^>]+rel=["']manifest["'][^>]*>/gi,
+let appHtml = indexHtml.replace(/<link[^>]+rel=["']manifest["'][^>]*>/gi,
   '<link rel="manifest" href="/app/manifest.json" />');
+
+// one obvious Install button — Chrome no longer shows its own prompt
+const barSrc = path.join(publicDir, 'app-install.js');
+if (fs.existsSync(barSrc)) {
+  fs.copyFileSync(barSrc, path.join(distDir, 'app-install.js'));
+  appHtml = appHtml.replace('</body>', '  <script src="/app-install.js" defer></script>\n</body>');
+}
 fs.writeFileSync(path.join(distDir, 'app.html'), appHtml);
 
 console.log('[make-app-files] wrote dist/app-manifest.json (start_url=/app) + dist/app.html');

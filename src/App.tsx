@@ -17,6 +17,7 @@ const MessengerView = lazy(()=> import('./components/MessengerView').then(m=> ({
 const InboxView = lazy(()=> import('./components/InboxView').then(m=> ({ default: m.InboxView })));
 import { FloatingToastContainer } from './components/FloatingToast';
 import { PWAInstallHelp } from './components/PWAInstallHelp';
+import { InstallAppBanner } from './components/InstallAppBanner';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import { P2PTransferModal } from './components/P2PTransferModal';
 import { AgentPayModal } from './components/AgentPayModal';
@@ -498,6 +499,9 @@ function AppInner() {
       {!currentUser ? (
         /* 2. AUTHENTICATION GATE */
         <div className="flex-1 flex flex-col justify-center">
+          {/* /app is the install link: show the install action BEFORE login too,
+              otherwise a phone that never signs in sees no install option. */}
+          <InstallAppBanner className="mx-4 mb-3" />
           <AuthGate onLoginUser={handleUserLogin} />
         </div>
       ) : (

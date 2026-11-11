@@ -14,6 +14,23 @@ declare global {
 
 export type InstallHelpMode = 'ios' | 'manual' | 'iframe';
 
+/**
+ * The help sheet is rendered by <PWAInstallHelp/>, and its button lives in a
+ * different component — each of which calls this hook, i.e. has its own state.
+ * Before this store existed, pressing Install set the state on the banner's
+ * instance only, so the guidance sheet never opened and the button looked dead.
+ * A module-level value + one event keeps every instance in sync.
+ */
+const INSTALL_HELP_EVENT = 'boostpay_install_help';
+let sharedHelpMode: InstallHelpMode | null = null;
+
+function publishHelpMode(mode: InstallHelpMode | null) {
+  sharedHelpMode = mode;
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(INSTALL_HELP_EVENT, { detail: mode }));
+  }
+}
+
 export function usePWAInstall() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(() => {
     if (typeof window !== 'undefined' && window.__boostpay_pwa_prompt) {
@@ -37,7 +54,14 @@ export function usePWAInstall() {
   const [isIframe, setIsIframe] = useState(false);
 
   // Manual-install guidance (shown when the browser offers no native prompt)
-  const [installHelpMode, setInstallHelpMode] = useState<InstallHelpMode | null>(null);
+  const [installHelpMode, setInstallHelpMode] = useState<InstallHelpMode | null>(sharedHelpMode);
+
+  useEffect(() => {
+    const onHelp = (e: Event) => setInstallHelpMode(((e as CustomEvent).detail as InstallHelpMode | null) ?? null);
+    window.addEventListener(INSTALL_HELP_EVENT, onHelp);
+    setInstallHelpMode(sharedHelpMode);        // catch a value set before mount
+    return () => window.removeEventListener(INSTALL_HELP_EVENT, onHelp);
+  }, []);
 
   useEffect(() => {
     // Check true standalone display mode
@@ -118,7 +142,7 @@ export function usePWAInstall() {
       } catch {
         // Popup blocked — fall through to guidance
       }
-      setInstallHelpMode('iframe');
+      publishHelpMode('iframe');
       return false;
     }
 
@@ -204,7 +228,7 @@ export function usePWAInstall() {
     // No native prompt available (iOS Safari, in-app browsers, a previously
     // dismissed prompt, or an insecure context) — show step-by-step guidance
     // instead of silently doing nothing.
-    setInstallHelpMode(isIOS ? 'ios' : 'manual');
+    publishHelpMode(isIOS ? 'ios' : 'manual');
     return false;
   }, [deferredPrompt, isInstalled, isIOS]);
 
@@ -230,6 +254,6 @@ export function usePWAInstall() {
     install,
     openApp,
     installHelpMode,
-    closeInstallHelp: () => setInstallHelpMode(null)
+    closeInstallHelp: () => publishHelpMode(null)
   };
 }

@@ -125,6 +125,35 @@ async def check_app(browser, base, label):
         ck('Chromium uses the /app manifest', str(got.get('url', '')).endswith('/app/manifest.json'),
            str(got.get('url')))
 
+        # the user must actually SEE an install action: Chrome no longer shows
+        # its own prompt, so /app has to render a button (owner report)
+        bar = await page.evaluate("""() => {
+            const nodes = [...document.querySelectorAll('[aria-label],[role=region]')];
+            const hit = nodes.find((n) => /install/i.test(n.getAttribute('aria-label') || '') ||
+                                            /install/i.test(n.textContent || ''));
+            if (!hit) return { found: false };
+            const r = hit.getBoundingClientRect();
+            const btn = [...hit.querySelectorAll('button')].find((b) => /install/i.test(b.textContent || ''));
+            return { found: true, visible: r.width > 0 && r.height > 0,
+                     text: (hit.textContent || '').trim().slice(0, 40),
+                     button: !!btn };
+        }""")
+        ck('the page shows an Install action', bool(bar.get('found')), str(bar)[:120])
+        ck('the Install action is visible on screen', bool(bar.get('visible')), str(bar)[:120])
+        ck('the Install action has a tappable button', bool(bar.get('button')), str(bar)[:120])
+
+        # a button that does nothing is worse than no button: when the browser
+        # gives no native prompt, tapping Install must open the step-by-step help
+        try:
+            await page.get_by_role('button', name='Install').first.click()
+            await page.wait_for_timeout(4200)
+            after = (await page.inner_text('body')).lower()
+            guided = ('add to home screen' in after) or ('home screen' in after) or ('install app' in after and 'menu' in after)
+            ck('tapping Install opens real guidance when no prompt is available', guided,
+               'help sheet shown' if guided else after[:90].replace('\n', ' '))
+        except Exception as exc:
+            ck('tapping Install opens real guidance when no prompt is available', False, str(exc)[:120])
+
         inst = await cdp.send('Page.getInstallabilityErrors')
         ierrs = inst.get('installabilityErrors') or []
         ck('Chromium reports the app as installable (no errors)',
