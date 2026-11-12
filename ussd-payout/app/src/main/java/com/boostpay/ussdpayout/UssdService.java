@@ -104,6 +104,45 @@ public class UssdService extends AccessibilityService {
         self.watch();                       // stops a wedged dialog instead of hammering it
         s.log("▶ mode: Accessibility · " + (p.dryRun ? "DRY RUN (no PIN, no money)" : "LIVE")
                 + (subId > 0 ? " · subId " + subId : " · default SIM"));
+        // v2.1.4: a USSD dialog left open by the previous attempt (a dry run, or a
+        // rejection) was being read as if it belonged to THIS job — that is how a
+        // leftover "Invalid PIN. Enter PIN:" turned a brand-new job into FAILED.
+        closeLeftoverDialog(c, s, () -> dial(c, p, s, subId));
+        return true;
+    }
+
+    /** Presses BACK once so no old USSD dialog is on screen when the new one opens. */
+    private static void closeLeftoverDialog(Context c, Sink s, Runnable then) {
+        UssdService self = instance;
+        if (self == null) { then.run(); return; }
+        if (self.isUssdOnScreen()) {
+            s.log("· an old USSD dialog was still open — closing it first");
+            try { self.performGlobalAction(GLOBAL_ACTION_BACK); } catch (Throwable ignored) { }
+        }
+        self.handler.postDelayed(() -> {
+            if (self.isUssdOnScreen()) {
+                try { self.performGlobalAction(GLOBAL_ACTION_BACK); } catch (Throwable ignored) { }
+            }
+            self.handler.postDelayed(then, 500);
+        }, 700);
+    }
+
+    /** True when the window in front belongs to the phone/carrier USSD dialog. */
+    private boolean isUssdOnScreen() {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) return false;
+            CharSequence pkg = root.getPackageName();
+            if (pkg == null) return false;
+            String p = pkg.toString();
+            return p.contains("phone") || p.contains("dialer") || p.contains("telecom")
+                    || p.contains("server.telephony") || p.contains("incallui") || p.contains("com.android.phone");
+        } catch (Throwable t) { return false; }
+    }
+
+    /** Dials the service code on the chosen SIM. Split out so it can wait for a BACK. */
+    private static void dial(Context c, Plan p, Sink s, int subId) {
+        UssdService self = instance;
         try {
             Intent call = new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(p.serviceCode)));
             call.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -117,10 +156,8 @@ public class UssdService extends AccessibilityService {
                 }
             }
             c.startActivity(call);
-            return true;
         } catch (Throwable t) {
-            self.finish(false, "Could not dial " + p.serviceCode + ": " + t.getMessage());
-            return false;
+            if (self != null) self.finish(false, "Could not dial " + p.serviceCode + ": " + t.getMessage());
         }
     }
 
@@ -246,6 +283,14 @@ public class UssdService extends AccessibilityService {
     private void watch() {
         if (cancelled || plan == null) return;
         long idle = System.currentTimeMillis() - lastProgressAt;
+        // A USSD dialog usually closes right after the PIN, and a closed dialog sends no
+        // event at all. Without this the job hung until the stall guard and was reported
+        // FAILED — which refunds a withdrawal even when the money DID leave.
+        if (pinTyped && idle > 14000) {
+            finish(true, "PIN was typed, but the wallet showed no confirmation text — "
+                    + "the debit SMS decides; check the balance before paying again");
+            return;
+        }
         if (idle > STALL_MS) {
             finish(false, "nothing advanced for " + (idle / 1000) + "s — the last screen was: " + lastScreen);
             return;
@@ -257,12 +302,30 @@ public class UssdService extends AccessibilityService {
         if (plan == null) return;
         sink.log("⇦ " + screen);
 
-        // After the PIN the network shows a confirmation — nothing more to type.
-        if (pinTyped) { finish(true, "PIN sent — confirmation screen/SMS should follow."); return; }
+        // After the PIN the network answers: "Tk … sent to …" or a refusal. Decide from the
+        // TEXT, never assume: calling every screen after the PIN a success is what made a
+        // refused payout look SENT while no money had moved.
+        if (pinTyped) {
+            String verdict = judgeAfterPin(screen);
+            if (!verdict.isEmpty()) { finish(verdict.startsWith("OK"), verdict.substring(2)); return; }
+            return;                          // no verdict yet — wait for the final screen
+        }
 
         if (++screens > 20) { finish(false, "20 screens seen — stopped so it cannot loop."); return; }
         if (UssdApiEngine.looksRejected(screen)) {
-            finish(false, "Network said no: " + UssdApiEngine.firstLine(screen));
+            String first = UssdApiEngine.firstLine(screen);
+            // Nothing typed yet + the text talks about a PIN ⇒ this is the leftover screen
+            // of the previous attempt, not an answer to this job. Report it separately so
+            // the panel does not count it as a payment failure.
+            if (actions == 0 && first.toLowerCase().contains("pin")) {
+                finish(true, "stale PIN screen from the previous attempt — nothing was sent this time");
+                return;
+            }
+            if (first.toLowerCase().contains("pin")) {
+                finish(false, "PIN_REJECTED: " + first + " — the PIN saved for this SIM is wrong");
+                return;
+            }
+            finish(false, "Network said no: " + first);
             return;
         }
 
@@ -429,9 +492,22 @@ public class UssdService extends AccessibilityService {
 
     /** All visible text of the dialog, without the input box (so typing never fakes a new screen). */
     private String collect(AccessibilityNodeInfo node) {
+        // v2.1.5: the accessibility root is the window IN FRONT — and after the PIN that is
+        // often the BoostPay app itself. Reading our own labels ("Save receiver number",
+        // "CONNECTED · LIVE") looked like a carrier screen: jobs were called SENT without a
+        // confirmation, and one job was killed by the 20-screen guard. Our window is ignored.
+        try {
+            CharSequence pkg = node == null ? null : node.getPackageName();
+            if (pkg != null && getPackageName().contentEquals(pkg)) return "";
+        } catch (Throwable ignored) { }
         StringBuilder sb = new StringBuilder();
         walk(node, sb);
-        return sb.toString().trim();
+        String out = sb.toString().trim();
+        String l = out.toLowerCase();
+        if (l.contains("boostpay payout") || l.contains("save receiver number") || l.contains("advanced settings")) {
+            return "";                       // our own UI in another package (webview/overlay)
+        }
+        return out;
     }
 
     private void walk(AccessibilityNodeInfo node, StringBuilder sb) {
@@ -448,6 +524,34 @@ public class UssdService extends AccessibilityService {
         for (int i = 0; i < node.getChildCount(); i++) walk(node.getChild(i), sb);
     }
 
+    /**
+     * Reads the wallet's answer after the PIN was typed.
+     *
+     * @return "OK …" (money moved), "NO …" (refused) or "" (nothing final yet).
+     */
+    private String judgeAfterPin(String screen) {
+        String l = screen == null ? "" : screen.toLowerCase();
+        if (l.isEmpty()) return "";
+        boolean refused = l.contains("invalid") || l.contains("wrong") || l.contains("failed")
+                || l.contains("insufficient") || l.contains("not enough") || l.contains("sorry")
+                || l.contains("denied") || l.contains("ভুল") || l.contains("ব্যর্থ")
+                || l.contains("পর্যাপ্ত");
+        if (refused) {
+            String first = UssdApiEngine.firstLine(screen);
+            if (l.contains("pin")) return "NO PIN_REJECTED: " + first + " — the PIN saved for this SIM is wrong";
+            if (l.contains("insufficient") || l.contains("not enough") || l.contains("পর্যাপ্ত")) {
+                return "NO not enough balance in the wallet for this payout — " + first;
+            }
+            return "NO the wallet refused it: " + first;
+        }
+        boolean success = l.contains("has been sent") || l.contains("has been transferred")
+                || l.contains("you have sent") || l.contains("sent to") || l.contains("success")
+                || l.contains("successful") || l.contains("thank you") || l.contains("সফল")
+                || l.contains("পাঠানো হয়েছে");
+        if (success) return "OK the wallet confirmed: " + UssdApiEngine.firstLine(screen);
+        return "";
+    }
+
     private void finish(boolean ok, String message) {
         if (cancelled && ok) ok = false;
         cancelled = false;
@@ -455,6 +559,27 @@ public class UssdService extends AccessibilityService {
         Sink s = sink;
         sink = null;
         Guard.end();
+        // v2.1.4: never leave the USSD dialog open. A dialog left at the PIN prompt made
+        // the NEXT job read it as its own screen ("Invalid PIN") and fail without sending.
+        closeDialogQuietly();
         if (s != null) s.finish(ok, message);
+    }
+
+    /** Presses BACK once, shortly after we are done, to close the USSD dialog. */
+    private void closeDialogQuietly() {
+        handler.postDelayed(() -> {
+            if (plan != null) return;                  // a new run already took over
+            try {
+                AccessibilityNodeInfo root = getRootInActiveWindow();
+                CharSequence pkg = root == null ? null : root.getPackageName();
+                if (pkg != null) {
+                    String p = pkg.toString();
+                    if (p.contains("phone") || p.contains("dialer") || p.contains("telecom")
+                            || p.contains("incallui") || p.contains("server.telephony")) {
+                        performGlobalAction(GLOBAL_ACTION_BACK);
+                    }
+                }
+            } catch (Throwable ignored) { }
+        }, 1200);
     }
 }

@@ -178,21 +178,39 @@ public class QueueService extends Service {
                     + " (" + job.kind + (dryRun ? ", dry run" : ", LIVE") + ")", "sending");
             updateNotification("Sending " + job.amount + " BDT", job.number + " · " + job.id);
 
+            LOG.clear();                      // each job carries only its own screens
             String failure = send(job, dryRun);
             String status;
             String note;
+            boolean pinRejected = failure != null && failure.startsWith("PIN_REJECTED:");
+            boolean staleScreen = failure != null && failure.contains("stale PIN screen");
             if (failure == null) {
                 status = dryRun ? "DRYRUN" : "SENT";
                 note = jobSummary;
+            } else if (staleScreen) {
+                // the wallet never saw this job: no money moved, so it is not a payment failure
+                status = "DRYRUN";
+                note = failure;
             } else {
                 status = "FAILED";
-                note = failure;
+                note = pinRejected
+                        ? "PIN rejected by " + job.provider + " for SIM " + simLabelOf() + " — save that SIM's PIN again (⚙ Advanced settings → SIM cards)"
+                        : failure;
             }
             String err = Queue.report(server, token, job.id, status, note, logText());
             lastJobStatus = status;
             lastJobNote = "FAILED".equals(status) ? (failure == null ? err : failure) : "";
             say("queue: job " + job.id + " → " + status + (err.isEmpty() ? "" : " (report failed: " + err + ")"), status.toLowerCase());
             updateNotification("Queue running", "Last job " + job.id + " → " + status);
+            if (pinRejected) {
+                // Three wrong PINs lock the wallet. Stop asking for jobs until the owner
+                // fixes the PIN and presses ▶ CONNECT again.
+                lastError = "PIN rejected — queue paused. Fix the PIN in ⚙ Advanced settings → SIM cards, then press ▶ CONNECT.";
+                say("queue: ⏸ PAUSED — the wallet said the PIN is wrong. Nothing will be sent until you fix it.", "paused");
+                updateNotification("Queue paused", "The wallet rejected the PIN — fix it in the app");
+                stop = true;
+                break;
+            }
             sleep(2500);
         }
     }
@@ -236,6 +254,18 @@ public class QueueService extends Service {
     }
 
     // ── log + notification helpers ───────────────────────────────────────────
+
+    /** "2 · Banglalink" for the SIM the last job used, or "this SIM". */
+    private static String simLabelOf() {
+        try {
+            int subId = SimStore.selected(instance());
+            Sims.Sim sim = subId > 0 ? Sims.bySubId(Sims.list(instance()), subId) : null;
+            if (sim != null) return sim.label;
+        } catch (Throwable ignored) { }
+        return "this SIM";
+    }
+
+    private static android.content.Context instance() { return self; }
 
     static String logText() {
         StringBuilder b = new StringBuilder();

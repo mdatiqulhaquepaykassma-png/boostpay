@@ -12110,6 +12110,15 @@ const paymentLocks = new Map<string, Promise<any>>();
           };
         })(),
         rate: { BDT: fxRate(db, 'BDT') },
+        // The debit SMS is what turns SENT into PAID — with no SMS at all, nothing can.
+        smsStats: (() => {
+          const list: any[] = (db.smsMessages || db.sms || []) as any[];
+          const last: any = list.length ? list[list.length - 1] : null;
+          return {
+            count: list.length,
+            lastAt: last ? Number(last.receivedAt || last.at || last.timestamp || 0) : 0,
+          };
+        })(),
         events: (db.auditLogs || [])
           .filter((a: any) => String(a.action || '').startsWith('PAYOUT_'))
           .slice(0, 25)

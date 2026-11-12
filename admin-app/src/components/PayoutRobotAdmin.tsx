@@ -91,6 +91,7 @@ export const PayoutRobotAdmin = () => {
   const [pending, setPending] = useState<Pending[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [smsStats, setSmsStats] = useState<{ count: number; lastAt: number } | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [phoneStatus, setPhoneStatus] = useState<{ online: number; dryRun: number; liveMode: number } | null>(null);
   const [, setTick] = useState(0);
@@ -113,6 +114,7 @@ export const PayoutRobotAdmin = () => {
       setPending(asArray<Pending>(j.pending));
       setDevices(asArray<Device>(j.devices));
       setStats(j.stats && typeof j.stats === 'object' ? j.stats : null);
+      setSmsStats(j.smsStats && typeof j.smsStats === 'object' ? j.smsStats : null);
       setEvents(asArray<EventRow>(j.events));
       setPhoneStatus(j.phoneStatus && typeof j.phoneStatus === 'object' ? j.phoneStatus : null);
       setErr('');
@@ -423,6 +425,14 @@ export const PayoutRobotAdmin = () => {
           </div>
         )}
       </div>
+
+      {smsStats && num(smsStats.count) === 0 ? (
+        <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-100">
+          <b>No SMS has ever reached the server.</b> The debit SMS is the only thing that turns a payout
+          <b> SENT → PAID</b> (and auto-credits a deposit). Until the SMS relay app is running on the wallet phone,
+          a payout can be sent but never confirmed. Text the relay phone’s number from another phone to test it.
+        </div>
+      ) : null}
 
       {/* ── queue ───────────────────────────────────────────────────────── */}
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
