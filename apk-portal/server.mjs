@@ -72,6 +72,13 @@ const APPS = [
     audience: 'Your own receiving phones',
     note: 'যে ফোনে bKash/Nagad-এর টাকা আসে, সেই ফোনে — SMS পড়ে অটো ব্যালেন্স যোগ করে।',
     private: true,
+    steps: [
+      'APK ইনস্টল করুন — <b>যে ফোনে bKash/Nagad-এর টাকা আসে</b> সেই ফোনে',
+      'Admin console → <b>SMS Bridge</b> → Add a phone → <b>Create &amp; show token</b> → <code>BPX-…</code> কপি করুন',
+      'অ্যাপে token পেস্ট করুন → <b>Save &amp; start forwarding</b> → SMS permission <b>Allow</b>',
+      'ফোনের Settings-এ <b>Battery → Unrestricted</b> আর <b>Autostart</b> চালু করুন',
+      'Admin-এ ডিভাইসের নিচে <span class="code">last seen just now</span> দেখলেই চালু',
+    ],
   },
   {
     slug: 'ussdpayout', icon: 'dial', file: 'boostpay-ussd-payout.apk', title: 'BoostPay Payout (USSD test)', short: 'Payout robot · test',
@@ -80,6 +87,13 @@ const APPS = [
     audience: 'Owner testing only',
     note: 'টেস্ট বিল্ড: মেনু হাঁটে, DRY RUN-এ PIN-এর আগেই থেমে যায়। আগে ড্রাই রান, পরে ছোট অ্যামাউন্ট।',
     private: true,
+    steps: [
+      'ইনস্টল করুন — <b>টেস্টের জন্য আলাদা, কম-ব্যালেন্স bKash নম্বরে</b> (মূল ফ্লোটে নয়)',
+      'Service code <span class="code">*247#</span>, receiver = আপনার নিজের দ্বিতীয় নম্বর, amount 10-20, steps <span class="code">1,{number},{amount},1,{pin}</span>',
+      'লিমিট ছোট রাখুন (max 100 / day 200) → <b>① DRY RUN</b> — PIN-এর আগেই থামবে, এক টাকাও যাবে না',
+      'লগে মেনু ঠিক দেখালে <b>② SEND REAL MONEY</b> → confirmation-এ <span class="code">amount + শেষ ৪ ডিজিট</span> টাইপ করুন',
+      '<b>Copy log</b> চেপে পুরো লগ আমাকে পাঠান — তারপর সার্ভারের withdraw কিউর সাথে জুড়ে দেব',
+    ],
   },
 ];
 
@@ -211,10 +225,12 @@ const appHtml = (a) => page(`${a.title} — download`, `
 <div class="card" style="margin-top:14px">
   <h2 style="font-size:13px">ইনস্টল কীভাবে</h2>
   <ol class="steps">
-    <li><b>Download</b> চাপুন — ফাইলের নাম হবে <span class="code">${a.file}</span></li>
-    <li>ফোনে খুলুন → "Install anyway" / "Allow from this source" দিন</li>
-    <li>অ্যাপ খুলুন → লগইন করুন (অ্যাকাউন্ট না থাকলে সাইন-আপ)</li>
-    <li>App info → Battery → <b>Unrestricted</b> (নোটিফিকেশন ঠিক সময়ে আসার জন্য)</li>
+    ${(a.steps || [
+      `<b>Download</b> চাপুন — ফাইলের নাম হবে <span class="code">${a.file}</span>`,
+      'ফোনে খুলুন → "Install anyway" / "Allow from this source" দিন',
+      'অ্যাপ খুলুন → লগইন করুন (অ্যাকাউন্ট না থাকলে সাইন-আপ)',
+      'App info → Battery → <b>Unrestricted</b> (নোটিফিকেশন ঠিক সময়ে আসার জন্য)',
+    ]).map((step) => `<li>${step}</li>`).join('')}
   </ol>
 </div>
 <p class="sub" style="margin-top:16px"><a href="/" style="color:#f59e0b;font-weight:700">← সব অ্যাপ</a></p>
