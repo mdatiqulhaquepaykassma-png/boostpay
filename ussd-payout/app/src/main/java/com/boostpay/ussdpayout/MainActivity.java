@@ -33,6 +33,8 @@ import android.widget.ArrayAdapter;
 import android.widget.Spinner;
 
 import java.util.ArrayList;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.List;
 
 import java.text.SimpleDateFormat;
@@ -82,12 +84,83 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Plan.DEFAULT_SERVICE = provider.serviceCode;
-        setContentView(buildUi());
-        loadSettings();
+        // v2.1.1 safety net: a UI bug must never close the app with a black screen —
+        // show the reason on screen (and in the log) so it can be reported.
+        try {
+            setContentView(buildUi());
+            loadSettings();
+            wireQueueBox();
+        } catch (Throwable t) {
+            setContentView(bootFailure(t));
+            return;
+        }
         ui.post(statusTicker);
         requestCallPermission();
         requestNotifyPermission();
         refresh();
+    }
+
+    /** Last-resort screen when buildUi() throws: the app stays open and tells us why. */
+    private View bootFailure(Throwable t) {
+        StringWriter sw = new StringWriter();
+        t.printStackTrace(new PrintWriter(sw));
+        log.append("STARTUP FAILED\n").append(sw);
+        String where = "unknown";
+        StackTraceElement[] st = t.getStackTrace();
+        if (st != null && st.length > 0) where = st[0].getFileName() + ":" + st[0].getLineNumber();
+
+        ScrollView sc = new ScrollView(this);
+        sc.setBackgroundColor(Color.parseColor("#09090b"));
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18), dp(30), dp(18), dp(30));
+        sc.addView(box);
+        TextView t1 = new TextView(this);
+        t1.setText("App could not start");
+        t1.setTextColor(Color.parseColor("#f87171"));
+        t1.setTextSize(22);
+        t1.setTypeface(Typeface.DEFAULT_BOLD);
+        box.addView(t1);
+        TextView t2 = new TextView(this);
+        t2.setText("\n" + t.getClass().getSimpleName() + ": " + t.getMessage() + "\n\nat " + where
+                + "\n\nপ্যানেলকে জানাতে নিচের লেখাটা কপি করুন।");
+        t2.setTextColor(Color.parseColor("#d4d4d8"));
+        t2.setTextSize(12.5f);
+        t2.setTextIsSelectable(true);
+        box.addView(t2);
+        Button copy = button("Copy error");
+        copy.setOnClickListener(v -> {
+            try {
+                android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("bp-crash", sw.toString()));
+                toast("Copied");
+            } catch (Throwable ignored) { }
+        });
+        box.addView(copy);
+        TextView full = new TextView(this);
+        full.setText(sw.toString());
+        full.setTextColor(Color.parseColor("#71717a"));
+        full.setTextSize(10f);
+        full.setTypeface(Typeface.MONOSPACE);
+        full.setTextIsSelectable(true);
+        box.addView(full);
+        return sc;
+    }
+
+    /**
+     * v2.1.1: the dry-run checkbox is created inside buildUi(), so its listener is
+     * attached only after loadSettings() has filled it in. (2.1.0 attached it before
+     * the checkbox existed → NullPointerException on launch.)
+     */
+    private void wireQueueBox() {
+        if (queueBox == null) return;
+        queueBox.setOnCheckedChangeListener((b, on) -> {
+            saveSettings();
+            if (QueueService.isRunning()) {      // restart so the new mode takes effect at once
+                queueBox.postDelayed(() -> QueueService.start(this), 700);
+                QueueService.stop(this);
+            }
+        });
     }
 
     /** Android 13+ hides the queue's foreground notification without this. */
@@ -158,13 +231,6 @@ public class MainActivity extends Activity {
         queueStart.setBackgroundColor(Color.parseColor("#10b981"));
         queueStart.setTextColor(Color.parseColor("#04170f"));
         queueStart.setOnClickListener(v -> toggleQueue());
-        queueBox.setOnCheckedChangeListener((b, on) -> {
-            saveSettings();
-            if (QueueService.isRunning()) {      // restart so the new mode takes effect at once
-                QueueService.stop(this);
-                queueBox.postDelayed(() -> QueueService.start(this), 700);
-            }
-        });
         mainButtons.addView(queueStart);
 
         Button stopBtn = button("⛔ STOP");
