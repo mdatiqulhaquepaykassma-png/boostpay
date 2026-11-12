@@ -11829,6 +11829,32 @@ const paymentLocks = new Map<string, Promise<any>>();
    * A TEST job has no user and no withdrawal, so it can never move money.
    */
 
+  /** A withdrawal's destination is a {accountName, accountNumber} map — never render it raw. */
+  function destinationMsisdn(dest: any): string {
+    if (!dest) return '';
+    if (typeof dest === 'string') return cleanMsisdn(dest);
+    if (typeof dest === 'object') {
+      const direct = dest.accountNumber || dest.number || dest.msisdn || dest.mobile || dest.account || dest.phone;
+      const ok = cleanMsisdn(direct);
+      if (ok) return ok;
+      for (const v of Object.values(dest)) {
+        const n = cleanMsisdn(v);
+        if (n) return n;
+      }
+    }
+    return '';
+  }
+  function destinationLabel(dest: any): string {
+    if (!dest) return '';
+    if (typeof dest === 'string') return dest.slice(0, 60);
+    if (typeof dest === 'object') {
+      const name = String(dest.accountName || dest.name || '').slice(0, 60);
+      const num = destinationMsisdn(dest);
+      return [name, num].filter(Boolean).join(' · ') || Object.values(dest).map((v) => String(v)).join(' · ').slice(0, 60);
+    }
+    return '';
+  }
+
   function payoutDevice(req: any) {
     const token = String(req.headers['x-payout-token'] || req.headers['x-sms-token'] || '').trim();
     if (!token) return null;
@@ -11929,7 +11955,9 @@ const paymentLocks = new Map<string, Promise<any>>();
           const bdt = toDisplay(db, Number(w.netUsd) || 0, 'BDT');
           return {
             id: w.id, userId: w.userId, userName: u.name || '', userPhone: u.phone || '',
-            methodName: w.methodName, number: w.destination || '',
+            methodName: w.methodName,
+            number: destinationMsisdn(w.destination),
+            destination: destinationLabel(w.destination),
             amountUsd: Number(w.netUsd) || 0,
             amountBdt: bdt == null ? null : Math.round(bdt * 100) / 100,
             queued: jobs.some((j) => j.status !== 'CANCELLED' && j.status !== 'FAILED' && j.withdrawId === w.id),
@@ -11991,7 +12019,7 @@ const paymentLocks = new Map<string, Promise<any>>();
         ? cleanAmount(body.amountBdt)
         : (toDisplay(db, Number(w.netUsd) || 0, 'BDT') || 0);
       const built = buildJob({
-        kind: 'WITHDRAW', provider, number: body.number || w.destination, amountBdt,
+        kind: 'WITHDRAW', provider, number: body.number || destinationMsisdn(w.destination), amountBdt,
         amountUsd: Number(w.netUsd) || 0, ref: '1',
         withdrawId: w.id, userId: w.userId, note: `withdrawal ${w.id}`,
       });

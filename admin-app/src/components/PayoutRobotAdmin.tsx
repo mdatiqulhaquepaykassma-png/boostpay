@@ -27,6 +27,24 @@ const num = (v: any, fallback = 0): number => {
   return Number.isFinite(n) ? n : fallback;
 };
 const asArray = <T,>(v: any): T[] => (Array.isArray(v) ? v : []);
+/**
+ * Anything that is not a plain string/number becomes ''. React refuses to render an
+ * object as a child (error #31) — a withdrawal's destination arrives as
+ * {accountName, accountNumber}, and that is exactly what blacked the tab out once.
+ */
+const str = (v: any): string => {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (typeof v === 'object') {
+    const d: any = v;
+    const num = d.accountNumber || d.number || d.msisdn || d.mobile || d.account || d.phone;
+    const name = d.accountName || d.name || '';
+    if (num || name) return [name, num].filter(Boolean).join(' · ');
+    try { return Object.values(d).map((x) => String(x)).join(' · '); } catch { return ''; }
+  }
+  return '';
+};
 
 type Job = {
   id: string; kind: 'TEST' | 'WITHDRAW'; provider: string; number: string;
@@ -117,13 +135,13 @@ export const PayoutRobotAdmin = () => {
   };
 
   const queueWithdraw = (p: Pending) => {
-    if (!window.confirm(`Send $${num(p.amountUsd).toFixed(2)} (${p.amountBdt ?? '?'} BDT) to ${p.number} via the robot?\n\nThe withdrawal is refunded automatically if the phone fails.`)) return;
-    void call('/api/admin/payouts/queue', { withdrawId: p.id }, `Withdrawal ${p.id} queued for the robot.`);
+    if (!window.confirm(`Send $${num(p.amountUsd).toFixed(2)} (${num(p.amountBdt)} BDT) to ${str(p.number) || str((p as any).destination)} via the robot?\n\nThe withdrawal is refunded automatically if the phone fails.`)) return;
+    void call('/api/admin/payouts/queue', { withdrawId: p.id }, `Withdrawal ${str(p.id)} queued for the robot.`);
   };
 
   const cancel = (j: Job) => {
-    if (!window.confirm(`Cancel ${j.id}? A queued withdrawal is refunded to the user.`)) return;
-    void call(`/api/admin/payouts/${j.id}/cancel`, { reason: 'cancelled in the admin panel' }, `${j.id} cancelled.`);
+    if (!window.confirm(`Cancel ${str(j.id)}? A queued withdrawal is refunded to the user.`)) return;
+    void call(`/api/admin/payouts/${j.id}/cancel`, { reason: 'cancelled in the admin panel' }, `${str(j.id)} cancelled.`);
   };
 
   const patchDevice = async (d: Device, body: any, okText: string) => {
@@ -210,9 +228,9 @@ export const PayoutRobotAdmin = () => {
             {pending.map((p) => (
               <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2">
                 <div className="min-w-0">
-                  <div className="text-[12px] font-bold text-white">{p.userName || p.userId || 'user'} · ${num(p.amountUsd).toFixed(2)}</div>
+                  <div className="text-[12px] font-bold text-white">{str(p.userName) || str(p.userId) || 'user'} · ${num(p.amountUsd).toFixed(2)}</div>
                   <div className="text-[10px] text-zinc-500">
-                    {p.methodName} · {p.number || 'no number'} · {p.amountBdt != null ? `${num(p.amountBdt)} BDT` : 'no BDT rate'} · {ago(p.createdAt)}
+                    {str(p.methodName)} · {str(p.number) || str((p as any).destination) || 'no number'} · {p.amountBdt != null ? `${num(p.amountBdt)} BDT` : 'no BDT rate'} · {ago(num(p.createdAt))}
                   </div>
                 </div>
                 <button
@@ -241,23 +259,23 @@ export const PayoutRobotAdmin = () => {
             {devices.map((d) => (
               <div key={d.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-white"><Smartphone className="w-3.5 h-3.5 text-zinc-400" /> {d.label}</div>
+                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-white"><Smartphone className="w-3.5 h-3.5 text-zinc-400" /> {str(d.label)}</div>
                   <div className="text-[10px] text-zinc-500">
-                    {d.methodName} · seen {ago(d.lastSeenAt)} · last job {ago(d.lastJobAt)} · {d.active ? 'relay on' : 'relay paused'}
+                    {str(d.methodName)} · seen {ago(num(d.lastSeenAt))} · last job {ago(num(d.lastJobAt))} · {d.active ? 'relay on' : 'relay paused'}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <select
                     className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] text-white"
                     value={d.payoutProvider}
-                    onChange={(e) => patchDevice(d, { payoutProvider: e.target.value }, `${d.label}: wallet ${e.target.value || 'auto'}`)}
+                    onChange={(e) => patchDevice(d, { payoutProvider: e.target.value }, `${str(d.label)}: wallet ${e.target.value || 'auto'}`)}
                   >
                     <option value="">auto</option>
                     <option value="nagad">nagad</option>
                     <option value="bkash">bkash</option>
                   </select>
                   <button
-                    onClick={() => patchDevice(d, { payoutEnabled: !d.payoutEnabled }, `${d.label}: payouts ${d.payoutEnabled ? 'OFF' : 'ON'}`)}
+                    onClick={() => patchDevice(d, { payoutEnabled: !d.payoutEnabled }, `${str(d.label)}: payouts ${d.payoutEnabled ? 'OFF' : 'ON'}`)}
                     className={`rounded-lg border px-2 py-1 text-[10px] font-black ${d.payoutEnabled ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}
                   >
                     {d.payoutEnabled ? 'payout ON' : 'payout OFF'}
@@ -282,13 +300,13 @@ export const PayoutRobotAdmin = () => {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-[12px] font-bold text-white">
                       <span className={`rounded-md border px-1.5 py-0.5 text-[9px] font-black ${STATUS_STYLE[j.status] || ''}`}>{j.status}</span>
-                      <span>{num(j.amountBdt)} BDT → {j.number || '—'}</span>
-                      <span className="text-[9px] font-bold uppercase text-zinc-500">{j.kind} · {j.provider}</span>
+                      <span>{num(j.amountBdt)} BDT → {str(j.number) || '—'}</span>
+                      <span className="text-[9px] font-bold uppercase text-zinc-500">{str(j.kind)} · {str(j.provider)}</span>
                     </div>
                     <div className="text-[10px] text-zinc-500">
-                      {j.id} · created {ago(j.createdAt)}
-                      {j.deviceLabel ? ` · phone ${j.deviceLabel}` : ''}
-                      {j.trxId ? ` · TrxID ${j.trxId}` : ''}
+                      {str(j.id)} · created {ago(num(j.createdAt))}
+                      {str(j.deviceLabel) ? ` · phone ${str(j.deviceLabel)}` : ''}
+                      {str(j.trxId) ? ` · TrxID ${str(j.trxId)}` : ''}
                       {num(j.attempts) ? ` · ${num(j.attempts)} attempt(s)` : ''}
                     </div>
                   </div>
@@ -307,11 +325,11 @@ export const PayoutRobotAdmin = () => {
                   <div className="mt-2 space-y-1 rounded-lg border border-zinc-800 bg-zinc-950 p-2">
                     <div className="text-[10px] text-zinc-400">
                       {j.status === 'PAID' ? <CheckCheck className="inline w-3 h-3 text-emerald-400" /> : <AlertTriangle className="inline w-3 h-3 text-amber-400" />}
-                      {' '}{j.resultNote || 'no note yet'}
+                      {' '}{str(j.resultNote) || 'no note yet'}
                     </div>
-                    {j.userId ? <div className="text-[10px] text-zinc-500">user {j.userId}{j.withdrawId ? ` · withdrawal ${j.withdrawId}` : ''}</div> : null}
-                    {j.screenLog ? (
-                      <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-[9.5px] leading-relaxed text-zinc-300">{j.screenLog}</pre>
+                    {j.userId ? <div className="text-[10px] text-zinc-500">user {str(j.userId)}{j.withdrawId ? ` · withdrawal ${str(j.withdrawId)}` : ''}</div> : null}
+                    {str(j.screenLog) ? (
+                      <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-[9.5px] leading-relaxed text-zinc-300">{str(j.screenLog)}</pre>
                     ) : <div className="text-[10px] text-zinc-600">the phone has not sent its screen log yet</div>}
                   </div>
                 ) : null}
