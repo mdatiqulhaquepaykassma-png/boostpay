@@ -60,6 +60,7 @@ type Pending = {
 type Device = {
   id: string; label: string; methodName: string; msisdn: string; active: boolean;
   payoutEnabled: boolean; payoutProvider: string; lastSeenAt: number; lastJobAt: number;
+  online?: boolean; secondsAgo?: number; payoutAppVersion?: string; queueDryRun?: boolean;
 };
 type Stats = { queued: number; claimed: number; sent: number; paid24h: number; failed24h: number; paidBdt24h: number };
 type EventRow = { at: number; action: string; detail: string };
@@ -88,6 +89,8 @@ export const PayoutRobotAdmin = () => {
   const [devices, setDevices] = useState<Device[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
+  const [phoneStatus, setPhoneStatus] = useState<{ online: number; dryRun: number; liveMode: number } | null>(null);
+  const [, setTick] = useState(0);
   const [issuedToken, setIssuedToken] = useState<{ label: string; token: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
@@ -108,12 +111,15 @@ export const PayoutRobotAdmin = () => {
       setDevices(asArray<Device>(j.devices));
       setStats(j.stats && typeof j.stats === 'object' ? j.stats : null);
       setEvents(asArray<EventRow>(j.events));
+      setPhoneStatus(j.phoneStatus && typeof j.phoneStatus === 'object' ? j.phoneStatus : null);
       setErr('');
     } catch (e: any) { setErr(e?.message || 'Could not load the payout queue.'); }
     finally { setLoaded(true); }
   }, []);
 
   useEffect(() => { void load(); const iv = window.setInterval(load, 5000); return () => window.clearInterval(iv); }, [load]);
+  // re-render every second so "3 s ago" stays true between polls
+  useEffect(() => { const iv = window.setInterval(() => setTick((n) => n + 1), 1000); return () => window.clearInterval(iv); }, []);
 
   const call = async (url: string, body: any, okText: string) => {
     setBusy(true); setErr(''); setNote('');
@@ -173,12 +179,6 @@ export const PayoutRobotAdmin = () => {
     setBusy(false);
   };
 
-  // A phone that has not checked in for 3 minutes cannot pick up anything: say it out loud
-  // instead of letting the owner wonder why a queued job never moves.
-  const lastSeen = devices.reduce((a, d) => Math.max(a, num(d.lastSeenAt)), 0);
-  const phonedOffline = jobs.some((j) => j.status === 'QUEUED') && (!lastSeen || Date.now() - lastSeen > 3 * 60 * 1000);
-  const lastSeenLabel = lastSeen ? new Date(lastSeen).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '';
-
   return (
     <div className="space-y-4">
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
@@ -190,6 +190,34 @@ export const PayoutRobotAdmin = () => {
           A job turns <b className="text-emerald-300">PAID</b> only when the wallet's “you have sent Tk …” SMS comes back through the
           SMS Bridge. If the phone fails, the withdrawal is refunded to the user automatically.
         </p>
+        {/* ── is the app connected right now? ───────────────────────────── */}
+        {(() => {
+          const online = devices.filter((d) => d.active !== false && d.payoutEnabled !== false
+            && (d.online === true || (num(d.lastSeenAt) && Date.now() - num(d.lastSeenAt) < 90_000)));
+          const live = online.filter((d) => d.queueDryRun !== true);
+          const dry = online.filter((d) => d.queueDryRun === true);
+          const tone = online.length === 0 ? 'border-red-500/40 bg-red-500/10 text-red-200'
+            : live.length > 0 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+              : 'border-amber-500/40 bg-amber-500/10 text-amber-200';
+          return (
+            <div className={`mt-3 rounded-xl border px-3 py-2 text-[11px] font-semibold ${tone}`}>
+              {online.length === 0 ? (
+                <>
+                  <b>App NOT connected.</b> No phone is asking for jobs. Open the payout app → <b>4 · Server queue</b> →
+                  check the server + token → <b>▶ Start queue</b>. The phone keeps a “Queue running” notification while it is connected.
+                </>
+              ) : (
+                <>
+                  <b>{online.length} phone connected</b>
+                  {live.length > 0 ? ` · ${live.length} LIVE (real money)` : ''}
+                  {dry.length > 0 ? ` · ${dry.length} in DRY RUN (test jobs only)` : ''}
+                  {online.map((d) => ` · ${str(d.label)} app ${str(d.payoutAppVersion) || '?'} · seen ${num(d.secondsAgo) >= 0 ? `${num(d.secondsAgo)}s ago` : 'just now'}`).join('')}
+                </>
+              )}
+            </div>
+          );
+        })()}
+
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-6">
           {[
             ['Queued', num(stats?.queued)],
@@ -238,18 +266,6 @@ export const PayoutRobotAdmin = () => {
             <li>2. Paste this token into the token box (replace the old one) → <b className="text-zinc-200">Test</b>.</li>
             <li>3. <b className="text-zinc-200">▶ Start queue</b> — a notification must appear: “Queue running”.</li>
           </ol>
-        </div>
-      ) : null}
-
-      {phonedOffline ? (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
-          <b>No phone is asking for jobs.</b> A queued job waits until the payout phone checks in.
-          {lastSeenLabel ? ` Last check-in: ${lastSeenLabel}.` : ' No phone has ever checked in.'}
-          <div className="mt-1 text-amber-200/80">
-            On the phone: open the payout app → <b>4 · Server queue</b> → server <code>https://boostpay.online</code>,
-            the device token, then <b>▶ Start queue</b> (it keeps running with the screen off). Tap <b>Test</b> to see the
-            panel's answer immediately.
-          </div>
         </div>
       ) : null}
 
@@ -317,9 +333,24 @@ export const PayoutRobotAdmin = () => {
             {devices.map((d) => (
               <div key={d.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 text-[12px] font-bold text-white"><Smartphone className="w-3.5 h-3.5 text-zinc-400" /> {str(d.label)}</div>
+                  <div className="flex flex-wrap items-center gap-1.5 text-[12px] font-bold text-white">
+                    <Smartphone className="w-3.5 h-3.5 text-zinc-400" /> {str(d.label)}
+                    {(() => {
+                      const seen = num(d.secondsAgo) >= 0 ? num(d.secondsAgo) : (num(d.lastSeenAt) ? Math.round((Date.now() - num(d.lastSeenAt)) / 1000) : -1);
+                      const isOnline = seen >= 0 && seen < 90;
+                      const cls = !isOnline ? 'bg-zinc-700/50 text-zinc-300 border-zinc-600'
+                        : d.queueDryRun ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                          : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40';
+                      return (
+                        <span className={`rounded-md border px-1.5 py-0.5 text-[9px] font-black ${cls}`}>
+                          {!isOnline ? 'OFFLINE' : d.queueDryRun ? 'DRY RUN' : 'LIVE'}
+                          {isOnline ? ` · ${seen}s` : ''}
+                        </span>
+                      );
+                    })()}
+                  </div>
                   <div className="text-[10px] text-zinc-500">
-                    {str(d.methodName)} · seen {ago(num(d.lastSeenAt))} · last job {ago(num(d.lastJobAt))} · {d.active ? 'relay on' : 'relay paused'}
+                    {str(d.methodName)} · app {str(d.payoutAppVersion) || '—'} · seen {ago(num(d.lastSeenAt))} · last job {ago(num(d.lastJobAt))} · {d.active ? 'relay on' : 'relay paused'}
                   </div>
                 </div>
                 <div className="flex items-center gap-2">

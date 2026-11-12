@@ -11537,6 +11537,8 @@ const paymentLocks = new Map<string, Promise<any>>();
       lastSeenAt: d.lastSeenAt || 0, lastSmsAt: d.lastSmsAt || 0,
       ingestCount: Number(d.ingestCount) || 0, creditCount: Number(d.creditCount) || 0,
       appVersion: d.appVersion || '', batteryOk: d.batteryOk !== false,
+      payoutAppVersion: d.payoutAppVersion || '', queueDryRun: d.queueDryRun === true,
+      lastJobAt: d.lastJobAt || 0,
     };
   }
   function findDeviceByToken(db: any, token: string) {
@@ -11933,7 +11935,8 @@ const paymentLocks = new Map<string, Promise<any>>();
       });
       const { db, dev } = auth;
       const jobs = ensurePayoutJobs(db);
-      const dryRun = (req.body || {}).dryRun === true;
+      const body = req.body || {};
+      const dryRun = body.dryRun === true;
       const wallet = deviceWallet(dev);
       const job = claimNext(jobs, {
         deviceId: dev.id, deviceLabel: dev.label, provider: wallet,
@@ -11942,14 +11945,33 @@ const paymentLocks = new Map<string, Promise<any>>();
         // a real withdrawal never lands on a phone nobody has aimed at it.
         kinds: (dryRun || !wallet) ? ['TEST'] : ['TEST', 'WITHDRAW'],
       });
-      dev.lastSeenAt = Date.now();
+      // ── heartbeat ────────────────────────────────────────────────────────
+      // The poll itself is the proof that the app is alive, so the panel can show
+      // "online / dry run / offline". Writing the whole database every 4 seconds
+      // would be silly, so the file is only touched when something changed or the
+      // stored check-in is older than 45 s.
+      const appVersion = sanitizeText(body.appVersion, 20).trim();
+      const heartbeat = {
+        lastSeenAt: Date.now(),
+        payoutAppVersion: appVersion || dev.payoutAppVersion || '',
+        queueDryRun: dryRun,
+        queueMode: 'queue',
+      };
+      const changed = dev.payoutAppVersion !== heartbeat.payoutAppVersion
+        || dev.queueDryRun !== heartbeat.queueDryRun
+        || Number(dev.lastSeenAt) === 0;
+      const stale = Date.now() - (Number(dev.lastSeenAt) || 0) > 45_000;
+      dev.lastSeenAt = heartbeat.lastSeenAt;
+      dev.payoutAppVersion = heartbeat.payoutAppVersion;
+      dev.queueDryRun = heartbeat.queueDryRun;
+      dev.queueMode = 'queue';
       if (job) {
         dev.lastJobAt = Date.now();
         recordAuditLog(db, 'PAYOUT_CLAIM', smsDeviceActor(dev),
           `Payout job ${job.id} (${job.kind} · ${job.provider} · ${job.amountBdt} BDT) handed to ${dev.label}`,
           job.userId ? String(job.userId) : undefined);
       }
-      writeDb(db);
+      if (job || changed || stale) writeDb(db);
       res.setHeader('Cache-Control', 'no-store');
       res.json({
         success: true,
@@ -12027,7 +12049,20 @@ const paymentLocks = new Map<string, Promise<any>>();
           payoutEnabled: d.payoutEnabled !== false,
           payoutProvider: d.payoutProvider || deviceWallet(d) || '',
           lastJobAt: d.lastJobAt || 0,
+          // online = the app polled within the last 90 s (it polls every ~4 s)
+          online: Date.now() - (Number(d.lastSeenAt) || 0) < 90_000,
+          secondsAgo: d.lastSeenAt ? Math.max(0, Math.round((Date.now() - Number(d.lastSeenAt)) / 1000)) : -1,
         })),
+        phoneStatus: (() => {
+          const now = Date.now();
+          const live = smsDevicesOf(db).filter((d: any) => d.active !== false && d.payoutEnabled !== false
+            && now - (Number(d.lastSeenAt) || 0) < 90_000);
+          return {
+            online: live.length,
+            dryRun: live.filter((d: any) => d.queueDryRun === true).length,
+            liveMode: live.filter((d: any) => d.queueDryRun !== true).length,
+          };
+        })(),
         rate: { BDT: fxRate(db, 'BDT') },
         events: (db.auditLogs || [])
           .filter((a: any) => String(a.action || '').startsWith('PAYOUT_'))

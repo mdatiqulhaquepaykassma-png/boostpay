@@ -56,6 +56,9 @@ final class Queue {
         try {
             JSONObject body = new JSONObject();
             body.put("dryRun", dryRun);
+            body.put("mode", "queue");
+            // the panel shows this, so the owner can see which build is on the phone
+            try { body.put("appVersion", BuildConfig.VERSION_NAME); } catch (Throwable ignored) { }
             JSONObject res = post(server, "/api/payout/next", token, body.toString());
             if (res == null) {
                 out.error = "the server did not answer — check the phone's internet and the address";
