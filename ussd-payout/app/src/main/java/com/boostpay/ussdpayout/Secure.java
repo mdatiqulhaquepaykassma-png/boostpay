@@ -21,7 +21,7 @@ import javax.crypto.spec.GCMParameterSpec;
 public final class Secure {
 
     private static final String PREFS = "bp_secure";
-    private static final String KEY = "pin_sealed";
+    private static final String KEY = "pin_sealed";       // legacy single-PIN slot
     private static final String ALIAS = "bp_pin_key_v1";
 
     private Secure() {}
@@ -39,8 +39,13 @@ public final class Secure {
     }
 
     public static void savePin(Context c, String pin) {
+        savePin(c, KEY, pin);
+    }
+
+    /** Seals a PIN under an arbitrary slot name (one slot per SIM). */
+    public static void savePin(Context c, String slot, String pin) {
         SharedPreferences p = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        if (pin == null || pin.isEmpty()) { p.edit().remove(KEY).apply(); return; }
+        if (pin == null || pin.isEmpty()) { p.edit().remove(KEY_OF(slot)).apply(); return; }
         try {
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.ENCRYPT_MODE, key());
@@ -50,14 +55,18 @@ public final class Secure {
             blob[0] = (byte) iv.length;
             System.arraycopy(iv, 0, blob, 1, iv.length);
             System.arraycopy(ct, 0, blob, 1 + iv.length, ct.length);
-            p.edit().putString(KEY, Base64.encodeToString(blob, Base64.NO_WRAP)).apply();
+            p.edit().putString(KEY_OF(slot), Base64.encodeToString(blob, Base64.NO_WRAP)).apply();
         } catch (Exception e) {
-            p.edit().remove(KEY).apply();
+            p.edit().remove(KEY_OF(slot)).apply();
         }
     }
 
     public static String readPin(Context c) {
-        String b64 = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null);
+        return readPin(c, KEY);
+    }
+
+    public static String readPin(Context c, String slot) {
+        String b64 = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_OF(slot), null);
         if (b64 == null) return "";
         try {
             byte[] blob = Base64.decode(b64, Base64.NO_WRAP);
@@ -71,6 +80,12 @@ public final class Secure {
     }
 
     public static boolean hasPin(Context c) {
-        return !readPin(c).isEmpty();
+        return !readPin(c, KEY).isEmpty();
     }
+
+    public static boolean hasPin(Context c, String slot) {
+        return !readPin(c, slot).isEmpty();
+    }
+
+    private static String KEY_OF(String slot) { return "pin:" + slot; }
 }

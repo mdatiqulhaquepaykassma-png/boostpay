@@ -1,6 +1,9 @@
 package com.boostpay.ussdpayout;
 
 import android.accessibilityservice.AccessibilityService;
+import android.telecom.PhoneAccountHandle;
+import android.telephony.SubscriptionManager;
+import android.telecom.TelecomManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -65,6 +68,14 @@ public class UssdService extends AccessibilityService {
 
     /** Starts a run: dials the service code, then walks the plan from the dialog. */
     public static boolean start(Context c, Plan p, Sink s) {
+        return start(c, p, s, -1);
+    }
+
+    /**
+     * @param subId subscription id of the SIM that must place the call, or -1 for the
+     *              phone's default SIM.
+     */
+    public static boolean start(Context c, Plan p, Sink s, int subId) {
         UssdService self = instance;
         if (self == null) {
             s.finish(false, "Accessibility service is off. Settings → Accessibility → BoostPay Payout → On, then try again.");
@@ -75,16 +86,57 @@ public class UssdService extends AccessibilityService {
         self.idx = 0;
         self.screens = 0;
         self.lastScreen = "";
-        s.log("▶ mode: Accessibility · " + (p.dryRun ? "DRY RUN (no PIN, no money)" : "LIVE"));
+        s.log("▶ mode: Accessibility · " + (p.dryRun ? "DRY RUN (no PIN, no money)" : "LIVE")
+                + (subId > 0 ? " · subId " + subId : " · default SIM"));
         try {
             Intent call = new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(p.serviceCode)));
             call.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            if (subId > 0) {
+                PhoneAccountHandle handle = handleFor(c, subId);
+                if (handle != null) {
+                    call.putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle);
+                    s.log("· calling from SIM subId " + subId);
+                } else {
+                    s.log("! could not map subId " + subId + " to a phone account — the default SIM will dial");
+                }
+            }
             c.startActivity(call);
             return true;
         } catch (Throwable t) {
             self.finish(false, "Could not dial " + p.serviceCode + ": " + t.getMessage());
             return false;
         }
+    }
+
+    // ── which SIM places the call ────────────────────────────────────────────
+
+    /** Finds the PhoneAccountHandle that belongs to a subscription (API 30+ is exact). */
+    private static PhoneAccountHandle handleFor(Context c, int subId) {
+        try {
+            TelecomManager tm = (TelecomManager) c.getSystemService(Context.TELECOM_SERVICE);
+            if (tm == null) return null;
+            java.util.List<PhoneAccountHandle> handles = tm.getCallCapablePhoneAccounts();
+            if (handles == null) return null;
+            android.telephony.TelephonyManager tel =
+                    (android.telephony.TelephonyManager) c.getSystemService(Context.TELEPHONY_SERVICE);
+            for (PhoneAccountHandle h : handles) {
+                if (android.os.Build.VERSION.SDK_INT >= 30 && tel != null) {
+                    int sid = tel.getSubscriptionId(h);
+                    if (sid == subId) return h;
+                }
+            }
+            // older APIs: the list is ordered by slot on most firmwares
+            SubscriptionManager sm = (SubscriptionManager) c.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
+            if (sm != null && !handles.isEmpty()) {
+                android.telephony.SubscriptionInfo info = null;
+                if (android.os.Build.VERSION.SDK_INT >= 22) {
+                    java.util.List<android.telephony.SubscriptionInfo> all = sm.getActiveSubscriptionInfoList();
+                    if (all != null) for (android.telephony.SubscriptionInfo i : all) if (i.getSubscriptionId() == subId) info = i;
+                }
+                if (info != null && info.getSimSlotIndex() < handles.size()) return handles.get(info.getSimSlotIndex());
+            }
+        } catch (Throwable ignored) { }
+        return null;
     }
 
     // ── dialog watching ──────────────────────────────────────────────────────

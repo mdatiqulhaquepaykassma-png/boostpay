@@ -21,6 +21,7 @@ public final class UssdApiEngine {
     private final Context ctx;
     private final Plan plan;
     private final Sink sink;
+    private final int subId;          // -1 = whatever the phone's default SIM is
     private final Handler h = new Handler(Looper.getMainLooper());
 
     private int idx = 0;
@@ -29,9 +30,14 @@ public final class UssdApiEngine {
     private Runnable timer;
 
     public UssdApiEngine(Context ctx, Plan plan, Sink sink) {
+        this(ctx, plan, sink, -1);
+    }
+
+    public UssdApiEngine(Context ctx, Plan plan, Sink sink, int subId) {
         this.ctx = ctx.getApplicationContext();
         this.plan = plan;
         this.sink = sink;
+        this.subId = subId;
     }
 
     public void start() {
@@ -39,7 +45,8 @@ public final class UssdApiEngine {
             finish(false, "USSD API needs Android 8+ — use the Accessibility method on this phone.");
             return;
         }
-        sink.log("▶ mode: USSD API · " + (plan.dryRun ? "DRY RUN (no PIN, no money)" : "LIVE"));
+        sink.log("▶ mode: USSD API · " + (plan.dryRun ? "DRY RUN (no PIN, no money)" : "LIVE")
+                + (subId > 0 ? " · subId " + subId : " · default SIM"));
         send(plan.serviceCode, "service code");
     }
 
@@ -49,7 +56,17 @@ public final class UssdApiEngine {
         try {
             TelephonyManager tm = (TelephonyManager) ctx.getSystemService(Context.TELEPHONY_SERVICE);
             if (tm == null) { finish(false, "No telephony service on this device."); return; }
-            tm.sendUssdRequest(input, new TelephonyManager.UssdResponseCallback() {
+            TelephonyManager bound = tm;
+            if (subId > 0) {
+                try {
+                    // API 24+: a manager bound to one subscription routes the USSD call
+                    // from that SIM on most devices.
+                    bound = tm.createForSubscriptionId(subId);
+                } catch (Throwable t) {
+                    sink.log("! this phone cannot target a SIM for USSD — using the default SIM");
+                }
+            }
+            bound.sendUssdRequest(input, new TelephonyManager.UssdResponseCallback() {
                 @Override
                 public void onReceiveUssdResponse(TelephonyManager t, String request, CharSequence response) {
                     cancelTimer();

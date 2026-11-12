@@ -83,11 +83,12 @@ const APPS = [
   {
     btn: 'Payout (bKash)', slug: 'ussdpayout', icon: 'dial', file: 'boostpay-ussd-payout.apk', title: 'BoostPay Payout (bKash)', short: 'Payout robot · bKash',
     color: '#fb923c', pkg: 'com.boostpay.ussdpayout',
-    tagline: 'Walks the *247# menu on your own phone and types the keys — dry run first.',
+    tagline: 'Walks the *247# menu on your own phone — dual SIM: each SIM gets its own wallet (bKash/Nagad) and Personal/Agent.',
     audience: 'Owner only',
     note: 'bKash বিল্ড: *247# মেনু হাঁটে, DRY RUN-এ PIN-এর আগেই থেমে যায়। আগে ড্রাই রান, পরে ছোট অ্যামাউন্ট।',
     private: true,
     steps: [
+      '<b>SIM 1 / SIM 2</b> — প্রতিটা SIM-এ দিন: bKash/Nagad, Personal/Agent, নিজের নম্বর, সেই SIM-এর PIN',
       'ইনস্টল করুন — <b>আলাদা, কম-ব্যালেন্স bKash নম্বরে</b> (মূল ফ্লোটে নয়)',
       'Service code <span class="code">*247#</span>, receiver = আপনার নিজের দ্বিতীয় নম্বর, amount 10-20',
       '<b>Adaptive ON</b> রাখুন (স্ক্রিন পড়ে নিজেই ঠিক মান বসায়) — বা steps <span class="code">1,{number},{amount},1,{pin}</span>',
@@ -98,11 +99,12 @@ const APPS = [
   {
     btn: 'Payout (Nagad)', slug: 'nagadpayout', icon: 'dial', file: 'boostpay-ussd-nagad.apk', title: 'BoostPay Payout (Nagad)', short: 'Payout robot · Nagad',
     color: '#f43f5e', pkg: 'com.boostpay.ussdpayout.nagad',
-    tagline: 'Walks the *167# menu on your own phone and types the keys — dry run first.',
+    tagline: 'Walks the *167# menu on your own phone — dual SIM: each SIM gets its own wallet (bKash/Nagad) and Personal/Agent.',
     audience: 'Owner only',
     note: 'Nagad বিল্ড: *167# মেনু, ৪ ডিজিট PIN। DRY RUN-এ PIN-এর আগেই থেমে যায়।',
     private: true,
     steps: [
+      '<b>SIM 1 / SIM 2</b> — প্রতিটার জন্য বেছে নিন: bKash না Nagad, Personal না Agent, নিজের নম্বর, আর সেই SIM-এর PIN (আলাদা PIN রাখা হয়)',
       'ইনস্টল করুন — <b>আলাদা Nagad নম্বরে</b> (মূল ফ্লোটে নয়), ব্যালেন্স ২০০-৩০০ টাকা',
       'Service code <span class="code">*167#</span>, receiver = নিজের দ্বিতীয় নম্বর, amount 10-20, PIN = <b>৪ ডিজিট</b>',
       '<b>Adaptive ON</b> রাখুন — "amount"/"PIN"/"number" যে স্ক্রিন যা চাইবে, সেই মানটাই বসাবে (+ বাংলা শব্দও বোঝে)',
@@ -126,7 +128,7 @@ function statApk(file) {
       size: st.size,
       mtime: st.mtimeMs,
       sha256: crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16),
-      version: (file.includes('ussd') ? '1.1' : '1.0'),
+      version: (file.includes('ussd') ? '1.2' : '1.0'),
     };
   } catch {
     return { ready: false, size: 0, mtime: 0, sha256: '', version: '' };

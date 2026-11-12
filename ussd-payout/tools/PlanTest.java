@@ -1,4 +1,5 @@
 import com.boostpay.ussdpayout.Plan;
+import com.boostpay.ussdpayout.SimPick;
 
 /** Plain-JVM checks for the menu reader (no Android needed): javac + java. */
 public class PlanTest {
@@ -68,6 +69,27 @@ public class PlanTest {
         Plan n2 = new Plan("", "01712345678", "50", "1234", "", "", false, true);
         check("empty service code -> *167# default", "*167#".equals(n2.serviceCode), n2.serviceCode);
         check("empty reference -> 1", "1".equals(n2.ref), n2.ref);
+
+        // ── which SIM sends a payout ──────────────────────────────────
+        java.util.List<SimPick.Entry> two = java.util.Arrays.asList(
+                new SimPick.Entry(11, 0, "bkash", "personal"),   // SIM 1 · bKash personal
+                new SimPick.Entry(22, 1, "nagad", "agent"));     // SIM 2 · Nagad agent
+        check("dual SIM: bkash goes out of SIM 1", SimPick.pick(two, "bkash") == 11, "" + SimPick.pick(two, "bkash"));
+        check("dual SIM: nagad goes out of SIM 2", SimPick.pick(two, "nagad") == 22, "" + SimPick.pick(two, "nagad"));
+        check("dual SIM: unknown provider -> -1 (never guess)", SimPick.pick(two, "rocket") == -1, "" + SimPick.pick(two, "rocket"));
+        check("dual SIM: explicit selection wins", SimPick.pick(two, "bkash", 11) == 11, "" + SimPick.pick(two, "bkash", 11));
+        check("dual SIM: selection for another wallet is refused", SimPick.pick(two, "bkash", 22) == -1, "" + SimPick.pick(two, "bkash", 22));
+
+        java.util.List<SimPick.Entry> sameProvider = java.util.Arrays.asList(
+                new SimPick.Entry(31, 0, "nagad", "agent"),
+                new SimPick.Entry(32, 1, "nagad", "personal"));
+        check("same provider twice: personal SIM preferred", SimPick.pick(sameProvider, "nagad") == 32, "" + SimPick.pick(sameProvider, "nagad"));
+
+        check("single SIM not configured -> -1", SimPick.pick(java.util.Collections.singletonList(
+                new SimPick.Entry(41, 0, "", "personal")), "bkash") == -1, "unset");
+        check("empty SIM list -> -1", SimPick.pick(java.util.Collections.emptyList(), "bkash") == -1, "empty");
+        check("describe: SIM 2 · Nagad · Agent", "SIM 2 · Nagad · Agent".equals(
+                SimPick.describe(two.get(1), null)), SimPick.describe(two.get(1), null));
 
         System.out.println("\n" + pass + " pass / " + fail + " fail");
         if (fail > 0) System.exit(1);

@@ -14,6 +14,21 @@ gradle assembleBkashRelease assembleNagadRelease
 # apk/nagad/release/app-nagad-release.apk  → boostpay-ussd-nagad.apk
 ```
 
+## Dual SIM
+
+Each SIM slot is configured on the phone: which wallet it carries (bKash / Nagad),
+Personal or Agent, its own number, and **its own PIN** (sealed per subscription id).
+A payout then leaves from the matching SIM; `SimPick` refuses to guess when nothing
+matches.
+
+| Method | How the chosen SIM dials |
+| --- | --- |
+| A · USSD API | `TelephonyManager.createForSubscriptionId(subId)` — logs a warning when the phone ignores it |
+| B · Accessibility | `ACTION_CALL` + `TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE` for that subscription |
+
+Files: `Sims.java` (discovery), `SimStore.java` (per-SIM settings + PIN),
+`SimPick.java` (pure decision logic, unit-tested).
+
 Two engines, one plan:
 
 | Method | What it does | Needs |
@@ -47,6 +62,9 @@ app/src/main/java/com/boostpay/ussdpayout/
   UssdApiEngine.java  method A state machine
   UssdService.java    method B: AccessibilityService that drives the dialog
   Provider.java       bKash/nagad presets (code, steps, PIN length, pacing)
+  Sims.java           active SIM list (subId, slot, carrier)
+  SimStore.java       per-SIM wallet / account type / number / sealed PIN
+  SimPick.java        which SIM sends this payout (pure, testable)
   Guard.java          limits, cooldown, single-flight, daily counter
   Secure.java         Keystore-sealed PIN
 ```
@@ -57,7 +75,7 @@ app/src/main/java/com/boostpay/ussdpayout/
 
 ```bash
 javac -encoding UTF-8 -d /tmp/pt com/boostpay/ussdpayout/Plan.java tools/PlanTest.java
-java -cp /tmp/pt PlanTest      # 17 pass / 0 fail
+java -cp /tmp/pt PlanTest      # 26 pass / 0 fail
 ```
 
 ## Build
