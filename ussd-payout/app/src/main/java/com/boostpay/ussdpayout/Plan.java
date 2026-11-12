@@ -61,16 +61,38 @@ public final class Plan {
         public final String value;
         public final boolean secret;
         public final boolean stopBefore;
+        public final boolean wait;        // screen seen, but nothing safe to type
         public final String why;
 
-        Key(String value, boolean secret, boolean stopBefore, String why) {
+        Key(String value, boolean secret, boolean stopBefore, boolean wait, String why) {
             this.value = value;
             this.secret = secret;
             this.stopBefore = stopBefore;
+            this.wait = wait;
             this.why = why;
         }
 
-        public static Key stop(String why) { return new Key(null, false, true, why); }
+        public static Key stop(String why) { return new Key(null, false, true, false, why); }
+
+        public static Key wait(String why) { return new Key(null, false, false, true, why); }
+    }
+
+    /** "Invalid PIN" / "Sorry, failed" — the network refused the last key. */
+    public static boolean looksRejected(String screen) {
+        String l = screen == null ? "" : screen.toLowerCase();
+        return l.contains("invalid") || l.contains("wrong") || l.contains("failed")
+                || l.contains("sorry") || l.contains("insufficient") || l.contains("not enough")
+                || l.contains("denied") || l.contains("ভুল") || l.contains("ব্যর্থ");
+    }
+
+    /** The robot must not type into these — the network is still working. */
+    public static boolean isWaitingScreen(String screen) {
+        String l = screen == null ? "" : screen.toLowerCase();
+        return l.contains("ussd code running") || l.contains("initiated ussd")
+                || l.contains("please wait") || l.contains("requesting")
+                || l.contains("processing") || l.contains("sending your")
+                || l.contains("loading") || l.contains("do not close")
+                || l.contains("অপেক্ষা") || l.contains("প্রক্রিয়া চলছে");
     }
 
     public Key decide(String screen, int csvIndex) {
@@ -82,8 +104,8 @@ public final class Plan {
             if (looksLikeMenu(l)) {
                 String option = menuOptionFor(l, SEND_MENU_WORDS);
                 if (option == null) option = menuOptionFor(l, SUBMENU_WORDS);
-                if (option != null) return new Key(option, false, false, "menu: picked that option");
-                return csvOrNull(csvIndex);
+                if (option != null) return new Key(option, false, false, false, "menu: picked that option");
+                return Key.wait("menu seen but no Send Money option matched — waiting");
             }
 
             boolean asksPin = has(l, "pin", "পিন", "password", "পাসওয়ার্ড", "গোপন")
@@ -95,12 +117,13 @@ public final class Plan {
 
             if (asksPin) {
                 if (dryRun) return Key.stop("this screen asks for the PIN — a dry run stops here, nothing is sent");
-                return new Key(pin, true, false, "PIN prompt");
+                return new Key(pin, true, false, false, "PIN prompt");
             }
-            if (asksAmount) return new Key(amount, false, false, "amount prompt");
-            if (asksNumber) return new Key(number, false, false, "receiver prompt");
-            if (asksRef) return new Key(ref, false, false, "reference prompt");
-            return csvOrNull(csvIndex);           // screen text not recognised → fall back to the list
+            if (asksAmount) return new Key(amount, false, false, false, "amount prompt");
+            if (asksNumber) return new Key(number, false, false, false, "receiver prompt");
+            if (asksRef) return new Key(ref, false, false, false, "reference prompt");
+            // Not recognised: wait for the next screen instead of typing a guess.
+            return Key.wait("this screen is not recognised — waiting (no keys typed)");
         }
 
         // fixed list mode
@@ -108,7 +131,7 @@ public final class Plan {
         if (next == null) return null;
         boolean secret = pinStep >= 0 && csvIndex == pinStep;
         if (secret && dryRun) return Key.stop("the next list step is the PIN — a dry run stops here, nothing is sent");
-        return new Key(next, secret, false, secret ? "PIN step" : "list step " + (csvIndex + 1));
+        return new Key(next, secret, false, false, secret ? "PIN step" : "list step " + (csvIndex + 1));
     }
 
     // ── menu reading ─────────────────────────────────────────────────────────
@@ -168,7 +191,7 @@ public final class Plan {
         if (i < 0 || i >= steps.length) return null;
         boolean secret = pinStep >= 0 && i == pinStep;
         if (secret && dryRun) return Key.stop("the next list step is the PIN — a dry run stops here, nothing is sent");
-        return new Key(steps[i], secret, false, "fallback step " + (i + 1));
+        return new Key(steps[i], secret, false, false, "fallback step " + (i + 1));
     }
 
     private static boolean has(String haystack, String... needles) {

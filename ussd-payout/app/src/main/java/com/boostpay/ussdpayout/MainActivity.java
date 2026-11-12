@@ -358,9 +358,20 @@ public class MainActivity extends Activity {
                     + (SimStore.hasPin(this, subId) ? " · PIN saved" : " · no PIN"));
         }
 
+        String rawNumber = numberInput.getText().toString();
+        String cleanNumber = rawNumber.replaceAll("[^0-9]", "");
+        if (cleanNumber.length() == 13 && cleanNumber.startsWith("880")) cleanNumber = "0" + cleanNumber.substring(3);
+        if (cleanNumber.length() != 11 || !cleanNumber.startsWith("01")) {
+            Guard.end();
+            line("✗ receiver number \"" + rawNumber + "\" is not a valid 11-digit 01XXXXXXXXX number");
+            toast("Receiver number must be 11 digits, starting 01 (spaces/dashes are removed automatically)");
+            refresh();
+            return;
+        }
+
         Plan plan = new Plan(
                 service,
-                numberInput.getText().toString(),
+                cleanNumber,
                 amountInput.getText().toString(),
                 pin,
                 ref,

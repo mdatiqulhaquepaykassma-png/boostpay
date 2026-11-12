@@ -26,6 +26,8 @@ public final class UssdApiEngine {
 
     private int idx = 0;
     private volatile boolean cancelled = false;
+    private String lastScreen = "";
+    private boolean pinTyped = false;
     private boolean started = false;
     private boolean over = false;
     private Runnable timer;
@@ -104,7 +106,19 @@ public final class UssdApiEngine {
 
     private void onScreen(String screen) {
         String clean = screen.replace('\n', ' ').replace('\r', ' ').trim();
+
+        if (Plan.isWaitingScreen(clean)) {
+            if (!clean.equals(lastScreen)) {
+                lastScreen = clean;
+                sink.log("⇦ " + clean + "   (waiting — nothing typed)");
+            }
+            return;                       // the network is still working
+        }
+        if (clean.equals(lastScreen)) return;   // already answered this exact screen
+        lastScreen = clean;
         sink.log("⇦ " + clean);
+
+        if (pinTyped) { finish(true, "PIN sent — confirmation screen/SMS should follow."); return; }
 
         if (looksRejected(clean)) { finish(false, "Network said no: " + firstLine(clean)); return; }
 
@@ -117,6 +131,7 @@ public final class UssdApiEngine {
 
         Plan.Key key = plan.decide(clean, idx);
         if (key == null) { finish(true, "Sequence finished — read the screens above."); return; }
+        if (key.wait) { sink.log("… " + key.why); return; }
         if (key.stopBefore) {
             sink.log("⏸ DRY RUN: " + key.why);
             finish(true, "Dry run complete: reached the PIN prompt, nothing was sent.");
@@ -125,6 +140,7 @@ public final class UssdApiEngine {
 
         sink.log("⇨ " + (key.secret ? "••••" : key.value) + "   · " + key.why);
         idx++;
+        if (key.secret) pinTyped = true;
         started = true;
         final String value = key.value;
         // operators with a slow menu (Nagad) get a moment before the next key
@@ -151,12 +167,7 @@ public final class UssdApiEngine {
         sink.finish(ok, msg);
     }
 
-    static boolean looksRejected(String s) {
-        String l = s.toLowerCase();
-        return l.contains("invalid") || l.contains("wrong") || l.contains("failed")
-                || l.contains("sorry") || l.contains("insufficient") || l.contains("not enough")
-                || l.contains("denied") || l.contains("ভুল") || l.contains("ব্যর্থ");
-    }
+    static boolean looksRejected(String s) { return Plan.looksRejected(s); }
 
     static boolean looksLikeMainMenu(String s) {
         String l = s.toLowerCase();

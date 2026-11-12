@@ -62,7 +62,7 @@ public class PlanTest {
 
         // ── unknown screen in adaptive mode falls back to the list ─────
         k = nagad(false, true).decide("Welcome to Nagad · 1 Send Money · 2 Cash Out", 0);
-        check("adaptive: unrecognised screen -> next list step", "1".equals(k.value), String.valueOf(k.value));
+        check("adaptive: unrecognised screen -> wait, nothing typed (v1.5)", k != null && k.wait, String.valueOf(k == null ? null : k.value));
 
         // ── provider defaults ─────────────────────────────────────────
         Plan.DEFAULT_SERVICE = "*167#";
@@ -94,6 +94,29 @@ public class PlanTest {
                 !Plan.looksLikeMenu("change pin · enter new pin".toLowerCase()), "no menu");
         check("menu counter: 8 items", Plan.countNumberedItems(nagadMenu.toLowerCase()) >= 8,
                 "" + Plan.countNumberedItems(nagadMenu.toLowerCase()));
+
+        // ── waiting screens must never be typed into (log 14:09:57) ───
+        check("waiting: 'USSD code running…'", Plan.isWaitingScreen("Initiated USSD session · USSD code running…"), "wait");
+        check("waiting: 'Please wait'", Plan.isWaitingScreen("Please wait"), "wait");
+        check("waiting: normal menu is not waiting", !Plan.isWaitingScreen(nagadMenu.toLowerCase()), "menu");
+        check("waiting: receiver prompt is not waiting",
+                !Plan.isWaitingScreen("Enter Receiver Account Number: · Cancel · Send"), "prompt");
+
+        // ── repeated identical screen: the plan must not type again ───
+        Plan p5 = nagad(false, true);
+        Plan.Key first = p5.decide(nagadMenu.toLowerCase(), 0);
+        Plan.Key again = p5.decide(nagadMenu.toLowerCase(), 1);   // index no longer matters
+        check("menu: same screen always yields the same single key",
+                "2".equals(first.value) && "2".equals(again.value), first.value + "/" + again.value);
+
+        // ── invalid-number screen is a rejection, and it re-asks the number ─
+        String invalid = "Carrier info · Invalid account number. Enter Receiver Account Number: · Cancel · Send";
+        check("invalid number triggers the rejection check",
+                Plan.looksRejected(invalid), "rejected");
+
+        // ── unknown screen in adaptive mode waits instead of guessing ──
+        Plan.Key unk = nagad(false, true).decide("Something new happened", 0);
+        check("adaptive: unknown screen -> wait, nothing typed", unk != null && unk.wait, "wait=" + (unk != null && unk.wait));
 
         // ── which SIM sends a payout ──────────────────────────────────
         java.util.List<SimPick.Entry> two = java.util.Arrays.asList(

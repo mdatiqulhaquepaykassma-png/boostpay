@@ -36,6 +36,10 @@ public class UssdService extends AccessibilityService {
     private String lastScreen = "";
     private volatile boolean cancelled = false;
     private int screenSeq = 0;
+    private int repeats = 0;            // how many times the same screen came back
+    private int actions = 0;            // keystrokes typed in this run
+    private long lastActionAt = 0;      // minimum gap between two keys
+    private boolean pinTyped = false;   // after the PIN only the confirmation is left
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     @Override
@@ -170,45 +174,92 @@ public class UssdService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (plan == null || sink == null) return;
+        if (plan == null || sink == null || cancelled) return;
         CharSequence pkg = event.getPackageName();
         if (pkg != null && getPackageName().contentEquals(pkg)) return;   // ignore our own window
         int type = event.getEventType();
         if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-                && type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return;
+                && type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                && type != AccessibilityEvent.TYPE_WINDOWS_CHANGED) return;
 
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
-        String screen = collect(root);
-        if (screen.isEmpty()) return;
-        if (screen.equals(lastScreen) && event.getEventType() == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
-            return;   // the keyboard/content flicker of the screen we already answered
+        consider(collect(root));
+    }
+
+    /** Single gate for every screen, whether it came from an event or a re-read. */
+    private void consider(final String screen) {
+        if (plan == null || cancelled || screen == null || screen.isEmpty()) return;
+
+        // 1) "USSD code running…" / "please wait" — the network is still working.
+        //    Typing here is what corrupted the very first session (log 14:09:57).
+        if (Plan.isWaitingScreen(screen)) {
+            if (!screen.equals(lastScreen)) {
+                lastScreen = screen;
+                sink.log("⇦ " + screen + "   (waiting — nothing typed)");
+            }
+            return;
         }
+
+        // 2) The same screen again? We already answered it — never answer twice.
+        if (screen.equals(lastScreen)) {
+            if (++repeats == 2) {
+                handler.postDelayed(this::nudge, 3000);
+            }
+            return;
+        }
+
+        // 3) A genuinely new screen: answer it once.
         lastScreen = screen;
-        final String captured = screen;
-        handler.postDelayed(() -> handle(captured), 600);   // let the dialog finish drawing
+        repeats = 0;
+        final int mySeq = ++screenSeq;
+        handler.postDelayed(() -> {
+            if (mySeq == screenSeq && !cancelled && plan != null) handle(screen);
+        }, 600);
+    }
+
+    /** The network keeps showing the same screen — stop instead of hammering it. */
+    private void nudge() {
+        if (cancelled || plan == null) return;
+        if (repeats >= 2) {
+            finish(false, "the network showed the same screen " + (repeats + 1)
+                    + " times and nothing advanced: " + lastScreen);
+        }
     }
 
     private void handle(String screen) {
         if (plan == null) return;
-        if (++screens > 16) { finish(false, "16 screens seen — stopped so it cannot loop."); return; }
         sink.log("⇦ " + screen);
+
+        // After the PIN the network shows a confirmation — nothing more to type.
+        if (pinTyped) { finish(true, "PIN sent — confirmation screen/SMS should follow."); return; }
+
+        if (++screens > 20) { finish(false, "20 screens seen — stopped so it cannot loop."); return; }
         if (UssdApiEngine.looksRejected(screen)) {
             finish(false, "Network said no: " + UssdApiEngine.firstLine(screen));
             return;
         }
+
         Plan.Key key = plan.decide(screen, idx);
         if (key == null) { finish(true, "Sequence finished — check the confirmation SMS."); return; }
+        if (key.wait) { sink.log("… " + key.why); return; }
         if (key.stopBefore) {
             sink.log("⏸ DRY RUN: " + key.why);
             finish(true, "Dry run complete: the dialog path works right up to the PIN prompt.");
             return;
         }
+
         idx++;
-        screenSeq++;
-        final int mySeq = screenSeq;
+        actions++;
+        if (key.secret) pinTyped = true;
+        final long gap = Math.max(1200, Provider.current().stepDelayMs);
+        final long wait = Math.max(0, lastActionAt + gap - System.currentTimeMillis());
         sink.log("⇨ " + (key.secret ? "••••" : key.value) + "   · " + key.why);
-        handler.postDelayed(() -> typeWithRetry(key.value, mySeq, 0), Provider.current().stepDelayMs);
+        handler.postDelayed(() -> {
+            if (cancelled || plan == null) return;
+            lastActionAt = System.currentTimeMillis();
+            typeWithRetry(key.value, screenSeq, 0);
+        }, wait);
     }
 
     /**
@@ -219,8 +270,7 @@ public class UssdService extends AccessibilityService {
     private void typeWithRetry(final String value, final int seq, final int attempt) {
         if (cancelled || plan == null) return;
         if (type(value)) {
-            lastScreen = "";                       // the next screen may look identical
-            handler.postDelayed(() -> recheck(seq), 5000);
+            handler.postDelayed(() -> recheck(seq), 4500);   // no event? read once more
             return;
         }
         if (attempt < 3) {
@@ -236,11 +286,16 @@ public class UssdService extends AccessibilityService {
 
     /** No event arrived after typing — read the window once more so the plan can go on. */
     private void recheck(int seq) {
-        if (cancelled || plan == null || seq != screenSeq) return;
+        if (cancelled || plan == null) return;
         String s = collect(getRootInActiveWindow());
         if (s.isEmpty()) return;
+        if (s.equals(lastScreen)) {                       // still the screen we answered
+            if (Plan.isWaitingScreen(s)) return;
+            sink.log("↻ still on the same screen — waiting for the network");
+            return;
+        }
         sink.log("↻ re-reading the screen (no event came)");
-        handle(s);
+        consider(s);
     }
 
     private boolean type(final String value) {
@@ -248,15 +303,23 @@ public class UssdService extends AccessibilityService {
         if (root == null) return false;
         AccessibilityNodeInfo field = find(root, this::isEditable);
         if (field == null) return false;
+
+        // Clear first: a leftover character from a previous screen turns a valid
+        // number into "Invalid account number" at the network.
+        Bundle clear = new Bundle();
+        clear.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "");
+        field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clear);
+        field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value);
         boolean ok = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-        if (!ok) {
-            field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
-            ok = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-        }
+        if (!ok) ok = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+
+        CharSequence landed = field.getText();
+        sink.log("  field now: \"" + (landed == null ? "" : landed.toString()) + "\"");
         if (!ok) return false;
-        handler.postDelayed(this::clickSend, 800);
+        handler.postDelayed(this::clickSend, 900);
         return true;
     }
 
