@@ -944,8 +944,9 @@ public class MainActivity extends Activity {
             Queue.Reply r = Queue.next(server, token, true);
             ui.post(() -> {
                 if (!r.ok) {
-                    queueState.setText("✗ panel said: " + r.error);
+                    queueState.setText("✗ " + r.error + (r.hint.isEmpty() ? "" : "\n→ " + r.hint));
                     line("queue test: ✗ " + r.error);
+                    if (!r.hint.isEmpty()) line("queue test: → " + r.hint);
                 } else if (r.job == null) {
                     queueState.setText("✓ connected — the queue is empty (dry run only)");
                     line("queue test: ✓ connected, no job waiting");

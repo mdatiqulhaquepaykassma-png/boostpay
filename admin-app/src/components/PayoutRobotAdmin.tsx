@@ -62,6 +62,7 @@ type Device = {
   payoutEnabled: boolean; payoutProvider: string; lastSeenAt: number; lastJobAt: number;
 };
 type Stats = { queued: number; claimed: number; sent: number; paid24h: number; failed24h: number; paidBdt24h: number };
+type EventRow = { at: number; action: string; detail: string };
 
 const STATUS_STYLE: Record<string, string> = {
   QUEUED: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
@@ -86,6 +87,8 @@ export const PayoutRobotAdmin = () => {
   const [pending, setPending] = useState<Pending[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [issuedToken, setIssuedToken] = useState<{ label: string; token: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [note, setNote] = useState('');
@@ -104,6 +107,7 @@ export const PayoutRobotAdmin = () => {
       setPending(asArray<Pending>(j.pending));
       setDevices(asArray<Device>(j.devices));
       setStats(j.stats && typeof j.stats === 'object' ? j.stats : null);
+      setEvents(asArray<EventRow>(j.events));
       setErr('');
     } catch (e: any) { setErr(e?.message || 'Could not load the payout queue.'); }
     finally { setLoaded(true); }
@@ -120,6 +124,19 @@ export const PayoutRobotAdmin = () => {
       setNote(okText);
       await load();
     } catch (e: any) { setErr(e?.message || 'That did not work.'); }
+    setBusy(false);
+  };
+
+  const newToken = async (d: Device) => {
+    if (!window.confirm(`Issue a new token for ${str(d.label)}?\n\nThe current token stops working immediately — paste the new one in the app.`)) return;
+    setBusy(true); setErr(''); setNote('');
+    try {
+      const r = await fetch(`/api/admin/payouts/devices/${d.id}/token`, { method: 'POST', headers: authHeaders(), body: JSON.stringify({}) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'Could not issue a token.');
+      setIssuedToken({ label: str(d.label), token: String(j.token || '') });
+      await load();
+    } catch (e: any) { setErr(e?.message || 'Could not issue a token.'); }
     setBusy(false);
   };
 
@@ -198,6 +215,29 @@ export const PayoutRobotAdmin = () => {
       {!loaded && !err ? (
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-[11px] text-zinc-400">
           Loading the queue… (if this never turns into a list, the panel could not reach the server{httpNote ? ` — ${httpNote}` : ''})
+        </div>
+      ) : null}
+
+      {issuedToken ? (
+        <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/[0.07] p-4">
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] font-black uppercase tracking-wider text-emerald-300">
+              New token for {str(issuedToken.label)} — shown once
+            </div>
+            <button onClick={() => setIssuedToken(null)} className="text-[10px] font-bold text-zinc-400">close</button>
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <code className="flex-1 break-all rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-[11px] text-emerald-200">{str(issuedToken.token)}</code>
+            <button
+              onClick={() => { void navigator.clipboard?.writeText(issuedToken.token); setNote('Token copied — paste it into the payout app (section 4).'); }}
+              className="rounded-xl border border-zinc-700 px-3 py-2 text-[10px] font-bold text-zinc-200"
+            >Copy</button>
+          </div>
+          <ol className="mt-2 space-y-1 text-[10.5px] leading-relaxed text-zinc-400">
+            <li>1. On the payout phone open the app → <b className="text-zinc-200">4 · Server queue</b>.</li>
+            <li>2. Paste this token into the token box (replace the old one) → <b className="text-zinc-200">Test</b>.</li>
+            <li>3. <b className="text-zinc-200">▶ Start queue</b> — a notification must appear: “Queue running”.</li>
+          </ol>
         </div>
       ) : null}
 
@@ -293,6 +333,14 @@ export const PayoutRobotAdmin = () => {
                     <option value="bkash">bkash</option>
                   </select>
                   <button
+                    disabled={busy}
+                    onClick={() => void newToken(d)}
+                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] font-bold text-zinc-300 disabled:opacity-40"
+                    title="Issue a new device token (the phone must be given the new one)"
+                  >
+                    New token
+                  </button>
+                  <button
                     onClick={() => patchDevice(d, { payoutEnabled: !d.payoutEnabled }, `${str(d.label)}: payouts ${d.payoutEnabled ? 'OFF' : 'ON'}`)}
                     className={`rounded-lg border px-2 py-1 text-[10px] font-black ${d.payoutEnabled ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}
                   >
@@ -356,6 +404,32 @@ export const PayoutRobotAdmin = () => {
           </div>
         )}
         <p className="mt-3 flex items-center gap-1 text-[10px] text-zinc-600"><Link2 className="w-3 h-3" /> this screen refreshes every 5 s</p>
+      </div>
+
+      {/* ── phone check-ins ─────────────────────────────────────────────── */}
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
+        <div className="text-[11px] font-black uppercase tracking-wider text-zinc-400">Phone check-ins &amp; payout events</div>
+        <p className="mt-1 text-[10.5px] leading-relaxed text-zinc-500">
+          If the list below is empty, no phone has ever asked this server for a job — the app is not connected
+          (wrong token, “Start queue” not pressed, or the phone has no internet).
+          A red <b className="text-red-300">PAYOUT_AUTH_FAIL</b> line means the phone IS calling but its token is not recognised:
+          press <b className="text-zinc-300">New token</b> above and paste it into the app.
+        </p>
+        {events.length === 0 ? (
+          <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-[11px] text-zinc-500">nothing yet</div>
+        ) : (
+          <div className="mt-2 space-y-1">
+            {events.map((e, i) => (
+              <div key={`${e.at}-${i}`} className="flex items-start gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2 py-1">
+                <span className="w-24 shrink-0 text-[9.5px] font-mono text-zinc-500">{new Date(num(e.at)).toISOString().slice(11, 19)}</span>
+                <span className={`shrink-0 rounded px-1 text-[9px] font-black ${e.action.includes('AUTH_FAIL') ? 'bg-red-500/15 text-red-300' : e.action === 'PAYOUT_PAID' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-800 text-zinc-300'}`}>
+                  {str(e.action).replace('PAYOUT_', '')}
+                </span>
+                <span className="min-w-0 break-words text-[10px] text-zinc-400">{str(e.detail)}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

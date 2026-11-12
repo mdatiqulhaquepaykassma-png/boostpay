@@ -42,8 +42,10 @@ final class Queue {
     }
 
     static final class Reply {
+        int http = 0;
         boolean ok;
         String error = "";
+        String hint = "";
         Job job;                // null when the queue is empty
         long pollAfterMs = 4000;
     }
@@ -55,8 +57,15 @@ final class Queue {
             JSONObject body = new JSONObject();
             body.put("dryRun", dryRun);
             JSONObject res = post(server, "/api/payout/next", token, body.toString());
-            if (res == null) { out.error = "the server did not answer"; return out; }
-            if (res.has("error")) { out.error = res.optString("error"); return out; }
+            if (res == null) {
+                out.error = "the server did not answer — check the phone's internet and the address";
+                return out;
+            }
+            if (res.has("error")) {
+                out.error = res.optString("error");
+                out.hint = res.optString("hint", "");
+                return out;
+            }
             out.ok = true;
             out.pollAfterMs = Math.max(2000, res.optLong("pollAfterMs", 4000));
             JSONObject j = res.optJSONObject("job");

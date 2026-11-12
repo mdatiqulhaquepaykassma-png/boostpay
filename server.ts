@@ -11591,6 +11591,10 @@ const paymentLocks = new Map<string, Promise<any>>();
         active: true, autoCredit: body.autoCredit !== false,
         tolerance: Math.max(0, Math.min(100, Number(body.tolerance) || 0)),
         tokenHash: smsTokenHash(token), tokenHint: token.slice(-4),
+        // Payout duty is on from the start and aimed at the wallet of this method,
+        // so a freshly created phone can already pick up its own payouts.
+        payoutEnabled: true,
+        payoutProvider: /nagad/i.test(String(m.name)) ? 'nagad' : (/bkash|বিকাশ/i.test(String(m.name)) ? 'bkash' : ''),
         createdAt: Date.now(), createdBy: String(req.authAdmin || 'admin'),
         lastSeenAt: 0, lastSmsAt: 0, ingestCount: 0, creditCount: 0,
       };
@@ -11855,14 +11859,43 @@ const paymentLocks = new Map<string, Promise<any>>();
     return '';
   }
 
+  /** One line per phone per minute in the audit log — enough to see a wrong token. */
+  const lastAuthNoise = new Map<string, number>();
+  function noteAuthFailure(reason: string, token: string, ip: string) {
+    const hint = token ? '••••' + token.slice(-4) : '(no token)';
+    const key = hint + '|' + reason;
+    const now = Date.now();
+    if (now - (lastAuthNoise.get(key) || 0) < 60_000) return;
+    lastAuthNoise.set(key, now);
+    try {
+      const db = ensurePaymentCollections(readDb());
+      recordAuditLog(db, 'PAYOUT_AUTH_FAIL', 'payout-phone:' + ip,
+        `${reason} · token ${hint} · ip ${ip}`, '');
+      writeDb(db);
+    } catch { /* never let logging break the answer */ }
+  }
+
   function payoutDevice(req: any) {
     const token = String(req.headers['x-payout-token'] || req.headers['x-sms-token'] || '').trim();
-    if (!token) return null;
+    const ip = String((req.headers['x-forwarded-for'] || req.ip || '') + '').split(',')[0].trim();
+    if (!token) {
+      noteAuthFailure('no token in the request', '', ip);
+      return null;
+    }
     const db = ensurePaymentCollections(readDb());
     const dev = findDeviceByToken(db, token);
-    if (!dev) return null;
-    if (dev.active === false) return null;
-    if (dev.payoutEnabled === false) return null;
+    if (!dev) {
+      noteAuthFailure('token not recognised', token, ip);
+      return null;
+    }
+    if (dev.active === false) {
+      noteAuthFailure('device paused by the admin', token, ip);
+      return null;
+    }
+    if (dev.payoutEnabled === false) {
+      noteAuthFailure('payout is switched OFF for this device', token, ip);
+      return null;
+    }
     return { db, dev };
   }
   function deviceWallet(dev: any) {
@@ -11878,7 +11911,10 @@ const paymentLocks = new Map<string, Promise<any>>();
   app.post('/api/payout/next', rateLimit(240), (req: any, res) => {
     try {
       const auth = payoutDevice(req);
-      if (!auth) return res.status(401).json({ error: 'This phone is not allowed to send payouts (token missing, paused or payout disabled).' });
+      if (!auth) return res.status(401).json({
+        error: 'This phone is not allowed to send payouts: token missing / not recognised, or payout is off or paused for it.',
+        hint: 'Admin panel → Payout Robot → Phones → “New token”, then paste that token in the app (section 4).',
+      });
       const { db, dev } = auth;
       const jobs = ensurePayoutJobs(db);
       const dryRun = (req.body || {}).dryRun === true;
@@ -11977,6 +12013,14 @@ const paymentLocks = new Map<string, Promise<any>>();
           lastJobAt: d.lastJobAt || 0,
         })),
         rate: { BDT: fxRate(db, 'BDT') },
+        events: (db.auditLogs || [])
+          .filter((a: any) => String(a.action || '').startsWith('PAYOUT_'))
+          .slice(0, 25)
+          .map((a: any) => ({
+            at: Number(a.at || a.timestamp || 0),
+            action: String(a.action || ''),
+            detail: String(a.detail || a.note || '').slice(0, 220),
+          })),
       });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load the payout queue.' }); }
   });
@@ -12050,6 +12094,23 @@ const paymentLocks = new Map<string, Promise<any>>();
       writeDb(db);
       res.json({ success: true, job: publicJob(job) });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not cancel that job.' }); }
+  });
+
+  /** Issue a fresh token for a phone — the old one stops working immediately. */
+  app.post('/api/admin/payouts/devices/:id/token', rateLimit(10), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const dev: any = smsDevicesOf(db).find((d: any) => String(d.id) === String(req.params.id));
+      if (!dev) return res.status(404).json({ error: 'That device does not exist.' });
+      const token = 'BPX-' + crypto.randomBytes(18).toString('hex').toUpperCase();
+      dev.tokenHash = smsTokenHash(token);
+      dev.tokenHint = token.slice(-4);
+      dev.tokenIssuedAt = Date.now();
+      recordAuditLog(db, 'PAYOUT_DEVICE_TOKEN', 'admin:' + String(req.authAdmin),
+        `New token for device ${dev.id} (${dev.label}) — the previous token no longer works`, dev.id);
+      writeDb(db);
+      res.json({ success: true, token, device: publicSmsDevice(dev) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not issue a new token.' }); }
   });
 
   /** Let a phone send payouts (or stop it) without touching its SMS relay duty. */
