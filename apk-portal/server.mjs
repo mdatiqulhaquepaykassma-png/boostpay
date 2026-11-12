@@ -128,7 +128,7 @@ function statApk(file) {
       size: st.size,
       mtime: st.mtimeMs,
       sha256: crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16),
-      version: (file.includes('ussd') ? '2.1.6' : '1.0'),
+      version: (file.includes('ussd') ? '2.1.6' : file.includes('user') ? '1.1' : '1.0'),
     };
   } catch {
     return { ready: false, size: 0, mtime: 0, sha256: '', version: '' };
