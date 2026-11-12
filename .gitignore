@@ -39,3 +39,6 @@ sms-relay/*.jks
 sms-relay/keystore.b64
 
 ptest.ts
+
+# Mobile release keystore: the .jks is generated from the committed keystore.b64
+mobile/android/app/boostpay-mobile.jks

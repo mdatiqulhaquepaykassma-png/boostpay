@@ -1,10 +1,31 @@
 apply plugin: 'com.android.application'
 
+// Stable release signing for all four BoostPay apps (one key signs every appId).
+// The keystore travels as keystore.b64 (committed); it is decoded at build time.
+// Without the file or the password the release build simply stays unsigned and
+// the debug key is used instead — CI keeps working with no secrets configured.
+def bpKeystore = file("boostpay-mobile.jks")
+if (!bpKeystore.exists() && file("keystore.b64").exists()) {
+    bpKeystore.bytes = file("keystore.b64").text.decodeBase64()
+}
+def bpStorePass = project.findProperty("BP_STORE_PASSWORD") ?: System.getenv("BP_STORE_PASSWORD") ?: "BoostPayApps2026!"
+def bpSigned = bpKeystore.exists()
+
 android {
+    signingConfigs {
+        release {
+            if (bpSigned) {
+                storeFile bpKeystore
+                storePassword bpStorePass
+                keyAlias project.findProperty("BP_KEY_ALIAS") ?: "boostpay"
+                keyPassword project.findProperty("BP_KEY_PASSWORD") ?: bpStorePass
+            }
+        }
+    }
     namespace "com.boostpay.app"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.boostpay.app"
+        applicationId "com.boostpay.admin"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
@@ -18,6 +39,7 @@ android {
     }
     buildTypes {
         release {
+            if (bpSigned) { signingConfig signingConfigs.release }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
