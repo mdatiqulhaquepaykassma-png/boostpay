@@ -62,7 +62,7 @@ def main():
             st, hdrs, page = get(f"/{slug}")
             check(f"/{slug} 200", st == 200, str(st))
             check(f"/{slug} shows its title", a["title"] in page.decode())
-            check(f"/{slug} shows size", "MB" in page.decode())
+            check(f"/{slug} shows size", ("MB" in page.decode()) or ("KB" in page.decode()))
 
             st, hdrs, blob = get(f"/{slug}/download")
             check(f"/{slug}/download 200", st == 200, str(st))

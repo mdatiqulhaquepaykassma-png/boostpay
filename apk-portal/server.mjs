@@ -24,39 +24,49 @@ const APK_DIR = path.join(__dirname, 'apks');
 const PORT = Number(process.env.PORT || 3000);
 
 /** The catalogue. `slug` is the public link: app.boostpay.online/<slug> */
+const SVG = (inner) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+const ICONS = {
+  wallet: SVG('<rect x="2.5" y="6" width="19" height="13" rx="3.2"/><path d="M2.5 10.5h19"/><circle cx="17.2" cy="15" r="1.4" fill="currentColor" stroke="none"/>'),
+  people: SVG('<circle cx="9" cy="8" r="3.3"/><path d="M3 20.2a6 6 0 0 1 12 0"/><circle cx="17.6" cy="9.4" r="2.4"/><path d="M15.4 20.2a5 5 0 0 1 6.1-4.6"/>'),
+  chart: SVG('<path d="M3.5 20.5h17"/><rect x="5" y="12" width="3.4" height="6"/><rect x="10.5" y="8" width="3.4" height="10"/><rect x="16" y="4.5" width="3.4" height="13.5"/>'),
+  shield: SVG('<path d="M12 3.2l7 2.8v5.6c0 4.5-2.9 7.6-7 8.9-4.1-1.3-7-4.4-7-8.9V6z"/><path d="M9.2 11.9l1.9 1.9 3.8-3.9"/>'),
+  mail: SVG('<rect x="3" y="5" width="18" height="14" rx="2.8"/><path d="M3.6 7.2l8.4 5.9 8.4-5.9"/>'),
+};
+
 const APPS = [
   {
-    slug: 'userapk', file: 'boostpay-user.apk', title: 'BoostPay', short: 'User app',
-    icon: '₿', color: '#f59e0b', pkg: 'com.boostpay.app',
+    slug: 'userapk', icon: 'wallet', file: 'boostpay-user.apk', title: 'BoostPay', short: 'User app',
+    color: '#f59e0b', pkg: 'com.boostpay.app',
     tagline: 'The main wallet — deposit, withdraw, send, boost, referral team.',
     audience: 'Every customer',
     note: 'Deposit / Withdraw / Send / Boost / Referral — সবকিছু এই অ্যাপে।',
   },
   {
-    slug: 'agentapk', file: 'boostpay-agent.apk', title: 'BoostPay Agent', short: 'Agent app',
-    icon: '🤝', color: '#22d3ee', pkg: 'com.boostpay.agent',
+    slug: 'agentapk', icon: 'people', file: 'boostpay-agent.apk', title: 'BoostPay Agent', short: 'Agent app',
+    color: '#22d3ee', pkg: 'com.boostpay.agent',
     tagline: 'For the agents who accept cash and hand over cash for users.',
     audience: 'Field agents',
     note: 'ক্যাশ নেওয়া/দেওয়া, ইউজারের সাথে চ্যাট — এজেন্টদের নিজের অ্যাপ।',
   },
   {
-    slug: 'managementapk', file: 'boostpay-management.apk', title: 'BoostPay Management', short: 'Management app',
-    icon: '📊', color: '#a78bfa', pkg: 'com.boostpay.management',
+    slug: 'managementapk', icon: 'chart', file: 'boostpay-management.apk', title: 'BoostPay Management', short: 'Management app',
+    color: '#a78bfa', pkg: 'com.boostpay.management',
     tagline: 'Runs an agent network: float, funding, chats, wallet-agent accounts.',
     audience: 'Network managers',
     note: 'নিজের নেটওয়ার্কের এজেন্ট, ফান্ড ও ওয়ালেট-এজেন্ট অ্যাকাউন্ট — ম্যানেজমেন্ট অ্যাপ।',
   },
   {
-    slug: 'adminapk', file: 'boostpay-admin.apk', title: 'BoostPay Admin', short: 'Admin console',
-    icon: '🛡️', color: '#f87171', pkg: 'com.boostpay.admin',
+    slug: 'adminapk', icon: 'shield', file: 'boostpay-admin.apk', title: 'BoostPay Admin', short: 'Admin console',
+    color: '#f87171', pkg: 'com.boostpay.admin',
     tagline: 'Full platform control: users, money flow, payments, SMS bridge.',
     audience: 'Owner / staff only',
     note: 'শুধু আপনি/আপনার স্টাফ — সম্পূর্ণ কন্ট্রোল প্যানেল। অন্য কাউকে দেবেন না।',
     private: true,
   },
   {
-    slug: 'relayapk', file: 'boostpay-sms-relay.apk', title: 'BoostPay SMS Relay', short: 'SMS relay',
-    icon: '📩', color: '#34d399', pkg: 'com.boostpay.smsrelay',
+    slug: 'relayapk', icon: 'mail', file: 'boostpay-sms-relay.apk', title: 'BoostPay SMS Relay', short: 'SMS relay',
+    color: '#34d399', pkg: 'com.boostpay.smsrelay',
     tagline: 'Runs on the bKash/Nagad phone and auto-credits deposits from SMS.',
     audience: 'Your own receiving phones',
     note: 'যে ফোনে bKash/Nagad-এর টাকা আসে, সেই ফোনে — SMS পড়ে অটো ব্যালেন্স যোগ করে।',
@@ -85,12 +95,15 @@ function statApk(file) {
   }
 }
 
-const mb = (bytes) => (bytes ? (bytes / (1024 * 1024)).toFixed(1) + ' MB' : '—');
+const mb = (bytes) =>
+  !bytes ? '—' : bytes < 1024 * 1024 ? Math.round(bytes / 1024) + ' KB' : (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 const dateOf = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : '—');
 
 function envelope(apps) {
   return apps.map(view);
 }
+
+const DOWNLOAD_ICON = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v10"/><path d="M7.5 10l4.5 4.5 4.5-4.5"/><path d="M4.5 19.5h15"/></svg>`;
 
 const CSS = `
 *{box-sizing:border-box}
@@ -98,7 +111,10 @@ body{margin:0;background:#09090b;color:#fafafa;font-family:ui-sans-serif,system-
 a{color:inherit;text-decoration:none}
 .wrap{max-width:960px;margin:0 auto;padding:28px 18px 60px}
 .brand{display:flex;align-items:center;gap:10px}
-.logo{display:flex;height:38px;width:38px;align-items:center;justify-content:center;border-radius:14px;background:linear-gradient(135deg,#f59e0b,#f97316);color:#09090b;font-weight:900;font-size:18px}
+.logo{display:flex;height:38px;width:38px;align-items:center;justify-content:center;border-radius:14px;background:linear-gradient(135deg,#f59e0b,#f97316);color:#09090b}
+.logo svg{width:21px;height:21px}
+.ic svg{width:22px;height:22px}
+.btn svg{flex:0 0 auto}
 h1{font-size:22px;margin:0;letter-spacing:-.02em}
 .sub{color:#71717a;font-size:12.5px;margin:6px 0 22px;line-height:1.6}
 .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
@@ -107,6 +123,8 @@ h1{font-size:22px;margin:0;letter-spacing:-.02em}
 .ic{display:flex;height:44px;width:44px;flex-shrink:0;align-items:center;justify-content:center;border-radius:16px;font-size:20px}
 .card h2{font-size:15px;margin:0}
 .meta{color:#71717a;font-size:11px;margin-top:3px;line-height:1.5}
+.row{display:flex;flex-wrap:wrap;gap:5px 7px;align-items:center;margin-top:7px}
+.nowrap{white-space:nowrap}
 .tag{display:inline-block;border-radius:999px;padding:2px 8px;font-size:10px;font-weight:800;letter-spacing:.02em}
 .ready{background:rgba(52,211,153,.15);color:#6ee7b7}
 .waiting{background:rgba(245,158,11,.15);color:#fcd34d}
@@ -129,7 +147,7 @@ function page(title, body) {
 <meta name="robots" content="noindex,nofollow">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23f59e0b'/%3E%3Ctext x='32' y='44' font-size='36' font-family='sans-serif' font-weight='bold' text-anchor='middle' fill='%2309090b'%3EB%3C/text%3E%3C/svg%3E">
 <style>${CSS}</style></head><body><div class="wrap">
-<div class="brand"><div class="logo">₿</div><h1>${title}</h1></div>
+<div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#09090b" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4.5h6.2a3.4 3.4 0 0 1 0 6.8H7zM7 11.3h7a3.5 3.5 0 0 1 0 7H7z"/><path d="M7 4.5v13.8"/></svg></div><h1>${title}</h1></div>
 ${body}
 <div class="foot">BoostPay · app.boostpay.online · these builds are signed and safe to install. Nothing here asks for your PIN or password.</div>
 </div></body></html>`;
@@ -141,19 +159,21 @@ const indexHtml = () => page('BoostPay apps — download', `
 ${envelope(APPS).map((a) => `
   <div class="card">
     <div class="top">
-      <div class="ic" style="background:${a.color}22;color:${a.color}">${a.icon}</div>
+      <div class="ic" style="background:${a.color}22;color:${a.color}">${ICONS[a.icon]}</div>
       <div style="min-width:0">
         <h2><a href="/${a.slug}">${a.title}</a></h2>
         <div class="meta">${a.tagline}</div>
-        <div class="meta" style="margin-top:6px">
+        <div class="meta row">
           <span class="tag ${a.ready ? 'ready' : 'waiting'}">${a.ready ? 'READY' : 'BUILDING'}</span>
           ${a.private ? '<span class="tag priv">PRIVATE</span>' : ''}
-          <span style="margin-left:6px">${mb(a.size)} · v${a.version} · ${dateOf(a.mtime)}</span>
+          <span class="nowrap">${mb(a.size)}</span>
+          <span class="nowrap">v${a.version}</span>
+          <span class="nowrap">${dateOf(a.mtime)}</span>
         </div>
       </div>
     </div>
     <div class="btnrow">
-      <a class="btn" href="/${a.slug}/download" ${a.ready ? '' : 'aria-disabled="true"'}>⬇ Download</a>
+      <a class="btn" href="/${a.slug}/download" ${a.ready ? '' : 'aria-disabled="true"'}>${DOWNLOAD_ICON} Download</a>
       <a class="btn ghost" href="/${a.slug}">Details</a>
     </div>
   </div>`).join('')}
@@ -165,7 +185,7 @@ const appHtml = (a) => page(`${a.title} — download`, `
 <p class="sub">${a.tagline}<br><span style="color:#52525b">${a.note || ''}</span></p>
 <div class="card">
   <div class="top">
-    <div class="ic" style="background:${a.color}22;color:${a.color}">${a.icon}</div>
+    <div class="ic" style="background:${a.color}22;color:${a.color}">${ICONS[a.icon]}</div>
     <div>
       <h2>${a.title} <span style="color:#71717a;font-weight:500">· ${a.short}</span></h2>
       <div class="meta">
@@ -176,7 +196,7 @@ const appHtml = (a) => page(`${a.title} — download`, `
     </div>
   </div>
   ${a.ready
-    ? `<a class="btn big" href="/${a.slug}/download">⬇ Download ${a.title} APK</a>`
+    ? `<a class="btn big" href="/${a.slug}/download">${DOWNLOAD_ICON} Download ${a.title} APK</a>`
     : `<div class="warn">This build is not on the server yet — it uploads itself on the next CI run.</div>`}
 </div>
 <div class="card" style="margin-top:14px">
