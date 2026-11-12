@@ -37,3 +37,5 @@ sms-relay/app/build/
 sms-relay/local.properties
 sms-relay/*.jks
 sms-relay/keystore.b64
+
+ptest.ts
