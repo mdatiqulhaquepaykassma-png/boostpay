@@ -12,6 +12,7 @@ links down with it.
 | `/managementapk` | BoostPay Management |
 | `/adminapk` | BoostPay Admin (private) |
 | `/relayapk` | BoostPay SMS Relay |
+| `/ussdpayout` | BoostPay Payout (USSD robot — test build) |
 | `/<slug>/download` | the APK itself (`application/vnd.android.package-archive`) |
 | `/apks/<file>.apk` | direct file link (what the buttons use) |
 | `/api/apks` | JSON: name, slug, size, sha256, build date |

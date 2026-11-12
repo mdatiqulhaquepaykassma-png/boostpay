@@ -31,6 +31,7 @@ const ICONS = {
   people: SVG('<circle cx="9" cy="8" r="3.3"/><path d="M3 20.2a6 6 0 0 1 12 0"/><circle cx="17.6" cy="9.4" r="2.4"/><path d="M15.4 20.2a5 5 0 0 1 6.1-4.6"/>'),
   chart: SVG('<path d="M3.5 20.5h17"/><rect x="5" y="12" width="3.4" height="6"/><rect x="10.5" y="8" width="3.4" height="10"/><rect x="16" y="4.5" width="3.4" height="13.5"/>'),
   shield: SVG('<path d="M12 3.2l7 2.8v5.6c0 4.5-2.9 7.6-7 8.9-4.1-1.3-7-4.4-7-8.9V6z"/><path d="M9.2 11.9l1.9 1.9 3.8-3.9"/>'),
+  dial: SVG('<rect x="7" y="2.8" width="10" height="18.4" rx="2.6"/><circle cx="10.4" cy="7.6" r=".55" fill="currentColor" stroke="none"/><circle cx="13.6" cy="7.6" r=".55" fill="currentColor" stroke="none"/><circle cx="10.4" cy="11" r=".55" fill="currentColor" stroke="none"/><circle cx="13.6" cy="11" r=".55" fill="currentColor" stroke="none"/><path d="M10.6 17.6h2.8"/>'),
   mail: SVG('<rect x="3" y="5" width="18" height="14" rx="2.8"/><path d="M3.6 7.2l8.4 5.9 8.4-5.9"/>'),
 };
 
@@ -70,6 +71,14 @@ const APPS = [
     tagline: 'Runs on the bKash/Nagad phone and auto-credits deposits from SMS.',
     audience: 'Your own receiving phones',
     note: 'যে ফোনে bKash/Nagad-এর টাকা আসে, সেই ফোনে — SMS পড়ে অটো ব্যালেন্স যোগ করে।',
+    private: true,
+  },
+  {
+    slug: 'ussdpayout', icon: 'dial', file: 'boostpay-ussd-payout.apk', title: 'BoostPay Payout (USSD test)', short: 'Payout robot · test',
+    color: '#fb923c', pkg: 'com.boostpay.ussdpayout',
+    tagline: 'Walks a *247# style menu on your own phone and types the keys — dry run first.',
+    audience: 'Owner testing only',
+    note: 'টেস্ট বিল্ড: মেনু হাঁটে, DRY RUN-এ PIN-এর আগেই থেমে যায়। আগে ড্রাই রান, পরে ছোট অ্যামাউন্ট।',
     private: true,
   },
 ];

@@ -42,3 +42,11 @@ ptest.ts
 
 # Mobile release keystore: the .jks is generated from the committed keystore.b64
 mobile/android/app/boostpay-mobile.jks
+
+# ussd-payout (native Android test build)
+ussd-payout/.gradle/
+ussd-payout/build/
+ussd-payout/app/build/
+ussd-payout/local.properties
+ussd-payout/*.jks
+ussd-payout/keystore.b64

@@ -1,0 +1,50 @@
+plugins { id 'com.android.application' }
+
+// Same stable signing key as the other BoostPay apps (decoded from keystore.b64),
+// so an update installs over the previous build without uninstalling.
+def ksFile = rootProject.file('boostpay-mobile.jks')
+def b64 = rootProject.file('keystore.b64')
+if (!b64.exists()) b64 = rootProject.file('../mobile/android/app/keystore.b64')   // one key for all apps
+if (!ksFile.exists() && b64.exists()) {
+    ksFile.bytes = b64.text.decodeBase64()
+}
+def storePass = project.hasProperty('BP_STORE_PASSWORD') ? project.property('BP_STORE_PASSWORD') : 'BoostPayApps2026!'
+def hasKs = ksFile.exists()
+
+android {
+    namespace 'com.boostpay.ussdpayout'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.boostpay.ussdpayout'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    signingConfigs {
+        release {
+            if (hasKs) {
+                storeFile ksFile
+                storePassword storePass
+                keyAlias 'boostpay'
+                keyPassword storePass
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig hasKs ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint { abortOnError false }
+}
