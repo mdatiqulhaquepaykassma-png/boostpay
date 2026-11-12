@@ -16,6 +16,10 @@ import {
   methodAvailable, limitsFor, toPublicMethod, withdrawFieldsFor,
 } from './payments';
 import { parseSms, normalizeTrxId } from './sms-parse';
+import {
+  ensurePayoutJobs, buildJob, claimNext, markResult, cancelJob, matchDebit,
+  publicJob, queueStats, cleanMsisdn, cleanAmount,
+} from './payout-queue';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11697,6 +11701,44 @@ const paymentLocks = new Map<string, Promise<any>>();
         return res.status(status).json(payload);
       };
 
+      // A "you have sent Tk 100 to 017…" SMS is the proof that the payout robot's
+      // job really left the wallet. It is the ONLY thing that marks a job PAID and
+      // completes the user's withdrawal.
+      if (parsed.direction === 'DEBIT') {
+        const job = matchDebit(ensurePayoutJobs(db), {
+          amount: parsed.amount, msisdn: parsed.receiverMsisdn || parsed.senderMsisdn,
+          provider: parsed.provider === 'UNKNOWN' ? provider : parsed.provider, trxId: parsed.trxId,
+        }, { tolerance: Number(dev.tolerance) || 0 });
+        dev.lastSmsAt = Date.now();
+        if (!job) {
+          row.status = 'IGNORED';
+          row.note = 'a debit SMS that matches no job in the payout queue';
+          return finish(200, { success: true, status: 'IGNORED', credit: false, note: row.note });
+        }
+        row.status = 'PAYOUT_PAID';
+        row.amount = Number(job.amountBdt) || parsed.amount;
+        row.trxId = job.trxId || parsed.trxId;
+        row.note = `Payout job ${job.id} confirmed by SMS — ${job.number} · ${job.amountBdt} BDT`;
+        if (job.kind === 'WITHDRAW' && job.withdrawId) {
+          const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
+          if (wr && wr.status === 'PENDING') {
+            reviewWithdrawCore(db, {
+              id: String(wr.id), action: 'APPROVE', actor: 'payout-robot',
+              payoutRef: job.trxId || job.id,
+              reason: `Paid by the USSD robot · job ${job.id}`,
+            });
+            row.note += ` — withdrawal ${wr.id} completed`;
+          }
+        }
+        recordAuditLog(db, 'PAYOUT_PAID', smsDeviceActor(dev),
+          `Payout job ${job.id} (${job.kind}) paid · ${job.amountBdt} BDT to ${job.number} · TrxID ${job.trxId || parsed.trxId}`,
+          job.userId ? String(job.userId) : undefined);
+        return finish(200, {
+          success: true, status: 'PAYOUT_PAID', credit: false,
+          jobId: job.id, amountBdt: job.amountBdt, trxId: job.trxId || parsed.trxId,
+        });
+      }
+
       if (!parsed.ok || parsed.direction !== 'CREDIT') {
         row.status = 'IGNORED';
         dev.lastSmsAt = Date.now();
@@ -11769,6 +11811,234 @@ const paymentLocks = new Map<string, Promise<any>>();
         creditedUsd: Number(req0.amountUsd) || 0,
       });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not process the SMS.' }); }
+  });
+
+  /* ── PAYOUT QUEUE — the admin panel drives the USSD robot ─────────────────
+   *
+   *  admin panel ──queue/test──▶ payoutJobs ──poll──▶ phone (ussd-payout app)
+   *        ▲                                            │
+   *        └──── "you have sent Tk X" SMS ◀── wallet ◀────┘
+   *
+   * The phone authenticates with the SAME hashed device token as the SMS relay
+   * (`x-payout-token` or `x-sms-token`), so there is one device registry, one
+   * revoke switch, and no second secret to lose.
+   *
+   * Money is only ever moved by code that already existed:
+   *   · FAILED  → reviewWithdrawCore(REJECT)  → refund + notify the user
+   *   · SMS says sent → reviewWithdrawCore(APPROVE) → withdrawal COMPLETED
+   * A TEST job has no user and no withdrawal, so it can never move money.
+   */
+
+  function payoutDevice(req: any) {
+    const token = String(req.headers['x-payout-token'] || req.headers['x-sms-token'] || '').trim();
+    if (!token) return null;
+    const db = ensurePaymentCollections(readDb());
+    const dev = findDeviceByToken(db, token);
+    if (!dev) return null;
+    if (dev.active === false) return null;
+    if (dev.payoutEnabled === false) return null;
+    return { db, dev };
+  }
+  function deviceWallet(dev: any) {
+    const p = String(dev.payoutProvider || '').toLowerCase();
+    if (p === 'nagad' || p === 'bkash') return p;
+    const name = String(dev.methodName || '').toLowerCase();
+    if (name.includes('nagad')) return 'nagad';
+    if (name.includes('bkash') || name.includes('bikash')) return 'bkash';
+    return '';
+  }
+
+  /** The phone asks for work. It gets one job at a time, never two. */
+  app.post('/api/payout/next', rateLimit(240), (req: any, res) => {
+    try {
+      const auth = payoutDevice(req);
+      if (!auth) return res.status(401).json({ error: 'This phone is not allowed to send payouts (token missing, paused or payout disabled).' });
+      const { db, dev } = auth;
+      const jobs = ensurePayoutJobs(db);
+      const dryRun = (req.body || {}).dryRun === true;
+      const job = claimNext(jobs, {
+        deviceId: dev.id, deviceLabel: dev.label, provider: deviceWallet(dev),
+        // a phone on DRY RUN is only ever given a TEST job
+        kinds: dryRun ? ['TEST'] : ['TEST', 'WITHDRAW'],
+      });
+      dev.lastSeenAt = Date.now();
+      if (job) {
+        dev.lastJobAt = Date.now();
+        recordAuditLog(db, 'PAYOUT_CLAIM', smsDeviceActor(dev),
+          `Payout job ${job.id} (${job.kind} · ${job.provider} · ${job.amountBdt} BDT) handed to ${dev.label}`,
+          job.userId ? String(job.userId) : undefined);
+      }
+      writeDb(db);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        success: true,
+        job: job ? {
+          id: job.id, kind: job.kind, provider: job.provider, number: job.number,
+          amountBdt: job.amountBdt, ref: job.ref, note: job.note || '',
+        } : null,
+        pollAfterMs: 4000,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not read the payout queue.' }); }
+  });
+
+  /** The phone reports what happened. */
+  app.post('/api/payout/:id/result', rateLimit(240), (req: any, res) => {
+    try {
+      const auth = payoutDevice(req);
+      if (!auth) return res.status(401).json({ error: 'This phone is not allowed to report payouts.' });
+      const { db, dev } = auth;
+      const body = req.body || {};
+      const raw = String(body.status || '').toUpperCase();
+      const status = raw === 'SENT' ? 'SENT' : raw === 'DRYRUN' ? 'DRYRUN' : 'FAILED';
+      const out = markResult(ensurePayoutJobs(db), String(req.params.id), status as any, {
+        note: sanitizeText(body.note, 300), log: String(body.log || '').slice(0, 4000), deviceId: dev.id,
+      });
+      if (!out.ok) return res.status(409).json({ error: out.error });
+      const job = out.job;
+      dev.lastSeenAt = Date.now();
+
+      if (status === 'FAILED' && job.kind === 'WITHDRAW' && job.withdrawId) {
+        const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
+        if (wr && wr.status === 'PENDING') {
+          reviewWithdrawCore(db, {
+            id: String(wr.id), action: 'REJECT', actor: 'payout-robot',
+            reason: `The phone could not send it: ${sanitizeText(body.note, 140) || 'no reason given'}`,
+          });
+        }
+      }
+      // A DRYRUN moves no money and leaves a real withdrawal PENDING for a live retry.
+      recordAuditLog(db, 'PAYOUT_' + status, smsDeviceActor(dev),
+        `Payout job ${job.id} → ${status}${body.note ? ' · ' + sanitizeText(body.note, 120) : ''}`,
+        job.userId ? String(job.userId) : undefined);
+      writeDb(db);
+      res.json({ success: true, job: publicJob(job) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not record the payout result.' }); }
+  });
+
+  /** Everything the admin "Payout Robot" screen paints. */
+  app.get('/api/admin/payouts', rateLimit(120), requireAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const jobs = ensurePayoutJobs(db);
+      const pending = (db.withdrawRequests || []).filter((w: any) => w.status === 'PENDING').slice(0, 40)
+        .map((w: any) => {
+          const u: any = (db.users || []).find((x: any) => String(x.id) === String(w.userId)) || {};
+          const bdt = toDisplay(db, Number(w.netUsd) || 0, 'BDT');
+          return {
+            id: w.id, userId: w.userId, userName: u.name || '', userPhone: u.phone || '',
+            methodName: w.methodName, number: w.destination || '',
+            amountUsd: Number(w.netUsd) || 0,
+            amountBdt: bdt == null ? null : Math.round(bdt * 100) / 100,
+            queued: jobs.some((j) => j.status !== 'CANCELLED' && j.status !== 'FAILED' && j.withdrawId === w.id),
+            createdAt: w.createdAt || 0,
+          };
+        });
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        success: true,
+        jobs: jobs.slice(0, 120).map(publicJob),
+        pending,
+        stats: queueStats(jobs),
+        devices: smsDevicesOf(db).map((d: any) => ({
+          ...publicSmsDevice(d),
+          payoutEnabled: d.payoutEnabled !== false,
+          payoutProvider: d.payoutProvider || deviceWallet(d) || '',
+          lastJobAt: d.lastJobAt || 0,
+        })),
+        rate: { BDT: fxRate(db, 'BDT') },
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load the payout queue.' }); }
+  });
+
+  /** A test payout from the admin panel — real USSD, real money, no user attached. */
+  app.post('/api/admin/payouts/test', rateLimit(20), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const db = ensurePaymentCollections(readDb());
+      const built = buildJob({
+        kind: 'TEST', provider: body.provider, number: body.number, amountBdt: body.amountBdt,
+        ref: body.ref, note: 'admin test' + (body.dryRun === true ? ' (dry run)' : ''),
+      });
+      if (!built.ok) return res.status(400).json({ error: built.error });
+      const jobs = ensurePayoutJobs(db);
+      jobs.unshift(built.job);
+      recordAuditLog(db, 'PAYOUT_TEST_QUEUED', 'admin:' + String(req.authAdmin),
+        `Test payout ${built.job.id}: ${built.job.amountBdt} BDT to ${built.job.number} (${built.job.provider})`, built.job.id);
+      writeDb(db);
+      res.json({ success: true, job: publicJob(built.job) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not queue the test payout.' }); }
+  });
+
+  /** Turn a pending withdrawal into a robot job. */
+  app.post('/api/admin/payouts/queue', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const db = ensurePaymentCollections(readDb());
+      const w: any = (db.withdrawRequests || []).find((x: any) => String(x.id) === String(body.withdrawId));
+      if (!w) return res.status(404).json({ error: 'That withdrawal does not exist.' });
+      if (w.status !== 'PENDING') return res.status(409).json({ error: `This withdrawal is already ${w.status}.` });
+      const jobs = ensurePayoutJobs(db);
+      if (jobs.some((j) => j.withdrawId === w.id && ['QUEUED', 'CLAIMED', 'SENT'].includes(j.status))) {
+        return res.status(409).json({ error: 'This withdrawal is already in the queue.' });
+      }
+      const name = String(w.methodName || '').toLowerCase();
+      const provider = name.includes('nagad') ? 'nagad' : (name.includes('bkash') || name.includes('বিকাশ')) ? 'bkash' : '';
+      if (!provider) return res.status(400).json({ error: 'This withdrawal is not a bKash/Nagad number payout.' });
+      const amountBdt = body.amountBdt != null && String(body.amountBdt).trim() !== ''
+        ? cleanAmount(body.amountBdt)
+        : (toDisplay(db, Number(w.netUsd) || 0, 'BDT') || 0);
+      const built = buildJob({
+        kind: 'WITHDRAW', provider, number: body.number || w.destination, amountBdt,
+        amountUsd: Number(w.netUsd) || 0, ref: '1',
+        withdrawId: w.id, userId: w.userId, note: `withdrawal ${w.id}`,
+      });
+      if (!built.ok) return res.status(400).json({ error: built.error });
+      jobs.unshift(built.job);
+      recordAuditLog(db, 'PAYOUT_QUEUED', 'admin:' + String(req.authAdmin),
+        `Withdrawal ${w.id} queued: ${built.job.amountBdt} BDT to ${built.job.number} (${provider})`, String(w.userId));
+      writeDb(db);
+      res.json({ success: true, job: publicJob(built.job) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not queue that withdrawal.' }); }
+  });
+
+  /** Cancel a job that has not left the wallet. A queued withdrawal is refunded. */
+  app.post('/api/admin/payouts/:id/cancel', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const jobs = ensurePayoutJobs(db);
+      const out = cancelJob(jobs, String(req.params.id), { reason: sanitizeText((req.body || {}).reason, 160) });
+      if (!out.ok) return res.status(409).json({ error: out.error });
+      const job = out.job;
+      if (job.kind === 'WITHDRAW' && job.withdrawId) {
+        const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
+        if (wr && wr.status === 'PENDING') {
+          reviewWithdrawCore(db, { id: String(wr.id), action: 'REJECT', actor: 'admin:' + String(req.authAdmin), reason: 'Payout job cancelled in the admin panel' });
+        }
+      }
+      recordAuditLog(db, 'PAYOUT_CANCEL', 'admin:' + String(req.authAdmin), `Payout job ${job.id} cancelled`, job.userId);
+      writeDb(db);
+      res.json({ success: true, job: publicJob(job) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not cancel that job.' }); }
+  });
+
+  /** Let a phone send payouts (or stop it) without touching its SMS relay duty. */
+  app.post('/api/admin/payouts/devices/:id', rateLimit(60), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const db = ensurePaymentCollections(readDb());
+      const dev: any = smsDevicesOf(db).find((d: any) => String(d.id) === String(req.params.id));
+      if (!dev) return res.status(404).json({ error: 'That device does not exist.' });
+      if (typeof body.payoutEnabled === 'boolean') dev.payoutEnabled = body.payoutEnabled;
+      if (body.payoutProvider != null) {
+        const p = String(body.payoutProvider).toLowerCase();
+        if (!['', 'nagad', 'bkash'].includes(p)) return res.status(400).json({ error: 'payoutProvider must be nagad, bkash or empty.' });
+        dev.payoutProvider = p;
+      }
+      recordAuditLog(db, 'PAYOUT_DEVICE_UPDATE', 'admin:' + String(req.authAdmin),
+        `Device ${dev.id} (${dev.label}): payout ${dev.payoutEnabled === false ? 'OFF' : 'ON'} · wallet ${dev.payoutProvider || 'auto'}`, dev.id);
+      writeDb(db);
+      res.json({ success: true, device: publicSmsDevice(dev) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not update that device.' }); }
   });
 
   // One-off (and re-runnable) move of bonuses that still sit in the retired bonus

@@ -3,6 +3,10 @@
 
     <!-- sendUssdRequest() needs CALL_PHONE; everything else is local only. -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
+    <!-- Server queue only: picks up jobs from the panel and reports the result.
+         Nothing else leaves the phone; the app never reads the wallet or the SMS. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Which SIM is in which slot, and which subscription a USSD call must use. -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
