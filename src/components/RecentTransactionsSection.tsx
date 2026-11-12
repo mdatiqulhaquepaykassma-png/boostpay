@@ -11,7 +11,7 @@ interface Props {
   onViewAllTransactions?: () => void;
 }
 
-type FilterTab = 'ALL' | 'REWARD' | 'P2P' | 'REFERRAL';
+type FilterTab = 'ALL' | 'DEPOSIT' | 'WITHDRAW' | 'REWARD' | 'P2P' | 'REFERRAL';
 
 export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId, onViewAllTransactions }) => {
   const { currency, fmt, price } = useCurrency();
@@ -45,12 +45,16 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
     reward: userTxs.filter(t => String(t.type).includes('REWARD')).length,
     p2p: userTxs.filter(t => t.type === 'TRANSFER_SENT' || t.type === 'TRANSFER_RECEIVED').length,
     referral: userTxs.filter(t => String(t.type).includes('REFERRAL')).length,
+    deposit: userTxs.filter(t => String(t.type).includes('DEPOSIT')).length,
+    withdraw: userTxs.filter(t => String(t.type).includes('WITHDRAW')).length,
   };
 
   const filteredTxs = userTxs.filter(t => {
     if (filterTab === 'REWARD') return String(t.type).includes('REWARD');
     if (filterTab === 'P2P') return t.type === 'TRANSFER_SENT' || t.type === 'TRANSFER_RECEIVED';
     if (filterTab === 'REFERRAL') return String(t.type).includes('REFERRAL');
+    if (filterTab === 'DEPOSIT') return String(t.type).includes('DEPOSIT');
+    if (filterTab === 'WITHDRAW') return String(t.type).includes('WITHDRAW');
     return true;
   });
 
@@ -62,6 +66,29 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
   const handleTab = (tab: FilterTab) => {
     setFilterTab(tab);
     setCurrentPage(0);
+  };
+
+  /** "Withdrawal · COMPLETED" — the row must say what happened, not only the amount. */
+  const statusOf = (tx: Transaction): string => {
+    const meta: any = (tx as any).metadata || {};
+    const raw = String((tx as any).status || meta.status || '').toUpperCase();
+    const type = String(tx.type);
+    if (type.includes('WITHDRAW')) {
+      if (raw === 'COMPLETED' || raw === 'APPROVED' || raw === 'PAID') return 'SENT';
+      if (raw === 'REJECTED' || raw === 'REFUNDED') return 'REFUNDED';
+      if (type === 'WITHDRAW_REFUND') return 'REFUNDED';
+      return 'PENDING';
+    }
+    if (type.includes('DEPOSIT')) {
+      if (raw === 'COMPLETED' || raw === 'APPROVED' || raw === 'CREDITED') return 'CREDITED';
+      if (raw === 'REJECTED') return 'REJECTED';
+      return 'PENDING';
+    }
+    return '';
+  };
+  const trxOf = (tx: Transaction): string => {
+    const meta: any = (tx as any).metadata || {};
+    return String(meta.trxId || (tx as any).trxId || '');
   };
 
   const getTxDetails = (tx: Transaction) => {
@@ -166,10 +193,12 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
       </div>
 
       {/* Filter tabs — fix: user can now see P2P vs Reward separately instead of only Reward flooding */}
-      <div className="grid grid-cols-4 gap-1 p-1 bg-zinc-950 rounded-2xl border border-zinc-800/80 mb-3">
+      <div className="grid grid-cols-6 gap-1 p-1 bg-zinc-950 rounded-2xl border border-zinc-800/80 mb-3">
         <button onClick={()=>handleTab('ALL')} className={`py-1.5 text-[10px] font-bold rounded-xl transition cursor-pointer truncate ${filterTab==='ALL'?'bg-zinc-800 text-amber-400':'text-zinc-400 hover:text-zinc-200'}`}>All ({counts.all})</button>
         <button onClick={()=>handleTab('REWARD')} className={`py-1.5 text-[10px] font-bold rounded-xl transition cursor-pointer truncate ${filterTab==='REWARD'?'bg-zinc-800 text-amber-400':'text-zinc-400 hover:text-zinc-200'}`}>Reward ({counts.reward})</button>
         <button onClick={()=>handleTab('P2P')} className={`py-1.5 text-[10px] font-bold rounded-xl transition cursor-pointer truncate ${filterTab==='P2P'?'bg-zinc-800 text-amber-400':'text-zinc-400 hover:text-zinc-200'}`}>P2P ({counts.p2p})</button>
+        <button onClick={()=>handleTab('DEPOSIT')} className={`py-1.5 text-[10px] font-bold rounded-xl transition cursor-pointer truncate ${filterTab==='DEPOSIT'?'bg-zinc-800 text-emerald-400':'text-zinc-400 hover:text-zinc-200'}`}>Dep ({counts.deposit})</button>
+        <button onClick={()=>handleTab('WITHDRAW')} className={`py-1.5 text-[10px] font-bold rounded-xl transition cursor-pointer truncate ${filterTab==='WITHDRAW'?'bg-zinc-800 text-rose-400':'text-zinc-400 hover:text-zinc-200'}`}>Wdr ({counts.withdraw})</button>
         <button onClick={()=>handleTab('REFERRAL')} className={`py-1.5 text-[10px] font-bold rounded-xl transition cursor-pointer truncate ${filterTab==='REFERRAL'?'bg-zinc-800 text-amber-400':'text-zinc-400 hover:text-zinc-200'}`}>Refer ({counts.referral})</button>
       </div>
 
@@ -189,7 +218,22 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
                   <Icon className="w-4 h-4" />
                 </div>
                 <div>
-                  <div className="text-xs font-semibold text-zinc-200">{detail.label}</div>
+                  <div className="text-xs font-semibold text-zinc-200">
+                    {detail.label}
+                    {(() => {
+                      const st = statusOf(tx);
+                      if (!st) return null;
+                      const tone = st === 'SENT' || st === 'CREDITED'
+                        ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                        : st === 'REFUNDED' || st === 'REJECTED'
+                          ? 'border-rose-500/40 bg-rose-500/10 text-rose-300'
+                          : 'border-amber-500/40 bg-amber-500/10 text-amber-300';
+                      return <span className={`ml-1.5 rounded-md border px-1 py-[1px] text-[8px] font-black ${tone}`}>{st}</span>;
+                    })()}
+                  </div>
+                  {trxOf(tx) ? (
+                    <div className="text-[9px] font-mono text-emerald-300">TrxID {trxOf(tx)}</div>
+                  ) : null}
                   <div className="text-[10px] font-mono text-zinc-500">
                     {new Date(tx.timestamp).toLocaleString([], {
                       month: 'short',
@@ -215,7 +259,12 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
 
         {filteredTxs.length === 0 && (
           <div className="py-8 text-center text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-xl">
-            {filterTab==='P2P' ? 'No P2P transfers yet. Send money to a peer to see history.' : filterTab==='REWARD' ? 'No boosting rewards yet. Start boost to earn.' : filterTab==='REFERRAL' ? 'No referral commissions yet. Invite friends.' : 'No transactions recorded yet. Complete a boost cycle or receive a transfer to see history.'}
+            {filterTab==='P2P' ? 'No P2P transfers yet. Send money to a peer to see history.'
+              : filterTab==='REWARD' ? 'No boosting rewards yet. Start boost to earn.'
+              : filterTab==='REFERRAL' ? 'No referral commissions yet. Invite friends.'
+              : filterTab==='DEPOSIT' ? 'No deposits yet. Add money to see them here.'
+              : filterTab==='WITHDRAW' ? 'No withdrawals yet. Cash out to see them here.'
+              : 'No transactions recorded yet. Complete a boost cycle or receive a transfer to see history.'}
           </div>
         )}
 
@@ -337,6 +386,18 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
                   <span className="text-zinc-200">#{selectedTx.senderId}</span>
                 </div>
               )}
+              {statusOf(selectedTx) ? (
+                <div className="flex justify-between py-1 border-b border-zinc-800/60">
+                  <span className="text-zinc-500">Status:</span>
+                  <span className="font-bold text-emerald-300">{statusOf(selectedTx)}</span>
+                </div>
+              ) : null}
+              {trxOf(selectedTx) ? (
+                <div className="flex justify-between py-1 border-b border-zinc-800/60">
+                  <span className="text-zinc-500">TrxID:</span>
+                  <span className="font-mono text-emerald-300">{trxOf(selectedTx)}</span>
+                </div>
+              ) : null}
               {selectedTx.notes && (
                 <div className="py-1">
                   <span className="text-zinc-500 block mb-1">Notes:</span>

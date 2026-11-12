@@ -103,6 +103,17 @@ export function getDefaultConfig(): SystemConfig {
   };
 }
 
+/**
+ * A stored transaction can CHANGE after it was first saved: a withdrawal goes
+ * PENDING → COMPLETED and later carries the wallet's TrxID. Merging only new ids
+ * left every device showing the old text ("pending review") for ever.
+ */
+const txChanged = (a: any, b: any): boolean =>
+  String(a?.notes || '') !== String(b?.notes || '')
+  || String(a?.status || '') !== String(b?.status || '')
+  || Number(a?.amount || 0) !== Number(b?.amount || 0)
+  || JSON.stringify(a?.metadata || {}) !== JSON.stringify(b?.metadata || {});
+
 export class BoostPayStore {
   private static isSyncing = false;
   // ---- BOOST STATE ORDERING (fixes "click Boost -> UI shows stopped while the server keeps running") ----
@@ -219,11 +230,18 @@ export class BoostPayStore {
         // Smart merge transactions — union by id (a slim window must never delete history)
         if (data.transactions && Array.isArray(data.transactions)) {
           const localTxs = this.getTransactions();
-          const seen = new Set(localTxs.map(t => t.id));
-          const fresh = (data.transactions as any[]).filter(t => t && !seen.has(t.id));
+          const byId = new Map(localTxs.map((t: any) => [String(t.id), t]));
+          let touched = false;
+          for (const t of data.transactions as any[]) {
+            if (!t) continue;
+            const old: any = byId.get(String(t.id));
+            if (!old) { localTxs.unshift(t); touched = true; continue; }
+            if (txChanged(old, t)) { Object.assign(old, t); touched = true; }
+          }
+          const fresh = touched ? localTxs : [];
           let addedTxs = false;
           if (fresh.length) {
-            const mergedTxs = [...fresh, ...localTxs].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
+            const mergedTxs = [...fresh].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
             localStorage.setItem(STORAGE_TRANSACTIONS, JSON.stringify(mergedTxs));
             this.txCached = null; // direct write — drop the memo
             addedTxs = true;
@@ -1473,7 +1491,13 @@ export class BoostPayStore {
             let hasNewTxs = false;
 
             for (const t of data.transactions) {
-              if (!allTxs.some(existing => existing.id === t.id)) {
+              const known = allTxs.find((x: any) => x.id === t.id);
+              if (known) {
+                if (txChanged(known, t)) { Object.assign(known, t); hasNewTxs = true; }
+                this.seenNotificationIds.add(t.id);
+                continue;
+              }
+              if (true) {
                 allTxs.unshift(t);
                 hasNewTxs = true;
 

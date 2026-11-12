@@ -149,7 +149,7 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
 
   const loadHistory = useCallback(async (m: Mode) => {
     try {
-      const r = await fetch(m === 'deposit' ? '/api/user/deposit-requests' : '/api/user/withdraw-requests', { headers: BoostPayStore.authHeaders() });
+      const r = await fetch(m === 'deposit' ? '/api/user/deposit-requests' : '/api/user/withdraw-requests', { headers: BoostPayStore.authHeaders(), cache: 'no-store' });
       if (!r.ok) return;
       const j = await r.json();
       setHistory(Array.isArray(j.requests) ? j.requests : []);

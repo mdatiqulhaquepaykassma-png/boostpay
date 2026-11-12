@@ -10714,11 +10714,20 @@ const paymentLocks = new Map<string, Promise<any>>();
       const credit = Number(Number(r.amountUsd).toFixed(8));
       if (!(credit > 0)) return { status: 400, body: { error: 'The stored amount is not usable.' } };
       user.balance = floor2((Number(user.balance) || 0) + credit);
-      const txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
-      db.transactions.unshift({
-        id: txId, userId: user.id, type: 'DEPOSIT', amount: credit, timestamp: Date.now(),
-        notes: `Deposit ${r.id} approved · ${r.methodName} · ref ${r.reference}`, referenceId: r.id,
-      });
+      const existing: any = (db.transactions || []).find((t: any) => String(t.id) === String(r.txId));
+      if (existing) {
+        existing.type = 'DEPOSIT'; existing.amount = credit; existing.status = 'CREDITED';
+        existing.notes = `Deposit ${r.id} credited · ${r.methodName} · ref ${r.reference}`;
+        existing.metadata = { ...(existing.metadata || {}), status: 'CREDITED', depositId: r.id };
+      }
+      const txId = existing ? existing.id : ('TX-' + Math.floor(10000000 + Math.random() * 90000000));
+      if (!existing) {
+        db.transactions.unshift({
+          id: txId, userId: user.id, type: 'DEPOSIT', amount: credit, timestamp: Date.now(), status: 'CREDITED',
+          notes: `Deposit ${r.id} credited · ${r.methodName} · ref ${r.reference}`, referenceId: r.id,
+          metadata: { status: 'CREDITED', depositId: r.id },
+        });
+      }
       r.status = 'APPROVED'; r.txId = txId;
       pushNotification(db, {
         id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
@@ -10728,6 +10737,12 @@ const paymentLocks = new Map<string, Promise<any>>();
       } as any);
     } else {
       r.status = 'REJECTED';
+      const pending: any = (db.transactions || []).find((t: any) => String(t.id) === String(r.txId));
+      if (pending) {
+        pending.status = 'REJECTED';
+        pending.notes = `Deposit ${r.id} could not be verified (${r.methodName})`;
+        pending.metadata = { ...(pending.metadata || {}), status: 'REJECTED', depositId: r.id };
+      }
       pushNotification(db, {
         id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
         userId: String(user.id), type: 'SYSTEM_ALERT', title: 'BOOSTPAY-DEPOSIT',
@@ -10777,6 +10792,13 @@ const paymentLocks = new Map<string, Promise<any>>();
         notes: `Withdrawal ${r.id} rejected — refunded`, referenceId: r.id,
       });
       r.status = 'REJECTED'; r.txId = txId;
+      // the original "you asked for a withdrawal" row now says what happened
+      const orig: any = (db.transactions || []).find((t: any) => String(t.referenceId) === String(r.id) && String(t.type) === 'WITHDRAW_REQUEST');
+      if (orig) {
+        orig.status = 'REFUNDED';
+        orig.notes = `Withdrawal ${r.id} could not be sent — refunded to your balance`;
+        orig.metadata = { ...(orig.metadata || {}), status: 'REFUNDED', withdrawId: r.id, refundTxId: txId };
+      }
       pushNotification(db, {
         id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
         userId: String(user.id), type: 'TRANSFER_RECEIVED', title: 'BOOSTPAY-WITHDRAW',
@@ -10886,6 +10908,14 @@ const paymentLocks = new Map<string, Promise<any>>();
         reason: '',
         txId: '',
       };
+      // The customer's history shows the deposit immediately, with its real status.
+      request.txId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+      db.transactions.unshift({
+        id: request.txId, userId: user.id, type: 'DEPOSIT_REQUEST', amount: request.amountUsd,
+        timestamp: Date.now(), status: 'PENDING',
+        notes: `Deposit ${request.id} via ${m.name} (pending verification)`,
+        referenceId: request.id, metadata: { status: 'PENDING', depositId: request.id },
+      });
       db.depositRequests.unshift(request);
       if (db.depositRequests.length > 20000) db.depositRequests.length = 20000;
       recordAuditLog(db, 'DEPOSIT_REQUEST', 'user:' + user.id, `Deposit ${request.id}: $${request.amountUsd.toFixed(2)} via ${m.name} (ref ${reference})`, String(user.id));
@@ -10962,9 +10992,9 @@ const paymentLocks = new Map<string, Promise<any>>();
         user.balance = Math.floor((balance - amount) * 100 + 1e-9) / 100;
         holdBoostProfit(user, amount);
         db.transactions.unshift({
-          id: txId, userId: user.id, type: 'WITHDRAW_REQUEST', amount, fee,
+          id: txId, userId: user.id, type: 'WITHDRAW_REQUEST', amount, fee, status: 'PENDING',
           timestamp: Date.now(), notes: `Withdrawal ${requestId} via ${m.name} (pending review)`,
-          referenceId: requestId,
+          referenceId: requestId, metadata: { status: 'PENDING', withdrawId: requestId },
         });
         const request: any = {
           id: requestId, userId: String(user.id), methodId: m.id, methodName: m.name, category: m.category,
@@ -10993,7 +11023,15 @@ const paymentLocks = new Map<string, Promise<any>>();
   app.get('/api/user/withdraw-requests', rateLimit(120), requireUser, (req: any, res) => {
     const db = ensurePaymentCollections(readDb());
     const rows = (db.withdrawRequests || []).filter((w: any) => String(w.userId) === String(req.authUserId)).slice(0, 50);
-    res.json({ success: true, requests: rows });
+    const jobs = ensurePayoutJobs(db);
+    res.setHeader('Cache-Control', 'no-store, max-age=0');
+    res.json({
+      success: true,
+      requests: rows.map((w: any) => {
+        const job: any = jobs.find((j: any) => j.withdrawId === w.id && j.trxId);
+        return { ...w, payoutTrxId: w.payoutTrxId || (job ? job.trxId : ''), payoutJobId: w.payoutJobId || (job ? job.id : '') };
+      }),
+    });
   });
 
   // ── Admin: method configuration ────────────────────────────────────────────
