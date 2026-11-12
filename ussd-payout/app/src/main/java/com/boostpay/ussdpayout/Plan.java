@@ -30,6 +30,11 @@ public final class Plan {
     /** index of the first CSV step that carries the PIN (-1 = none) */
     public final int pinStep;
 
+    // ── per-run memory: a value is sent once and never repeated ──────────────
+    public boolean numberSent;
+    public boolean amountSent;
+    public boolean pinSent;
+
     public Plan(String serviceCode, String number, String amount, String pin, String ref,
                 String stepsCsv, boolean dryRun, boolean adaptive) {
         this.serviceCode = blank(serviceCode) ? DEFAULT_SERVICE : serviceCode.trim();
@@ -99,6 +104,17 @@ public final class Plan {
         String l = screen == null ? "" : screen.toLowerCase();
 
         if (adaptive) {
+            // (a) The "Send money to 01X… amount 100? 1. Confirm 2. Cancel" screen.
+            //     It mentions the amount and the number, so a keyword reader would
+            //     re-type the amount here and the network refuses it. Answer the
+            //     confirm option instead — never a money value.
+            if (looksLikeConfirm(l)) {
+                String opt = menuOptionFor(l, CONFIRM_WORDS);
+                if (opt != null) return new Key(opt, false, false, false, "confirm screen: option " + opt + " = Confirm");
+                if (looksLikeMenu(l)) return Key.wait("confirm screen but I cannot read its options — waiting");
+                return new Key("1", false, false, false, "confirm screen: 1 = Confirm");
+            }
+
             // A numbered menu is never a PIN prompt — even when one item is "PIN Reset"
             // (Nagad's main menu has exactly that) or "Change PIN".
             if (looksLikeMenu(l)) {
@@ -111,16 +127,32 @@ public final class Plan {
             boolean asksPin = has(l, "pin", "পিন", "password", "পাসওয়ার্ড", "গোপন")
                     && !has(l, "pin reset", "reset pin", "change pin", "pin change",
                               "পিন রিসেট", "পিন পরিবর্তন", "পিন ভুলে");
-            boolean asksAmount = has(l, "amount", "পরিমাণ", "টাকার পরিমাণ", "taka", "tk ");
+            boolean asksAmount = has(l, "amount", "পরিমাণ", "টাকার পরিমাণ");
             boolean asksRef = has(l, "reference", "রেফারেন্স", "remark");
             boolean asksNumber = has(l, "number", "নম্বর", "account", "একাউন্ট", "একাউন্টে", "mobile", "মোবাইল");
+            // Only a real question accepts input: "Enter…", "Type…", "লিখুন", "দিন".
+            // A summary screen that merely prints "Amount 100" must never be typed into.
+            boolean question = isQuestion(l);
 
             if (asksPin) {
+                if (pinSent) return Key.wait("PIN already sent — waiting for the confirmation");
+                if (!question) return Key.wait("screen mentions PIN but is not asking for it — waiting");
                 if (dryRun) return Key.stop("this screen asks for the PIN — a dry run stops here, nothing is sent");
+                pinSent = true;
                 return new Key(pin, true, false, false, "PIN prompt");
             }
-            if (asksAmount) return new Key(amount, false, false, false, "amount prompt");
-            if (asksNumber) return new Key(number, false, false, false, "receiver prompt");
+            if (asksAmount) {
+                if (amountSent) return Key.wait("amount already sent — waiting for the next screen");
+                if (!question) return Key.wait("screen shows the amount but is not asking for it — waiting");
+                amountSent = true;
+                return new Key(amount, false, false, false, "amount prompt");
+            }
+            if (asksNumber) {
+                if (numberSent) return Key.wait("receiver number already sent — waiting for the next screen");
+                if (!question) return Key.wait("screen mentions a number but is not asking for it — waiting");
+                numberSent = true;
+                return new Key(number, false, false, false, "receiver prompt");
+            }
             if (asksRef) return new Key(ref, false, false, false, "reference prompt");
             // Not recognised: wait for the next screen instead of typing a guess.
             return Key.wait("this screen is not recognised — waiting (no keys typed)");
@@ -144,6 +176,33 @@ public final class Plan {
             "nagad account", "to nagad", "nagad number", "to account", "account number",
             "mobile number", "personal", "নগদ একাউন্ট", "একাউন্ট নম্বর", "মোবাইল নম্বর"
     };
+    /** Options that carry a "yes, do it" meaning. */
+    private static final String[] CONFIRM_WORDS = {
+            "confirm", "proceed", "yes", "ok", "continue", "submit",
+            "নিশ্চিত", "হ্যাঁ", "সম্মত", "চালিয়ে"
+    };
+    /** Screens that ask "shall I send it?" — they take the confirm option, never a value. */
+    public static boolean looksLikeConfirm(String lower) {
+        if (lower == null) return false;
+        // "Enter your PIN to confirm" is a PIN prompt, not a confirmation.
+        if (isQuestion(lower)) return false;
+        if (has(lower, "are you sure", "do you want to", "please confirm",
+                     "নিশ্চিত করুন", "আপনি কি")) return true;
+        // "1. Confirm 2. Cancel" — a menu whose only real option is Confirm.
+        String opt = menuOptionFor(lower, CONFIRM_WORDS);
+        if (opt == null) return false;
+        // The main menu always carries several unrelated services — a confirmation does not.
+        return looksLikeMenu(lower) && has(lower, "cancel")
+                && !has(lower, "cash out", "pin reset", "mobile recharge", "bill pay",
+                            "my nagad", "ক্যাশ আউট", "পিন রিসেট", "মোবাইল রিচার্জ");
+    }
+
+    /** Does the screen actually ask for input (rather than just printing a summary)? */
+    public static boolean isQuestion(String lower) {
+        return has(lower, "enter", "type", "input", "provide", "give",
+                        "লিখুন", "দিন", "প্রদান", "ইনপুট");
+    }
+
     private static final String[] MENU_SIGNS = {
             "cash out", "send money", "mobile recharge", "recharge", "bill pay", "payment",
             "my nagad", "pin reset", "balance", "mini statement", "ক্যাশ আউট", "সেন্ড মানি"

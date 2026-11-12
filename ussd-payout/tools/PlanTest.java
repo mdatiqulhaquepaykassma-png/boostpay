@@ -20,31 +20,34 @@ public class PlanTest {
 
     public static void main(String[] a) {
         // ── adaptive, Nagad menu wording ───────────────────────────────
-        Plan p = nagad(false, true);
-        Plan.Key k = p.decide("Enter the amount you want to send", 1);
-        check("nagad adaptive: amount prompt -> amount", "50".equals(k.value) && !k.secret, String.valueOf(k.value));
+        // one fresh plan per case: a value is sent once and the plan remembers it
+        check("nagad adaptive: amount prompt -> amount",
+                "50".equals(nagad(false, true).decide("Enter the amount you want to send", 1).value), "amount");
 
-        k = p.decide("Enter Nagad Account Number", 0);
-        check("nagad adaptive: account prompt -> receiver", "01712345678".equals(k.value), String.valueOf(k.value));
+        check("nagad adaptive: account prompt -> receiver",
+                "01712345678".equals(nagad(false, true).decide("Enter Nagad Account Number", 0).value), "number");
 
-        k = p.decide("Enter your PIN to confirm", 2);
-        check("nagad adaptive: PIN prompt -> pin (secret)", "1234".equals(k.value) && k.secret, String.valueOf(k.value));
+        Plan.Key kp = nagad(false, true).decide("Enter your PIN to confirm", 2);
+        check("nagad adaptive: PIN prompt -> pin (secret)", "1234".equals(kp.value) && kp.secret, String.valueOf(kp.value));
 
-        k = p.decide("Reference (optional)", 2);
-        check("nagad adaptive: reference prompt -> ref", "1".equals(k.value), String.valueOf(k.value));
+        check("nagad adaptive: 'Enter your PIN to confirm' is NOT a confirm screen",
+                !Plan.looksLikeConfirm("enter your pin to confirm"), "not confirm");
+
+        check("nagad adaptive: reference prompt -> ref",
+                "1".equals(nagad(false, true).decide("Reference (optional)", 2).value), "ref");
 
         // ── Bangla menus ──────────────────────────────────────────────
-        k = p.decide("আপনার পিন দিন", 2);
-        check("bangla: পিন prompt -> pin", "1234".equals(k.value) && k.secret, String.valueOf(k.value));
+        Plan.Key kb = nagad(false, true).decide("আপনার পিন দিন", 2);
+        check("bangla: পিন prompt -> pin", "1234".equals(kb.value) && kb.secret, String.valueOf(kb.value));
 
-        k = p.decide("টাকার পরিমাণ লিখুন", 1);
-        check("bangla: পরিমাণ prompt -> amount", "50".equals(k.value), String.valueOf(k.value));
+        check("bangla: পরিমাণ prompt -> amount",
+                "50".equals(nagad(false, true).decide("টাকার পরিমাণ লিখুন", 1).value), "amount");
 
-        k = p.decide("মোবাইল নম্বর দিন", 0);
-        check("bangla: নম্বর prompt -> receiver", "01712345678".equals(k.value), String.valueOf(k.value));
+        check("bangla: নম্বর prompt -> receiver",
+                "01712345678".equals(nagad(false, true).decide("মোবাইল নম্বর দিন", 0).value), "number");
 
         // ── DRY RUN must stop exactly at the PIN, both providers ──────
-        k = nagad(true, true).decide("Enter your PIN", 2);
+        Plan.Key k = nagad(true, true).decide("Enter your PIN", 2);
         check("nagad dry-run: stops before PIN", k.stopBefore && k.value == null, "stop=" + k.stopBefore);
 
         k = bkash(true, true).decide("Enter PIN (5 digits)", 3);
@@ -117,6 +120,32 @@ public class PlanTest {
         // ── unknown screen in adaptive mode waits instead of guessing ──
         Plan.Key unk = nagad(false, true).decide("Something new happened", 0);
         check("adaptive: unknown screen -> wait, nothing typed", unk != null && unk.wait, "wait=" + (unk != null && unk.wait));
+
+        // ── the "shall I send it?" screen must get Confirm, never the amount ──
+        String confirm1 = "Send Money to 01780240277. Amount Tk 100. 1. Confirm 2. Cancel";
+        Plan pc = nagad(false, true);
+        pc.numberSent = true; pc.amountSent = true;
+        Plan.Key ck = pc.decide(confirm1.toLowerCase(), 2);
+        check("confirm screen -> option 1 (Confirm), never the amount",
+                "1".equals(ck.value) && !ck.secret, String.valueOf(ck.value) + " secret=" + ck.secret);
+
+        // a summary line with no question never takes a value
+        Plan ps = nagad(false, true);
+        ps.numberSent = true; ps.amountSent = true;
+        Plan.Key sk = ps.decide("send money to 01780240277 amount 100 taka", 2);
+        check("summary screen (no 'enter') -> wait, nothing typed", sk != null && sk.wait, "wait=" + (sk != null && sk.wait));
+
+        // ── amount is typed once, PIN is typed once ───────────────────
+        Plan po = nagad(false, true);
+        Plan.Key n1 = po.decide("enter receiver account number:", 0);
+        Plan.Key a1 = po.decide("enter amount:", 1);
+        Plan.Key a2 = po.decide("enter amount:", 2);      // same question again
+        Plan.Key p1 = po.decide("enter pin:", 3);
+        Plan.Key p2 = po.decide("enter your pin:", 4);    // re-asked
+        check("number/amount/pin each typed exactly once",
+                "01712345678".equals(n1.value) && "50".equals(a1.value)
+                        && a2.wait && "1234".equals(p1.value) && p1.secret && p2.wait,
+                n1.value + "/" + a1.value + "/a2wait=" + a2.wait + "/" + p1.value + "/p2wait=" + p2.wait);
 
         // ── which SIM sends a payout ──────────────────────────────────
         java.util.List<SimPick.Entry> two = java.util.Arrays.asList(

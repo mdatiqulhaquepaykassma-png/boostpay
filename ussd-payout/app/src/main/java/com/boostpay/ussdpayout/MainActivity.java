@@ -369,6 +369,44 @@ public class MainActivity extends Activity {
             return;
         }
 
+        // Amount: digits (and at most one dot) only — "1,000", "Tk 500" or "" would
+        // reach the network as garbage and come back as a refusal.
+        String rawAmount = amountInput.getText().toString();
+        String cleanAmount = rawAmount.trim().replaceAll("[^0-9.]", "");
+        if (cleanAmount.isEmpty() || cleanAmount.equals(".") || cleanAmount.matches(".*\\..*\\..*")
+                || cleanAmount.matches("^\\.0*$")) {
+            Guard.end();
+            line("✗ amount \"" + rawAmount + "\" is not a number — enter the amount like 100 or 500.50");
+            toast("Amount must be a number (spaces, commas and Tk are removed automatically)");
+            refresh();
+            return;
+        }
+        try {
+            if (Double.parseDouble(cleanAmount.replaceAll("\\.$", "")) <= 0) throw new NumberFormatException();
+        } catch (NumberFormatException e) {
+            Guard.end();
+            line("✗ amount \"" + rawAmount + "\" must be greater than zero");
+            toast("Amount must be greater than zero");
+            refresh();
+            return;
+        }
+        amountInput.setText(cleanAmount);
+
+        // PIN: digits only. A PIN with a stray space or letter is what the network
+        // answers with "Invalid PIN" — check it before dialling.
+        String cleanPin = pin == null ? "" : pin.replaceAll("[^0-9]", "");
+        if (!cleanPin.equals(pin == null ? "" : pin.trim())) {
+            Guard.end();
+            line("✗ the saved PIN contains something other than digits — save it again in SIM settings");
+            toast("PIN must be digits only");
+            refresh();
+            return;
+        }
+        if (!cleanPin.isEmpty() && provider.pinLength > 0 && cleanPin.length() != provider.pinLength) {
+            line("! PIN has " + cleanPin.length() + " digits, " + provider.name
+                    + " usually uses " + provider.pinLength + " — check SIM settings");
+        }
+
         Plan plan = new Plan(
                 service,
                 cleanNumber,

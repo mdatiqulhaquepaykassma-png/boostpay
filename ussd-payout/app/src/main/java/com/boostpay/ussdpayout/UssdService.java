@@ -316,11 +316,35 @@ public class UssdService extends AccessibilityService {
         boolean ok = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
         if (!ok) ok = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
 
-        CharSequence landed = field.getText();
-        sink.log("  field now: \"" + (landed == null ? "" : landed.toString()) + "\"");
-        if (!ok) return false;
+        CharSequence landedCs = field.getText();
+        String landed = landedCs == null ? "" : landedCs.toString();
+        if (!value.equals(landed)) {                 // second chance, the box may have lagged
+            field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+            field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+            landedCs = field.getText();
+            landed = landedCs == null ? "" : landedCs.toString();
+        }
+
+        String shown = value.length() > 0 && isSecret(value) ? mask(value) : landed;
+        sink.log("  field now: \"" + shown + "\"");
+
+        // The box did not take the text — the caller retries instead of clicking Send
+        // with an empty/partial field, which is what the network rejects as invalid.
+        if (!value.equals(landed)) return false;
+
         handler.postDelayed(this::clickSend, 900);
         return true;
+    }
+
+    /** PIN-like values must never be printed in the log. */
+    private boolean isSecret(String v) {
+        return plan != null && plan.pin.equals(v);
+    }
+
+    private static String mask(String v) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < v.length(); i++) b.append('•');
+        return b.toString();
     }
 
     private void clickSend() {
