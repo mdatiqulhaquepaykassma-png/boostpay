@@ -54,6 +54,7 @@ public class MainActivity extends Activity {
     private static final int REQ_CALL = 51;
 
     private EditText serviceInput, stepsInput, numberInput, amountInput, pinInput, refInput, maxInput, capInput;
+    private TextView numberState, amountState, pinState;
     private CheckBox adaptiveBox;
     private Provider provider = Provider.current();
     private List<Sims.Sim> sims = new ArrayList<>();
@@ -104,13 +105,66 @@ public class MainActivity extends Activity {
         serviceInput = input(provider.serviceCode, InputType.TYPE_CLASS_TEXT);
         root.addView(serviceInput);
 
-        root.addView(label("Receiver number (the user's bKash/number)"));
+        // ── three separate boxes: receiver number · amount · PIN ─────────────
+        // Each one keeps its own value, its own Save button and its own status
+        // line, so the amount and the PIN can never be mixed up again.
+        LinearLayout numberCard = card("1 · Receiver number", "whose " + provider.name + " account gets the money");
         numberInput = input("01XXXXXXXXX", InputType.TYPE_CLASS_PHONE);
-        root.addView(numberInput);
+        numberCard.addView(numberInput);
+        numberState = state();
+        numberCard.addView(numberState);
+        Button saveNumber = button("Save receiver number");
+        saveNumber.setOnClickListener(v -> { saveOne("number", numberInput.getText().toString()); refresh(); });
+        numberCard.addView(saveNumber);
+        root.addView(numberCard);
 
-        root.addView(label("Amount (BDT)"));
-        amountInput = input("20", InputType.TYPE_CLASS_NUMBER);
-        root.addView(amountInput);
+        LinearLayout amountCard = card("2 · Amount (BDT)", "how much this payout sends — digits only, e.g. 100 or 500.50");
+        amountInput = input("20", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        amountCard.addView(amountInput);
+        amountState = state();
+        amountCard.addView(amountState);
+        Button saveAmount = button("Save amount");
+        saveAmount.setOnClickListener(v -> {
+            String a = amountInput.getText().toString().trim().replaceAll("[^0-9.]", "");
+            if (a.isEmpty() || a.matches(".*\\..*\\..*")) { toast("Amount must be a number, e.g. 100"); return; }
+            saveOne("amount", a);
+            amountInput.setText(a);
+            refresh();
+        });
+        amountCard.addView(saveAmount);
+        root.addView(amountCard);
+
+        LinearLayout pinCard = card("3 · PIN (" + provider.pinLength + " digits)",
+                "sealed with the phone's Keystore — never stored as text, never logged");
+        pinInput = input("•••••", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        pinCard.addView(pinInput);
+        pinState = state();
+        pinCard.addView(pinState);
+        CheckBox showPin = new CheckBox(this);
+        showPin.setText("Show digits while typing");
+        showPin.setTextColor(Color.parseColor("#d4d4d8"));
+        showPin.setTextSize(12);
+        showPin.setOnCheckedChangeListener((b, on) -> pinInput.setInputType(on
+                ? InputType.TYPE_CLASS_NUMBER
+                : InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD));
+        pinCard.addView(showPin);
+        Button savePin = button("Save PIN on this phone");
+        savePin.setOnClickListener(v -> {
+            String typed = pinInput.getText().toString().trim();
+            if (!typed.isEmpty() && !typed.matches("[0-9]+")) { toast("PIN must be digits only"); return; }
+            if (!typed.isEmpty() && typed.length() != provider.pinLength) {
+                toast("Note: " + provider.name + " PIN is usually " + provider.pinLength + " digits — saved anyway");
+            }
+            Secure.savePin(this, typed);
+            pinInput.setText("");
+            toast(Secure.hasPin(this) ? "PIN saved (encrypted)" : "PIN cleared");
+            refresh();
+        });
+        pinCard.addView(savePin);
+        Button clearPin = button("Clear saved PIN");
+        clearPin.setOnClickListener(v -> { Secure.savePin(this, ""); pinInput.setText(""); toast("PIN cleared"); refresh(); });
+        pinCard.addView(clearPin);
+        root.addView(pinCard);
 
         root.addView(label("Menu steps, comma separated — {number} {amount} {pin}"));
         stepsInput = input(provider.steps, InputType.TYPE_CLASS_TEXT);
@@ -131,18 +185,6 @@ public class MainActivity extends Activity {
         root.addView(adaptiveBox);
         root.addView(note("recommended: an \"enter amount\" screen gets the amount, a \"pin\" screen gets the PIN, "
                 + "any number/account screen gets the receiver. Turn it off to type the steps list strictly in order.", "#71717a"));
-
-        root.addView(label("PIN (" + provider.pinLength + " digits) — sealed with the phone's Keystore, never stored as text"));
-        pinInput = input("•••••", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
-        root.addView(pinInput);
-        Button savePin = button("Save PIN on this phone");
-        savePin.setOnClickListener(v -> {
-            Secure.savePin(this, pinInput.getText().toString().trim());
-            pinInput.setText("");
-            toast(Secure.hasPin(this) ? "PIN saved (encrypted)" : "PIN cleared");
-            refresh();
-        });
-        root.addView(savePin);
 
         root.addView(label("Method"));
         RadioGroup group = new RadioGroup(this);
@@ -666,6 +708,12 @@ public class MainActivity extends Activity {
                 + "   ·   PIN saved: " + (Secure.hasPin(this) ? "yes" : "no")
                 + "\naccessibility service: " + (UssdService.isEnabled(this) ? "ON" : "off")
                 + "   ·   method: " + (a11yRadio.isChecked() ? "B" : "A"));
+        numberState.setText("receiver: " + (numberInput.getText().toString().trim().isEmpty()
+                ? "not set" : numberInput.getText().toString().trim()));
+        amountState.setText("amount: " + (amountInput.getText().toString().trim().isEmpty()
+                ? "not set" : amountInput.getText().toString().trim() + " BDT"));
+        pinState.setText("PIN on this phone: " + (Secure.hasPin(this) ? "saved (encrypted)" : "not saved"));
+        pinState.setTextColor(Color.parseColor(Secure.hasPin(this) ? "#4ade80" : "#fca5a5"));
         if (!Guard.isRunning() && statusView.getText().length() == 0) {
             statusView.setText("idle — start with DRY RUN");
         }
@@ -678,6 +726,50 @@ public class MainActivity extends Activity {
             log.append(ts).append("  ").append(s).append('\n');
             logView.setText(log.toString());
         });
+    }
+
+    /** A bordered box that holds one value (number / amount / PIN). */
+    private LinearLayout card(String title, String help) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(12), dp(10), dp(12), dp(12));
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(Color.parseColor("#111113"));
+        bg.setCornerRadius(dp(12));
+        bg.setStroke(dp(1), Color.parseColor("#27272a"));
+        box.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(14);
+        box.setLayoutParams(lp);
+
+        TextView h = new TextView(this);
+        h.setText(title);
+        h.setTextColor(Color.WHITE);
+        h.setTextSize(15);
+        h.setTypeface(Typeface.DEFAULT_BOLD);
+        box.addView(h);
+        TextView sub = new TextView(this);
+        sub.setText(help);
+        sub.setTextColor(Color.parseColor("#71717a"));
+        sub.setTextSize(11);
+        sub.setPadding(0, dp(2), 0, dp(6));
+        box.addView(sub);
+        return box;
+    }
+
+    private TextView state() {
+        TextView tv = new TextView(this);
+        tv.setTextColor(Color.parseColor("#a1a1aa"));
+        tv.setTextSize(11);
+        tv.setPadding(0, dp(6), 0, dp(6));
+        return tv;
+    }
+
+    /** Saves one field on its own, without touching the others. */
+    private void saveOne(String key, String value) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(key, value.trim()).apply();
+        toast("Saved (" + key + ")");
     }
 
     private TextView label(String t) {
