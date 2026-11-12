@@ -59,14 +59,29 @@ final class Queue {
             body.put("mode", "queue");
             // the panel shows this, so the owner can see which build is on the phone
             try { body.put("appVersion", BuildConfig.VERSION_NAME); } catch (Throwable ignored) { }
-            JSONObject res = post(server, "/api/payout/next", token, body.toString());
-            if (res == null) {
+            Res r = post(server, "/api/payout/next", token, body.toString());
+            if (r == null || r.http == 0) {
                 out.error = "the server did not answer — check the phone's internet and the address";
+                out.hint = "correct address: " + CANONICAL;
+                return out;
+            }
+            out.http = r.http;
+            JSONObject res = r.json;
+            if (res == null) {
+                out.error = "the server answered " + r.http + " but not with JSON";
+                out.hint = "correct address: " + CANONICAL;
                 return out;
             }
             if (res.has("error")) {
-                out.error = res.optString("error");
+                out.error = explain(r.http, res.optString("error"));
                 out.hint = res.optString("hint", "");
+                if (out.hint.isEmpty() && (r.http == 404 || r.http == 405)) {
+                    out.hint = "use " + CANONICAL + " — the APK download site cannot take payouts";
+                }
+                return out;
+            }
+            if (r.http >= 400) {
+                out.error = "the server refused the request (" + r.http + ")";
                 return out;
             }
             out.ok = true;
@@ -98,9 +113,9 @@ final class Queue {
             body.put("status", status);
             body.put("note", note == null ? "" : note);
             body.put("log", screenLog == null ? "" : screenLog);
-            JSONObject res = post(server, "/api/payout/" + jobId + "/result", token, body.toString());
-            if (res == null) return "the server did not answer";
-            if (res.has("error")) return res.optString("error");
+            Res r = post(server, "/api/payout/" + jobId + "/result", token, body.toString());
+            if (r == null || r.json == null) return "the server did not answer";
+            if (r.json.has("error")) return explain(r.http, r.json.optString("error"));
             return "";
         } catch (Throwable t) {
             return t.getClass().getSimpleName() + ": " + t.getMessage();
@@ -116,13 +131,63 @@ final class Queue {
         return s;
     }
 
+    /** The one address that serves the payout API. */
+    static final String CANONICAL = "https://management.boostpay.online";
+
+    /** Hosts that look plausible but do NOT serve the payout API (they answer "GET only"). */
+    private static final String[] NOT_THE_API = {
+            "app.boostpay.online",          // the APK download portal
+            "admin.72-60-42-18.sslip.io",   // the admin panel
+    };
+
+    /** Result of looking at what the owner typed. */
+    static final class Fixed {
+        String url = "";
+        String note = "";                   // non-empty when the address had to be corrected
+    }
+
+    /**
+     * v2.1.2: 2.1.1 asked the APK portal for jobs and got 405 "GET only".
+     * Any known-wrong host is swapped for the real API address, and the owner is told.
+     */
+    static Fixed fixServer(String input) {
+        Fixed f = new Fixed();
+        f.url = cleanServer(input);
+        if (f.url.isEmpty()) return f;
+        for (String bad : NOT_THE_API) {
+            if (f.url.contains(bad)) {
+                f.note = bad + " is not the payout server → using " + CANONICAL;
+                f.url = CANONICAL;
+                break;
+            }
+        }
+        return f;
+    }
+
+    /** Short, actionable text for the two mistakes that actually happen on a phone. */
+    private static String explain(int http, String error) {
+        String e = error == null ? "" : error.trim();
+        if (http == 405 || "GET only".equalsIgnoreCase(e)) {
+            return "this address is not the payout server (" + e + ")";
+        }
+        if (http == 404) return "no payout server at this address (404)";
+        if (http == 502 || http == 503 || http == 504) return "the server is restarting (" + http + ") — try again in a minute";
+        return e;
+    }
+
     static String hint(String token) {
         if (token == null || token.length() < 4) return "••••";
         return "••••" + token.substring(token.length() - 4);
     }
 
-    private static JSONObject post(String server, String path, String token, String json) {
+    private static final class Res {
+        int http = 0;
+        JSONObject json;
+    }
+
+    private static Res post(String server, String path, String token, String json) {
         HttpURLConnection c = null;
+        Res out = new Res();
         try {
             URL url = new URL(cleanServer(server) + path);
             c = (HttpURLConnection) url.openConnection();
@@ -139,18 +204,20 @@ final class Queue {
             os.flush();
             os.close();
             int code = c.getResponseCode();
+            out.http = code;
             InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
-            if (in == null) return null;
+            if (in == null) return out;
             StringBuilder sb = new StringBuilder();
             BufferedReader r = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
             String line;
             while ((line = r.readLine()) != null) sb.append(line);
             r.close();
             String text = sb.toString();
-            if (text.isEmpty()) return null;
-            return new JSONObject(text);
+            if (text.isEmpty()) return out;
+            try { out.json = new JSONObject(text); } catch (Throwable ignored) { }
+            return out;
         } catch (Throwable t) {
-            return null;
+            return out;
         } finally {
             if (c != null) c.disconnect();
         }

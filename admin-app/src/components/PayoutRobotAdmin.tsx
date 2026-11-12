@@ -17,6 +17,8 @@ import { BoostPayStore } from '../services/store';
 
 // NOTE: adminAuthHeaders() already sets Content-Type — never add it twice.
 // Wrapped: a broken session in storage must never take the whole console down.
+const PAYOUT_SERVER = 'https://management.boostpay.online';
+
 const authHeaders = (): Record<string, string> => {
   try { return { ...BoostPayStore.adminAuthHeaders() }; } catch { return { 'Content-Type': 'application/json' }; }
 };
@@ -260,8 +262,16 @@ export const PayoutRobotAdmin = () => {
         <p className="mt-2 flex flex-wrap items-center gap-2 text-[10px] leading-relaxed text-zinc-500">
           <a href="/nagadpayout" target="_blank" rel="noreferrer" className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-2 py-1 font-black text-rose-300">Nagad payout APK</a>
           <a href="/ussdpayout" target="_blank" rel="noreferrer" className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1 font-black text-amber-300">bKash payout APK</a>
-          <span>on the phone: paste the server URL + device token, tick “Server queue”, then START.</span>
+          <span>on the phone: paste the server URL + device token, then press ▶ CONNECT.</span>
         </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2">
+          <span className="text-[9px] font-bold uppercase tracking-wider text-zinc-500">Server URL for the phone</span>
+          <code className="break-all font-mono text-[11px] text-emerald-200">{PAYOUT_SERVER}</code>
+          <button
+            onClick={() => { void navigator.clipboard?.writeText(PAYOUT_SERVER); setNote('Server URL copied — paste it into the payout app → Server connection.'); }}
+            className="ml-auto rounded-lg border border-zinc-700 px-2 py-1 text-[10px] font-bold text-zinc-200"
+          >Copy</button>
+        </div>
       </div>
 
       {!loaded && !err ? (
@@ -286,9 +296,9 @@ export const PayoutRobotAdmin = () => {
             >Copy</button>
           </div>
           <ol className="mt-2 space-y-1 text-[10.5px] leading-relaxed text-zinc-400">
-            <li>1. On the payout phone open the app → <b className="text-zinc-200">4 · Server queue</b>.</li>
-            <li>2. Paste this token into the token box (replace the old one) → <b className="text-zinc-200">Test</b>.</li>
-            <li>3. <b className="text-zinc-200">▶ Start queue</b> — a notification must appear: “Queue running”.</li>
+            <li>1. On the payout phone open the app → <b className="text-zinc-200">Server connection</b>.</li>
+            <li>2. Server = <b className="text-zinc-200">{PAYOUT_SERVER}</b> · paste this token into the token box → <b className="text-zinc-200">Test</b>.</li>
+            <li>3. <b className="text-zinc-200">▶ CONNECT</b> — the big card must turn green and this panel must show <b className="text-zinc-200">CONNECTED</b>.</li>
           </ol>
         </div>
       ) : null}

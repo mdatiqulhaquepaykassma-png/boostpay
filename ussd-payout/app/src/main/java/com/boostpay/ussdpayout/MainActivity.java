@@ -244,8 +244,10 @@ public class MainActivity extends Activity {
 
         // ── 2 · connection details (only needed once) ───────────────────────
         LinearLayout conn = card("Server connection", "the admin panel queues a payout · this phone sends it");
-        serverInput = input("https://boostpay.online", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        serverInput = input(Queue.CANONICAL, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         conn.addView(serverInput);
+        conn.addView(note("Payout server = " + Queue.CANONICAL
+                + "\n(app.boostpay.online হলো APK ডাউনলোড সাইট — ওখানে পেআউট হয় না)", "#71717a"));
         tokenInput = input("device token (BPX-…)", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         conn.addView(tokenInput);
 
@@ -1065,7 +1067,12 @@ public class MainActivity extends Activity {
         apiRadio.setChecked(!a11y);
         serviceInput.setSelection(serviceInput.getText().length());
         queueBox.setChecked(p.getBoolean("queueDryRun", false));
-        serverInput.setText(p.getString("server", "https://boostpay.online"));
+        Queue.Fixed fixed = Queue.fixServer(p.getString("server", Queue.CANONICAL));
+        serverInput.setText(fixed.url.isEmpty() ? Queue.CANONICAL : fixed.url);
+        if (!fixed.note.isEmpty()) {
+            p.edit().putString("server", fixed.url).apply();
+            line("startup: " + fixed.note);
+        }
         tokenInput.setText(p.getString("token", ""));
     }
 
@@ -1083,10 +1090,16 @@ public class MainActivity extends Activity {
             line("queue: stopped");
             return;
         }
-        String server = Queue.cleanServer(serverInput.getText().toString());
+        Queue.Fixed fixed = Queue.fixServer(serverInput.getText().toString());
+        String server = fixed.url;
         String token = tokenInput.getText().toString().trim();
+        if (!fixed.note.isEmpty()) {                 // app.boostpay.online etc. → the real API
+            serverInput.setText(server);
+            toast(fixed.note);
+            line("queue: " + fixed.note);
+        }
         if (server.isEmpty() || !server.startsWith("https://")) {
-            toast("Enter the server address, e.g. https://boostpay.online");
+            toast("Enter the server address: " + Queue.CANONICAL);
             return;
         }
         if (token.length() < 10) {
@@ -1109,7 +1122,12 @@ public class MainActivity extends Activity {
 
     /** One-shot check: is the token right and is the panel reachable? */
     private void testQueueConnection() {
-        final String server = Queue.cleanServer(serverInput.getText().toString());
+        final Queue.Fixed fixed = Queue.fixServer(serverInput.getText().toString());
+        final String server = fixed.url;
+        if (!fixed.note.isEmpty()) {
+            serverInput.setText(server);
+            line("queue test: " + fixed.note);
+        }
         final String token = tokenInput.getText().toString().trim();
         if (server.isEmpty() || token.length() < 10) { toast("Fill the server and the token first"); return; }
         queueState.setText("checking the panel…");

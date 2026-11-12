@@ -121,7 +121,12 @@ public class QueueService extends Service {
 
     private void loop() {
         while (!stop) {
-            String server = Queue.cleanServer(Runner.prefs(this).getString("server", ""));
+            Queue.Fixed fixed = Queue.fixServer(Runner.prefs(this).getString("server", ""));
+            String server = fixed.url;
+            if (!fixed.note.isEmpty()) {                 // wrong address saved → repair it once
+                say("queue: " + fixed.note, "fixed address");
+                Runner.prefs(this).edit().putString("server", server).apply();
+            }
             String token = Runner.prefs(this).getString("token", "");
             boolean dryRun = Runner.prefs(this).getBoolean("queueDryRun", false);
             if (server.isEmpty() || token.isEmpty()) {
@@ -139,6 +144,7 @@ public class QueueService extends Service {
             }
             if (!reply.ok) {
                 say("queue: " + reply.error, "server error");
+                if (!reply.hint.isEmpty()) say("queue: → " + reply.hint, "hint");
                 updateNotification("Queue: " + reply.error, "Retrying in 15 s…");
                 sleep(15000);
                 continue;
