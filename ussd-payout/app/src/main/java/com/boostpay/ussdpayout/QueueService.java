@@ -46,6 +46,8 @@ public class QueueService extends Service {
     static volatile boolean running;
     static final Deque<String> LOG = new ArrayDeque<>();
     static volatile String lastStatus = "idle";
+    static volatile long lastContactAt = 0;      // last successful answer from the panel
+    static volatile String lastError = "";       // the panel's reason, when it refuses us
 
     private static QueueService self;
     private Handler handler;
@@ -129,6 +131,12 @@ public class QueueService extends Service {
             }
 
             Queue.Reply reply = Queue.next(server, token, dryRun);
+            if (reply.ok) {
+                lastContactAt = System.currentTimeMillis();
+                lastError = "";
+            } else {
+                lastError = reply.error;
+            }
             if (!reply.ok) {
                 say("queue: " + reply.error, "server error");
                 updateNotification("Queue: " + reply.error, "Retrying in 15 s…");

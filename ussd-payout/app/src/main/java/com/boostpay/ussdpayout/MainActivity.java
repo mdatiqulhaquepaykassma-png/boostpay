@@ -16,6 +16,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.text.InputType;
+import android.view.View;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -59,6 +60,9 @@ public class MainActivity extends Activity {
     private EditText serverInput, tokenInput;
     private Button queueStart;
     private TextView queueState;
+    private LinearLayout statusCard, advancedBox, logBox;
+    private TextView statusTitle, statusDetail;
+    private Button advButton, logButton;
     private boolean queueRunning;
     private boolean queueLive;                       // the mode the queue is running in
 
@@ -80,6 +84,7 @@ public class MainActivity extends Activity {
         Plan.DEFAULT_SERVICE = provider.serviceCode;
         setContentView(buildUi());
         loadSettings();
+        ui.post(statusTicker);
         requestCallPermission();
         requestNotifyPermission();
         refresh();
@@ -103,29 +108,100 @@ public class MainActivity extends Activity {
         scroll.setBackgroundColor(Color.parseColor("#09090b"));
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(pad, dp(30), pad, dp(40));
+        root.setPadding(pad, dp(26), pad, dp(40));
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("BoostPay Payout · " + provider.name);
+        title.setText("BoostPay Payout");
         title.setTextColor(Color.WHITE);
-        title.setTextSize(21);
+        title.setTextSize(22);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(title);
+        TextView subtitle = new TextView(this);
+        subtitle.setText(provider.name + " · " + provider.serviceCode);
+        subtitle.setTextColor(Color.parseColor(provider.accent));
+        subtitle.setTextSize(12);
+        root.addView(subtitle);
 
-        root.addView(note(provider.name + " build — reads the " + provider.serviceCode + " menu on this phone and types the keys.\n"
-                + "Start with DRY RUN every time: it stops the moment the menu asks for the PIN, so no money can move. "
-                + "Then a small real amount (10-20 BDT) to your own number.", provider.accent));
+        // ── 1 · the one thing the owner must see: CONNECTED or NOT ───────────
+        statusCard = new LinearLayout(this);
+        statusCard.setOrientation(LinearLayout.VERTICAL);
+        statusCard.setPadding(dp(16), dp(14), dp(16), dp(16));
+        android.graphics.drawable.GradientDrawable sbg = new android.graphics.drawable.GradientDrawable();
+        sbg.setColor(Color.parseColor("#111113"));
+        sbg.setCornerRadius(dp(16));
+        sbg.setStroke(dp(2), Color.parseColor("#3f3f46"));
+        statusCard.setBackground(sbg);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.topMargin = dp(16);
+        statusCard.setLayoutParams(slp);
 
-        root.addView(simSection());
+        statusTitle = new TextView(this);
+        statusTitle.setText("CHECKING…");
+        statusTitle.setTextColor(Color.parseColor("#a1a1aa"));
+        statusTitle.setTextSize(26);
+        statusTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        statusCard.addView(statusTitle);
 
-        root.addView(label("Service code (falls back to the SIM's provider)"));
-        serviceInput = input(provider.serviceCode, InputType.TYPE_CLASS_TEXT);
-        root.addView(serviceInput);
+        statusDetail = new TextView(this);
+        statusDetail.setText("server status appears here");
+        statusDetail.setTextColor(Color.parseColor("#a1a1aa"));
+        statusDetail.setTextSize(12);
+        statusDetail.setPadding(0, dp(4), 0, dp(10));
+        statusCard.addView(statusDetail);
 
-        // ── three separate boxes: receiver number · amount · PIN ─────────────
-        // Each one keeps its own value, its own Save button and its own status
-        // line, so the amount and the PIN can never be mixed up again.
+        LinearLayout mainButtons = new LinearLayout(this);
+        mainButtons.setOrientation(LinearLayout.HORIZONTAL);
+        queueStart = button("▶ CONNECT");
+        queueStart.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 2f));
+        queueStart.setBackgroundColor(Color.parseColor("#10b981"));
+        queueStart.setTextColor(Color.parseColor("#04170f"));
+        queueStart.setOnClickListener(v -> toggleQueue());
+        queueBox.setOnCheckedChangeListener((b, on) -> {
+            saveSettings();
+            if (QueueService.isRunning()) {      // restart so the new mode takes effect at once
+                QueueService.stop(this);
+                queueBox.postDelayed(() -> QueueService.start(this), 700);
+            }
+        });
+        mainButtons.addView(queueStart);
+
+        Button stopBtn = button("⛔ STOP");
+        stopBtn.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        stopBtn.setBackgroundColor(Color.parseColor("#3f1d1d"));
+        stopBtn.setTextColor(Color.parseColor("#fecaca"));
+        stopBtn.setOnClickListener(v -> stopRun());
+        mainButtons.addView(stopBtn);
+        statusCard.addView(mainButtons);
+        root.addView(statusCard);
+
+        // ── 2 · connection details (only needed once) ───────────────────────
+        LinearLayout conn = card("Server connection", "the admin panel queues a payout · this phone sends it");
+        serverInput = input("https://boostpay.online", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        conn.addView(serverInput);
+        tokenInput = input("device token (BPX-…)", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        conn.addView(tokenInput);
+
+        LinearLayout connRow = new LinearLayout(this);
+        connRow.setOrientation(LinearLayout.HORIZONTAL);
+        queueBox = new CheckBox(this);
+        queueBox.setText("Dry run only (test jobs)");
+        queueBox.setTextColor(Color.parseColor("#d4d4d8"));
+        queueBox.setTextSize(12.5f);
+        queueBox.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        connRow.addView(queueBox);
+        Button testConn = button("Test");
+        testConn.setLayoutParams(new LinearLayout.LayoutParams(dp(96), ViewGroup.LayoutParams.WRAP_CONTENT));
+        testConn.setOnClickListener(v -> testQueueConnection());
+        connRow.addView(testConn);
+        conn.addView(connRow);
+
+        queueState = state();
+        conn.addView(queueState);
+        root.addView(conn);
+
+        // ── 3 · what to send (three separate boxes) ─────────────────────────
         LinearLayout numberCard = card("1 · Receiver number", "whose " + provider.name + " account gets the money");
         numberInput = input("01XXXXXXXXX", InputType.TYPE_CLASS_PHONE);
         numberCard.addView(numberInput);
@@ -136,7 +212,7 @@ public class MainActivity extends Activity {
         numberCard.addView(saveNumber);
         root.addView(numberCard);
 
-        LinearLayout amountCard = card("2 · Amount (BDT)", "how much this payout sends — digits only, e.g. 100 or 500.50");
+        LinearLayout amountCard = card("2 · Amount (BDT)", "digits only, e.g. 100 or 500.50");
         amountInput = input("20", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
         amountCard.addView(amountInput);
         amountState = state();
@@ -166,7 +242,10 @@ public class MainActivity extends Activity {
                 ? InputType.TYPE_CLASS_NUMBER
                 : InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD));
         pinCard.addView(showPin);
-        Button savePin = button("Save PIN on this phone");
+        LinearLayout pinRow = new LinearLayout(this);
+        pinRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button savePin = button("Save PIN");
+        savePin.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         savePin.setOnClickListener(v -> {
             String typed = pinInput.getText().toString().trim();
             if (!typed.isEmpty() && !typed.matches("[0-9]+")) { toast("PIN must be digits only"); return; }
@@ -178,107 +257,62 @@ public class MainActivity extends Activity {
             toast(Secure.hasPin(this) ? "PIN saved (encrypted)" : "PIN cleared");
             refresh();
         });
-        pinCard.addView(savePin);
-        Button clearPin = button("Clear saved PIN");
+        pinRow.addView(savePin);
+        Button clearPin = button("Clear");
+        clearPin.setLayoutParams(new LinearLayout.LayoutParams(dp(96), ViewGroup.LayoutParams.WRAP_CONTENT));
         clearPin.setOnClickListener(v -> { Secure.savePin(this, ""); pinInput.setText(""); toast("PIN cleared"); refresh(); });
-        pinCard.addView(clearPin);
+        pinRow.addView(clearPin);
+        pinCard.addView(pinRow);
         root.addView(pinCard);
 
-        root.addView(label("Menu steps, comma separated — {number} {amount} {pin}"));
-        stepsInput = input(provider.steps, InputType.TYPE_CLASS_TEXT);
-        root.addView(stepsInput);
-        root.addView(note(("nagad".equals(provider.id)
-                    ? "Nagad default: Send Money → receiver → amount → PIN. (If your menu also asks for a reference, add {ref} before {pin}.)"
-                    : "bKash default: Send Money → receiver → amount → reference (1 = skip) → PIN. "
-                      + "Read the log after a dry run and fix this line if your phone's menu differs."), "#71717a"));
+        // ── 4 · everything else lives behind one toggle ─────────────────────
+        advancedBox = new LinearLayout(this);
+        advancedBox.setOrientation(LinearLayout.VERTICAL);
+        advancedBox.setVisibility(View.GONE);
 
-        root.addView(label("Reference word (used by {ref} and by an adaptive reference prompt)"));
+        advancedBox.addView(simSection());
+
+        advancedBox.addView(label("Service code"));
+        serviceInput = input(provider.serviceCode, InputType.TYPE_CLASS_TEXT);
+        advancedBox.addView(serviceInput);
+
+        advancedBox.addView(label("Menu steps — {number} {amount} {ref} {pin}"));
+        stepsInput = input(provider.steps, InputType.TYPE_CLASS_TEXT);
+        advancedBox.addView(stepsInput);
+        advancedBox.addView(note("nagad: Send Money → number → amount → reference → PIN · bkash: 1,{number},{amount},1,{pin}", "#71717a"));
+
+        advancedBox.addView(label("Reference value"));
         refInput = input("1", InputType.TYPE_CLASS_TEXT);
-        root.addView(refInput);
+        advancedBox.addView(refInput);
 
         adaptiveBox = new CheckBox(this);
-        adaptiveBox.setText("Adaptive — read each screen and send the matching value");
+        adaptiveBox.setText("Adaptive — read each screen and answer only what it asks");
         adaptiveBox.setTextColor(Color.parseColor("#d4d4d8"));
+        adaptiveBox.setTextSize(12.5f);
         adaptiveBox.setChecked(true);
-        root.addView(adaptiveBox);
-        root.addView(note("recommended: an \"enter amount\" screen gets the amount, a \"pin\" screen gets the PIN, "
-                + "any number/account screen gets the receiver. Turn it off to type the steps list strictly in order.", "#71717a"));
+        advancedBox.addView(adaptiveBox);
 
-        root.addView(label("Method"));
         RadioGroup group = new RadioGroup(this);
         group.setOrientation(RadioGroup.HORIZONTAL);
         apiRadio = new RadioButton(this);
-        apiRadio.setText("USSD API (fast)");
+        apiRadio.setText("USSD API");
         apiRadio.setTextColor(Color.parseColor("#d4d4d8"));
         a11yRadio = new RadioButton(this);
-        a11yRadio.setText("Accessibility (works everywhere)");
+        a11yRadio.setText("Accessibility");
         a11yRadio.setTextColor(Color.parseColor("#d4d4d8"));
         group.addView(apiRadio);
         group.addView(a11yRadio);
-        root.addView(group);
+        advancedBox.addView(label("Method (Accessibility is the one that works on Nagad)"));
+        advancedBox.addView(group);
 
-        Button defaults = button("Load " + provider.name + " defaults (" + provider.serviceCode + ")");
-        defaults.setOnClickListener(v -> {
-            serviceInput.setText(provider.serviceCode);
-            stepsInput.setText(provider.steps);
-            if (refInput.getText().toString().trim().isEmpty()) refInput.setText("1");
-            toast(provider.name + " defaults loaded");
-        });
-        root.addView(defaults);
-
-        Button a11yOpen = button("Open Accessibility settings (needed for method B)");
+        Button a11yOpen = button("Open Accessibility settings");
         a11yOpen.setOnClickListener(v -> {
             try { startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)); }
             catch (Throwable t) { toast("Settings → Accessibility → BoostPay Payout"); }
         });
-        root.addView(a11yOpen);
+        advancedBox.addView(a11yOpen);
 
-        // ── server queue: the admin panel says what to send ────────────────
-        LinearLayout queueCard = card("4 · Server queue (admin panel)",
-                "the panel queues a payout, this phone sends it and reports back");
-        queueBox = new CheckBox(this);
-        queueBox.setText("Queue dry run — only TEST jobs (nothing leaves the wallet)");
-        queueBox.setTextColor(Color.parseColor("#d4d4d8"));
-        queueCard.addView(queueBox);
-        serverInput = input("https://boostpay.online", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        queueCard.addView(serverInput);
-        tokenInput = input("device token (BPX-…)", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        queueCard.addView(tokenInput);
-        queueState = state();
-        queueCard.addView(queueState);
-
-        LinearLayout queueButtons = new LinearLayout(this);
-        queueButtons.setOrientation(LinearLayout.HORIZONTAL);
-        queueStart = button("▶ Start queue");
-        queueStart.setOnClickListener(v -> toggleQueue());
-        queueButtons.addView(queueStart);
-        Button testConn = button("Test");
-        testConn.setOnClickListener(v -> testQueueConnection());
-        queueButtons.addView(testConn);
-        queueCard.addView(queueButtons);
-
-        queueCard.addView(note("Dry run: a phone in DRY RUN is only ever given TEST jobs, so it can watch the whole menu "
-                + "without a real withdrawal leaving the wallet. Stop it any time with ⛔ STOP.", "#71717a"));
-        root.addView(queueCard);
-
-        Button dry = button("① DRY RUN — walk the menu, stop before PIN");
-        dry.setBackgroundColor(Color.parseColor("#f59e0b"));
-        dry.setTextColor(Color.parseColor("#09090b"));
-        dry.setOnClickListener(v -> run(false));
-        root.addView(dry);
-
-        Button live = button("② SEND REAL MONEY…");
-        live.setTextColor(Color.parseColor("#fca5a5"));
-        live.setOnClickListener(v -> confirmLive());
-        root.addView(live);
-
-        Button stop = button("⛔ STOP — cancel the run");
-        stop.setTextColor(Color.parseColor("#fecaca"));
-        stop.setBackgroundColor(Color.parseColor("#3f1d1d"));
-        stop.setOnClickListener(v -> stopRun());
-        root.addView(stop);
-
-        root.addView(label("Safety limits (BDT)"));
+        advancedBox.addView(label("Safety limits (BDT) — per payout · per day"));
         LinearLayout limits = new LinearLayout(this);
         limits.setOrientation(LinearLayout.HORIZONTAL);
         maxInput = input("500", InputType.TYPE_CLASS_NUMBER);
@@ -287,8 +321,7 @@ public class MainActivity extends Activity {
         capInput.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         limits.addView(maxInput);
         limits.addView(capInput);
-        root.addView(limits);
-        root.addView(note("left = max per payout · right = max per day (both enforced before anything is dialled)", "#71717a"));
+        advancedBox.addView(limits);
         Button saveLimits = button("Save limits");
         saveLimits.setOnClickListener(v -> {
             try {
@@ -297,25 +330,54 @@ public class MainActivity extends Activity {
                 toast("Limits saved"); refresh();
             } catch (NumberFormatException e) { toast("Numbers only"); }
         });
-        root.addView(saveLimits);
+        advancedBox.addView(saveLimits);
+
+        Button defaults = button("Load " + provider.name + " defaults");
+        defaults.setOnClickListener(v -> {
+            serviceInput.setText(provider.serviceCode);
+            stepsInput.setText(provider.steps);
+            if (refInput.getText().toString().trim().isEmpty()) refInput.setText("1");
+            toast(provider.name + " defaults loaded");
+        });
+        advancedBox.addView(defaults);
+
+        Button dry = button("Manual DRY RUN (one payout, stop before PIN)");
+        dry.setOnClickListener(v -> run(false));
+        advancedBox.addView(dry);
+        Button live = button("Manual SEND real money…");
+        live.setTextColor(Color.parseColor("#fca5a5"));
+        live.setOnClickListener(v -> confirmLive());
+        advancedBox.addView(live);
+
+        Button battery = button("Allow background (battery)");
+        battery.setOnClickListener(v -> askBattery());
+        advancedBox.addView(battery);
+
+        advButton = button("⚙ Advanced settings");
+        advButton.setOnClickListener(v -> {
+            boolean show = advancedBox.getVisibility() != View.VISIBLE;
+            advancedBox.setVisibility(show ? View.VISIBLE : View.GONE);
+            advButton.setText(show ? "⚙ Hide advanced settings" : "⚙ Advanced settings");
+        });
+        root.addView(advButton);
+        root.addView(advancedBox);
+
+        // ── 5 · log behind a toggle ─────────────────────────────────────────
+        logBox = new LinearLayout(this);
+        logBox.setOrientation(LinearLayout.VERTICAL);
+        logBox.setVisibility(View.GONE);
 
         counterView = new TextView(this);
         counterView.setTextColor(Color.parseColor("#a1a1aa"));
-        counterView.setTextSize(12);
-        counterView.setPadding(0, dp(14), 0, dp(4));
-        root.addView(counterView);
+        counterView.setTextSize(11.5f);
+        counterView.setPadding(0, dp(10), 0, dp(4));
+        logBox.addView(counterView);
 
         statusView = new TextView(this);
         statusView.setTextColor(Color.parseColor("#d4d4d8"));
-        statusView.setTextSize(12.5f);
-        statusView.setPadding(0, dp(6), 0, dp(10));
-        root.addView(statusView);
-
-        TextView logTitle = new TextView(this);
-        logTitle.setText("LOG — copy this and send it to me");
-        logTitle.setTextColor(Color.parseColor("#71717a"));
-        logTitle.setTextSize(10.5f);
-        root.addView(logTitle);
+        statusView.setTextSize(12);
+        statusView.setPadding(0, dp(2), 0, dp(8));
+        logBox.addView(statusView);
 
         logView = new TextView(this);
         logView.setTextColor(Color.parseColor("#a1a1aa"));
@@ -324,7 +386,7 @@ public class MainActivity extends Activity {
         logView.setPadding(dp(8), dp(8), dp(8), dp(8));
         logView.setBackgroundColor(Color.parseColor("#111113"));
         logView.setTextIsSelectable(true);
-        root.addView(logView);
+        logBox.addView(logView);
 
         LinearLayout logButtons = new LinearLayout(this);
         logButtons.setOrientation(LinearLayout.HORIZONTAL);
@@ -340,16 +402,61 @@ public class MainActivity extends Activity {
         clear.setOnClickListener(v -> { log.setLength(0); logView.setText(""); });
         logButtons.addView(copy);
         logButtons.addView(clear);
-        root.addView(logButtons);
+        logBox.addView(logButtons);
 
-        Button battery = button("Allow background (battery)");
-        battery.setOnClickListener(v -> askBattery());
-        root.addView(battery);
+        logButton = button("📄 Log");
+        logButton.setOnClickListener(v -> {
+            boolean show = logBox.getVisibility() != View.VISIBLE;
+            logBox.setVisibility(show ? View.VISIBLE : View.GONE);
+            logButton.setText(show ? "📄 Hide log" : "📄 Log");
+        });
+        root.addView(logButton);
+        root.addView(logBox);
 
-        root.addView(note("\nThis app talks to no server and stores nothing outside this phone. "
-                + "The PIN is sealed in the Android Keystore; uninstalling wipes it.", "#52525b"));
         return scroll;
     }
+
+    /** The big green/red card: is this phone connected to the panel right now? */
+    private void paintStatus() {
+        boolean service = QueueService.isRunning();
+        long lastContact = QueueService.lastContactAt;
+        String err = QueueService.lastError;
+        long age = lastContact == 0 ? -1 : (System.currentTimeMillis() - lastContact) / 1000;
+        boolean online = service && age >= 0 && age < 20;
+
+        String head;
+        String colour;
+        if (online) {
+            head = "CONNECTED";
+            colour = queueBox.isChecked() ? "#fbbf24" : "#34d399";
+        } else if (service) {
+            head = "CONNECTING…";
+            colour = "#fbbf24";
+        } else {
+            head = "DISCONNECTED";
+            colour = "#f87171";
+        }
+        if (!err.isEmpty() && !online) head = "DISCONNECTED";
+        statusTitle.setText(head);
+        statusTitle.setTextColor(Color.parseColor(colour));
+        ((android.graphics.drawable.GradientDrawable) statusCard.getBackground())
+                .setStroke(dp(2), Color.parseColor(online ? (queueBox.isChecked() ? "#fbbf24" : "#10b981") : "#7f1d1d"));
+
+        StringBuilder d = new StringBuilder();
+        if (online) {
+            d.append(queueBox.isChecked() ? "DRY RUN — the panel sends TEST jobs only" : "LIVE — real money can be sent");
+            d.append(" · last check ").append(age).append("s ago");
+            if (!QueueService.lastStatus.isEmpty()) d.append("\n").append(QueueService.lastStatus);
+        } else if (service) {
+            d.append("asking the panel… ").append(age >= 0 ? (age + "s since the last answer") : "no answer yet");
+        } else {
+            d.append("Not talking to the admin panel. Press ▶ CONNECT.");
+        }
+        if (!err.isEmpty()) d.append("\n✗ ").append(err);
+        statusDetail.setText(d.toString());
+        queueStart.setText(service ? "■ DISCONNECT" : "▶ CONNECT");
+    }
+
 
     private void confirmLive() {
         final long amount;
@@ -974,6 +1081,21 @@ public class MainActivity extends Activity {
                 .apply();
     }
 
+    /** Once a second: keep the green/red card honest. */
+    private final Runnable statusTicker = new Runnable() {
+        @Override public void run() {
+            try { paintStatus(); } catch (Throwable ignored) { }
+            ui.postDelayed(this, 1000);
+        }
+    };
+
+    @Override
+    protected void onDestroy() {
+        ui.removeCallbacks(statusTicker);
+        QueueService.listener = null;
+        super.onDestroy();
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
@@ -989,9 +1111,4 @@ public class MainActivity extends Activity {
         refresh();
     }
 
-    @Override
-    protected void onDestroy() {
-        QueueService.listener = null;   // the service keeps running on its own
-        super.onDestroy();
-    }
 }

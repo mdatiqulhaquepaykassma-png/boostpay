@@ -190,30 +190,54 @@ export const PayoutRobotAdmin = () => {
           A job turns <b className="text-emerald-300">PAID</b> only when the wallet's “you have sent Tk …” SMS comes back through the
           SMS Bridge. If the phone fails, the withdrawal is refunded to the user automatically.
         </p>
-        {/* ── is the app connected right now? ───────────────────────────── */}
+        {/* ── MOBILE ⇄ PANEL — the one thing that must be obvious ─────────── */}
         {(() => {
-          const online = devices.filter((d) => d.active !== false && d.payoutEnabled !== false
-            && (d.online === true || (num(d.lastSeenAt) && Date.now() - num(d.lastSeenAt) < 90_000)));
+          const seen = (d: Device) => (num(d.secondsAgo) >= 0 ? num(d.secondsAgo)
+            : (num(d.lastSeenAt) ? Math.round((Date.now() - num(d.lastSeenAt)) / 1000) : -1));
+          const enabled = devices.filter((d) => d.active !== false && d.payoutEnabled !== false);
+          const online = enabled.filter((d) => seen(d) >= 0 && seen(d) < 90);
           const live = online.filter((d) => d.queueDryRun !== true);
           const dry = online.filter((d) => d.queueDryRun === true);
-          const tone = online.length === 0 ? 'border-red-500/40 bg-red-500/10 text-red-200'
-            : live.length > 0 ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
-              : 'border-amber-500/40 bg-amber-500/10 text-amber-200';
+          const state = online.length === 0 ? 'DISCONNECTED' : (live.length > 0 ? 'CONNECTED · LIVE' : 'CONNECTED · DRY RUN');
+          const ring = online.length === 0 ? 'border-red-500/60 bg-red-500/10'
+            : live.length > 0 ? 'border-emerald-500/60 bg-emerald-500/10' : 'border-amber-500/60 bg-amber-500/10';
+          const text = online.length === 0 ? 'text-red-200' : live.length > 0 ? 'text-emerald-200' : 'text-amber-200';
           return (
-            <div className={`mt-3 rounded-xl border px-3 py-2 text-[11px] font-semibold ${tone}`}>
+            <div className={`mt-3 rounded-2xl border-2 ${ring} px-4 py-3`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className={`h-3 w-3 rounded-full ${online.length ? 'bg-emerald-400 animate-pulse' : 'bg-red-500'}`} />
+                  <span className={`text-[15px] font-black tracking-wide ${text}`}>MOBILE: {state}</span>
+                </div>
+                <span className="text-[10px] font-semibold text-zinc-400">
+                  {online.length === 0 ? 'no phone is asking for jobs right now'
+                    : online.map((d) => `${str(d.label)} · app ${str(d.payoutAppVersion) || '?'} · ${seen(d)}s ago`).join('  |  ')}
+                </span>
+              </div>
               {online.length === 0 ? (
-                <>
-                  <b>App NOT connected.</b> No phone is asking for jobs. Open the payout app → <b>4 · Server queue</b> →
-                  check the server + token → <b>▶ Start queue</b>. The phone keeps a “Queue running” notification while it is connected.
-                </>
-              ) : (
-                <>
-                  <b>{online.length} phone connected</b>
-                  {live.length > 0 ? ` · ${live.length} LIVE (real money)` : ''}
-                  {dry.length > 0 ? ` · ${dry.length} in DRY RUN (test jobs only)` : ''}
-                  {online.map((d) => ` · ${str(d.label)} app ${str(d.payoutAppVersion) || '?'} · seen ${num(d.secondsAgo) >= 0 ? `${num(d.secondsAgo)}s ago` : 'just now'}`).join('')}
-                </>
-              )}
+                <p className="mt-1 text-[11px] leading-relaxed text-red-200/85">
+                  A queued job waits until the phone checks in. On the phone: open the app → <b>▶ CONNECT</b> (top button) →
+                  the card on the phone must turn green. A “Queue running” notification stays on the phone while it is connected.
+                </p>
+              ) : null}
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {devices.length === 0 ? (
+                  <span className="text-[10.5px] text-zinc-400">No phone registered yet — create one in <b>SMS Bridge</b>.</span>
+                ) : devices.map((d) => (
+                  <button
+                    key={d.id}
+                    disabled={busy}
+                    onClick={() => patchDevice(d, { payoutEnabled: d.payoutEnabled === false },
+                      d.payoutEnabled === false ? `${str(d.label)} re-connected` : `${str(d.label)} disconnected — its app will show DISCONNECTED`)}
+                    className={`rounded-lg border px-2.5 py-1 text-[10.5px] font-black disabled:opacity-40 ${
+                      d.payoutEnabled === false
+                        ? 'border-red-500/50 bg-red-500/15 text-red-200'
+                        : 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200'}`}
+                  >
+                    {str(d.label)} · {d.payoutEnabled === false ? 'DISCONNECTED — connect' : 'CONNECTED — disconnect'}
+                  </button>
+                ))}
+              </div>
             </div>
           );
         })()}
