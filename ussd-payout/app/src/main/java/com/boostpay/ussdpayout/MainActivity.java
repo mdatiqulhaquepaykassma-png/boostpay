@@ -444,9 +444,12 @@ public class MainActivity extends Activity {
             refresh();
             return;
         }
-        if (!cleanPin.isEmpty() && provider.pinLength > 0 && cleanPin.length() != provider.pinLength) {
-            line("! PIN has " + cleanPin.length() + " digits, " + provider.name
-                    + " usually uses " + provider.pinLength + " — check SIM settings");
+        // Judge the PIN length by the wallet this SIM is configured for, not by the
+        // APK flavour — a Nagad SIM inside the bKash build is still a Nagad PIN.
+        Provider pinProvider = cfg.configured() ? Provider.byId(cfg.provider) : provider;
+        if (!cleanPin.isEmpty() && pinProvider.pinLength > 0 && cleanPin.length() != pinProvider.pinLength) {
+            line("! PIN has " + cleanPin.length() + " digits, " + pinProvider.name
+                    + " usually uses " + pinProvider.pinLength + " — check SIM settings");
         }
 
         Plan plan = new Plan(

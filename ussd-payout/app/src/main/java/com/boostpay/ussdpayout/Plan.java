@@ -197,6 +197,22 @@ public final class Plan {
                             "my nagad", "ক্যাশ আউট", "পিন রিসেট", "মোবাইল রিচার্জ");
     }
 
+    /**
+     * Lowercase words in sorted order — "Carrier info · Enter Reference:" and
+     * "Enter Reference: · Carrier info" become the same screen, so a dialog that
+     * re-announces itself cannot cancel its own pending key.
+     */
+    public static String canon(String screen) {
+        if (screen == null) return "";
+        String l = screen.toLowerCase(java.util.Locale.ROOT).replace("carrier info", " ");
+        java.util.List<String> words = new java.util.ArrayList<>();
+        for (String w : l.split("[^\\p{L}\\p{N}]+")) if (!w.isEmpty()) words.add(w);
+        java.util.Collections.sort(words);
+        StringBuilder b = new StringBuilder();
+        for (String w : words) b.append(w).append(' ');
+        return b.toString().trim();
+    }
+
     /** Does the screen actually ask for input (rather than just printing a summary)? */
     public static boolean isQuestion(String lower) {
         return has(lower, "enter", "type", "input", "provide", "give",

@@ -147,6 +147,42 @@ public class PlanTest {
                         && a2.wait && "1234".equals(p1.value) && p1.secret && p2.wait,
                 n1.value + "/" + a1.value + "/a2wait=" + a2.wait + "/" + p1.value + "/p2wait=" + p2.wait);
 
+        // ── the owner's live log: "Enter Reference:" must get 1 ───────
+        Plan pr = nagad(false, true);
+        pr.numberSent = true; pr.amountSent = true;
+        Plan.Key rk = pr.decide("Carrier info · Enter Reference: · Cancel · Send", 3);
+        check("reference prompt -> 1 (owner: reference number 1 hobe)",
+                "1".equals(rk.value) && !rk.wait && !rk.stopBefore, String.valueOf(rk.value));
+
+        Plan.Key rk2 = nagad(false, true).decide("Enter Reference", 3);
+        check("reference prompt without a colon -> 1", "1".equals(rk2.value), String.valueOf(rk2.value));
+
+        // the same dialog announced with its words in another order = one screen
+        check("re-announced screen is the same screen (canonical form)",
+                Plan.canon("Carrier info · Enter Reference: · Cancel · Send")
+                        .equals(Plan.canon("Cancel · Send · Enter Reference: · Carrier info")), "canon");
+
+        check("a different prompt is still a different screen",
+                !Plan.canon("Enter Amount:").equals(Plan.canon("Enter Reference:")), "canon2");
+
+        // the whole live path: menu -> number -> amount -> reference -> PIN
+        Plan walk = nagad(false, true);
+        String[][] script = {
+                {"Carrier info · Nagad 1. Cash Out 2. Send Money 3. Mobile Recharge", "2"},
+                {"Carrier info · Enter Receiver Account Number: · Cancel · Send", "01712345678"},
+                {"Carrier info · Enter Amount: · Cancel · Send", "50"},
+                {"Carrier info · Enter Reference: · Cancel · Send", "1"},
+        };
+        StringBuilder got = new StringBuilder();
+        for (int i = 0; i < script.length; i++) {
+            Plan.Key wk = walk.decide(script[i][0], i);
+            got.append(wk == null ? "null" : String.valueOf(wk.value))
+               .append(wk != null && wk.value != null && wk.value.equals(script[i][1]) ? "✓" : "✗");
+        }
+        Plan.Key pinK = walk.decide("Carrier info · Enter PIN: · Cancel · Send", 4);
+        check("full nagad walk: 2 · number · amount · 1 · PIN", got.toString().equals("2✓01712345678✓50✓1✓")
+                && "1234".equals(pinK.value) && pinK.secret, got + " pin=" + pinK.value);
+
         // ── which SIM sends a payout ──────────────────────────────────
         java.util.List<SimPick.Entry> two = java.util.Arrays.asList(
                 new SimPick.Entry(11, 0, "bkash", "personal"),   // SIM 1 · bKash personal

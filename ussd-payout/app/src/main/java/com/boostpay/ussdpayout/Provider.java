@@ -47,6 +47,24 @@ public final class Provider {
         }
     }
 
+    /** The wallet a SIM is configured for ("bkash" / "nagad"), or the build default. */
+    public static Provider byId(String id) {
+        if ("nagad".equalsIgnoreCase(id)) return NAGAD;
+        if ("bkash".equalsIgnoreCase(id)) return BKASH;
+        return current();
+    }
+
+    /**
+     * The wallet a USSD screen belongs to — "Carrier info · Nagad …" is enough. Used
+     * for key timing, so a Nagad SIM in the bKash build still waits Nagad's 1.6 s.
+     */
+    public static Provider forText(String screen) {
+        String l = screen == null ? "" : screen.toLowerCase();
+        if (l.contains("nagad")) return NAGAD;
+        if (l.contains("bkash")) return BKASH;
+        return current();
+    }
+
     public static Provider other(Provider p) {
         return "nagad".equals(p.id) ? BKASH : NAGAD;
     }

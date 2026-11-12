@@ -36,7 +36,10 @@ public class UssdService extends AccessibilityService {
     private String lastScreen = "";
     private volatile boolean cancelled = false;
     private int screenSeq = 0;
-    private int repeats = 0;            // how many times the same screen came back
+    private final java.util.Set<String> answered = new java.util.HashSet<>();
+    private Runnable pendingTask;
+    private long lastProgressAt = System.currentTimeMillis();
+    private static final long STALL_MS = 12000;
     private int actions = 0;            // keystrokes typed in this run
     private long lastActionAt = 0;      // minimum gap between two keys
     private boolean pinTyped = false;   // after the PIN only the confirmation is left
@@ -94,7 +97,11 @@ public class UssdService extends AccessibilityService {
         self.lastScreen = "";
         self.cancelled = false;
         self.screenSeq = 0;
+        self.answered.clear();
+        self.pendingTask = null;
+        self.lastProgressAt = System.currentTimeMillis();
         self.handler.removeCallbacksAndMessages(null);
+        self.watch();                       // stops a wedged dialog instead of hammering it
         s.log("▶ mode: Accessibility · " + (p.dryRun ? "DRY RUN (no PIN, no money)" : "LIVE")
                 + (subId > 0 ? " · subId " + subId : " · default SIM"));
         try {
@@ -187,44 +194,63 @@ public class UssdService extends AccessibilityService {
         consider(collect(root));
     }
 
-    /** Single gate for every screen, whether it came from an event or a re-read. */
-    private void consider(final String screen) {
-        if (plan == null || cancelled || screen == null || screen.isEmpty()) return;
+    /**
+     * One gate for every screen, whether it came from an event or a re-read.
+     *
+     * USSD dialogs re-announce themselves several times per second, and the same
+     * screen can arrive with its words in a different order ("Carrier info · Enter
+     * Reference:" vs "Enter Reference: · Carrier info"). Comparing the raw text made
+     * the robot cancel its own pending key over and over — that is exactly why the
+     * Reference prompt never got its "1". So screens are compared in a canonical
+     * form (lowercase words, sorted), answered once, and never answered twice.
+     */
+    private void consider(final String raw) {
+        if (plan == null || cancelled || raw == null || raw.isEmpty()) return;
 
         // 1) "USSD code running…" / "please wait" — the network is still working.
-        //    Typing here is what corrupted the very first session (log 14:09:57).
-        if (Plan.isWaitingScreen(screen)) {
-            if (!screen.equals(lastScreen)) {
-                lastScreen = screen;
-                sink.log("⇦ " + screen + "   (waiting — nothing typed)");
+        if (Plan.isWaitingScreen(raw)) {
+            lastProgressAt = System.currentTimeMillis();
+            if (!raw.equals(lastScreen)) {
+                lastScreen = raw;
+                sink.log("⇦ " + raw + "   (waiting — nothing typed)");
             }
             return;
         }
 
-        // 2) The same screen again? We already answered it — never answer twice.
-        if (screen.equals(lastScreen)) {
-            if (++repeats == 2) {
-                handler.postDelayed(this::nudge, 3000);
-            }
-            return;
-        }
+        final String canon = Plan.canon(raw);
+        if (answered.contains(canon)) return;        // already answered, never again
 
-        // 3) A genuinely new screen: answer it once.
-        lastScreen = screen;
-        repeats = 0;
-        final int mySeq = ++screenSeq;
-        handler.postDelayed(() -> {
-            if (mySeq == screenSeq && !cancelled && plan != null) handle(screen);
-        }, 600);
+        // 2) A decision is already queued: it will re-read the live screen, so a
+        //    re-worded duplicate must not cancel it.
+        if (pendingTask != null) return;
+
+        pendingTask = () -> {
+            pendingTask = null;
+            if (cancelled || plan == null) return;
+            String now = collect(getRootInActiveWindow());
+            if (now.isEmpty()) now = raw;
+            String c2 = Plan.canon(now);
+            if (answered.contains(c2)) return;
+            answered.add(c2);
+            lastScreen = now;
+            lastProgressAt = System.currentTimeMillis();
+            handle(now);
+        };
+        handler.postDelayed(pendingTask, 700);
     }
 
-    /** The network keeps showing the same screen — stop instead of hammering it. */
-    private void nudge() {
+    /**
+     * Nothing new for too long? Stop. This replaces the old "same screen N times"
+     * counter, which fired while a key was still on its way to the box.
+     */
+    private void watch() {
         if (cancelled || plan == null) return;
-        if (repeats >= 2) {
-            finish(false, "the network showed the same screen " + (repeats + 1)
-                    + " times and nothing advanced: " + lastScreen);
+        long idle = System.currentTimeMillis() - lastProgressAt;
+        if (idle > STALL_MS) {
+            finish(false, "nothing advanced for " + (idle / 1000) + "s — the last screen was: " + lastScreen);
+            return;
         }
+        handler.postDelayed(this::watch, 2500);
     }
 
     private void handle(String screen) {
@@ -252,60 +278,70 @@ public class UssdService extends AccessibilityService {
         idx++;
         actions++;
         if (key.secret) pinTyped = true;
-        final long gap = Math.max(1200, Provider.current().stepDelayMs);
+        // Timing follows the wallet that is answering, not the APK flavour: a Nagad
+        // SIM inside the bKash build still needs the slower Nagad pace.
+        final long gap = Math.max(1200, Provider.forText(screen).stepDelayMs);
         final long wait = Math.max(0, lastActionAt + gap - System.currentTimeMillis());
         sink.log("⇨ " + (key.secret ? "••••" : key.value) + "   · " + key.why);
         handler.postDelayed(() -> {
             if (cancelled || plan == null) return;
             lastActionAt = System.currentTimeMillis();
-            typeWithRetry(key.value, screenSeq, 0);
+            typeVerified(key.value, 0);
         }, wait);
     }
 
     /**
-     * Some phones need a moment before the reply box exists, and a few reply with a
-     * brand-new dialog whose event arrives late. Try three times, then re-read the
-     * screen once before declaring failure — always logging what was on screen.
+     * Fill the reply box and only then press Send.
+     *
+     * Many phones report the field as empty for a few hundred milliseconds after
+     * ACTION_SET_TEXT lands, which used to look like a failure and caused an extra
+     * retry (and, before that, an empty Send → "Invalid account number"). So the text
+     * is written, read back after a short pause, written again if it did not stick,
+     * and only a field that really holds the value gets a Send.
      */
-    private void typeWithRetry(final String value, final int seq, final int attempt) {
+    private void typeVerified(final String value, final int attempt) {
         if (cancelled || plan == null) return;
-        if (type(value)) {
-            handler.postDelayed(() -> recheck(seq), 4500);   // no event? read once more
+        if (!writeField(value)) {
+            if (attempt < 2) {
+                sink.log("· reply box not ready, retry " + (attempt + 1) + "/2");
+                handler.postDelayed(() -> typeVerified(value, attempt + 1), 700);
+                return;
+            }
+            String onScreen = collect(getRootInActiveWindow());
+            finish(false, "Could not find the USSD reply box. Screen was: "
+                    + (onScreen.isEmpty() ? "(empty)" : onScreen)
+                    + " — send me this line and I will adapt the reader to this phone.");
             return;
         }
-        if (attempt < 3) {
-            sink.log("· reply box not ready, retry " + (attempt + 1) + "/3");
-            handler.postDelayed(() -> typeWithRetry(value, seq, attempt + 1), 1200);
+        handler.postDelayed(() -> confirmLanded(value, attempt), 400);
+    }
+
+    private void confirmLanded(final String value, final int attempt) {
+        if (cancelled || plan == null) return;
+        String landed = currentFieldText();
+        boolean ok = holds(landed, value);
+        sink.log("  field now: \"" + (isSecretValue(value) ? mask(value) : landed) + "\"");
+        if (ok) {
+            clickSend();
+            return;
+        }
+        if (attempt < 2) {
+            sink.log("· the box did not keep the value, retry " + (attempt + 1) + "/2");
+            typeVerified(value, attempt + 1);
             return;
         }
         String onScreen = collect(getRootInActiveWindow());
-        finish(false, "Could not find the USSD reply box after 3 tries. Screen was: "
-                + (onScreen.isEmpty() ? "(empty)" : onScreen)
-                + " — send me this line and I will adapt the reader to this phone.");
+        finish(false, "the reply box never accepted the value — screen was: "
+                + (onScreen.isEmpty() ? "(empty)" : onScreen));
     }
 
-    /** No event arrived after typing — read the window once more so the plan can go on. */
-    private void recheck(int seq) {
-        if (cancelled || plan == null) return;
-        String s = collect(getRootInActiveWindow());
-        if (s.isEmpty()) return;
-        if (s.equals(lastScreen)) {                       // still the screen we answered
-            if (Plan.isWaitingScreen(s)) return;
-            sink.log("↻ still on the same screen — waiting for the network");
-            return;
-        }
-        sink.log("↻ re-reading the screen (no event came)");
-        consider(s);
-    }
-
-    private boolean type(final String value) {
+    /** Clearing first matters: a leftover character turns a good number into "Invalid". */
+    private boolean writeField(final String value) {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return false;
         AccessibilityNodeInfo field = find(root, this::isEditable);
         if (field == null) return false;
 
-        // Clear first: a leftover character from a previous screen turns a valid
-        // number into "Invalid account number" at the network.
         Bundle clear = new Bundle();
         clear.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "");
         field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clear);
@@ -315,35 +351,33 @@ public class UssdService extends AccessibilityService {
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value);
         boolean ok = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
         if (!ok) ok = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-
-        CharSequence landedCs = field.getText();
-        String landed = landedCs == null ? "" : landedCs.toString();
-        if (!value.equals(landed)) {                 // second chance, the box may have lagged
-            field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
-            field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-            landedCs = field.getText();
-            landed = landedCs == null ? "" : landedCs.toString();
-        }
-
-        String shown = value.length() > 0 && isSecret(value) ? mask(value) : landed;
-        sink.log("  field now: \"" + shown + "\"");
-
-        // The box did not take the text — the caller retries instead of clicking Send
-        // with an empty/partial field, which is what the network rejects as invalid.
-        if (!value.equals(landed)) return false;
-
-        handler.postDelayed(this::clickSend, 900);
-        return true;
+        return ok;
     }
 
-    /** PIN-like values must never be printed in the log. */
-    private boolean isSecret(String v) {
-        return plan != null && plan.pin.equals(v);
+    private String currentFieldText() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return "";
+        AccessibilityNodeInfo field = find(root, this::isEditable);
+        if (field == null) return "";
+        CharSequence t = field.getText();
+        return t == null ? "" : t.toString();
+    }
+
+    /** A password field reports bullets, so length is the only thing to compare there. */
+    private static boolean holds(String landed, String value) {
+        if (landed == null) return false;
+        if (landed.equals(value)) return true;
+        String stripped = landed.replace("\u2022", "").replace("*", "").trim();
+        return stripped.isEmpty() && landed.length() == value.length();
+    }
+
+    private boolean isSecretValue(String v) {
+        return plan != null && plan.pin != null && plan.pin.equals(v);
     }
 
     private static String mask(String v) {
         StringBuilder b = new StringBuilder();
-        for (int i = 0; i < v.length(); i++) b.append('•');
+        for (int i = 0; i < v.length(); i++) b.append('\u2022');
         return b.toString();
     }
 
