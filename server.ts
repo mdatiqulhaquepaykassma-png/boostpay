@@ -10743,7 +10743,7 @@ const paymentLocks = new Map<string, Promise<any>>();
   }
 
   /** The money decision for a withdrawal — same single implementation. */
-  function reviewWithdrawCore(db: any, opts: { id: string; action: 'APPROVE' | 'REJECT'; actor: string; reason?: string; payoutRef?: string }): { status: number; body: any } {
+  function reviewWithdrawCore(db: any, opts: { id: string; action: 'APPROVE' | 'REJECT'; actor: string; reason?: string; payoutRef?: string; jobId?: string }): { status: number; body: any } {
     const r = (db.withdrawRequests || []).find((w: any) => w.id === opts.id);
     if (!r) return { status: 404, body: { error: 'That withdrawal does not exist.' } };
     if (r.status !== 'PENDING') return { status: 409, body: { error: `This withdrawal is already ${r.status}.` } };
@@ -10752,12 +10752,21 @@ const paymentLocks = new Map<string, Promise<any>>();
     if (opts.action === 'APPROVE') {
       r.status = 'COMPLETED';
       r.payoutRef = sanitizeText(opts.payoutRef, 80).trim();
+      const ref = sanitizeText(opts.payoutRef, 80).trim();
+      const amountLabel = r.entryAmount ? `${Number(r.entryAmount)} ${r.entryCurrency || ''}`.trim() : `$${Number(r.netUsd).toFixed(2)}`;
       pushNotification(db, {
         id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
-        userId: String(user.id), type: 'SYSTEM_ALERT', title: 'BOOSTPAY-WITHDRAW',
-        message: `WITHDRAWAL PAID: $${Number(r.netUsd).toFixed(2)} sent via ${r.methodName}. Ref: ${r.id}`,
-        timestamp: Date.now(), isRead: false, metadata: { withdrawId: r.id },
+        userId: String(user.id), type: 'WITHDRAW_PAID', title: 'Withdrawal sent',
+        message: `${amountLabel} sent via ${r.methodName}. Ref: ${r.id}${ref ? ` · TrxID ${ref}` : ''}`,
+        timestamp: Date.now(), isRead: false, metadata: { withdrawId: r.id, trxId: ref || '' },
       } as any);
+      // the customer's own transaction history shows the same receipt
+      const linked: any = (db.transactions || []).find((t: any) => String(t.id) === String(r.txId));
+      if (linked) {
+        linked.notes = `Withdrawal ${r.id} via ${r.methodName} — sent${ref ? ` · TrxID ${ref}` : ''}`;
+        linked.status = 'COMPLETED';
+        linked.metadata = { ...(linked.metadata || {}), withdrawId: r.id, trxId: ref || '', payoutJobId: opts.jobId || '' };
+      }
     } else {
       const refund = Number(Number(r.amountUsd).toFixed(8));
       user.balance = floor2((Number(user.balance) || 0) + refund);
@@ -12027,6 +12036,20 @@ const paymentLocks = new Map<string, Promise<any>>();
       const job = out.job;
       dev.lastSeenAt = Date.now();
 
+      // A SENT job that carries the wallet's TrxID needs no further proof: the money left
+      // the wallet and the customer must see it as done. (The debit SMS, when/if it arrives,
+      // only confirms the job — the withdrawal is no longer PENDING, so nothing doubles.)
+      if (status === 'SENT' && job.kind === 'WITHDRAW' && job.withdrawId && (trxId || job.trxId)) {
+        const wr0: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
+        if (wr0 && wr0.status === 'PENDING') {
+          reviewWithdrawCore(db, {
+            id: String(wr0.id), action: 'APPROVE', actor: 'payout-robot',
+            payoutRef: job.trxId || trxId, jobId: job.id,
+            reason: `Paid by the USSD robot · job ${job.id} · TrxID ${job.trxId || trxId}`,
+          });
+        }
+      }
+
       // The customer sees the payout's TrxID on their own withdrawal row.
       if (job.kind === 'WITHDRAW' && job.withdrawId && (trxId || job.trxId)) {
         const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
@@ -12034,19 +12057,7 @@ const paymentLocks = new Map<string, Promise<any>>();
           wr.payoutTrxId = job.trxId || trxId;
           wr.payoutTrxAt = Date.now();
           wr.payoutJobId = job.id;
-          if (status === 'SENT') {
-            const u: any = (db.users || []).find((x: any) => String(x.id) === String(wr.userId));
-            try {
-              pushNotification(db, {
-                id: 'N-' + Math.random().toString(36).slice(2, 10).toUpperCase(), userId: wr.userId,
-                type: 'WITHDRAW_SENT', title: 'Withdrawal sent',
-                message: `Your withdrawal ${wr.id} was sent. TrxID ${wr.payoutTrxId}.` +
-                  `${u ? ` Amount ${Number(wr.entryAmount || 0) || ''} ${wr.entryCurrency || ''}`.trimEnd() : ''}`.trim(),
-                amount: 0, referenceId: wr.id, timestamp: Date.now(), isRead: false,
-                metadata: { withdrawId: wr.id, trxId: wr.payoutTrxId },
-              });
-            } catch { }
-          }
+
         }
       }
 
