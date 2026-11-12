@@ -12018,14 +12018,42 @@ const paymentLocks = new Map<string, Promise<any>>();
       const body = req.body || {};
       const raw = String(body.status || '').toUpperCase();
       const status = raw === 'SENT' ? 'SENT' : raw === 'DRYRUN' ? 'DRYRUN' : 'FAILED';
+      const noteText = sanitizeText(body.note, 300);
+      const trxId = String(body.trxId || '').trim().slice(0, 40);
       const out = markResult(ensurePayoutJobs(db), String(req.params.id), status as any, {
-        note: sanitizeText(body.note, 300), log: String(body.log || '').slice(0, 4000), deviceId: dev.id,
+        note: noteText, log: String(body.log || '').slice(0, 4000), deviceId: dev.id, trxId,
       });
       if (!out.ok) return res.status(409).json({ error: out.error });
       const job = out.job;
       dev.lastSeenAt = Date.now();
 
-      if (status === 'FAILED' && job.kind === 'WITHDRAW' && job.withdrawId) {
+      // The customer sees the payout's TrxID on their own withdrawal row.
+      if (job.kind === 'WITHDRAW' && job.withdrawId && (trxId || job.trxId)) {
+        const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
+        if (wr) {
+          wr.payoutTrxId = job.trxId || trxId;
+          wr.payoutTrxAt = Date.now();
+          wr.payoutJobId = job.id;
+          if (status === 'SENT') {
+            const u: any = (db.users || []).find((x: any) => String(x.id) === String(wr.userId));
+            try {
+              pushNotification(db, {
+                id: 'N-' + Math.random().toString(36).slice(2, 10).toUpperCase(), userId: wr.userId,
+                type: 'WITHDRAW_SENT', title: 'Withdrawal sent',
+                message: `Your withdrawal ${wr.id} was sent. TrxID ${wr.payoutTrxId}.` +
+                  `${u ? ` Amount ${Number(wr.entryAmount || 0) || ''} ${wr.entryCurrency || ''}`.trimEnd() : ''}`.trim(),
+                amount: 0, referenceId: wr.id, timestamp: Date.now(), isRead: false,
+                metadata: { withdrawId: wr.id, trxId: wr.payoutTrxId },
+              });
+            } catch { }
+          }
+        }
+      }
+
+      // Money safety: "sent but no TrxID" may still have moved money, so the withdrawal is
+      // NOT refunded automatically — it stays pending for the admin to check.
+      const unsure = status === 'FAILED' && /NO_TRXID/i.test(noteText);
+      if (status === 'FAILED' && job.kind === 'WITHDRAW' && job.withdrawId && !unsure) {
         const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
         if (wr && wr.status === 'PENDING') {
           reviewWithdrawCore(db, {
@@ -12036,7 +12064,7 @@ const paymentLocks = new Map<string, Promise<any>>();
       }
       // A DRYRUN moves no money and leaves a real withdrawal PENDING for a live retry.
       recordAuditLog(db, 'PAYOUT_' + status, smsDeviceActor(dev),
-        `Payout job ${job.id} → ${status}${body.note ? ' · ' + sanitizeText(body.note, 120) : ''}`,
+        `Payout job ${job.id} → ${status}${job.trxId ? ' · TrxID ' + job.trxId : ''}${body.note ? ' · ' + sanitizeText(body.note, 120) : ''}`,
         job.userId ? String(job.userId) : undefined);
       writeDb(db);
       res.json({ success: true, job: publicJob(job) });

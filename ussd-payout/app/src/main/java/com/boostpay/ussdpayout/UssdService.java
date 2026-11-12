@@ -43,6 +43,7 @@ public class UssdService extends AccessibilityService {
     private int actions = 0;            // keystrokes typed in this run
     private long lastActionAt = 0;      // minimum gap between two keys
     private boolean pinTyped = false;   // after the PIN only the confirmation is left
+    private String trxSeen = "";        // the wallet's TrxID, once the confirmation shows it
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     @Override
@@ -98,6 +99,8 @@ public class UssdService extends AccessibilityService {
         self.cancelled = false;
         self.screenSeq = 0;
         self.answered.clear();
+        self.pinTyped = false;
+        self.trxSeen = "";
         self.pendingTask = null;
         self.lastProgressAt = System.currentTimeMillis();
         self.handler.removeCallbacksAndMessages(null);
@@ -287,8 +290,11 @@ public class UssdService extends AccessibilityService {
         // event at all. Without this the job hung until the stall guard and was reported
         // FAILED — which refunds a withdrawal even when the money DID leave.
         if (pinTyped && idle > 14000) {
-            finish(true, "PIN was typed, but the wallet showed no confirmation text — "
-                    + "the debit SMS decides; check the balance before paying again");
+            if (!trxSeen.isEmpty()) {
+                finish(true, "SENT · TrxID " + trxSeen + " — the confirmation screen closed, the wallet never showed it again");
+            } else {
+                finish(false, "NO_TRXID the wallet showed no confirmation and no TrxID — check the wallet before paying again");
+            }
             return;
         }
         if (idle > STALL_MS) {
@@ -306,8 +312,24 @@ public class UssdService extends AccessibilityService {
         // TEXT, never assume: calling every screen after the PIN a success is what made a
         // refused payout look SENT while no money had moved.
         if (pinTyped) {
+            // v2.1.6: a payout counts as sent only with the wallet's TrxID in hand.
+            String trx = trxIdOf(screen);
+            if (!trx.isEmpty()) {
+                trxSeen = trx;
+                sink.log("· TrxID " + trx + (feeOf(screen).isEmpty() ? "" : " · " + feeOf(screen)));
+                sink.trx(trx);
+            }
             String verdict = judgeAfterPin(screen);
-            if (!verdict.isEmpty()) { finish(verdict.startsWith("OK"), verdict.substring(2)); return; }
+            if (!verdict.isEmpty()) {
+                if (verdict.startsWith("OK")) {
+                    sink.log("✔ " + verdict.substring(2));
+                    finish(true, "SENT · TrxID " + trxSuffix() + " — " + verdict.substring(2));
+                } else {
+                    sink.log("✘ " + verdict.substring(2));
+                    finish(false, verdict.substring(2));
+                }
+                return;
+            }
             return;                          // no verdict yet — wait for the final screen
         }
 
@@ -548,8 +570,39 @@ public class UssdService extends AccessibilityService {
                 || l.contains("you have sent") || l.contains("sent to") || l.contains("success")
                 || l.contains("successful") || l.contains("thank you") || l.contains("সফল")
                 || l.contains("পাঠানো হয়েছে");
-        if (success) return "OK the wallet confirmed: " + UssdApiEngine.firstLine(screen);
+        if (success) {
+            // The owner's rule: a success screen without a TrxID is not a success.
+            if (!trxIdOf(screen).isEmpty() || !trxSeen.isEmpty()) {
+                return "OK the wallet confirmed: " + UssdApiEngine.firstLine(screen);
+            }
+            return "NO NO_TRXID the wallet said it was sent but showed no TrxID — check the wallet before paying again";
+        }
         return "";
+    }
+
+    /** The wallet's transaction id from a confirmation screen ("TrxID: 76B13VK1"). */
+    static String trxIdOf(String screen) {
+        if (screen == null) return "";
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(?i)(?:trx|txn|transaction)\\s*(?:id|no|number)?\\s*[:#-]?\\s*([A-Za-z0-9]{6,20})")
+                .matcher(screen);
+        while (m.find()) {
+            String v = m.group(1);
+            if (v.matches(".*[0-9].*")) return v.toUpperCase();      // a real id carries digits
+        }
+        return "";
+    }
+
+    /** "Fee & VAT: Tk 5.00" → "Fee & VAT: Tk 5.00" (kept for the log and the panel). */
+    static String feeOf(String screen) {
+        if (screen == null) return "";
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(?i)(fee[^\\n·]*?(?:tk|bdt)?\\s*[0-9]+(?:\\.[0-9]+)?)").matcher(screen);
+        return m.find() ? m.group(1).trim() : "";
+    }
+
+    private String trxSuffix() {
+        return trxSeen.isEmpty() ? "(no TrxID shown)" : trxSeen;
     }
 
     private void finish(boolean ok, String message) {
@@ -559,27 +612,50 @@ public class UssdService extends AccessibilityService {
         Sink s = sink;
         sink = null;
         Guard.end();
-        // v2.1.4: never leave the USSD dialog open. A dialog left at the PIN prompt made
-        // the NEXT job read it as its own screen ("Invalid PIN") and fail without sending.
-        closeDialogQuietly();
+        // v2.1.6: close the dialog the way the wallet expects —
+        //   success → Cancel (ends the session, never "0. Main Menu")
+        //   failure → OK     (dismisses the error box)
+        // Leaving it open made the NEXT job read a stale "Invalid PIN" screen.
+        closeDialog(ok);
         if (s != null) s.finish(ok, message);
     }
 
-    /** Presses BACK once, shortly after we are done, to close the USSD dialog. */
-    private void closeDialogQuietly() {
+    /** Presses Cancel (success) or OK (failure) on the USSD dialog; BACK if no button. */
+    private void closeDialog(final boolean success) {
         handler.postDelayed(() -> {
             if (plan != null) return;                  // a new run already took over
             try {
                 AccessibilityNodeInfo root = getRootInActiveWindow();
-                CharSequence pkg = root == null ? null : root.getPackageName();
-                if (pkg != null) {
-                    String p = pkg.toString();
-                    if (p.contains("phone") || p.contains("dialer") || p.contains("telecom")
-                            || p.contains("incallui") || p.contains("server.telephony")) {
-                        performGlobalAction(GLOBAL_ACTION_BACK);
-                    }
-                }
+                if (root == null) return;
+                CharSequence pkg = root.getPackageName();
+                String p = pkg == null ? "" : pkg.toString();
+                boolean carrier = p.contains("phone") || p.contains("dialer") || p.contains("telecom")
+                        || p.contains("incallui") || p.contains("server.telephony");
+                if (!carrier) return;                  // our own app (or nothing) — leave it alone
+                boolean done = success ? clickButton(root, "cancel") : clickButton(root, "ok");
+                if (!done) done = clickButton(root, "cancel") || clickButton(root, "ok");
+                if (!done) performGlobalAction(GLOBAL_ACTION_BACK);
             } catch (Throwable ignored) { }
         }, 1200);
+    }
+
+    /** Clicks the first visible button/link whose text starts with the given word. */
+    private boolean clickButton(AccessibilityNodeInfo node, String word) {
+        if (node == null) return false;
+        CharSequence t = node.getText();
+        if (t != null) {
+            String label = t.toString().trim().toLowerCase();
+            if (!label.isEmpty() && label.startsWith(word)) {
+                AccessibilityNodeInfo target = node;
+                for (int i = 0; i < 4 && target != null && !target.isClickable(); i++) target = target.getParent();
+                if (target != null && target.isClickable() && target.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    return true;
+                }
+            }
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (clickButton(node.getChild(i), word)) return true;
+        }
+        return false;
     }
 }

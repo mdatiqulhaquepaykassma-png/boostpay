@@ -54,6 +54,7 @@ public class QueueService extends Service {
     static volatile String lastJobLabel = "";    // "100 BDT → 017…"
     static volatile String lastJobStatus = "";   // SENDING · SENT · DRYRUN · FAILED
     static volatile String lastJobNote = "";     // why it failed, in the server's words
+    static volatile String lastJobTrx = "";      // the wallet's TrxID, when the payout went through
 
     private static QueueService self;
     private Handler handler;
@@ -63,6 +64,7 @@ public class QueueService extends Service {
     private CountDownLatch jobDone;
     private volatile boolean jobOk;
     private volatile String jobSummary = "";
+    private volatile String jobTrx = "";         // the wallet's TrxID for the job being sent
 
     // ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -185,8 +187,18 @@ public class QueueService extends Service {
             boolean pinRejected = failure != null && failure.startsWith("PIN_REJECTED:");
             boolean staleScreen = failure != null && failure.contains("stale PIN screen");
             if (failure == null) {
-                status = dryRun ? "DRYRUN" : "SENT";
-                note = jobSummary;
+                if (dryRun) {
+                    status = "DRYRUN";
+                    note = jobSummary;
+                } else if (!jobTrx.isEmpty()) {
+                    status = "SENT";
+                    note = "TrxID " + jobTrx + " · " + jobSummary;
+                } else {
+                    // Owner's rule: no TrxID means we cannot show the customer a receipt,
+                    // so it is not counted as sent.
+                    status = "FAILED";
+                    note = "NO_TRXID the wallet showed no TrxID — " + jobSummary;
+                }
             } else if (staleScreen) {
                 // the wallet never saw this job: no money moved, so it is not a payment failure
                 status = "DRYRUN";
@@ -197,9 +209,11 @@ public class QueueService extends Service {
                         ? "PIN rejected by " + job.provider + " for SIM " + simLabelOf() + " — save that SIM's PIN again (⚙ Advanced settings → SIM cards)"
                         : failure;
             }
-            String err = Queue.report(server, token, job.id, status, note, logText());
+            String err = Queue.report(server, token, job.id, status, note, logText(), jobTrx);
             lastJobStatus = status;
-            lastJobNote = "FAILED".equals(status) ? (failure == null ? err : failure) : "";
+            lastJobTrx = jobTrx;
+            lastJobNote = "FAILED".equals(status) ? (failure == null ? err : failure)
+                    : ("SENT".equals(status) ? "TrxID " + jobTrx : "");
             say("queue: job " + job.id + " → " + status + (err.isEmpty() ? "" : " (report failed: " + err + ")"), status.toLowerCase());
             updateNotification("Queue running", "Last job " + job.id + " → " + status);
             if (pinRejected) {
@@ -228,8 +242,10 @@ public class QueueService extends Service {
         jobDone = new CountDownLatch(1);
         jobOk = false;
         jobSummary = "";
+        jobTrx = "";
         final Sink sink = new Sink() {
             @Override public void log(String line) { say("  " + line, "sending"); }
+            @Override public void trx(String trxId) { if (trxId != null && !trxId.isEmpty()) jobTrx = trxId; }
             @Override public void finish(boolean ok, String summary) {
                 jobOk = ok;
                 jobSummary = summary;

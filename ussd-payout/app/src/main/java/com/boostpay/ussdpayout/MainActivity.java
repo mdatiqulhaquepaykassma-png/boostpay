@@ -559,6 +559,7 @@ public class MainActivity extends Activity {
         if (!jobId.isEmpty()) {
             j.append("JOB ").append(jobId).append(" · ").append(QueueService.lastJobLabel);
             j.append("\n").append(jobStatus.isEmpty() ? "waiting" : jobStatus);
+            if (!QueueService.lastJobTrx.isEmpty()) j.append("\nTrxID ").append(QueueService.lastJobTrx);
             if (!QueueService.lastJobNote.isEmpty()) j.append(" — ").append(QueueService.lastJobNote);
         }
         queueJobView.setText(j.toString());

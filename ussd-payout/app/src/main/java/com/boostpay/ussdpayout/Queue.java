@@ -108,11 +108,18 @@ final class Queue {
     /** "SENT" (live, wait for the SMS), "DRYRUN" (nothing left the wallet) or "FAILED". */
     static String report(String server, String token, String jobId, String status,
                          String note, String screenLog) {
+        return report(server, token, jobId, status, note, screenLog, "");
+    }
+
+    /** v2.1.6: the report carries the wallet's TrxID, so the panel and the customer see it. */
+    static String report(String server, String token, String jobId, String status,
+                         String note, String screenLog, String trxId) {
         try {
             JSONObject body = new JSONObject();
             body.put("status", status);
             body.put("note", note == null ? "" : note);
             body.put("log", screenLog == null ? "" : screenLog);
+            if (trxId != null && !trxId.isEmpty()) body.put("trxId", trxId);
             Res r = post(server, "/api/payout/" + jobId + "/result", token, body.toString());
             if (r == null || r.json == null) return "the server did not answer";
             if (r.json.has("error")) return explain(r.http, r.json.optString("error"));

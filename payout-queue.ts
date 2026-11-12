@@ -177,7 +177,7 @@ export function markResult(
   jobs: PayoutJob[],
   jobId: string,
   status: 'SENT' | 'FAILED' | 'DRYRUN',
-  opts: { note?: string; log?: string; now?: number; deviceId?: string } = {},
+  opts: { note?: string; log?: string; now?: number; deviceId?: string; trxId?: string } = {},
 ): { ok: true; job: PayoutJob } | { ok: false; error: string } {
   const job = jobs.find((j) => j.id === jobId);
   if (!job) return { ok: false, error: 'That job does not exist.' };
@@ -196,6 +196,9 @@ export function markResult(
   if (status === 'SENT') {
     job.status = 'SENT';
     job.sentAt = now;
+    // The wallet's own transaction id, straight from the confirmation screen.
+    const trx = String(opts.trxId || '').trim().slice(0, 40);
+    if (trx) job.trxId = trx;
   } else if (status === 'DRYRUN') {
     // The phone walked the menu but sent nothing. No money moved, no refund either:
     // a withdrawal stays PENDING so the admin can queue it again in LIVE mode.

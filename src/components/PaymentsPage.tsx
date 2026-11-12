@@ -425,6 +425,9 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
                           {mode === 'withdraw' && r.methodName === 'Telegram Agent' ? 'Cash Agent' : r.methodName} · <span className="font-mono text-zinc-500">{r.id}</span>
                         </div>
                         <div className="text-[9px] text-zinc-500">{timeAgo(r.createdAt)} · {r.entryAmount} {r.entryCurrency}{r.reason ? ` · ${r.reason}` : ''}</div>
+                        {mode === 'withdraw' && (r as any).payoutTrxId ? (
+                          <div className="mt-0.5 font-mono text-[9px] text-emerald-300">TrxID {(r as any).payoutTrxId}</div>
+                        ) : null}
                       </div>
                       <div className="text-right">
                         <div className="font-mono text-[10.5px] font-bold text-zinc-100">{price(r.amountUsd)}</div>
