@@ -10758,6 +10758,31 @@ const paymentLocks = new Map<string, Promise<any>>();
   }
 
   /** The money decision for a withdrawal — same single implementation. */
+  /**
+   * A payout job that reported SENT with the wallet's TrxID is proof the money left.
+   * If the matching withdrawal is still PENDING (an old build reported SENT without
+   * completing it, or a restart lost the update), close it now — same result the live
+   * path produces, and it never touches a job without a TrxID.
+   */
+  function reconcileSentWithdrawals(): number {
+    const db = ensurePaymentCollections(readDb());
+    const jobs = ensurePayoutJobs(db);
+    let fixed = 0;
+    for (const j of jobs as any[]) {
+      if (j.status !== 'SENT' || !j.trxId || !j.withdrawId) continue;
+      const w: any = (db.withdrawRequests || []).find((x: any) => String(x.id) === String(j.withdrawId));
+      if (!w || w.status !== 'PENDING') continue;
+      const out = reviewWithdrawCore(db, {
+        id: String(w.id), action: 'APPROVE', actor: 'payout-robot',
+        payoutRef: j.trxId, jobId: j.id,
+        reason: `Paid by the USSD robot · job ${j.id} · TrxID ${j.trxId}`,
+      });
+      if (out.status === 200) fixed++;
+    }
+    if (fixed) writeDb(db);
+    return fixed;
+  }
+
   function reviewWithdrawCore(db: any, opts: { id: string; action: 'APPROVE' | 'REJECT'; actor: string; reason?: string; payoutRef?: string; jobId?: string }): { status: number; body: any } {
     const r = (db.withdrawRequests || []).find((w: any) => w.id === opts.id);
     if (!r) return { status: 404, body: { error: 'That withdrawal does not exist.' } };
@@ -15513,6 +15538,14 @@ const paymentLocks = new Map<string, Promise<any>>();
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`BoostPay Server listening on port ${PORT} [Version: ${SERVER_VERSION}]`);
+    // Self-healing receipts: any withdrawal still PENDING while its payout job already
+    // left the wallet with a TrxID is completed on boot. Idempotent — safe on every start.
+    setTimeout(() => {
+      try {
+        const fixed = reconcileSentWithdrawals();
+        if (fixed) console.log(`[boot] completed ${fixed} withdrawal(s) whose payout already had a TrxID`);
+      } catch (e: any) { console.warn('[boot] payout receipt reconcile skipped:', e?.message || e); }
+    }, 4000);
   });
 }
 
