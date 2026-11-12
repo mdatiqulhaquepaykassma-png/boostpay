@@ -11856,10 +11856,13 @@ const paymentLocks = new Map<string, Promise<any>>();
       const { db, dev } = auth;
       const jobs = ensurePayoutJobs(db);
       const dryRun = (req.body || {}).dryRun === true;
+      const wallet = deviceWallet(dev);
       const job = claimNext(jobs, {
-        deviceId: dev.id, deviceLabel: dev.label, provider: deviceWallet(dev),
-        // a phone on DRY RUN is only ever given a TEST job
-        kinds: dryRun ? ['TEST'] : ['TEST', 'WITHDRAW'],
+        deviceId: dev.id, deviceLabel: dev.label, provider: wallet,
+        // A phone in DRY RUN only ever gets a TEST job. A phone that is not yet
+        // tied to a wallet (SMS Bridge → wallet: auto) is treated the same way, so
+        // a real withdrawal never lands on a phone nobody has aimed at it.
+        kinds: (dryRun || !wallet) ? ['TEST'] : ['TEST', 'WITHDRAW'],
       });
       dev.lastSeenAt = Date.now();
       if (job) {
