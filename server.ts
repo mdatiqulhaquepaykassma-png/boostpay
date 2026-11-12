@@ -17,7 +17,7 @@ import {
 } from './payments';
 import { parseSms, normalizeTrxId } from './sms-parse';
 import {
-  ensurePayoutJobs, buildJob, claimNext, markResult, cancelJob, matchDebit,
+  ensurePayoutJobs, buildJob, claimNext, markResult, cancelJob, retryJob, matchDebit,
   publicJob, queueStats, cleanMsisdn, cleanAmount,
 } from './payout-queue';
 
@@ -11984,6 +11984,31 @@ const paymentLocks = new Map<string, Promise<any>>();
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not read the payout queue.' }); }
   });
 
+  /** The phone asks for the SAME job again after a failure (the ↻ RETRY button). */
+  app.post('/api/payout/:id/retry', rateLimit(60), (req: any, res) => {
+    try {
+      const auth = payoutDevice(req);
+      if (!auth) return res.status(401).json({ error: 'This phone is not allowed to retry payouts.' });
+      const { db, dev } = auth;
+      const jobs = ensurePayoutJobs(db);
+      const job: any = jobs.find((j: any) => String(j.id) === String(req.params.id));
+      if (!job) return res.status(404).json({ error: 'That job does not exist.' });
+      if (job.deviceId && job.deviceId !== dev.id) {
+        return res.status(409).json({ error: 'That job belongs to another phone.' });
+      }
+      const blocked = retryBlocker(db, job);
+      if (blocked) return res.status(409).json({ error: blocked, canRetry: false });
+      const out = retryJob(jobs, String(job.id), { note: 'retried from the phone' });
+      if (!out.ok) return res.status(409).json({ error: out.error, canRetry: false });
+      dev.lastSeenAt = Date.now();
+      recordAuditLog(db, 'PAYOUT_RETRY', smsDeviceActor(dev),
+        `Payout job ${out.job.id} failed earlier (${sanitizeText(job.resultNote, 80)}) → queued again from the phone`,
+        job.userId ? String(job.userId) : undefined);
+      writeDb(db);
+      res.json({ success: true, job: publicJob(out.job) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not retry that job.' }); }
+  });
+
   /** The phone reports what happened. */
   app.post('/api/payout/:id/result', rateLimit(240), (req: any, res) => {
     try {
@@ -12018,6 +12043,24 @@ const paymentLocks = new Map<string, Promise<any>>();
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not record the payout result.' }); }
   });
 
+  /**
+   * Why a job may NOT be retried (empty string = it may). Money-safety only:
+   * a retried withdrawal must still be pending, otherwise it was already refunded.
+   */
+  function retryBlocker(db: any, job: any): string {
+    if (!job) return 'That job does not exist.';
+    if (job.status === 'SENT' || job.status === 'PAID') return 'already sent — do not send twice';
+    if (job.status === 'CLAIMED') return 'a phone is working on it right now';
+    if (job.status !== 'FAILED') return `only a FAILED job can be retried (this is ${job.status})`;
+    if (job.kind === 'WITHDRAW' && job.withdrawId) {
+      const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
+      if (wr && wr.status !== 'PENDING') {
+        return `withdrawal ${wr.id} is ${wr.status} (already refunded) — retrying would pay it twice`;
+      }
+    }
+    return '';
+  }
+
   /** Everything the admin "Payout Robot" screen paints. */
   app.get('/api/admin/payouts', rateLimit(120), requireAdmin, (req: any, res) => {
     try {
@@ -12041,7 +12084,10 @@ const paymentLocks = new Map<string, Promise<any>>();
       res.setHeader('Cache-Control', 'no-store');
       res.json({
         success: true,
-        jobs: jobs.slice(0, 120).map(publicJob),
+        jobs: jobs.slice(0, 120).map((j: any) => {
+          const blocked = retryBlocker(db, j);
+          return { ...publicJob(j), retryable: !blocked, retryBlocked: blocked };
+        }),
         pending,
         stats: queueStats(jobs),
         devices: smsDevicesOf(db).map((d: any) => ({
@@ -12148,6 +12194,24 @@ const paymentLocks = new Map<string, Promise<any>>();
   });
 
   /** Issue a fresh token for a phone — the old one stops working immediately. */
+  /** Admin ↻ Retry: queue a FAILED job again (same safety rule as the phone). */
+  app.post('/api/admin/payouts/:id/retry', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const jobs = ensurePayoutJobs(db);
+      const job: any = jobs.find((j: any) => String(j.id) === String(req.params.id));
+      const blocked = retryBlocker(db, job);
+      if (blocked) return res.status(409).json({ error: blocked });
+      const out = retryJob(jobs, String(req.params.id), { note: 'retried from the panel' });
+      if (!out.ok) return res.status(409).json({ error: out.error });
+      recordAuditLog(db, 'PAYOUT_RETRY', 'admin:' + String(req.authAdmin),
+        `Payout job ${out.job.id} → queued again (was: ${sanitizeText(job.resultNote, 80)})`,
+        job.userId ? String(job.userId) : undefined);
+      writeDb(db);
+      res.json({ success: true, job: publicJob(out.job) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not retry that job.' }); }
+  });
+
   app.post('/api/admin/payouts/devices/:id/token', rateLimit(10), requireAdmin, requireSuperAdmin, (req: any, res) => {
     try {
       const db = ensurePaymentCollections(readDb());

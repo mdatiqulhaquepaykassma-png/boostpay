@@ -258,6 +258,40 @@ export function cancelJob(
   return { ok: true, job };
 }
 
+/**
+ * Put a FAILED job back in the queue so the phone (or the panel) can try again.
+ *
+ * Safety: the money must not move twice. A SENT/PAID job is never retried, and a
+ * WITHDRAW job is only retried when its withdrawal is still PENDING — a failed
+ * withdrawal is refunded to the user, so paying it again would be a loss.
+ */
+export function retryJob(
+  jobs: PayoutJob[],
+  jobId: string,
+  opts: { now?: number; note?: string } = {},
+): { ok: true; job: PayoutJob } | { ok: false; error: string } {
+  const job = jobs.find((j) => j.id === jobId);
+  if (!job) return { ok: false, error: 'That job does not exist.' };
+  if (job.status === 'SENT' || job.status === 'PAID') {
+    return { ok: false, error: 'The phone already sent this one — wait for the SMS, do not send it twice.' };
+  }
+  if (job.status === 'CLAIMED') {
+    return { ok: false, error: 'A phone is working on this job right now — cancel it first if it is stuck.' };
+  }
+  if (job.status !== 'FAILED') {
+    return { ok: false, error: `Only a FAILED job can be retried — this one is ${job.status}.` };
+  }
+  job.status = 'QUEUED';
+  job.deviceId = undefined;
+  job.deviceLabel = undefined;
+  job.claimedAt = undefined;
+  job.sentAt = undefined;
+  job.finishedAt = undefined;
+  job.trxId = undefined;
+  job.resultNote = String(opts.note || 'queued again — retry').slice(0, 300);
+  return { ok: true, job };
+}
+
 export function publicJob(j: PayoutJob) {
   return {
     id: j.id, kind: j.kind, provider: j.provider, number: j.number,

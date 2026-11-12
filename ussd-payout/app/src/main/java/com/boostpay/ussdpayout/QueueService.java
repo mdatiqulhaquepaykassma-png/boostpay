@@ -49,6 +49,12 @@ public class QueueService extends Service {
     static volatile long lastContactAt = 0;      // last successful answer from the panel
     static volatile String lastError = "";       // the panel's reason, when it refuses us
 
+    // ── the last job, so the big card can show a status and a ↻ RETRY button ──
+    static volatile String lastJobId = "";
+    static volatile String lastJobLabel = "";    // "100 BDT → 017…"
+    static volatile String lastJobStatus = "";   // SENDING · SENT · DRYRUN · FAILED
+    static volatile String lastJobNote = "";     // why it failed, in the server's words
+
     private static QueueService self;
     private Handler handler;
     private PowerManager.WakeLock wake;
@@ -59,6 +65,14 @@ public class QueueService extends Service {
     private volatile String jobSummary = "";
 
     // ── lifecycle ────────────────────────────────────────────────────────────
+
+    /** Clears the "last job" line — the UI calls this when ▶ CONNECT starts a new session. */
+    static void forgetLastJob() {
+        lastJobId = "";
+        lastJobLabel = "";
+        lastJobStatus = "";
+        lastJobNote = "";
+    }
 
     static void start(Context c) {
         Intent i = new Intent(c, QueueService.class).setAction(ACTION_START);
@@ -156,7 +170,11 @@ public class QueueService extends Service {
             }
 
             Queue.Job job = reply.job;
-            say("queue: job " + job.id + " · " + job.amount + " BDT → " + job.number
+            lastJobId = job.id;
+            lastJobLabel = job.amount + " BDT → " + job.number;
+            lastJobStatus = "SENDING";
+            lastJobNote = "";
+            say("queue: job " + job.id + " · " + lastJobLabel
                     + " (" + job.kind + (dryRun ? ", dry run" : ", LIVE") + ")", "sending");
             updateNotification("Sending " + job.amount + " BDT", job.number + " · " + job.id);
 
@@ -171,6 +189,8 @@ public class QueueService extends Service {
                 note = failure;
             }
             String err = Queue.report(server, token, job.id, status, note, logText());
+            lastJobStatus = status;
+            lastJobNote = "FAILED".equals(status) ? (failure == null ? err : failure) : "";
             say("queue: job " + job.id + " → " + status + (err.isEmpty() ? "" : " (report failed: " + err + ")"), status.toLowerCase());
             updateNotification("Queue running", "Last job " + job.id + " → " + status);
             sleep(2500);

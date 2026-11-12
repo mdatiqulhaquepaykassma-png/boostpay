@@ -7,7 +7,7 @@
  * is really paid, is exercised here first.
  */
 import {
-  buildJob, claimNext, markResult, matchDebit, cancelJob, releaseStale,
+  buildJob, claimNext, markResult, matchDebit, cancelJob, releaseStale, retryJob,
   queueStats, cleanMsisdn, cleanAmount, CLAIM_MS, type PayoutJob,
 } from '../payout-queue';
 
@@ -130,6 +130,30 @@ check('a dry run is not a payment', matchDebit(jobs, { amount: 250, msisdn: '017
 const j5 = make({ provider: 'bkash', number: '01812345678', amountBdt: 30 });
 const anyPhone = claimNext(jobs, { deviceId: 'D8', provider: '', now: 8000 });
 check('a phone with no wallet set takes the oldest job', !!anyPhone && anyPhone.id === j5.id, anyPhone && anyPhone.id);
+
+// ── ↻ RETRY: only a FAILED job, and never one that already paid out ─────────
+const rj = make({ kind: 'TEST', amountBdt: 120 });
+const claimed = claimNext(jobs, { deviceId: 'DR', provider: rj.provider, now: 9500 });
+check('retry test setup: the job was claimed', !!claimed && claimed.id === rj.id, claimed && claimed.id);
+check('a job still being worked on cannot be retried', !retryJob(jobs, rj.id).ok, 'retried a CLAIMED job');
+markResult(jobs, rj.id, 'FAILED', { deviceId: 'DR', note: 'menu never appeared', now: 9600 });
+const back = retryJob(jobs, rj.id, { note: 'retry' });
+check('a FAILED job goes back to the queue', back.ok && rj.status === 'QUEUED', rj.status);
+check('the retry forgets the old phone', back.ok && !rj.deviceId && !rj.claimedAt, rj.deviceId);
+check('the retry keeps the attempt count', Number(rj.attempts) >= 1, String(rj.attempts));
+check('the retried job can be claimed again',
+  (claimNext(jobs, { deviceId: 'DR2', provider: rj.provider, now: 9700 }) || {}).id === rj.id, 'not claimable');
+
+const sentJob = make({ kind: 'TEST', amountBdt: 70 });
+claimNext(jobs, { deviceId: 'DS', provider: sentJob.provider, now: 9800 });
+markResult(jobs, sentJob.id, 'SENT', { deviceId: 'DS', now: 9900 });
+const sentRetry = retryJob(jobs, sentJob.id);
+check('a SENT job is never retried (no double payment)', !sentRetry.ok && sentJob.status === 'SENT', sentJob.status);
+
+const retryCancel = make({ kind: 'TEST', amountBdt: 55 });
+cancelJob(jobs, retryCancel.id, { reason: 'test' });
+check('a CANCELLED job is not retried', !retryJob(jobs, retryCancel.id).ok, retryCancel.status);
+check('an unknown job is not retried', !retryJob(jobs, 'PAY-NOPE').ok, 'no error');
 
 console.log('\n' + pass + ' pass / ' + fail + ' fail');
 process.exit(fail === 0 ? 0 : 1);

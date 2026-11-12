@@ -64,6 +64,8 @@ public class MainActivity extends Activity {
     private TextView queueState;
     private LinearLayout statusCard, advancedBox, logBox;
     private TextView statusTitle, statusDetail;
+    private TextView queueJobView;                  // "JOB … · 100 BDT → 017… · FAILED: reason"
+    private Button retryButton;                     // ↻ RETRY — only when something failed
     private Button advButton, logButton;
     private boolean queueRunning;
     private boolean queueLive;                       // the mode the queue is running in
@@ -240,6 +242,26 @@ public class MainActivity extends Activity {
         stopBtn.setOnClickListener(v -> stopRun());
         mainButtons.addView(stopBtn);
         statusCard.addView(mainButtons);
+
+        // ── the queue's own line: what is happening to the job, and ↻ RETRY ──
+        queueJobView = new TextView(this);
+        queueJobView.setTextColor(Color.parseColor("#a1a1aa"));
+        queueJobView.setTextSize(11.5f);
+        queueJobView.setPadding(0, dp(10), 0, 0);
+        queueJobView.setVisibility(View.GONE);
+        statusCard.addView(queueJobView);
+
+        retryButton = button("↻ RETRY");
+        retryButton.setBackgroundColor(Color.parseColor("#f59e0b"));
+        retryButton.setTextColor(Color.parseColor("#1c1207"));
+        retryButton.setVisibility(View.GONE);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.topMargin = dp(8);
+        retryButton.setLayoutParams(rlp);
+        retryButton.setOnClickListener(v -> onRetry());
+        statusCard.addView(retryButton);
+
         root.addView(statusCard);
 
         // ── 2 · connection details (only needed once) ───────────────────────
@@ -523,7 +545,71 @@ public class MainActivity extends Activity {
         if (!err.isEmpty()) d.append("\n✗ ").append(err);
         statusDetail.setText(d.toString());
         queueStart.setText(service ? "■ DISCONNECT" : "▶ CONNECT");
+
+        // ── the queue's job line + ↻ RETRY ──────────────────────────────────
+        String jobId = QueueService.lastJobId;
+        String jobStatus = QueueService.lastJobStatus;
+        boolean failed = "FAILED".equals(jobStatus);
+        if (jobId.isEmpty() && jobStatus.isEmpty()) {
+            queueJobView.setVisibility(View.GONE);
+            retryButton.setVisibility(View.GONE);
+            return;
+        }
+        StringBuilder j = new StringBuilder();
+        if (!jobId.isEmpty()) {
+            j.append("JOB ").append(jobId).append(" · ").append(QueueService.lastJobLabel);
+            j.append("\n").append(jobStatus.isEmpty() ? "waiting" : jobStatus);
+            if (!QueueService.lastJobNote.isEmpty()) j.append(" — ").append(QueueService.lastJobNote);
+        }
+        queueJobView.setText(j.toString());
+        queueJobView.setTextColor(Color.parseColor(failed ? "#fca5a5"
+                : "PAID".equals(jobStatus) || "SENT".equals(jobStatus) || "DRYRUN".equals(jobStatus)
+                ? "#86efac" : "#a1a1aa"));
+        queueJobView.setVisibility(View.VISIBLE);
+
+        // RETRY is offered for a failed job, and for any job when the panel refuses us
+        boolean showRetry = failed && !jobId.isEmpty();
+        if (!showRetry && !err.isEmpty() && !jobId.isEmpty()) showRetry = true;
+        retryButton.setVisibility(showRetry ? View.VISIBLE : View.GONE);
+        retryButton.setText(failed ? "↻ RETRY THIS JOB" : "↻ TRY AGAIN");
     }
+
+    /** ↻ RETRY — ask the panel to queue the failed job again, then keep polling. */
+    private void onRetry() {
+        final String server = Queue.fixServer(serverInput.getText().toString()).url;
+        final String token = tokenInput.getText().toString().trim();
+        final String jobId = QueueService.lastJobId;
+        if (server.isEmpty() || token.length() < 10) { toast("Fill the server and the token first"); return; }
+        retryButton.setEnabled(false);
+        retryButton.setText("↻ RETRYING…");
+        line("queue: retry asked for " + (jobId.isEmpty() ? "the connection" : jobId));
+        new Thread(() -> {
+            final String problem = jobId.isEmpty() ? "" : Queue.retry(server, token, jobId);
+            ui.post(() -> {
+                retryButton.setEnabled(true);
+                retryButton.setText(jobId.isEmpty() ? "↻ TRY AGAIN" : "↻ RETRY THIS JOB");
+                if (!problem.isEmpty()) {
+                    QueueService.lastJobNote = problem;
+                    line("queue: retry refused — " + problem);
+                    toast("Retry refused: " + problem);
+                    paintStatus();
+                    return;
+                }
+                // the job is QUEUED again (or we only wanted the connection): the running
+                // loop asks the panel again within a few seconds, so no restart is needed
+                QueueService.forgetLastJob();
+                QueueService.lastError = "";
+                line("queue: retry accepted — the panel will hand it back within a few seconds");
+                if (!QueueService.isRunning()) {
+                    toast("Retry saved — press ▶ CONNECT to keep sending");
+                } else {
+                    toast("Retry queued — watch this card");
+                }
+                paintStatus();
+            });
+        }).start();
+    }
+
 
 
     private void confirmLive() {

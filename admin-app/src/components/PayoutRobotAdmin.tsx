@@ -54,6 +54,7 @@ type Job = {
   status: string; deviceId: string; deviceLabel: string; attempts: number;
   createdAt: number; claimedAt: number; sentAt: number; paidAt: number; finishedAt: number;
   trxId: string; resultNote: string; screenLog: string;
+  retryable?: boolean; retryBlocked?: string;
 };
 type Pending = {
   id: string; userId: string; userName: string; userPhone: string; methodName: string;
@@ -167,6 +168,11 @@ export const PayoutRobotAdmin = () => {
   const cancel = (j: Job) => {
     if (!window.confirm(`Cancel ${str(j.id)}? A queued withdrawal is refunded to the user.`)) return;
     void call(`/api/admin/payouts/${j.id}/cancel`, { reason: 'cancelled in the admin panel' }, `${str(j.id)} cancelled.`);
+  };
+
+  const retry = (j: Job) => {
+    if (!window.confirm(`Queue ${str(j.id)} again?\n\nOnly a job that FAILED can be retried, and a withdrawal is only retried while it is still pending — so this can never pay twice.`)) return;
+    void call(`/api/admin/payouts/${j.id}/retry`, {}, `${str(j.id)} is back in the queue — the phone will pick it up.`);
   };
 
   const patchDevice = async (d: Device, body: any, okText: string) => {
@@ -420,7 +426,16 @@ export const PayoutRobotAdmin = () => {
 
       {/* ── queue ───────────────────────────────────────────────────────── */}
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
-        <div className="text-[11px] font-black uppercase tracking-wider text-emerald-400">Queue</div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[11px] font-black uppercase tracking-wider text-emerald-400">Queue</div>
+          <div className="flex flex-wrap items-center gap-2 text-[10px] font-bold">
+            <span className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-cyan-300">{num(stats?.queued)} queued</span>
+            <span className="rounded-md border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-indigo-300">{num(stats?.claimed)} on a phone</span>
+            <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-amber-300">{num(stats?.sent)} waiting for SMS</span>
+            <span className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">{num(stats?.paid24h)} paid 24 h</span>
+            <span className={`rounded-md border px-1.5 py-0.5 ${num(stats?.failed24h) ? 'border-red-500/40 bg-red-500/15 text-red-300' : 'border-zinc-700 bg-zinc-800 text-zinc-400'}`}>{num(stats?.failed24h)} failed 24 h</span>
+          </div>
+        </div>
         {jobs.length === 0 ? (
           <p className="mt-2 text-[11px] text-zinc-500">No jobs yet. Queue a test above to see the whole path end to end.</p>
         ) : (
@@ -440,11 +455,29 @@ export const PayoutRobotAdmin = () => {
                       {str(j.trxId) ? ` · TrxID ${str(j.trxId)}` : ''}
                       {num(j.attempts) ? ` · ${num(j.attempts)} attempt(s)` : ''}
                     </div>
+                    {j.status === 'FAILED' ? (
+                      <div className="mt-1 text-[10px] text-red-300">
+                        failed: {str(j.resultNote) || 'the phone did not say why'}
+                        {j.retryable === false && str(j.retryBlocked) ? <span className="text-zinc-500"> · {str(j.retryBlocked)}</span> : null}
+                      </div>
+                    ) : null}
                   </div>
                   <div className="flex items-center gap-2">
                     <button onClick={() => setOpen(open === j.id ? '' : j.id)} className="rounded-lg border border-zinc-700 px-2 py-1 text-[10px] font-bold text-zinc-300">
                       {open === j.id ? 'hide' : 'log'}
                     </button>
+                    {j.status === 'FAILED' ? (
+                      <button
+                        onClick={() => retry(j)}
+                        disabled={busy || j.retryable === false}
+                        title={j.retryable === false ? (str(j.retryBlocked) || 'this job cannot be retried') : 'queue this failed job again'}
+                        className={`rounded-lg border px-2 py-1 text-[10px] font-black ${j.retryable === false
+                          ? 'cursor-not-allowed border-zinc-700 bg-zinc-800/60 text-zinc-500'
+                          : 'border-amber-500/50 bg-amber-500/15 text-amber-200'}`}
+                      >
+                        <RefreshCw className="inline w-3 h-3" /> retry
+                      </button>
+                    ) : null}
                     {['QUEUED', 'CLAIMED', 'FAILED'].includes(j.status) ? (
                       <button onClick={() => cancel(j)} className="rounded-lg border border-red-500/40 bg-red-500/10 px-2 py-1 text-[10px] font-black text-red-300">
                         <Ban className="inline w-3 h-3" /> cancel

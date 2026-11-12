@@ -122,6 +122,27 @@ final class Queue {
         }
     }
 
+    /**
+     * v2.1.3: the ↻ RETRY button. The phone asks the panel to put the SAME failed job
+     * back in the queue — the server decides whether that is safe (a job that already
+     * paid, or a withdrawal that was refunded, is refused).
+     *
+     * @return "" when the job is queued again, otherwise the server's reason.
+     */
+    static String retry(String server, String token, String jobId) {
+        try {
+            if (jobId == null || jobId.trim().isEmpty()) return "no failed job to retry";
+            JSONObject body = new JSONObject();
+            body.put("mode", "queue");
+            Res r = post(server, "/api/payout/" + jobId + "/retry", token, body.toString());
+            if (r == null || r.json == null) return "the server did not answer";
+            if (r.json.has("error")) return explain(r.http, r.json.optString("error"));
+            return "";
+        } catch (Throwable t) {
+            return t.getClass().getSimpleName() + ": " + t.getMessage();
+        }
+    }
+
     /** Normalises what the owner types: "app.boostpay.online" → "https://app.boostpay.online". */
     static String cleanServer(String input) {
         String s = input == null ? "" : input.trim();
