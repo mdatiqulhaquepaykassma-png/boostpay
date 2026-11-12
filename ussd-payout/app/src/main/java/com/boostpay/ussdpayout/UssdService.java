@@ -34,6 +34,8 @@ public class UssdService extends AccessibilityService {
     private int idx = 0;
     private int screens = 0;
     private String lastScreen = "";
+    private volatile boolean cancelled = false;
+    private int screenSeq = 0;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     @Override
@@ -86,6 +88,9 @@ public class UssdService extends AccessibilityService {
         self.idx = 0;
         self.screens = 0;
         self.lastScreen = "";
+        self.cancelled = false;
+        self.screenSeq = 0;
+        self.handler.removeCallbacksAndMessages(null);
         s.log("▶ mode: Accessibility · " + (p.dryRun ? "DRY RUN (no PIN, no money)" : "LIVE")
                 + (subId > 0 ? " · subId " + subId : " · default SIM"));
         try {
@@ -139,6 +144,28 @@ public class UssdService extends AccessibilityService {
         return null;
     }
 
+    /** STOP pressed in the app: drop the plan and close the USSD dialog if we can. */
+    public static void cancel(Context c) {
+        UssdService self = instance;
+        if (self == null) return;
+        self.cancelRun();
+    }
+
+    private void cancelRun() {
+        cancelled = true;
+        handler.removeCallbacksAndMessages(null);
+        Plan p = plan;
+        Sink s = sink;
+        plan = null;
+        sink = null;
+        Guard.end();
+        try { performGlobalAction(GLOBAL_ACTION_BACK); } catch (Throwable ignored) { }
+        if (s != null) s.finish(false, "cancelled by the operator — the USSD dialog was closed");
+    }
+
+    /** True when the accessibility path is the one currently holding the robot. */
+    public static boolean busy() { return instance != null && instance.plan != null; }
+
     // ── dialog watching ──────────────────────────────────────────────────────
 
     @Override
@@ -153,10 +180,13 @@ public class UssdService extends AccessibilityService {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
         String screen = collect(root);
-        if (screen.isEmpty() || screen.equals(lastScreen)) return;
+        if (screen.isEmpty()) return;
+        if (screen.equals(lastScreen) && event.getEventType() == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            return;   // the keyboard/content flicker of the screen we already answered
+        }
         lastScreen = screen;
         final String captured = screen;
-        handler.postDelayed(() -> handle(captured), 550);   // let the dialog finish drawing
+        handler.postDelayed(() -> handle(captured), 600);   // let the dialog finish drawing
     }
 
     private void handle(String screen) {
@@ -175,13 +205,42 @@ public class UssdService extends AccessibilityService {
             return;
         }
         idx++;
+        screenSeq++;
+        final int mySeq = screenSeq;
         sink.log("⇨ " + (key.secret ? "••••" : key.value) + "   · " + key.why);
-        handler.postDelayed(() -> {
-            if (!type(key.value)) {
-                finish(false, "Could not find the USSD input box in this dialog. Take a screenshot of it and send it over — "
-                        + "I will adapt the reader to this phone.");
-            }
-        }, Provider.current().stepDelayMs);
+        handler.postDelayed(() -> typeWithRetry(key.value, mySeq, 0), Provider.current().stepDelayMs);
+    }
+
+    /**
+     * Some phones need a moment before the reply box exists, and a few reply with a
+     * brand-new dialog whose event arrives late. Try three times, then re-read the
+     * screen once before declaring failure — always logging what was on screen.
+     */
+    private void typeWithRetry(final String value, final int seq, final int attempt) {
+        if (cancelled || plan == null) return;
+        if (type(value)) {
+            lastScreen = "";                       // the next screen may look identical
+            handler.postDelayed(() -> recheck(seq), 5000);
+            return;
+        }
+        if (attempt < 3) {
+            sink.log("· reply box not ready, retry " + (attempt + 1) + "/3");
+            handler.postDelayed(() -> typeWithRetry(value, seq, attempt + 1), 1200);
+            return;
+        }
+        String onScreen = collect(getRootInActiveWindow());
+        finish(false, "Could not find the USSD reply box after 3 tries. Screen was: "
+                + (onScreen.isEmpty() ? "(empty)" : onScreen)
+                + " — send me this line and I will adapt the reader to this phone.");
+    }
+
+    /** No event arrived after typing — read the window once more so the plan can go on. */
+    private void recheck(int seq) {
+        if (cancelled || plan == null || seq != screenSeq) return;
+        String s = collect(getRootInActiveWindow());
+        if (s.isEmpty()) return;
+        sink.log("↻ re-reading the screen (no event came)");
+        handle(s);
     }
 
     private boolean type(final String value) {
@@ -227,7 +286,10 @@ public class UssdService extends AccessibilityService {
 
     private boolean isEditable(AccessibilityNodeInfo n) {
         CharSequence cls = n.getClassName();
-        return cls != null && cls.toString().contains("EditText") && n.isVisibleToUser();
+        if (cls == null) return false;
+        String c = cls.toString();
+        boolean box = c.contains("EditText") || c.contains("AutoComplete") || n.isEditable();
+        return box && (n.isVisibleToUser() || n.isEnabled());
     }
 
     private boolean isSendButton(AccessibilityNodeInfo n) {
@@ -237,7 +299,11 @@ public class UssdService extends AccessibilityService {
         if (!cls.toString().contains("Button")) return false;
         String t = txt.toString().trim().toLowerCase();
         return t.equals("send") || t.equals("ok") || t.equals("okay") || t.equals("yes")
-                || t.equals("confirm") || t.equals("পাঠান") || t.equals("হ্যাঁ") || t.equals("ঠিক আছে");
+                || t.equals("confirm") || t.equals("reply") || t.equals("call") || t.equals("submit")
+                || t.equals("done") || t.equals("next") || t.equals("enter")
+                || t.contains("send") || t.contains("reply")
+                || t.equals("পাঠান") || t.equals("হ্যাঁ") || t.equals("ঠিক আছে")
+                || t.equals("রিপ্লাই") || t.equals("পাঠিয়ে দিন");
     }
 
     /** All visible text of the dialog, without the input box (so typing never fakes a new screen). */
@@ -262,6 +328,8 @@ public class UssdService extends AccessibilityService {
     }
 
     private void finish(boolean ok, String message) {
+        if (cancelled && ok) ok = false;
+        cancelled = false;
         plan = null;
         Sink s = sink;
         sink = null;

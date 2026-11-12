@@ -109,7 +109,7 @@ const APPS = [
       'Service code <span class="code">*167#</span>, receiver = নিজের দ্বিতীয় নম্বর, amount 10-20, PIN = <b>৪ ডিজিট</b>',
       '<b>Adaptive ON</b> রাখুন — "amount"/"PIN"/"number" যে স্ক্রিন যা চাইবে, সেই মানটাই বসাবে (+ বাংলা শব্দও বোঝে)',
       '<b>① DRY RUN</b> → লগে মেনু ঠিক দেখালে <b>② SEND REAL MONEY</b> → <span class="code">amount + শেষ ৪ ডিজিট</span> টাইপ',
-      'লগে reference চাইলে steps লাইনে <span class="code">{pin}</span>-এর আগে <span class="code">{ref}</span> বসান',
+      'কিছু ভুল হলে <b>⛔ STOP</b> — যে কোনো সময় রান বাতিল হয়, আর কোনো কী যায় না',
     ],
   },
 ];
@@ -128,7 +128,7 @@ function statApk(file) {
       size: st.size,
       mtime: st.mtimeMs,
       sha256: crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16),
-      version: (file.includes('ussd') ? '1.2' : '1.0'),
+      version: (file.includes('ussd') ? '1.3' : '1.0'),
     };
   } catch {
     return { ready: false, size: 0, mtime: 0, sha256: '', version: '' };

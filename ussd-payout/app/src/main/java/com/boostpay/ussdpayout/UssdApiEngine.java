@@ -25,6 +25,7 @@ public final class UssdApiEngine {
     private final Handler h = new Handler(Looper.getMainLooper());
 
     private int idx = 0;
+    private volatile boolean cancelled = false;
     private boolean started = false;
     private boolean over = false;
     private Runnable timer;
@@ -50,8 +51,18 @@ public final class UssdApiEngine {
         send(plan.serviceCode, "service code");
     }
 
-    private void send(final String input, String what) {
+    /** Operator pressed STOP: stop sending keys and release the guard. */
+    public void cancel() {
         if (over) return;
+        cancelled = true;
+        over = true;
+        cancelTimer();
+        Guard.end();
+        sink.finish(false, "cancelled by the operator — no further keys are sent");
+    }
+
+    private void send(final String input, String what) {
+        if (over || cancelled) return;
         armTimer(what);
         try {
             TelephonyManager tm = (TelephonyManager) ctx.getSystemService(Context.TELEPHONY_SERVICE);
@@ -133,6 +144,7 @@ public final class UssdApiEngine {
 
     private void finish(boolean ok, String msg) {
         if (over) return;
+        cancelled = false;
         over = true;
         cancelTimer();
         Guard.end();

@@ -34,8 +34,8 @@ public final class Provider {
 
     private static final Provider NAGAD = new Provider(
             "nagad", "Nagad", "*167#",
-            "1,{number},{amount},{pin}",       // 1 Send Money · number · amount · PIN
-            4, "#e11d48", 1400);
+            "2,{number},{amount},{pin}",       // 2 Send Money · number · amount · PIN (owner-verified menu)
+            4, "#e11d48", 1600);
 
     /** The flavour this APK was built for. */
     public static Provider current() {

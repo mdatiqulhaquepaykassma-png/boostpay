@@ -6,7 +6,7 @@ and types the keys. **One codebase, two APKs** (product flavours):
 | Flavour | appId | Service code | Default steps |
 | --- | --- | --- | --- |
 | `bkash` | `com.boostpay.ussdpayout` | `*247#` | `1,{number},{amount},1,{pin}` |
-| `nagad` | `com.boostpay.ussdpayout.nagad` | `*167#` | `1,{number},{amount},{pin}` |
+| `nagad` | `com.boostpay.ussdpayout.nagad` | `*167#` | `2,{number},{amount},{pin}` (Send Money = 2) |
 
 ```bash
 gradle assembleBkashRelease assembleNagadRelease
@@ -41,6 +41,9 @@ Two engines, one plan:
 * **Adaptive reading** (`Plan.decide`): each screen is matched to the value it asks
   for — pin / amount / number / reference — in English **and Bangla**, with the steps
   list as the fallback. A renumbered or reworded menu needs no new APK.
+* **⛔ STOP** cancels a run at any moment (drops the plan, sends no further keys,
+  closes the Accessibility USSD dialog and releases the guard). A run that dies
+  without reporting is auto-released after 2 minutes.
 * **DRY RUN is the default path**: it walks the menu and stops before the key that
   contains `{pin}`. No PIN typed, no money can move.
 * Live mode is gated by `Guard`: one run at a time, per-payout ceiling (default 500

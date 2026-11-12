@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  The USSD dialog belongs to the phone/dialer app, and every firmware names it
+  differently, so this service must see ALL windows: no packageNames filter (an
+  empty attribute can be read as "a package literally named empty" on some ROMs,
+  which silently swallows every event). flagRetrieveInteractiveWindows lets it
+  read a dialog that is not the focused activity.
+-->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_description"
-    android:notificationTimeout="100"
-    android:packageNames="" />
+    android:notificationTimeout="100" />

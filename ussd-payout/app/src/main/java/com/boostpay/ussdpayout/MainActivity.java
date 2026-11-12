@@ -57,6 +57,8 @@ public class MainActivity extends Activity {
     private CheckBox adaptiveBox;
     private Provider provider = Provider.current();
     private List<Sims.Sim> sims = new ArrayList<>();
+    private UssdApiEngine apiEngine;
+    private String counterOrigin = "";
     private LinearLayout simRows;
     private TextView simSummary;
     private RadioButton apiRadio, a11yRadio;
@@ -182,6 +184,12 @@ public class MainActivity extends Activity {
         live.setOnClickListener(v -> confirmLive());
         root.addView(live);
 
+        Button stop = button("⛔ STOP — cancel the run");
+        stop.setTextColor(Color.parseColor("#fecaca"));
+        stop.setBackgroundColor(Color.parseColor("#3f1d1d"));
+        stop.setOnClickListener(v -> stopRun());
+        root.addView(stop);
+
         root.addView(label("Safety limits (BDT)"));
         LinearLayout limits = new LinearLayout(this);
         limits.setOrientation(LinearLayout.HORIZONTAL);
@@ -289,10 +297,40 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    // ── stopping ─────────────────────────────────────────────────────────────
+
+    private void stopRun() {
+        boolean was = Guard.isRunning() || UssdService.busy();
+        if (apiEngine != null) { apiEngine.cancel(); apiEngine = null; }
+        UssdService.cancel(this);
+        Guard.forceEnd();
+        line("⛔ STOP pressed — run cancelled, no further keys are sent");
+        statusView.setText(was ? "⛔ stopped by you" : "idle — nothing was running");
+        statusView.setTextColor(Color.parseColor("#fca5a5"));
+        refresh();
+    }
+
+    /** A run that died without reporting (phone killed the dialog) must not lock the app. */
+    private void clearStaleRun() {
+        if (Guard.stale()) {
+            Guard.forceEnd();
+            apiEngine = null;
+            UssdService.cancel(this);
+            line("· previous run was still marked as running after 2 min — cleared it");
+            statusView.setText("previous run timed out — cleared. Start again.");
+            statusView.setTextColor(Color.parseColor("#fca5a5"));
+        }
+    }
+
     // ── running ──────────────────────────────────────────────────────────────
 
     private void run(boolean live) {
-        if (!Guard.begin()) { toast("A run is already in progress"); return; }
+        clearStaleRun();
+        if (!Guard.begin()) {
+            toast("A run is already in progress — press ⛔ STOP to cancel it");
+            statusView.setText("a run is in progress — press ⛔ STOP to cancel");
+            return;
+        }
         saveSettings();
 
         // Which SIM? The selected one if the owner picked it, otherwise the SIM that
@@ -351,6 +389,7 @@ public class MainActivity extends Activity {
             @Override public void finish(boolean ok, String summary) {
                 ui.post(() -> {
                     Guard.end();
+                    apiEngine = null;
                     line((ok ? "■ done: " : "■ stopped: ") + summary);
                     statusView.setText((ok ? "✅ " : "⚠️ ") + summary);
                     statusView.setTextColor(Color.parseColor(ok ? "#6ee7b7" : "#fca5a5"));
@@ -368,7 +407,8 @@ public class MainActivity extends Activity {
             }
             started = UssdService.start(this, plan, sink, subId);
         } else {
-            new UssdApiEngine(this, plan, sink, subId).start();
+            apiEngine = new UssdApiEngine(this, plan, sink, subId);
+            apiEngine.start();
             started = true;
         }
         if (!started) Guard.end();
@@ -563,7 +603,10 @@ public class MainActivity extends Activity {
 
     private void refresh() {
         long sent = Guard.sentToday(this);
-        counterView.setText("SIMs: " + sims.size() + "   ·   selected: "
+        counterOrigin = Guard.isRunning()
+                ? "running for " + (Guard.runningForMs() / 1000) + "s — ⛔ STOP is available\n"
+                : "";
+        counterView.setText(counterOrigin + "SIMs: " + sims.size() + "   ·   selected: "
                 + (SimStore.selected(this) > 0 ? Sims.bySubId(sims, SimStore.selected(this)) != null
                     ? Sims.bySubId(sims, SimStore.selected(this)).label : "subId " + SimStore.selected(this)
                     : "auto")
@@ -640,7 +683,14 @@ public class MainActivity extends Activity {
     private void loadSettings() {
         SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
         serviceInput.setText(p.getString("service", provider.serviceCode));
-        stepsInput.setText(p.getString("steps", provider.steps));
+        String savedSteps = p.getString("steps", provider.steps);
+        // v1.3: Nagad's Send Money is option 2 — upgrade an untouched old list
+        if ("nagad".equals(provider.id) && "1,{number},{amount},{pin}".equals(savedSteps)) {
+            savedSteps = provider.steps;
+            p.edit().putString("steps", savedSteps).apply();
+            p.edit().putString("service", provider.serviceCode).apply();
+        }
+        stepsInput.setText(savedSteps);
         numberInput.setText(p.getString("number", ""));
         amountInput.setText(p.getString("amount", "20"));
         refInput.setText(p.getString("ref", "1"));

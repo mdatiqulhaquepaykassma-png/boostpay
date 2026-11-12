@@ -74,18 +74,35 @@ public final class Guard {
 
     /** One robot at a time — a second tap must never start a parallel session. */
     private static volatile boolean running = false;
+    private static volatile long startedAt = 0;
+
+    /** A run that never reported back must not block the app forever. */
+    private static final long STALE_AFTER_MS = 120_000;
 
     public static boolean begin() {
         synchronized (Guard.class) {
-            if (running) return false;
+            if (running && !stale()) return false;
             running = true;
+            startedAt = System.currentTimeMillis();
             return true;
         }
     }
 
     public static void end() {
-        synchronized (Guard.class) { running = false; }
+        synchronized (Guard.class) { running = false; startedAt = 0; }
     }
 
     public static boolean isRunning() { return running; }
+
+    /** True when a run has been "in progress" for over two minutes — i.e. it is dead. */
+    public static boolean stale() {
+        return running && startedAt > 0 && System.currentTimeMillis() - startedAt > STALE_AFTER_MS;
+    }
+
+    public static long runningForMs() {
+        return running && startedAt > 0 ? System.currentTimeMillis() - startedAt : 0;
+    }
+
+    /** Emergency release used by the STOP button. */
+    public static void forceEnd() { end(); }
 }
