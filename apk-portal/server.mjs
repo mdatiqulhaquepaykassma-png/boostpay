@@ -81,7 +81,7 @@ const APPS = [
     ],
   },
   {
-    slug: 'ussdpayout', icon: 'dial', file: 'boostpay-ussd-payout.apk', title: 'BoostPay Payout (bKash)', short: 'Payout robot · bKash',
+    btn: 'Payout (bKash)', slug: 'ussdpayout', icon: 'dial', file: 'boostpay-ussd-payout.apk', title: 'BoostPay Payout (bKash)', short: 'Payout robot · bKash',
     color: '#fb923c', pkg: 'com.boostpay.ussdpayout',
     tagline: 'Walks the *247# menu on your own phone and types the keys — dry run first.',
     audience: 'Owner only',
@@ -96,7 +96,7 @@ const APPS = [
     ],
   },
   {
-    slug: 'nagadpayout', icon: 'dial', file: 'boostpay-ussd-nagad.apk', title: 'BoostPay Payout (Nagad)', short: 'Payout robot · Nagad',
+    btn: 'Payout (Nagad)', slug: 'nagadpayout', icon: 'dial', file: 'boostpay-ussd-nagad.apk', title: 'BoostPay Payout (Nagad)', short: 'Payout robot · Nagad',
     color: '#f43f5e', pkg: 'com.boostpay.ussdpayout.nagad',
     tagline: 'Walks the *167# menu on your own phone and types the keys — dry run first.',
     audience: 'Owner only',
@@ -126,7 +126,7 @@ function statApk(file) {
       size: st.size,
       mtime: st.mtimeMs,
       sha256: crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16),
-      version: '1.0',
+      version: (file.includes('ussd') ? '1.1' : '1.0'),
     };
   } catch {
     return { ready: false, size: 0, mtime: 0, sha256: '', version: '' };
@@ -234,7 +234,7 @@ const appHtml = (a) => page(`${a.title} — download`, `
     </div>
   </div>
   ${a.ready
-    ? `<a class="btn big" href="/${a.slug}/download">${DOWNLOAD_ICON} Download ${a.title} APK</a>`
+    ? `<a class="btn big" href="/${a.slug}/download">${DOWNLOAD_ICON} Download ${a.btn || a.title} APK</a>`
     : `<div class="warn">This build is not on the server yet — it uploads itself on the next CI run.</div>`}
 </div>
 <div class="card" style="margin-top:14px">
