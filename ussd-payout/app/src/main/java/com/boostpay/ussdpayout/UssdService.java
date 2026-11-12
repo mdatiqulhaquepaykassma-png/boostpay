@@ -115,20 +115,21 @@ public class UssdService extends AccessibilityService {
             finish(false, "Network said no: " + UssdApiEngine.firstLine(screen));
             return;
         }
-        String next = plan.stepAt(idx);
-        if (next == null) { finish(true, "Sequence finished — check the confirmation SMS."); return; }
-        if (plan.mustStopHere(idx)) {
-            sink.log("⏸ DRY RUN: the next key is the PIN — stopping here. Nothing was sent.");
+        Plan.Key key = plan.decide(screen, idx);
+        if (key == null) { finish(true, "Sequence finished — check the confirmation SMS."); return; }
+        if (key.stopBefore) {
+            sink.log("⏸ DRY RUN: " + key.why);
             finish(true, "Dry run complete: the dialog path works right up to the PIN prompt.");
             return;
         }
-        boolean secret = plan.isSecret(idx);
         idx++;
-        sink.log("⇨ " + (secret ? "••••" : next));
-        if (!type(next)) {
-            finish(false, "Could not find the USSD input box in this dialog. Take a screenshot of it and send it over — "
-                    + "I will adapt the reader to this phone.");
-        }
+        sink.log("⇨ " + (key.secret ? "••••" : key.value) + "   · " + key.why);
+        handler.postDelayed(() -> {
+            if (!type(key.value)) {
+                finish(false, "Could not find the USSD input box in this dialog. Take a screenshot of it and send it over — "
+                        + "I will adapt the reader to this phone.");
+            }
+        }, Provider.current().stepDelayMs);
     }
 
     private boolean type(final String value) {

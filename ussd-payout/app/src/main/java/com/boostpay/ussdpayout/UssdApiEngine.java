@@ -87,18 +87,20 @@ public final class UssdApiEngine {
             return;
         }
 
-        String next = plan.stepAt(idx);
-        if (next == null) { finish(true, "Sequence finished — read the screens above."); return; }
-        if (plan.mustStopHere(idx)) {
-            sink.log("⏸ DRY RUN: this next key is the PIN — stopping. Nothing was sent.");
-            finish(true, "Dry run complete: the menu path works up to the PIN prompt.");
+        Plan.Key key = plan.decide(clean, idx);
+        if (key == null) { finish(true, "Sequence finished — read the screens above."); return; }
+        if (key.stopBefore) {
+            sink.log("⏸ DRY RUN: " + key.why);
+            finish(true, "Dry run complete: reached the PIN prompt, nothing was sent.");
             return;
         }
 
-        sink.log("⇨ " + (plan.isSecret(idx) ? "••••" : next));
+        sink.log("⇨ " + (key.secret ? "••••" : key.value) + "   · " + key.why);
         idx++;
         started = true;
-        send(next, "step " + idx);
+        final String value = key.value;
+        // operators with a slow menu (Nagad) get a moment before the next key
+        h.postDelayed(() -> send(value, "step " + idx), Provider.current().stepDelayMs);
     }
 
     private void armTimer(String what) {

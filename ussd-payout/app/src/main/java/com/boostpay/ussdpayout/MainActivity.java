@@ -48,7 +48,9 @@ public class MainActivity extends Activity {
     private static final String PREFS = "bp_settings";
     private static final int REQ_CALL = 51;
 
-    private EditText serviceInput, stepsInput, numberInput, amountInput, pinInput, maxInput, capInput;
+    private EditText serviceInput, stepsInput, numberInput, amountInput, pinInput, refInput, maxInput, capInput;
+    private CheckBox adaptiveBox;
+    private Provider provider = Provider.current();
     private RadioButton apiRadio, a11yRadio;
     private TextView statusView, counterView, logView;
     private final StringBuilder log = new StringBuilder();
@@ -57,6 +59,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Plan.DEFAULT_SERVICE = provider.serviceCode;
         setContentView(buildUi());
         loadSettings();
         requestCallPermission();
@@ -75,18 +78,18 @@ public class MainActivity extends Activity {
         scroll.addView(root);
 
         TextView title = new TextView(this);
-        title.setText("BoostPay Payout (USSD)");
+        title.setText("BoostPay Payout · " + provider.name);
         title.setTextColor(Color.WHITE);
         title.setTextSize(21);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(title);
 
-        root.addView(note("TEST BUILD — reads a USSD menu on this phone and types the keys. "
-                + "Start with DRY RUN every time: it stops before the PIN, so nothing can be sent. "
-                + "Only then try a small real amount (10-20 BDT) to your own number.", "#fbbf24"));
+        root.addView(note(provider.name + " build — reads the " + provider.serviceCode + " menu on this phone and types the keys.\n"
+                + "Start with DRY RUN every time: it stops the moment the menu asks for the PIN, so no money can move. "
+                + "Then a small real amount (10-20 BDT) to your own number.", provider.accent));
 
         root.addView(label("Service code"));
-        serviceInput = input("*247#", InputType.TYPE_CLASS_TEXT);
+        serviceInput = input(provider.serviceCode, InputType.TYPE_CLASS_TEXT);
         root.addView(serviceInput);
 
         root.addView(label("Receiver number (the user's bKash/number)"));
@@ -98,12 +101,26 @@ public class MainActivity extends Activity {
         root.addView(amountInput);
 
         root.addView(label("Menu steps, comma separated — {number} {amount} {pin}"));
-        stepsInput = input("1,{number},{amount},1,{pin}", InputType.TYPE_CLASS_TEXT);
+        stepsInput = input(provider.steps, InputType.TYPE_CLASS_TEXT);
         root.addView(stepsInput);
-        root.addView(note("bKash default: 1 = Send Money → receiver → amount → reference (1 = skip/friend) → PIN. "
-                + "Read the log after a dry run and fix this line if your phone's menu differs.", "#71717a"));
+        root.addView(note(("nagad".equals(provider.id)
+                    ? "Nagad default: Send Money → receiver → amount → PIN. (If your menu also asks for a reference, add {ref} before {pin}.)"
+                    : "bKash default: Send Money → receiver → amount → reference (1 = skip) → PIN. "
+                      + "Read the log after a dry run and fix this line if your phone's menu differs."), "#71717a"));
 
-        root.addView(label("PIN (sealed with the phone's Keystore, never stored as text)"));
+        root.addView(label("Reference word (used by {ref} and by an adaptive reference prompt)"));
+        refInput = input("1", InputType.TYPE_CLASS_TEXT);
+        root.addView(refInput);
+
+        adaptiveBox = new CheckBox(this);
+        adaptiveBox.setText("Adaptive — read each screen and send the matching value");
+        adaptiveBox.setTextColor(Color.parseColor("#d4d4d8"));
+        adaptiveBox.setChecked(true);
+        root.addView(adaptiveBox);
+        root.addView(note("recommended: an \"enter amount\" screen gets the amount, a \"pin\" screen gets the PIN, "
+                + "any number/account screen gets the receiver. Turn it off to type the steps list strictly in order.", "#71717a"));
+
+        root.addView(label("PIN (" + provider.pinLength + " digits) — sealed with the phone's Keystore, never stored as text"));
         pinInput = input("•••••", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
         root.addView(pinInput);
         Button savePin = button("Save PIN on this phone");
@@ -127,6 +144,15 @@ public class MainActivity extends Activity {
         group.addView(apiRadio);
         group.addView(a11yRadio);
         root.addView(group);
+
+        Button defaults = button("Load " + provider.name + " defaults (" + provider.serviceCode + ")");
+        defaults.setOnClickListener(v -> {
+            serviceInput.setText(provider.serviceCode);
+            stepsInput.setText(provider.steps);
+            if (refInput.getText().toString().trim().isEmpty()) refInput.setText("1");
+            toast(provider.name + " defaults loaded");
+        });
+        root.addView(defaults);
 
         Button a11yOpen = button("Open Accessibility settings (needed for method B)");
         a11yOpen.setOnClickListener(v -> {
@@ -263,15 +289,17 @@ public class MainActivity extends Activity {
                 numberInput.getText().toString(),
                 amountInput.getText().toString(),
                 pin,
+                refInput.getText().toString(),
                 stepsInput.getText().toString(),
-                !live);
+                !live,
+                adaptiveBox.isChecked());
 
         if (!plan.dryRun && pin.isEmpty()) {
             Guard.end();
             toast("No PIN saved — only the dry run is possible");
             return;
         }
-        if (!plan.dryRun && plan.pinStep < 0) {
+        if (!plan.dryRun && !plan.adaptive && plan.pinStep < 0) {
             Guard.end();
             toast("The steps do not contain {pin} — add it, otherwise the plan can never finish a payout.");
             return;
@@ -334,7 +362,8 @@ public class MainActivity extends Activity {
 
     private void refresh() {
         long sent = Guard.sentToday(this);
-        counterView.setText("sent today: " + sent + " / " + Guard.dailyCap(this) + " BDT"
+        counterView.setText(provider.name + " · " + provider.serviceCode + "   ·   adaptive: " + (adaptiveBox.isChecked() ? "on" : "off")
+                + "\nsent today: " + sent + " / " + Guard.dailyCap(this) + " BDT"
                 + "   ·   per payout max: " + Guard.maxPerTx(this) + " BDT"
                 + "   ·   PIN saved: " + (Secure.hasPin(this) ? "yes" : "no")
                 + "\naccessibility service: " + (UssdService.isEnabled(this) ? "ON" : "off")
@@ -404,10 +433,12 @@ public class MainActivity extends Activity {
 
     private void loadSettings() {
         SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
-        serviceInput.setText(p.getString("service", "*247#"));
-        stepsInput.setText(p.getString("steps", "1,{number},{amount},1,{pin}"));
+        serviceInput.setText(p.getString("service", provider.serviceCode));
+        stepsInput.setText(p.getString("steps", provider.steps));
         numberInput.setText(p.getString("number", ""));
         amountInput.setText(p.getString("amount", "20"));
+        refInput.setText(p.getString("ref", "1"));
+        adaptiveBox.setChecked(p.getBoolean("adaptive", true));
         maxInput.setText(String.valueOf(Guard.maxPerTx(this)));
         capInput.setText(String.valueOf(Guard.dailyCap(this)));
         boolean a11y = "a11y".equals(p.getString("mode", "api"));
@@ -422,6 +453,8 @@ public class MainActivity extends Activity {
                 .putString("steps", stepsInput.getText().toString().trim())
                 .putString("number", numberInput.getText().toString().trim())
                 .putString("amount", amountInput.getText().toString().trim())
+                .putString("ref", refInput.getText().toString().trim())
+                .putBoolean("adaptive", adaptiveBox.isChecked())
                 .putString("mode", a11yRadio.isChecked() ? "a11y" : "api")
                 .apply();
     }

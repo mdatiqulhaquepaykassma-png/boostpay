@@ -1,31 +1,44 @@
 package com.boostpay.ussdpayout;
 
 /**
- * One payout, rendered from the settings screen. The steps are the keys the
- * robot types after the service code, in order, with {number} / {amount} / {pin}
- * placeholders. Nothing about a menu path is hard-coded: the operator changes the
- * menu and the owner edits the steps, no new APK needed.
+ * One payout, rendered from the settings screen.
  *
- * Example (bKash send money):   1 , {number} , {amount} , 1 , {pin}
- *                              Send   receiver    amount   ref    PIN
+ * Two ways to answer a menu:
+ *   · ADAPTIVE (default) — the screen text is read and the right value is chosen:
+ *     a prompt that asks for the amount gets the amount, a prompt that asks for the
+ *     PIN gets the PIN, and a prompt that asks for the PIN is also where a DRY RUN
+ *     stops. Works when the operator renumbers or rewording its menu.
+ *   · STEPS — the comma list is typed in order, with {number} {amount} {ref} {pin}
+ *     substituted. Use it when the screen text is too terse for the reader.
+ *
+ * Nothing about a provider's menu is compiled in: the defaults come from
+ * {@link Provider} and the owner can edit the steps on the phone.
  */
 public final class Plan {
+
+    /** Used when the service-code field is left empty; the activity sets it per flavour. */
+    public static String DEFAULT_SERVICE = "*167#";
 
     public final String serviceCode;
     public final String number;
     public final String amount;
     public final String pin;
+    public final String ref;
     public final boolean dryRun;
+    public final boolean adaptive;
     public final String[] steps;
-    /** index of the first step that must not run in dry-run mode (-1 = none) */
+    /** index of the first CSV step that carries the PIN (-1 = none) */
     public final int pinStep;
 
-    public Plan(String serviceCode, String number, String amount, String pin, String stepsCsv, boolean dryRun) {
-        this.serviceCode = blank(serviceCode) ? "*247#" : serviceCode.trim();
+    public Plan(String serviceCode, String number, String amount, String pin, String ref,
+                String stepsCsv, boolean dryRun, boolean adaptive) {
+        this.serviceCode = blank(serviceCode) ? DEFAULT_SERVICE : serviceCode.trim();
         this.number = number == null ? "" : number.trim();
         this.amount = amount == null ? "" : amount.trim();
         this.pin = pin == null ? "" : pin.trim();
+        this.ref = blank(ref) ? "1" : ref.trim();
         this.dryRun = dryRun;
+        this.adaptive = adaptive;
 
         String[] raw = (stepsCsv == null ? "" : stepsCsv).split(",");
         java.util.List<String> out = new java.util.ArrayList<>();
@@ -34,25 +47,68 @@ public final class Plan {
             String t = s.trim();
             if (t.isEmpty()) continue;
             if (t.contains("{pin}") && pinIdx < 0) pinIdx = out.size();
-            out.add(t.replace("{number}", this.number).replace("{amount}", this.amount).replace("{pin}", this.pin));
+            out.add(t.replace("{number}", this.number)
+                    .replace("{amount}", this.amount)
+                    .replace("{ref}", this.ref)
+                    .replace("{pin}", this.pin));
         }
         this.steps = out.toArray(new String[0]);
         this.pinStep = pinIdx;
     }
 
-    /** What the robot should type next, or null when the plan is finished. */
-    public String stepAt(int i) {
-        return i >= 0 && i < steps.length ? steps[i] : null;
+    /** What to type next, given what the menu is asking. */
+    public static final class Key {
+        public final String value;
+        public final boolean secret;
+        public final boolean stopBefore;
+        public final String why;
+
+        Key(String value, boolean secret, boolean stopBefore, String why) {
+            this.value = value;
+            this.secret = secret;
+            this.stopBefore = stopBefore;
+            this.why = why;
+        }
+
+        public static Key stop(String why) { return new Key(null, false, true, why); }
     }
 
-    /** True when step i carries the PIN (and must be masked in the log). */
-    public boolean isSecret(int i) {
-        return pinStep >= 0 && i == pinStep;
+    public Key decide(String screen, int csvIndex) {
+        String l = screen == null ? "" : screen.toLowerCase();
+        boolean asksPin = has(l, "pin", "পিন", "password", "পাসওয়ার্ড", "গোপন");
+        boolean asksAmount = has(l, "amount", "পরিমাণ", "টাকার পরিমাণ", "taka", "tk ");
+        boolean asksRef = has(l, "reference", "রেফারেন্স");
+        boolean asksNumber = has(l, "number", "নম্বর", "account", "একাউন্ট", "একাউন্টে", "mobile", "মোবাইল");
+
+        if (adaptive) {
+            if (asksPin) {
+                if (dryRun) return Key.stop("this screen asks for the PIN — a dry run stops here, nothing is sent");
+                return new Key(pin, true, false, "PIN prompt");
+            }
+            if (asksAmount) return new Key(amount, false, false, "amount prompt");
+            if (asksNumber) return new Key(number, false, false, "receiver prompt");
+            if (asksRef) return new Key(ref, false, false, "reference prompt");
+            return csvOrNull(csvIndex);           // screen text not recognised → fall back to the list
+        }
+
+        // fixed list mode
+        String next = csvIndex >= 0 && csvIndex < steps.length ? steps[csvIndex] : null;
+        if (next == null) return null;
+        boolean secret = pinStep >= 0 && csvIndex == pinStep;
+        if (secret && dryRun) return Key.stop("the next list step is the PIN — a dry run stops here, nothing is sent");
+        return new Key(next, secret, false, secret ? "PIN step" : "list step " + (csvIndex + 1));
     }
 
-    /** Dry-run stops right before the PIN, so no money can move. */
-    public boolean mustStopHere(int i) {
-        return dryRun && i == pinStep;
+    private Key csvOrNull(int i) {
+        if (i < 0 || i >= steps.length) return null;
+        boolean secret = pinStep >= 0 && i == pinStep;
+        if (secret && dryRun) return Key.stop("the next list step is the PIN — a dry run stops here, nothing is sent");
+        return new Key(steps[i], secret, false, "fallback step " + (i + 1));
+    }
+
+    private static boolean has(String haystack, String... needles) {
+        for (String n : needles) if (haystack.contains(n)) return true;
+        return false;
     }
 
     private static boolean blank(String s) { return s == null || s.trim().isEmpty(); }

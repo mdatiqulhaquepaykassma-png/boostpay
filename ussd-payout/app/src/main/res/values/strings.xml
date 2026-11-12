@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">BoostPay Payout</string>
+    <!-- app_name comes from the product flavour (resValue in app/build.gradle) -->
+    <string name="accessibility_description">Reads the USSD dialog and types the payout keys</string>
 </resources>

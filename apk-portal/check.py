@@ -48,13 +48,13 @@ def main():
         status, _, body = get("/")
         html = body.decode()
         check("index 200", status == 200)
-        for slug in ("userapk", "agentapk", "managementapk", "adminapk", "relayapk", "ussdpayout"):
+        for slug in ("userapk", "agentapk", "managementapk", "adminapk", "relayapk", "ussdpayout", "nagadpayout"):
             check(f"index links /{slug}", f'href="/{slug}"' in html)
             check(f"index has a download button for {slug}", f'href="/{slug}/download"' in html)
 
         status, _, body = get("/api/apks")
         data = json.loads(body)
-        check("api/apks lists every app", len(data["apps"]) == 6, str(len(data["apps"])))
+        check("api/apks lists every app", len(data["apps"]) == 7, str(len(data["apps"])))
         check("api/apks flags every file ready", all(a["ready"] for a in data["apps"]))
 
         for a in data["apps"]:

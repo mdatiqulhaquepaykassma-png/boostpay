@@ -1,7 +1,20 @@
-# ussd-payout — the *247# robot (test build)
+# ussd-payout — the USSD payout robot
 
 A native Android app that walks a USSD money-transfer menu on the owner's own phone
-and types the keys. Two engines, one plan:
+and types the keys. **One codebase, two APKs** (product flavours):
+
+| Flavour | appId | Service code | Default steps |
+| --- | --- | --- | --- |
+| `bkash` | `com.boostpay.ussdpayout` | `*247#` | `1,{number},{amount},1,{pin}` |
+| `nagad` | `com.boostpay.ussdpayout.nagad` | `*167#` | `1,{number},{amount},{pin}` |
+
+```bash
+gradle assembleBkashRelease assembleNagadRelease
+# apk/bkash/release/app-bkash-release.apk  → boostpay-ussd-payout.apk
+# apk/nagad/release/app-nagad-release.apk  → boostpay-ussd-nagad.apk
+```
+
+Two engines, one plan:
 
 | Method | What it does | Needs |
 | --- | --- | --- |
@@ -10,6 +23,9 @@ and types the keys. Two engines, one plan:
 
 ## Safety, by design
 
+* **Adaptive reading** (`Plan.decide`): each screen is matched to the value it asks
+  for — pin / amount / number / reference — in English **and Bangla**, with the steps
+  list as the fallback. A renumbered or reworded menu needs no new APK.
 * **DRY RUN is the default path**: it walks the menu and stops before the key that
   contains `{pin}`. No PIN typed, no money can move.
 * Live mode is gated by `Guard`: one run at a time, per-payout ceiling (default 500
@@ -30,17 +46,27 @@ app/src/main/java/com/boostpay/ussdpayout/
   Plan.java           steps CSV → keys, {number} {amount} {pin} placeholders
   UssdApiEngine.java  method A state machine
   UssdService.java    method B: AccessibilityService that drives the dialog
+  Provider.java       bKash/nagad presets (code, steps, PIN length, pacing)
   Guard.java          limits, cooldown, single-flight, daily counter
   Secure.java         Keystore-sealed PIN
+```
+
+## Test the menu reader without a phone
+
+`Plan.java` is plain Java, so the reader is unit-tested on the JVM:
+
+```bash
+javac -encoding UTF-8 -d /tmp/pt com/boostpay/ussdpayout/Plan.java tools/PlanTest.java
+java -cp /tmp/pt PlanTest      # 17 pass / 0 fail
 ```
 
 ## Build
 
 ```bash
-JAVA_HOME=/home/user/jdk-17.0.12+7 ANDROID_HOME=/home/user/android-sdk \
-GRADLE_USER_HOME=/home/user/.gradle-cache /home/user/bt/gradle-8.7/bin/gradle assembleRelease
-# signed with the shared BoostPay key (keystore.b64), package com.boostpay.ussdpayout
-cp app/build/outputs/apk/release/app-release.apk ../apk-portal/apks/boostpay-ussd-payout.apk
+JAVA_HOME=… ANDROID_HOME=… GRADLE_USER_HOME=… /home/user/bt/gradle-8.7/bin/gradle \
+  assembleBkashRelease assembleNagadRelease
+cp app/build/outputs/apk/bkash/release/app-bkash-release.apk ../apk-portal/apks/boostpay-ussd-payout.apk
+cp app/build/outputs/apk/nagad/release/app-nagad-release.apk ../apk-portal/apks/boostpay-ussd-nagad.apk
 ```
 
-Download: `https://app.boostpay.online/ussdpayout`
+Download: `https://app.boostpay.online/ussdpayout` · `https://app.boostpay.online/nagadpayout`
