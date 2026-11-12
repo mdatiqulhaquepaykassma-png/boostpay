@@ -11907,6 +11907,22 @@ const paymentLocks = new Map<string, Promise<any>>();
     return '';
   }
 
+  /** Reachability check the owner can open in the phone's browser — no token needed. */
+  app.get('/api/payout/ping', rateLimit(120), (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const jobs = ensurePayoutJobs(db);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        ok: true,
+        service: 'payout-queue',
+        time: new Date().toISOString(),
+        queued: jobs.filter((j) => j.status === 'QUEUED').length,
+        message: 'This phone can reach the payout server. Now put the device token in the app and press ▶ Start queue.',
+      });
+    } catch (err: any) { res.status(500).json({ ok: false, error: err?.message || 'server error' }); }
+  });
+
   /** The phone asks for work. It gets one job at a time, never two. */
   app.post('/api/payout/next', rateLimit(240), (req: any, res) => {
     try {
