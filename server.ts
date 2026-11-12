@@ -15,6 +15,7 @@ import {
   PAYMENT_CATEGORIES, defaultPaymentMethods, ensurePaymentCollections, findMethod,
   methodAvailable, limitsFor, toPublicMethod, withdrawFieldsFor,
 } from './payments';
+import { parseSms, normalizeTrxId } from './sms-parse';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11482,6 +11483,292 @@ const paymentLocks = new Map<string, Promise<any>>();
       writeDb(db);
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not delete the wallet agent.' }); }
+  });
+
+  /** The relay APK — public on purpose: the phone that pairs needs no console login. */
+  app.get('/download/boostpay-sms-relay.apk', (req: any, res) => {
+    const file = path.join(__dirname, 'public', 'download', 'boostpay-sms-relay.apk');
+    if (!fs.existsSync(file)) return res.status(404).json({ error: 'The relay APK has not been built yet.' });
+    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+    res.setHeader('Content-Disposition', 'attachment; filename="boostpay-sms-relay.apk"');
+    res.setHeader('Cache-Control', 'no-cache');
+    try {
+    } catch { /* never block a download */ }
+    return res.sendFile(file);
+  });
+
+  /* ── SMS BRIDGE (bKash / Nagad "money received" → automatic credit) ───────
+   *
+   * The relay app on the phone that holds the receiving SIM forwards every SMS.
+   * A message is only ever turned into money when ALL of these hold:
+   *   · the device token is valid and the device is not paused
+   *   · the text is a "money received" message with an amount and a TrxID
+   *   · a PENDING deposit request exists whose user-typed reference IS that TrxID
+   *   · that request is for the same payment method as the device
+   *   · the amount in the SMS equals what the user claimed (tolerance configurable)
+   * and a TrxID can only ever credit once — a replayed SMS is a no-op.
+   * Anything else is stored in the inbox for a human, never credited.
+   */
+
+  const SMS_INBOX_MAX = 2000;
+
+  function smsDevicesOf(db: any): any[] {
+    if (!Array.isArray(db.smsDevices)) db.smsDevices = [];
+    return db.smsDevices;
+  }
+  function smsInboxOf(db: any): any[] {
+    if (!Array.isArray(db.smsInbox)) db.smsInbox = [];
+    if (db.smsInbox.length > SMS_INBOX_MAX) db.smsInbox.length = SMS_INBOX_MAX;
+    return db.smsInbox;
+  }
+  function smsTokenHash(token: string): string {
+    return crypto.createHash('sha256').update('bp-sms:' + String(token || '')).digest('hex');
+  }
+  function publicSmsDevice(d: any) {
+    return {
+      id: d.id, label: d.label, methodId: d.methodId, methodName: d.methodName,
+      msisdn: d.msisdn || '', country: d.country || '', active: d.active !== false,
+      autoCredit: d.autoCredit !== false, tolerance: Number(d.tolerance) || 0,
+      tokenHint: d.tokenHint || '••••', createdAt: d.createdAt || 0,
+      lastSeenAt: d.lastSeenAt || 0, lastSmsAt: d.lastSmsAt || 0,
+      ingestCount: Number(d.ingestCount) || 0, creditCount: Number(d.creditCount) || 0,
+      appVersion: d.appVersion || '', batteryOk: d.batteryOk !== false,
+    };
+  }
+  function findDeviceByToken(db: any, token: string) {
+    const h = smsTokenHash(token);
+    return smsDevicesOf(db).find((d: any) => String(d.tokenHash || '') === h);
+  }
+  function smsDeviceActor(d: any) { return 'sms:' + String(d.id); }
+
+  app.get('/api/admin/sms-devices', rateLimit(120), requireAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const inbox = smsInboxOf(db);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        success: true,
+        devices: smsDevicesOf(db).map(publicSmsDevice),
+        methods: (db.paymentMethods || [])
+          .filter((m: any) => ['EWALLET', 'BANK', 'AGENT'].includes(String(m.category)))
+          .map((m: any) => ({ id: m.id, name: m.name, logo: m.logo, category: m.category, enabled: !!m.enabled })),
+        inbox: inbox.slice(0, 100),
+        stats: {
+          devices: smsDevicesOf(db).length,
+          activeDevices: smsDevicesOf(db).filter((d: any) => d.active !== false).length,
+          credited24h: inbox.filter((r: any) => r.status === 'CREDITED' && Date.now() - Number(r.at || 0) < 864e5).length,
+          unmatched24h: inbox.filter((r: any) => r.status === 'UNMATCHED' && Date.now() - Number(r.at || 0) < 864e5).length,
+          creditedTotal: smsDevicesOf(db).reduce((a: number, d: any) => a + (Number(d.creditCount) || 0), 0),
+        },
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load the SMS bridge.' }); }
+  });
+
+  /** Create a relay device — the token is shown ONCE and stored only as a hash. */
+  app.post('/api/admin/sms-devices', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const label = sanitizeText(body.label, 60).trim();
+      const methodId = String(body.methodId || '').trim();
+      const msisdn = String(body.msisdn || '').replace(/[^0-9]/g, '');
+      const country = String(body.country || 'BD').toUpperCase();
+      if (!label) return res.status(400).json({ error: 'Give the phone a name (e.g. "bKash 01711-111111 — Dhaka shop").' });
+      if (!methodId) return res.status(400).json({ error: 'Pick the payment method this SIM receives.' });
+      if (msisdn && !/^(?:88)?01[3-9][0-9]{8}$/.test(msisdn)) return res.status(400).json({ error: 'Enter the receiving mobile number (01XXXXXXXXX).' });
+      const db = ensurePaymentCollections(readDb());
+      const m = findMethod(db, methodId);
+      if (!m) return res.status(404).json({ error: 'That payment method does not exist.' });
+
+      const token = 'BPX-' + crypto.randomBytes(18).toString('hex').toUpperCase();
+      const dev: any = {
+        id: 'SMSD-' + Date.now().toString(36).toUpperCase() + '-' + crypto.randomBytes(2).toString('hex').toUpperCase(),
+        label, methodId: m.id, methodName: m.name,
+        msisdn: msisdn.replace(/^88/, ''), country,
+        active: true, autoCredit: body.autoCredit !== false,
+        tolerance: Math.max(0, Math.min(100, Number(body.tolerance) || 0)),
+        tokenHash: smsTokenHash(token), tokenHint: token.slice(-4),
+        createdAt: Date.now(), createdBy: String(req.authAdmin || 'admin'),
+        lastSeenAt: 0, lastSmsAt: 0, ingestCount: 0, creditCount: 0,
+      };
+      smsDevicesOf(db).push(dev);
+      recordAuditLog(db, 'SMS_DEVICE_CREATE', 'admin:' + String(req.authAdmin), `Created SMS relay device ${dev.id} (${m.name}) for ${dev.msisdn || 'no number'}`, dev.id);
+      writeDb(db);
+      res.json({ success: true, device: publicSmsDevice(dev), token });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not create the relay device.' }); }
+  });
+
+  app.patch('/api/admin/sms-devices/:id', rateLimit(60), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const dev = smsDevicesOf(db).find((d: any) => d.id === String(req.params.id));
+      if (!dev) return res.status(404).json({ error: 'That relay device does not exist.' });
+      const body = req.body || {};
+      const changes: string[] = [];
+      if (typeof body.label === 'string' && sanitizeText(body.label, 60).trim()) {
+        dev.label = sanitizeText(body.label, 60).trim(); changes.push('label');
+      }
+      if (typeof body.active === 'boolean' && body.active !== (dev.active !== false)) {
+        dev.active = body.active; changes.push(body.active ? 'resumed' : 'paused');
+      }
+      if (typeof body.autoCredit === 'boolean' && body.autoCredit !== (dev.autoCredit !== false)) {
+        dev.autoCredit = body.autoCredit; changes.push(body.autoCredit ? 'auto-credit on' : 'auto-credit off (match only)');
+      }
+      if (body.tolerance !== undefined) {
+        const t = Math.max(0, Math.min(100, Number(body.tolerance) || 0));
+        if (t !== Number(dev.tolerance || 0)) { dev.tolerance = t; changes.push('tolerance ' + t); }
+      }
+      if (typeof body.msisdn === 'string') {
+        const num = body.msisdn.replace(/[^0-9]/g, '').replace(/^88/, '');
+        if (num && !/^01[3-9][0-9]{8}$/.test(num)) return res.status(400).json({ error: 'Enter the receiving mobile number (01XXXXXXXXX).' });
+        if (num !== String(dev.msisdn || '')) { dev.msisdn = num; changes.push('msisdn'); }
+      }
+      let token: string | undefined;
+      if (body.rotateToken === true) {
+        token = 'BPX-' + crypto.randomBytes(18).toString('hex').toUpperCase();
+        dev.tokenHash = smsTokenHash(token); dev.tokenHint = token.slice(-4);
+        changes.push('token rotated');
+      }
+      recordAuditLog(db, 'SMS_DEVICE_UPDATE', 'admin:' + String(req.authAdmin), `Updated SMS device ${dev.id}: ${changes.join(', ') || 'no change'}`, dev.id);
+      writeDb(db);
+      res.json({ success: true, device: publicSmsDevice(dev), changes, ...(token ? { token } : {}) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not update the relay device.' }); }
+  });
+
+  app.delete('/api/admin/sms-devices/:id', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const arr = smsDevicesOf(db);
+      const i = arr.findIndex((d: any) => d.id === String(req.params.id));
+      if (i < 0) return res.status(404).json({ error: 'That relay device does not exist.' });
+      const [dev] = arr.splice(i, 1);
+      recordAuditLog(db, 'SMS_DEVICE_DELETE', 'admin:' + String(req.authAdmin), `Deleted SMS device ${dev.id} (${dev.label})`, dev.id);
+      writeDb(db);
+      res.json({ success: true });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not delete the relay device.' }); }
+  });
+
+  /** Parse preview — the console can show what the server will read from an SMS. */
+  app.post('/api/admin/sms-devices/parse', rateLimit(120), requireAdmin, (req: any, res) => {
+    try {
+      const body = req.body || {};
+      res.json({ success: true, parsed: parseSms(String(body.message || ''), String(body.sender || '')) });
+    } catch (err: any) { res.status(400).json({ error: err?.message || 'Could not parse that message.' }); }
+  });
+
+  /**
+   * The relay app's single endpoint. Header `x-sms-token: BPX-…`
+   * body: { sender, message, receivedAt, appVersion, batteryOk }
+   */
+  app.post('/api/sms/ingest', rateLimit(240), (req: any, res) => {
+    try {
+      const token = String(req.headers['x-sms-token'] || (req.body && req.body.deviceToken) || '').trim();
+      if (!token) return res.status(401).json({ error: 'Missing device token.' });
+      const db = ensurePaymentCollections(readDb());
+      const dev = findDeviceByToken(db, token);
+      if (!dev) return res.status(401).json({ error: 'This device token is not recognised.' });
+      if (dev.active === false) return res.status(403).json({ error: 'This relay device is paused by the admin.' });
+
+      const body = req.body || {};
+      const message = String(body.message || '').slice(0, 2000);
+      const sender = String(body.sender || '').slice(0, 60);
+      const receivedAt = Number(body.receivedAt) || Date.now();
+      if (!message.trim()) return res.status(400).json({ error: 'Empty message.' });
+
+      dev.lastSeenAt = Date.now();
+      dev.ingestCount = (Number(dev.ingestCount) || 0) + 1;
+      if (body.appVersion) dev.appVersion = sanitizeText(body.appVersion, 20);
+      if (typeof body.batteryOk === 'boolean') dev.batteryOk = body.batteryOk;
+
+      const parsed = parseSms(message, sender);
+      const providerFromDevice = String(dev.methodName || '').toLowerCase().includes('nagad') ? 'NAGAD' : 'BKASH';
+      const provider = parsed.provider === 'UNKNOWN' ? providerFromDevice : parsed.provider;
+      const inbox = smsInboxOf(db);
+      const row: any = {
+        id: 'SMS-' + Date.now().toString(36).toUpperCase() + '-' + crypto.randomBytes(2).toString('hex').toUpperCase(),
+        deviceId: dev.id, deviceLabel: dev.label, methodId: dev.methodId, methodName: dev.methodName,
+        at: Date.now(), receivedAt, sender, provider,
+        direction: parsed.direction, amount: parsed.amount, trxId: parsed.trxId,
+        status: 'IGNORED', note: parsed.reason || '', requestId: '', userId: '', raw: message.slice(0, 400),
+      };
+      const finish = (status: number, payload: any) => {
+        inbox.unshift(row);
+        if (inbox.length > SMS_INBOX_MAX) inbox.length = SMS_INBOX_MAX;
+        try { writeDb(db); } catch { /* the response still tells the truth */ }
+        return res.status(status).json(payload);
+      };
+
+      if (!parsed.ok || parsed.direction !== 'CREDIT') {
+        row.status = 'IGNORED';
+        dev.lastSmsAt = Date.now();
+        return finish(200, { success: true, status: 'IGNORED', note: row.note, credit: false });
+      }
+      dev.lastSmsAt = Date.now();
+
+      // same TrxID twice (retry from the phone, or a replay) → never credit twice
+      const seen = inbox.find((r: any) => normalizeTrxId(r.trxId) === normalizeTrxId(parsed.trxId) && r.status === 'CREDITED');
+      if (seen) {
+        row.status = 'DUPLICATE';
+        row.note = `TrxID already credited on ${new Date(Number(seen.at)).toISOString()}`;
+        return finish(200, { success: true, status: 'DUPLICATE', credit: false, note: row.note });
+      }
+
+      const wanted = normalizeTrxId(parsed.trxId);
+      const pending = (db.depositRequests || [])
+        .filter((d: any) => d.status === 'PENDING' && String(d.methodId) === String(dev.methodId)
+          && normalizeTrxId(d.reference) === wanted)
+        .sort((a: any, b: any) => Number(a.createdAt || 0) - Number(b.createdAt || 0));
+
+      if (!pending.length) {
+        row.status = 'UNMATCHED';
+        row.note = `No pending ${dev.methodName} deposit carries TrxID ${parsed.trxId}`;
+        return finish(200, { success: true, status: 'UNMATCHED', credit: false, note: row.note });
+      }
+
+      const req0 = pending[0];
+      const claimed = Number(req0.entryAmount) || 0;
+      const tolerance = Number(dev.tolerance) || 0;
+      const sameCurrency = String(req0.entryCurrency || 'BDT').toUpperCase() === 'BDT';
+      const amountOk = !sameCurrency ? true : Math.abs(claimed - parsed.amount) <= tolerance + 0.005;
+
+      row.requestId = String(req0.id);
+      row.userId = String(req0.userId);
+      if (!amountOk) {
+        row.status = 'UNMATCHED';
+        row.note = `Amount mismatch: user claimed ${claimed} ${req0.entryCurrency || 'BDT'}, SMS says ${parsed.amount}`;
+        req0.smsFlag = 'AMOUNT_MISMATCH';
+        req0.smsNote = row.note;
+        return finish(200, { success: true, status: 'AMOUNT_MISMATCH', credit: false, note: row.note });
+      }
+
+      req0.smsDeviceId = dev.id;
+      req0.smsReceivedAt = receivedAt;
+      req0.smsVerifiedAt = Date.now();
+      req0.smsAmount = parsed.amount;
+      req0.smsTrxId = parsed.trxId;
+
+      if (dev.autoCredit === false) {
+        row.status = 'MATCHED';
+        row.note = 'SMS verified — auto-credit is OFF, waiting for a human approval';
+        return finish(200, { success: true, status: 'MATCHED', credit: false, requestId: req0.id, note: row.note });
+      }
+
+      const out = reviewDepositCore(db, { id: String(req0.id), action: 'APPROVE', actor: smsDeviceActor(dev), reason: `Auto-verified by SMS (${parsed.trxId})` });
+      if (out.status !== 200) {
+        row.status = 'UNMATCHED';
+        row.note = String((out.body || {}).error || 'Approval failed');
+        return finish(200, { success: true, status: 'UNMATCHED', credit: false, note: row.note });
+      }
+      row.status = 'CREDITED';
+      row.note = `Credited user ${req0.userId} · ${req0.methodName} · ${parsed.amount} BDT`;
+      dev.creditCount = (Number(dev.creditCount) || 0) + 1;
+      recordAuditLog(db, 'SMS_AUTO_CREDIT', smsDeviceActor(dev),
+        `Deposit ${req0.id} auto-credited from SMS (${dev.methodName} ${parsed.amount}, TrxID ${parsed.trxId})`, String(req0.userId));
+      return finish(200, {
+        success: true, status: 'CREDITED', credit: true, requestId: req0.id,
+        userId: req0.userId, amountBdt: parsed.amount, trxId: parsed.trxId,
+        creditedUsd: Number(req0.amountUsd) || 0,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not process the SMS.' }); }
   });
 
   // One-off (and re-runnable) move of bonuses that still sit in the retired bonus

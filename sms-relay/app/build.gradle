@@ -1,0 +1,46 @@
+plugins { id 'com.android.application' }
+
+// Release signing: the APK the admin downloads must be signed with a stable key,
+// otherwise every rebuild would need an uninstall first. Place `boostpay-relay.jks`
+// next to this file and set the three Gradle properties (kept out of git).
+def ksFile = rootProject.file('boostpay-relay.jks')
+def hasKs = ksFile.exists() && project.hasProperty('BP_STORE_PASSWORD')
+
+android {
+    namespace 'com.boostpay.smsrelay'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.boostpay.smsrelay'
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    signingConfigs {
+        release {
+            if (hasKs) {
+                storeFile ksFile
+                storePassword project.property('BP_STORE_PASSWORD')
+                keyAlias project.hasProperty('BP_KEY_ALIAS') ? project.property('BP_KEY_ALIAS') : 'boostpay'
+                keyPassword project.hasProperty('BP_KEY_PASSWORD') ? project.property('BP_KEY_PASSWORD') : project.property('BP_STORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // a real key when one is provided, otherwise the debug key (still installable)
+            signingConfig hasKs ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint { abortOnError false }
+}

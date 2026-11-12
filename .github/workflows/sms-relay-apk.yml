@@ -1,0 +1,74 @@
+name: SMS Relay APK
+
+# Builds the little Android app that forwards bKash / Nagad SMS to BoostPay.
+# Run it by hand (Actions → SMS Relay APK → Run workflow) or on any push that
+# touches sms-relay/. The APK lands in the run's artifacts AND, on main, is
+# copied to public/download/ so https://boostpay.online/download/boostpay-sms-relay.apk
+# always serves the newest build.
+#
+# Note: this app is sideloaded on purpose (Google Play does not allow general SMS
+# reading for this purpose) — it is our own APK, installed from our own domain.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sms-relay/**'
+      - '.github/workflows/sms-relay-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  apk:
+    name: Build relay APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Restore the signing key
+        # The keystore is committed as base64 (a signing key is not a server secret:
+        # it only has to stay the same so updates install over an older APK).
+        run: |
+          if [ -f sms-relay/keystore.b64 ]; then
+            base64 -d sms-relay/keystore.b64 > sms-relay/boostpay-relay.jks
+          fi
+
+      - name: Build
+        working-directory: sms-relay
+        run: |
+          gradle assembleRelease --no-daemon \
+            -PBP_STORE_PASSWORD='${{ secrets.BP_RELAY_STORE_PASSWORD || 'BoostPayRelay2026!' }}' \
+            -PBP_KEY_ALIAS=boostpay
+
+      - name: Collect the APK
+        run: |
+          mkdir -p out
+          cp sms-relay/app/build/outputs/apk/release/app-release.apk out/boostpay-sms-relay.apk
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boostpay-sms-relay-apk
+          path: out/boostpay-sms-relay.apk
+          if-no-files-found: error
+
+      - name: Publish it on the site (main only)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p public/download
+          cp out/boostpay-sms-relay.apk public/download/boostpay-sms-relay.apk
+          git config user.name "BoostPay Bot"
+          git config user.email "bot@boostpay.online"
+          if ! git diff --quiet -- public/download/boostpay-sms-relay.apk; then
+            git add public/download/boostpay-sms-relay.apk
+            git commit -m "build: refresh the SMS relay APK"
+            git push
+          else
+            echo "APK unchanged"
+          fi
