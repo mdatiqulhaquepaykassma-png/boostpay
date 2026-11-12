@@ -8,6 +8,7 @@ import { PaymentAdmin } from './PaymentAdmin';
 import { WalletAgentAdmin } from './WalletAgentAdmin';
 import { SmsBridgeAdmin } from './SmsBridgeAdmin';
 import { PayoutRobotAdmin } from './PayoutRobotAdmin';
+import { TabBoundary } from './TabBoundary';
 import { PushBell } from '../push/PushBell';
 import {
   ShieldCheck,
@@ -1411,8 +1412,12 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
         {activeTab === 'CURRENCY' && <CurrencyAdmin />}
         {activeTab === 'PAYMENTS' && <PaymentAdmin />}
         {activeTab === 'WALLETAGENTS' && <WalletAgentAdmin />}
-        {activeTab === 'SMSBRIDGE' && <SmsBridgeAdmin />}
-        {activeTab === 'PAYOUTROBOT' && <PayoutRobotAdmin />}
+        {activeTab === 'SMSBRIDGE' && (
+          <TabBoundary tab="SMSBRIDGE"><SmsBridgeAdmin /></TabBoundary>
+        )}
+        {activeTab === 'PAYOUTROBOT' && (
+          <TabBoundary tab="PAYOUTROBOT"><PayoutRobotAdmin /></TabBoundary>
+        )}
         {activeTab === 'ADMINS' && (
           <div className="space-y-5">
             <AdminMfaView myEmail={(adminSession && adminSession.email) || ''} />

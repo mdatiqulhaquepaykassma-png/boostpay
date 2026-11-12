@@ -16,7 +16,17 @@ import { BoostPayStore } from '../services/store';
  */
 
 // NOTE: adminAuthHeaders() already sets Content-Type — never add it twice.
-const authHeaders = () => ({ ...BoostPayStore.adminAuthHeaders() });
+// Wrapped: a broken session in storage must never take the whole console down.
+const authHeaders = (): Record<string, string> => {
+  try { return { ...BoostPayStore.adminAuthHeaders() }; } catch { return { 'Content-Type': 'application/json' }; }
+};
+
+/** Every number on this screen is rendered defensively — a missing field shows 0, never a crash. */
+const num = (v: any, fallback = 0): number => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+};
+const asArray = <T,>(v: any): T[] => (Array.isArray(v) ? v : []);
 
 type Job = {
   id: string; kind: 'TEST' | 'WITHDRAW'; provider: string; number: string;
@@ -63,18 +73,22 @@ export const PayoutRobotAdmin = () => {
   const [note, setNote] = useState('');
   const [open, setOpen] = useState<string>('');
   const [form, setForm] = useState({ provider: 'nagad', number: '', amountBdt: '20', ref: '1' });
+  const [loaded, setLoaded] = useState(false);
+  const [httpNote, setHttpNote] = useState('');
 
   const load = useCallback(async () => {
     try {
       const r = await fetch('/api/admin/payouts', { headers: authHeaders() });
       const j = await r.json();
+      setHttpNote('HTTP ' + r.status);
       if (!r.ok) throw new Error(j.error || 'Could not load the payout queue.');
-      setJobs(j.jobs || []);
-      setPending(j.pending || []);
-      setDevices(j.devices || []);
-      setStats(j.stats || null);
+      setJobs(asArray<Job>(j.jobs));
+      setPending(asArray<Pending>(j.pending));
+      setDevices(asArray<Device>(j.devices));
+      setStats(j.stats && typeof j.stats === 'object' ? j.stats : null);
       setErr('');
     } catch (e: any) { setErr(e?.message || 'Could not load the payout queue.'); }
+    finally { setLoaded(true); }
   }, []);
 
   useEffect(() => { void load(); const iv = window.setInterval(load, 5000); return () => window.clearInterval(iv); }, [load]);
@@ -103,7 +117,7 @@ export const PayoutRobotAdmin = () => {
   };
 
   const queueWithdraw = (p: Pending) => {
-    if (!window.confirm(`Send $${p.amountUsd.toFixed(2)} (${p.amountBdt ?? '?'} BDT) to ${p.number} via the robot?\n\nThe withdrawal is refunded automatically if the phone fails.`)) return;
+    if (!window.confirm(`Send $${num(p.amountUsd).toFixed(2)} (${p.amountBdt ?? '?'} BDT) to ${p.number} via the robot?\n\nThe withdrawal is refunded automatically if the phone fails.`)) return;
     void call('/api/admin/payouts/queue', { withdrawId: p.id }, `Withdrawal ${p.id} queued for the robot.`);
   };
 
@@ -137,12 +151,12 @@ export const PayoutRobotAdmin = () => {
         </p>
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-6">
           {[
-            ['Queued', stats?.queued ?? 0],
-            ['On a phone', stats?.claimed ?? 0],
-            ['Sent', stats?.sent ?? 0],
-            ['Paid 24h', stats?.paid24h ?? 0],
-            ['Failed 24h', stats?.failed24h ?? 0],
-            ['BDT paid 24h', stats?.paidBdt24h ?? 0],
+            ['Queued', num(stats?.queued)],
+            ['On a phone', num(stats?.claimed)],
+            ['Sent', num(stats?.sent)],
+            ['Paid 24h', num(stats?.paid24h)],
+            ['Failed 24h', num(stats?.failed24h)],
+            ['BDT paid 24h', num(stats?.paidBdt24h)],
           ].map(([label, value]) => (
             <div key={String(label)} className="rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2">
               <div className="text-[9px] font-bold uppercase tracking-wider text-zinc-500">{label}</div>
@@ -156,6 +170,12 @@ export const PayoutRobotAdmin = () => {
           <span>on the phone: paste the server URL + device token, tick “Server queue”, then START.</span>
         </p>
       </div>
+
+      {!loaded && !err ? (
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-[11px] text-zinc-400">
+          Loading the queue… (if this never turns into a list, the panel could not reach the server{httpNote ? ` — ${httpNote}` : ''})
+        </div>
+      ) : null}
 
       {note ? <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-200">{note}</div> : null}
       {err ? <div className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">{err}</div> : null}
@@ -190,9 +210,9 @@ export const PayoutRobotAdmin = () => {
             {pending.map((p) => (
               <div key={p.id} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2">
                 <div className="min-w-0">
-                  <div className="text-[12px] font-bold text-white">{p.userName || p.userId} · ${p.amountUsd.toFixed(2)}</div>
+                  <div className="text-[12px] font-bold text-white">{p.userName || p.userId || 'user'} · ${num(p.amountUsd).toFixed(2)}</div>
                   <div className="text-[10px] text-zinc-500">
-                    {p.methodName} · {p.number || 'no number'} · {p.amountBdt != null ? `${p.amountBdt} BDT` : 'no BDT rate'} · {ago(p.createdAt)}
+                    {p.methodName} · {p.number || 'no number'} · {p.amountBdt != null ? `${num(p.amountBdt)} BDT` : 'no BDT rate'} · {ago(p.createdAt)}
                   </div>
                 </div>
                 <button
@@ -262,14 +282,14 @@ export const PayoutRobotAdmin = () => {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2 text-[12px] font-bold text-white">
                       <span className={`rounded-md border px-1.5 py-0.5 text-[9px] font-black ${STATUS_STYLE[j.status] || ''}`}>{j.status}</span>
-                      <span>{j.amountBdt} BDT → {j.number}</span>
+                      <span>{num(j.amountBdt)} BDT → {j.number || '—'}</span>
                       <span className="text-[9px] font-bold uppercase text-zinc-500">{j.kind} · {j.provider}</span>
                     </div>
                     <div className="text-[10px] text-zinc-500">
                       {j.id} · created {ago(j.createdAt)}
                       {j.deviceLabel ? ` · phone ${j.deviceLabel}` : ''}
                       {j.trxId ? ` · TrxID ${j.trxId}` : ''}
-                      {j.attempts ? ` · ${j.attempts} attempt(s)` : ''}
+                      {num(j.attempts) ? ` · ${num(j.attempts)} attempt(s)` : ''}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
