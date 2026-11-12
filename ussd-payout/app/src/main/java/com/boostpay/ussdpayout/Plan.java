@@ -75,12 +75,24 @@ public final class Plan {
 
     public Key decide(String screen, int csvIndex) {
         String l = screen == null ? "" : screen.toLowerCase();
-        boolean asksPin = has(l, "pin", "পিন", "password", "পাসওয়ার্ড", "গোপন");
-        boolean asksAmount = has(l, "amount", "পরিমাণ", "টাকার পরিমাণ", "taka", "tk ");
-        boolean asksRef = has(l, "reference", "রেফারেন্স");
-        boolean asksNumber = has(l, "number", "নম্বর", "account", "একাউন্ট", "একাউন্টে", "mobile", "মোবাইল");
 
         if (adaptive) {
+            // A numbered menu is never a PIN prompt — even when one item is "PIN Reset"
+            // (Nagad's main menu has exactly that) or "Change PIN".
+            if (looksLikeMenu(l)) {
+                String option = menuOptionFor(l, SEND_MENU_WORDS);
+                if (option == null) option = menuOptionFor(l, SUBMENU_WORDS);
+                if (option != null) return new Key(option, false, false, "menu: picked that option");
+                return csvOrNull(csvIndex);
+            }
+
+            boolean asksPin = has(l, "pin", "পিন", "password", "পাসওয়ার্ড", "গোপন")
+                    && !has(l, "pin reset", "reset pin", "change pin", "pin change",
+                              "পিন রিসেট", "পিন পরিবর্তন", "পিন ভুলে");
+            boolean asksAmount = has(l, "amount", "পরিমাণ", "টাকার পরিমাণ", "taka", "tk ");
+            boolean asksRef = has(l, "reference", "রেফারেন্স", "remark");
+            boolean asksNumber = has(l, "number", "নম্বর", "account", "একাউন্ট", "একাউন্টে", "mobile", "মোবাইল");
+
             if (asksPin) {
                 if (dryRun) return Key.stop("this screen asks for the PIN — a dry run stops here, nothing is sent");
                 return new Key(pin, true, false, "PIN prompt");
@@ -97,6 +109,59 @@ public final class Plan {
         boolean secret = pinStep >= 0 && csvIndex == pinStep;
         if (secret && dryRun) return Key.stop("the next list step is the PIN — a dry run stops here, nothing is sent");
         return new Key(next, secret, false, secret ? "PIN step" : "list step " + (csvIndex + 1));
+    }
+
+    // ── menu reading ─────────────────────────────────────────────────────────
+
+    private static final String[] SEND_MENU_WORDS = {
+            "send money", "sendmoney", "সেন্ড মানি", "সেন্ডমানি", "টাকা পাঠা", "পাঠান"
+    };
+    /** Sub-menus that ask where the money should go. */
+    private static final String[] SUBMENU_WORDS = {
+            "nagad account", "to nagad", "nagad number", "to account", "account number",
+            "mobile number", "personal", "নগদ একাউন্ট", "একাউন্ট নম্বর", "মোবাইল নম্বর"
+    };
+    private static final String[] MENU_SIGNS = {
+            "cash out", "send money", "mobile recharge", "recharge", "bill pay", "payment",
+            "my nagad", "pin reset", "balance", "mini statement", "ক্যাশ আউট", "সেন্ড মানি"
+    };
+
+    /**
+     * A USSD list looks like "1. Cash Out 2. Send Money 3. …" (the dialog joins its
+     * lines with a separator, so count numbered items rather than lines).
+     */
+    public static boolean looksLikeMenu(String lower) {
+        int numbered = countNumberedItems(lower);
+        if (numbered >= 2) return true;
+        int signs = 0;
+        for (String w : MENU_SIGNS) if (lower.contains(w)) signs++;
+        return signs >= 3;
+    }
+
+    public static int countNumberedItems(String lower) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(?<![0-9])([1-9])\\s*[.)]\\s*(?=\\p{L})")
+                .matcher(lower);
+        int n = 0;
+        while (m.find()) n++;
+        return n;
+    }
+
+    /**
+     * Finds the option number whose label matches one of the words, e.g. the screen
+     * "1. Cash Out 2. Send Money …" answers "2" for SEND_MENU_WORDS.
+     */
+    public static String menuOptionFor(String lower, String[] words) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(?<![0-9])([1-9])\\s*[.)]\\s*([^0-9]{0,40})")
+                .matcher(lower);
+        while (m.find()) {
+            String label = m.group(2);
+            for (String w : words) {
+                if (label.contains(w)) return m.group(1);      // group 1 = the option number
+            }
+        }
+        return null;
     }
 
     private Key csvOrNull(int i) {

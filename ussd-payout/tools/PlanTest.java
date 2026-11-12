@@ -70,6 +70,31 @@ public class PlanTest {
         check("empty service code -> *167# default", "*167#".equals(n2.serviceCode), n2.serviceCode);
         check("empty reference -> 1", "1".equals(n2.ref), n2.ref);
 
+        // ── the owner's real Nagad main menu (log 2026-11-12 14:00) ────
+        String nagadMenu = "Carrier info · Nagad · 1. Cash Out  2. Send Money  3. Mobile Recharge  "
+                + "4. Payment  5. Bill Pay  6. EMI Payment  7. My Nagad  8. PIN Reset · Cancel · Send";
+        check("menu: recognised as a menu", Plan.looksLikeMenu(nagadMenu.toLowerCase()), "menu");
+        check("menu: PIN Reset does NOT look like a PIN prompt",
+                Plan.menuOptionFor(nagadMenu.toLowerCase(), new String[]{"send money"}).equals("2"), "option");
+        Plan.Key mk = nagad(false, true).decide(nagadMenu, 0);
+        check("menu: dry run picks Send Money (2) instead of stopping", "2".equals(mk.value) && !mk.stopBefore,
+                String.valueOf(mk.value) + " stop=" + mk.stopBefore);
+
+        String nagadSub = "Send Money · 1. To Nagad Account  2. To Bank Account · Cancel · Send";
+        check("submenu: picks 'To Nagad Account' (1)",
+                "1".equals(nagad(false, true).decide(nagadSub, 1).value),
+                String.valueOf(nagad(false, true).decide(nagadSub, 1).value));
+
+        String pinPrompt = "Enter your Nagad PIN · Cancel · Send";
+        Plan.Key pk = nagad(true, true).decide(pinPrompt, 3);
+        check("dry run still stops at a real PIN prompt", pk.stopBefore, "stop=" + pk.stopBefore);
+        check("live: real PIN prompt gets the PIN", "1234".equals(nagad(false, true).decide(pinPrompt, 3).value), "pin");
+
+        check("change-PIN prompt is not treated as a payout PIN",
+                !Plan.looksLikeMenu("change pin · enter new pin".toLowerCase()), "no menu");
+        check("menu counter: 8 items", Plan.countNumberedItems(nagadMenu.toLowerCase()) >= 8,
+                "" + Plan.countNumberedItems(nagadMenu.toLowerCase()));
+
         // ── which SIM sends a payout ──────────────────────────────────
         java.util.List<SimPick.Entry> two = java.util.Arrays.asList(
                 new SimPick.Entry(11, 0, "bkash", "personal"),   // SIM 1 · bKash personal
