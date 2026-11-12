@@ -61,8 +61,7 @@ public class MainActivity extends Activity {
     private TextView queueState;
     private boolean queueRunning;
     private boolean queueLive;                       // the mode the queue is running in
-    private Queue.Job currentJob;                    // job being sent right now
-    private final StringBuilder jobLog = new StringBuilder();
+
     private CheckBox adaptiveBox;
     private Provider provider = Provider.current();
     private List<Sims.Sim> sims = new ArrayList<>();
@@ -82,7 +81,18 @@ public class MainActivity extends Activity {
         setContentView(buildUi());
         loadSettings();
         requestCallPermission();
+        requestNotifyPermission();
         refresh();
+    }
+
+    /** Android 13+ hides the queue's foreground notification without this. */
+    private void requestNotifyPermission() {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 33
+                    && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != 0) {
+                requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 52);
+            }
+        } catch (Throwable ignored) { }
     }
 
     // ── UI ───────────────────────────────────────────────────────────────────
@@ -227,7 +237,7 @@ public class MainActivity extends Activity {
         LinearLayout queueCard = card("4 · Server queue (admin panel)",
                 "the panel queues a payout, this phone sends it and reports back");
         queueBox = new CheckBox(this);
-        queueBox.setText("Server queue mode");
+        queueBox.setText("Queue dry run — only TEST jobs (nothing leaves the wallet)");
         queueBox.setTextColor(Color.parseColor("#d4d4d8"));
         queueCard.addView(queueBox);
         serverInput = input("https://boostpay.online", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
@@ -236,9 +246,17 @@ public class MainActivity extends Activity {
         queueCard.addView(tokenInput);
         queueState = state();
         queueCard.addView(queueState);
-        queueStart = button("▶ Start picking jobs from the panel");
+
+        LinearLayout queueButtons = new LinearLayout(this);
+        queueButtons.setOrientation(LinearLayout.HORIZONTAL);
+        queueStart = button("▶ Start queue");
         queueStart.setOnClickListener(v -> toggleQueue());
-        queueCard.addView(queueStart);
+        queueButtons.addView(queueStart);
+        Button testConn = button("Test");
+        testConn.setOnClickListener(v -> testQueueConnection());
+        queueButtons.addView(testConn);
+        queueCard.addView(queueButtons);
+
         queueCard.addView(note("Dry run: a phone in DRY RUN is only ever given TEST jobs, so it can watch the whole menu "
                 + "without a real withdrawal leaving the wallet. Stop it any time with ⛔ STOP.", "#71717a"));
         root.addView(queueCard);
@@ -510,7 +528,6 @@ public class MainActivity extends Activity {
 
             @Override public void finish(boolean ok, String summary) {
                 ui.post(() -> {
-                    reportJob(ok, summary);
                     Guard.end();
                     apiEngine = null;
                     line((ok ? "■ done: " : "■ stopped: ") + summary);
@@ -753,10 +770,6 @@ public class MainActivity extends Activity {
 
     private void line(String s) {
         String ts = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
-        if (currentJob != null) {
-            if (jobLog.length() > 6000) jobLog.delete(0, 3000);
-            jobLog.append(ts).append("  ").append(s).append('\n');
-        }
         ui.post(() -> {
             if (log.length() > 40_000) log.delete(0, 20_000);
             log.append(ts).append("  ").append(s).append('\n');
@@ -878,19 +891,25 @@ public class MainActivity extends Activity {
         a11yRadio.setChecked(a11y);
         apiRadio.setChecked(!a11y);
         serviceInput.setSelection(serviceInput.getText().length());
-        queueBox.setChecked(p.getBoolean("queueMode", false));
+        queueBox.setChecked(p.getBoolean("queueDryRun", false));
         serverInput.setText(p.getString("server", "https://boostpay.online"));
         tokenInput.setText(p.getString("token", ""));
     }
 
     // ── server queue (admin panel → this phone) ──────────────────────────────
-
-    private boolean dryRunOn() {
-        return !queueLive;      // queueLive is set when a job starts
-    }
+    // The actual polling lives in QueueService (a foreground service), so a job is
+    // still sent with the screen off. This Activity only starts/stops it and shows
+    // the log.
 
     private void toggleQueue() {
-        if (queueRunning) { stopQueue("stopped by the operator"); return; }
+        if (QueueService.isRunning()) {
+            QueueService.stop(this);
+            queueRunning = false;
+            queueStart.setText("▶ Start picking jobs from the panel");
+            queueState.setText("stopped");
+            line("queue: stopped");
+            return;
+        }
         String server = Queue.cleanServer(serverInput.getText().toString());
         String token = tokenInput.getText().toString().trim();
         if (server.isEmpty() || !server.startsWith("https://")) {
@@ -901,79 +920,39 @@ public class MainActivity extends Activity {
             toast("Paste the device token from the admin panel (SMS Bridge → the phone's token)");
             return;
         }
+        if (!UssdService.isEnabled(this)) {
+            toast("Turn on Settings → Accessibility → BoostPay Payout, otherwise a job cannot be sent");
+        }
         saveSettings();
         queueRunning = true;
-        queueBox.setChecked(true);
         queueStart.setText("■ Stop picking jobs");
-        queueState.setText("waiting for a job… (dry run ON = only TEST jobs)");
-        line("queue: polling " + server + " as " + Queue.hint(token));
-        ui.postDelayed(this::queueTick, 600);
+        queueState.setText("starting the queue service…");
+        QueueService.listener = (l, status) -> {
+            queueState.setText(status + "  ·  " + QueueService.tail().split("\n")[0]);
+            line("queue│ " + l);
+        };
+        QueueService.start(this);
     }
 
-    private void stopQueue(String why) {
-        queueRunning = false;
-        queueStart.setText("▶ Start picking jobs from the panel");
-        queueState.setText(why);
-        line("queue: " + why);
-    }
-
-    /** One poll. Runs off the UI thread; the answer comes back on it. */
-    private void queueTick() {
-        if (!queueRunning) return;
+    /** One-shot check: is the token right and is the panel reachable? */
+    private void testQueueConnection() {
         final String server = Queue.cleanServer(serverInput.getText().toString());
         final String token = tokenInput.getText().toString().trim();
-        if (Guard.isRunning()) { ui.postDelayed(this::queueTick, 3000); return; }
-        final boolean dry = dryRunOn();
+        if (server.isEmpty() || token.length() < 10) { toast("Fill the server and the token first"); return; }
+        queueState.setText("checking the panel…");
         new Thread(() -> {
-            Queue.Reply r = Queue.next(server, token, dry);
+            Queue.Reply r = Queue.next(server, token, true);
             ui.post(() -> {
-                if (!queueRunning) return;
                 if (!r.ok) {
-                    queueState.setText("server said: " + r.error);
-                    line("queue: " + r.error);
-                    ui.postDelayed(this::queueTick, 15000);
-                    return;
+                    queueState.setText("✗ panel said: " + r.error);
+                    line("queue test: ✗ " + r.error);
+                } else if (r.job == null) {
+                    queueState.setText("✓ connected — the queue is empty (dry run only)");
+                    line("queue test: ✓ connected, no job waiting");
+                } else {
+                    queueState.setText("✓ connected — a job is waiting: " + r.job.id);
+                    line("queue test: ✓ connected, job " + r.job.id + " waiting");
                 }
-                if (r.job == null) {
-                    queueState.setText("waiting for a job…");
-                    ui.postDelayed(this::queueTick, r.pollAfterMs);
-                    return;
-                }
-                startJob(r.job, dry);
-            });
-        }).start();
-    }
-
-    private void startJob(Queue.Job job, boolean dry) {
-        currentJob = job;
-        jobLog.setLength(0);
-        queueLive = !dry;
-        provider = Provider.byId(job.provider);
-        Plan.DEFAULT_SERVICE = provider.serviceCode;
-        numberInput.setText(job.number);
-        amountInput.setText(job.amount);
-        refInput.setText(job.ref);
-        queueState.setText("job " + job.id + " · " + job.amount + " BDT → " + job.number);
-        line("queue: job " + job.id + " (" + job.kind + " · " + job.provider + ") · "
-                + job.amount + " BDT → " + job.number + (dry ? "  [DRY RUN]" : "  [LIVE]"));
-        run(!dry);
-    }
-
-    /** Tell the panel how it went. SENT / DRYRUN / FAILED — never more than once. */
-    private void reportJob(boolean ok, String summary) {
-        final Queue.Job job = currentJob;
-        if (job == null) return;
-        currentJob = null;
-        final String server = Queue.cleanServer(serverInput.getText().toString());
-        final String token = tokenInput.getText().toString().trim();
-        final String status = !ok ? "FAILED" : (queueLive ? "SENT" : "DRYRUN");
-        final String log = jobLog.toString();
-        queueState.setText("reported " + status + " for " + job.id);
-        new Thread(() -> {
-            String err = Queue.report(server, token, job.id, status, summary, log);
-            ui.post(() -> {
-                line("queue: reported " + status + (err == null || err.isEmpty() ? "" : " — " + err));
-                if (queueRunning) ui.postDelayed(this::queueTick, 3000);
             });
         }).start();
     }
@@ -988,14 +967,30 @@ public class MainActivity extends Activity {
                 .putBoolean("adaptive", adaptiveBox.isChecked())
                 .putString("mode", a11yRadio.isChecked() ? "a11y" : "api")
                 .putBoolean("queueMode", queueBox.isChecked())
+                .putBoolean("queueDryRun", queueBox.isChecked())
                 .putString("server", serverInput.getText().toString().trim())
                 .putString("token", tokenInput.getText().toString().trim())
                 .apply();
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        queueRunning = QueueService.isRunning();
+        queueStart.setText(queueRunning ? "■ Stop queue" : "▶ Start queue");
+        if (queueRunning) {
+            QueueService.listener = (l, status) -> {
+                queueState.setText(status + "  ·  " + QueueService.tail().split("\n")[0]);
+                line("queue│ " + l);
+            };
+            queueState.setText("running (background service) · " + QueueService.lastStatus);
+        }
+        refresh();
+    }
+
+    @Override
     protected void onDestroy() {
-        queueRunning = false;          // no polling from a dead activity
+        QueueService.listener = null;   // the service keeps running on its own
         super.onDestroy();
     }
 }

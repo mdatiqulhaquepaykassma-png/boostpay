@@ -156,6 +156,12 @@ export const PayoutRobotAdmin = () => {
     setBusy(false);
   };
 
+  // A phone that has not checked in for 3 minutes cannot pick up anything: say it out loud
+  // instead of letting the owner wonder why a queued job never moves.
+  const lastSeen = devices.reduce((a, d) => Math.max(a, num(d.lastSeenAt)), 0);
+  const phonedOffline = jobs.some((j) => j.status === 'QUEUED') && (!lastSeen || Date.now() - lastSeen > 3 * 60 * 1000);
+  const lastSeenLabel = lastSeen ? new Date(lastSeen).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : '';
+
   return (
     <div className="space-y-4">
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/60 p-4">
@@ -192,6 +198,18 @@ export const PayoutRobotAdmin = () => {
       {!loaded && !err ? (
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-[11px] text-zinc-400">
           Loading the queue… (if this never turns into a list, the panel could not reach the server{httpNote ? ` — ${httpNote}` : ''})
+        </div>
+      ) : null}
+
+      {phonedOffline ? (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
+          <b>No phone is asking for jobs.</b> A queued job waits until the payout phone checks in.
+          {lastSeenLabel ? ` Last check-in: ${lastSeenLabel}.` : ' No phone has ever checked in.'}
+          <div className="mt-1 text-amber-200/80">
+            On the phone: open the payout app → <b>4 · Server queue</b> → server <code>https://boostpay.online</code>,
+            the device token, then <b>▶ Start queue</b> (it keeps running with the screen off). Tap <b>Test</b> to see the
+            panel's answer immediately.
+          </div>
         </div>
       ) : null}
 
