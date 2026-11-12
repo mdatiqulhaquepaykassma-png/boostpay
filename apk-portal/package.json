@@ -1,0 +1,11 @@
+{
+  "name": "boostpay-apk-portal",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "app.boostpay.online — download page for every BoostPay Android build",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": { "node": ">=20" }
+}

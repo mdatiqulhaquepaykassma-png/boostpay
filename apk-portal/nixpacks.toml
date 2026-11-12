@@ -1,0 +1,9 @@
+# Nothing to compile: the APKs are committed files. Just run the tiny server.
+[phases.setup]
+nixPkgs = ["nodejs_20"]
+
+[phases.install]
+cmds = ["echo 'no dependencies to install'"]
+
+[start]
+cmd = "node server.mjs"
