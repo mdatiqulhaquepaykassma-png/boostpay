@@ -230,7 +230,7 @@ public class MainActivity extends Activity {
         queueBox.setText("Server queue mode");
         queueBox.setTextColor(Color.parseColor("#d4d4d8"));
         queueCard.addView(queueBox);
-        serverInput = input("https://app.boostpay.online", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        serverInput = input("https://boostpay.online", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         queueCard.addView(serverInput);
         tokenInput = input("device token (BPX-…)", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         queueCard.addView(tokenInput);
@@ -879,7 +879,7 @@ public class MainActivity extends Activity {
         apiRadio.setChecked(!a11y);
         serviceInput.setSelection(serviceInput.getText().length());
         queueBox.setChecked(p.getBoolean("queueMode", false));
-        serverInput.setText(p.getString("server", "https://app.boostpay.online"));
+        serverInput.setText(p.getString("server", "https://boostpay.online"));
         tokenInput.setText(p.getString("token", ""));
     }
 
@@ -894,7 +894,7 @@ public class MainActivity extends Activity {
         String server = Queue.cleanServer(serverInput.getText().toString());
         String token = tokenInput.getText().toString().trim();
         if (server.isEmpty() || !server.startsWith("https://")) {
-            toast("Enter the server address, e.g. https://app.boostpay.online");
+            toast("Enter the server address, e.g. https://boostpay.online");
             return;
         }
         if (token.length() < 10) {
