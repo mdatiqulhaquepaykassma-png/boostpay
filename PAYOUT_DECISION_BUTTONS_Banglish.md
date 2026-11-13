@@ -122,3 +122,21 @@ POST /api/admin/payouts/refund      { jobId } | { withdrawId }, reason?      (su
   auto-verify + `matchDebit()` + apnar kache swadhin proman thakbe. Ekhon `smsInbox` = 1 row (self-test).
 - Ekhonkar customer (`WDR-MWF662BX-O2K`) **notun withdrawal** ekhoni korbe? **Na** — age deploy,
   nahole notun job abar oi race-e pore ar withdrawal abar PENDING-i thakbe (ekhon onno kichu hobe na).
+
+## Update 2026-11-13 (rate 2) — Balance verification (commit 05a301e)
+
+**Protita bKash/Nagad transaction-er por automatic balance check.**
+
+- **SMS balance parsing** (`sms-parse.ts`): protita SMS theke `balance` extract hoy —
+  "Your current balance is Tk X" / "Balance: Tk X" / "ব্যালেন্স: X" pattern.
+- **Balance tracking** (`server.ts`): protita SMS device-er jonno `lastBalanceBdt` track hoy.
+- **Verification** (`verifyBalance()`):
+  - **CREDIT** (deposit): `lastBalance + amount == smsBalance`? → thik thakle auto-confirm.
+  - **DEBIT** (withdrawal): `lastBalance - amount == smsBalance`? → thik thakle auto-confirm.
+  - 1 BDT tolerance (rounding/fee-er jonno).
+  - Prothom SMS → baseline set hoy.
+  - **Mismatch** → `BALANCE_MISMATCH` audit row + device flag + deposit-e `smsFlag`.
+- **Admin panel**: device list-e `lastBalanceBdt`, `balanceVerified`, `balanceMismatch` dekha jay.
+
+**Kaj korar jonno**: SMS relay **ON** thakte hobe (D4). Relay chara SMS ashbe na, balance verify hobe na.
+Payout phone-e relay app chalu korun → protita transaction auto-verify hobe.
