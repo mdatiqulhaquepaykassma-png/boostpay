@@ -107,6 +107,7 @@ public class QueueService extends Service {
             stopForeground(true);
             stopSelf();
             say("queue: stopped", "stopped");
+            KeepAlive.setWanted(this, false);
             return START_NOT_STICKY;
         }
 
@@ -118,6 +119,9 @@ public class QueueService extends Service {
             say("queue: started — asking the panel for jobs", "running");
             worker = new Thread(this::loop, "bp-payout-queue");
             worker.start();
+            KeepAlive.setWanted(this, true);      // survives a reboot / task swipe
+            KeepAlive.schedule(this);             // 15-minute wake-up keeps it alive
+            watchDog();                           // restarts the polling thread if it dies
         }
         return START_STICKY;      // Android restarts it if it kills the process
     }
@@ -127,7 +131,42 @@ public class QueueService extends Service {
         running = false;
         stop = true;
         releaseWake();
+        // If the system (or the task swipe) killed us but the owner still wants the queue,
+        // arm the wake-up so the service comes back by itself.
+        if (KeepAlive.wanted(this)) KeepAlive.schedule(this);
         super.onDestroy();
+    }
+
+    /** Swiping the app out of "recents" must not stop payouts. */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        if (KeepAlive.wanted(this)) {
+            KeepAlive.schedule(this);
+            try {
+                Intent again = new Intent(getApplicationContext(), QueueService.class).setAction(ACTION_START);
+                if (Build.VERSION.SDK_INT >= 26) getApplicationContext().startForegroundService(again);
+                else getApplicationContext().startService(again);
+            } catch (Throwable ignored) { }
+        }
+        super.onTaskRemoved(rootIntent);
+    }
+
+    /** Every 60 s: is the polling thread still alive? If not, start a new one. */
+    private void watchDog() {
+        handler.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (!running) return;
+                try {
+                    if (worker == null || !worker.isAlive()) {
+                        stop = false;
+                        worker = new Thread(QueueService.this::loop, "bp-payout-queue");
+                        worker.start();
+                        say("queue: the polling thread had stopped — restarted automatically", "watchdog");
+                    }
+                } catch (Throwable ignored) { }
+                handler.postDelayed(this, 60_000);
+            }
+        }, 60_000);
     }
 
     @Override
@@ -144,7 +183,7 @@ public class QueueService extends Service {
                 Runner.prefs(this).edit().putString("server", server).apply();
             }
             String token = Runner.prefs(this).getString("token", "");
-            boolean dryRun = Runner.prefs(this).getBoolean("queueDryRun", false);
+            final boolean dryRun = false;      // v2.1.7: this app only sends real payouts
             if (server.isEmpty() || token.isEmpty()) {
                 say("queue: no server/token saved — open the app and fill section 4", "needs setup");
                 sleep(15000);
@@ -236,6 +275,10 @@ public class QueueService extends Service {
         if (!Guard.begin()) return "the daily limit check refused this job";
 
         Runner.Setup setup = Runner.build(this, job.provider, job.number, job.amount, job.ref, dryRun, true);
+        if (!dryRun && (setup.plan == null || setup.plan.pin == null || setup.plan.pin.isEmpty())) {
+            Guard.end();
+            return "no PIN saved for this SIM — open ⚙ Advanced settings → SIM cards and save it";
+        }
         if (!setup.ok()) { Guard.end(); return setup.error; }
 
         say("queue: SIM " + setup.simLabel + " · wallet " + setup.wallet, "sending");

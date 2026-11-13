@@ -157,7 +157,7 @@ export const PayoutRobotAdmin = () => {
     if (!window.confirm(
       `Send a REAL payout of ${amount} BDT to ${form.number.trim()} from the ${form.provider} phone?\n\n` +
       'This is a test job: no user and no withdrawal are attached, so nothing can be paid or refunded wrongly — ' +
-      'but the money does leave the wallet. Leave the phone on "DRY RUN" if you only want to watch the menu walk.'
+      'but the money does leave the wallet. The phone sends it for real — there is no dry run any more.'
     )) return;
     void call('/api/admin/payouts/test', { ...form, amountBdt: amount }, 'Test payout queued — the phone will pick it up within a few seconds.');
   };

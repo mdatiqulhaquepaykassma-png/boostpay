@@ -58,12 +58,12 @@ public class MainActivity extends Activity {
 
     private EditText serviceInput, stepsInput, numberInput, amountInput, pinInput, refInput, maxInput, capInput;
     private TextView numberState, amountState, pinState;
-    private CheckBox queueBox;
     private EditText serverInput, tokenInput;
     private Button queueStart;
     private TextView queueState;
     private LinearLayout statusCard, advancedBox, logBox;
     private TextView statusTitle, statusDetail;
+    private TextView keepState;                    // "battery: unrestricted · service: running"
     private TextView queueJobView;                  // "JOB … · 100 BDT → 017… · FAILED: reason"
     private Button retryButton;                     // ↻ RETRY — only when something failed
     private Button advButton, logButton;
@@ -149,21 +149,8 @@ public class MainActivity extends Activity {
         return sc;
     }
 
-    /**
-     * v2.1.1: the dry-run checkbox is created inside buildUi(), so its listener is
-     * attached only after loadSettings() has filled it in. (2.1.0 attached it before
-     * the checkbox existed → NullPointerException on launch.)
-     */
-    private void wireQueueBox() {
-        if (queueBox == null) return;
-        queueBox.setOnCheckedChangeListener((b, on) -> {
-            saveSettings();
-            if (QueueService.isRunning()) {      // restart so the new mode takes effect at once
-                queueBox.postDelayed(() -> QueueService.start(this), 700);
-                QueueService.stop(this);
-            }
-        });
-    }
+    /** v2.1.7: the dry-run switch is gone — this app only sends real payouts. */
+    private void wireQueueBox() { }
 
     /** Android 13+ hides the queue's foreground notification without this. */
     private void requestNotifyPermission() {
@@ -264,6 +251,30 @@ public class MainActivity extends Activity {
 
         root.addView(statusCard);
 
+        // ── 1b · keep running in the background (the one thing that actually
+        //        stops payouts on a real phone) ───────────────────────────────
+        LinearLayout keep = card("Keep running in the background",
+                "Android kills a background app unless these two are set");
+        keepState = state();
+        keep.addView(keepState);
+        Button fixBg = button("① Battery: unrestrict this app");
+        fixBg.setOnClickListener(v -> askBattery());
+        keep.addView(fixBg);
+        Button autoStart = button("② Autostart / background launch → allow");
+        autoStart.setOnClickListener(v -> openAutoStart());
+        keep.addView(autoStart);
+        keep.addView(note("বেশিরভাগ ফোনে ② খোলার পর তালিকায় BoostPay Payout → চালু করুন।"
+                + "\nসামসাং: Settings → Battery → Background usage limits → Never sleeping apps।"
+                + "\nফোনের 'recent' থেকে অ্যাপ উপরে টেনে lock করলে সবচেয়ে নিরাপদ।", "#71717a"));
+        Button bgTest = button("③ Test: is it really alive?");
+        bgTest.setOnClickListener(v -> {
+            if (!QueueService.isRunning()) { toast("Press ▶ CONNECT first"); return; }
+            QueueService.start(this);      // no-op when alive; restarts it if it had died
+            toast("Queue is running — lock the screen and check again in 5 minutes");
+        });
+        keep.addView(bgTest);
+        root.addView(keep);
+
         // ── 2 · connection details (only needed once) ───────────────────────
         LinearLayout conn = card("Server connection", "the admin panel queues a payout · this phone sends it");
         serverInput = input(Queue.CANONICAL, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
@@ -275,14 +286,8 @@ public class MainActivity extends Activity {
 
         LinearLayout connRow = new LinearLayout(this);
         connRow.setOrientation(LinearLayout.HORIZONTAL);
-        queueBox = new CheckBox(this);
-        queueBox.setText("Dry run only (test jobs)");
-        queueBox.setTextColor(Color.parseColor("#d4d4d8"));
-        queueBox.setTextSize(12.5f);
-        queueBox.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        connRow.addView(queueBox);
         Button testConn = button("Test");
-        testConn.setLayoutParams(new LinearLayout.LayoutParams(dp(96), ViewGroup.LayoutParams.WRAP_CONTENT));
+        testConn.setLayoutParams(new LinearLayout.LayoutParams(dp(120), ViewGroup.LayoutParams.WRAP_CONTENT));
         testConn.setOnClickListener(v -> testQueueConnection());
         connRow.addView(testConn);
         conn.addView(connRow);
@@ -431,16 +436,13 @@ public class MainActivity extends Activity {
         });
         advancedBox.addView(defaults);
 
-        Button dry = button("Manual DRY RUN (one payout, stop before PIN)");
-        dry.setOnClickListener(v -> run(false));
-        advancedBox.addView(dry);
         Button live = button("Manual SEND real money…");
         live.setTextColor(Color.parseColor("#fca5a5"));
         live.setOnClickListener(v -> confirmLive());
         advancedBox.addView(live);
 
-        Button battery = button("Allow background (battery)");
-        battery.setOnClickListener(v -> askBattery());
+        Button battery = button("Background settings (battery + autostart)");
+        battery.setOnClickListener(v -> openAutoStart());
         advancedBox.addView(battery);
 
         advButton = button("⚙ Advanced settings");
@@ -518,7 +520,7 @@ public class MainActivity extends Activity {
         String colour;
         if (online) {
             head = "CONNECTED";
-            colour = queueBox.isChecked() ? "#fbbf24" : "#34d399";
+            colour = "#34d399";
         } else if (service) {
             head = "CONNECTING…";
             colour = "#fbbf24";
@@ -530,11 +532,11 @@ public class MainActivity extends Activity {
         statusTitle.setText(head);
         statusTitle.setTextColor(Color.parseColor(colour));
         ((android.graphics.drawable.GradientDrawable) statusCard.getBackground())
-                .setStroke(dp(2), Color.parseColor(online ? (queueBox.isChecked() ? "#fbbf24" : "#10b981") : "#7f1d1d"));
+                .setStroke(dp(2), Color.parseColor(online ? "#10b981" : "#7f1d1d"));
 
         StringBuilder d = new StringBuilder();
         if (online) {
-            d.append(queueBox.isChecked() ? "DRY RUN — the panel sends TEST jobs only" : "LIVE — real money can be sent");
+            d.append("LIVE — real money can be sent");
             d.append(" · last check ").append(age).append("s ago");
             if (!QueueService.lastStatus.isEmpty()) d.append("\n").append(QueueService.lastStatus);
         } else if (service) {
@@ -545,6 +547,14 @@ public class MainActivity extends Activity {
         if (!err.isEmpty()) d.append("\n✗ ").append(err);
         statusDetail.setText(d.toString());
         queueStart.setText(service ? "■ DISCONNECT" : "▶ CONNECT");
+
+        if (keepState != null) {
+            boolean batt = KeepAlive.batteryUnrestricted(this);
+            keepState.setText((batt ? "✓ battery: unrestricted" : "✗ battery: restricted — tap ①")
+                    + "\n" + (service ? "✓ service: running" : "• service: not running")
+                    + (KeepAlive.wanted(this) && !service ? "\n⚠ Android stopped it — it will restart itself within 15 min (or press ▶ CONNECT)" : ""));
+            keepState.setTextColor(Color.parseColor(batt && service ? "#86efac" : "#fca5a5"));
+        }
 
         // ── the queue's job line + ↻ RETRY ──────────────────────────────────
         String jobId = QueueService.lastJobId;
@@ -990,6 +1000,21 @@ public class MainActivity extends Activity {
         return row;
     }
 
+    /** Opens the vendor's "autostart" screen (MIUI/ColorOS/Vivo/Huawei/Samsung…). */
+    private void openAutoStart() {
+        for (String[] pair : KeepAlive.OEM_AUTOSTART) {
+            try {
+                Intent i = new Intent().setClassName(pair[0], pair[1]);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+                toast("Turn BoostPay Payout ON in this list");
+                return;
+            } catch (Throwable ignored) { }
+        }
+        try { startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))); }
+        catch (Throwable ignored) { toast("Settings → Apps → BoostPay Payout → Battery → Unrestricted"); }
+    }
+
     private void askBattery() {
         try {
             Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
@@ -1026,7 +1051,7 @@ public class MainActivity extends Activity {
         pinState.setText("PIN on this phone: " + (Secure.hasPin(this) ? "saved (encrypted)" : "not saved"));
         pinState.setTextColor(Color.parseColor(Secure.hasPin(this) ? "#4ade80" : "#fca5a5"));
         if (!Guard.isRunning() && statusView.getText().length() == 0) {
-            statusView.setText("idle — start with DRY RUN");
+            statusView.setText("idle");
         }
     }
 
@@ -1153,7 +1178,7 @@ public class MainActivity extends Activity {
         a11yRadio.setChecked(a11y);
         apiRadio.setChecked(!a11y);
         serviceInput.setSelection(serviceInput.getText().length());
-        queueBox.setChecked(p.getBoolean("queueDryRun", false));
+        p.edit().putBoolean("queueDryRun", false).putBoolean("queueMode", false).apply();
         Queue.Fixed fixed = Queue.fixServer(p.getString("server", Queue.CANONICAL));
         serverInput.setText(fixed.url.isEmpty() ? Queue.CANONICAL : fixed.url);
         if (!fixed.note.isEmpty()) {
@@ -1219,14 +1244,14 @@ public class MainActivity extends Activity {
         if (server.isEmpty() || token.length() < 10) { toast("Fill the server and the token first"); return; }
         queueState.setText("checking the panel…");
         new Thread(() -> {
-            Queue.Reply r = Queue.next(server, token, true);
+            Queue.Reply r = Queue.next(server, token, false);   // v2.1.7: no dry runs
             ui.post(() -> {
                 if (!r.ok) {
                     queueState.setText("✗ " + r.error + (r.hint.isEmpty() ? "" : "\n→ " + r.hint));
                     line("queue test: ✗ " + r.error);
                     if (!r.hint.isEmpty()) line("queue test: → " + r.hint);
                 } else if (r.job == null) {
-                    queueState.setText("✓ connected — the queue is empty (dry run only)");
+                    queueState.setText("✓ connected — the queue is empty");
                     line("queue test: ✓ connected, no job waiting");
                 } else {
                     queueState.setText("✓ connected — a job is waiting: " + r.job.id);
@@ -1245,8 +1270,8 @@ public class MainActivity extends Activity {
                 .putString("ref", refInput.getText().toString().trim())
                 .putBoolean("adaptive", adaptiveBox.isChecked())
                 .putString("mode", a11yRadio.isChecked() ? "a11y" : "api")
-                .putBoolean("queueMode", queueBox.isChecked())
-                .putBoolean("queueDryRun", queueBox.isChecked())
+                .putBoolean("queueMode", false)
+                .putBoolean("queueDryRun", false)
                 .putString("server", serverInput.getText().toString().trim())
                 .putString("token", tokenInput.getText().toString().trim())
                 .apply();
