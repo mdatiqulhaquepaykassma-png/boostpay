@@ -262,13 +262,31 @@ function sendApk(req, res, app) {
   try { st = fs.statSync(full); } catch {
     return html(res, 404, page('Not ready', `<p class="sub">${app.title} এখনো আপলোড হয়নি।</p><p><a class="btn" href="/">সব অ্যাপ</a></p>`));
   }
-  res.writeHead(200, {
+  const headers = {
     'Content-Type': 'application/vnd.android.package-archive',
-    'Content-Length': String(st.size),
     'Content-Disposition': `attachment; filename="${app.file}"`,
     'Cache-Control': 'no-cache',
     'X-Content-Type-Options': 'nosniff',
-  });
+    'Accept-Ranges': 'bytes',
+  };
+  // Range support: a phone on a flaky network resumes instead of starting the 4 MB again.
+  const range = String(req.headers.range || '');
+  const m = /^bytes=(\d*)-(\d*)$/.exec(range);
+  if (m) {
+    let start = m[1] === '' ? null : Number(m[1]);
+    let end = m[2] === '' ? null : Number(m[2]);
+    if (start == null && end != null) { start = Math.max(0, st.size - end); end = st.size - 1; }
+    if (start != null && end == null) end = st.size - 1;
+    if (start == null || end == null || start > end || start >= st.size) {
+      res.writeHead(416, { 'Content-Range': `bytes */${st.size}` });
+      return res.end();
+    }
+    end = Math.min(end, st.size - 1);
+    res.writeHead(206, { ...headers, 'Content-Length': String(end - start + 1), 'Content-Range': `bytes ${start}-${end}/${st.size}` });
+    if (req.method === 'HEAD') return res.end();
+    return fs.createReadStream(full, { start, end }).pipe(res);
+  }
+  res.writeHead(200, { ...headers, 'Content-Length': String(st.size) });
   if (req.method === 'HEAD') return res.end();
   fs.createReadStream(full).pipe(res);
 }
