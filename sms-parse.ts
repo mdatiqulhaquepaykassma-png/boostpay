@@ -21,6 +21,8 @@ export interface ParsedSms {
   trxId: string;
   senderMsisdn: string;
   receiverMsisdn: string;
+  /** The wallet balance AFTER this transaction, when the SMS carries it (BDT). */
+  balance: number;
   /** true when the text is an OTP / promo / balance notice rather than a transfer. */
   noise: boolean;
 }
@@ -63,6 +65,12 @@ const TRX_PATTERNS: RegExp[] = [
   /\b([a-z]{0,3}[0-9]{2}[a-z0-9]{6,14})\b/i                                   // bare id such as "9A1B2C3D4E"
 ];
 
+const BALANCE_PATTERNS: RegExp[] = [
+  /(?:current\s*)?balance\s*(?:is\s*)?[:=]?\s*(?:tk|bdt|taka|টাকা|৳)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i,
+  /(?:new\s*)?balance\s*[:=]?\s*(?:tk|bdt|taka|টাকা|৳)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i,
+  /ব্যালেন্স\s*[:=]?\s*(?:টাকা|৳)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i,
+];
+
 const CREDIT_WORDS = /(received|credited|cash\s*in|deposited|পেয়েছেন|পেয়েছি|জমা\s*হয়েছে|ক্যাশ\s*ইন|গৃহীত)/i;
 const DEBIT_WORDS = /(sent|paid|debited|withdrawn|পাঠিয়েছেন|দিয়েছেন|কাটা\s*হয়েছে|কেটে\s*নেওয়া|উত্তোলন)/i;
 const NOISE_WORDS = /(otp|one[-\s]*time\s*(password|pin)|verification\s*code|do not share|পিন\s*কোড|গোপন\s*কোড|কেউ\s*জানতে)/i;
@@ -72,7 +80,7 @@ export function parseSms(rawBody: string, senderHint = ''): ParsedSms {
   const hint = String(senderHint || '');
   const empty: ParsedSms = {
     ok: false, provider: 'UNKNOWN', direction: 'UNKNOWN', amount: 0,
-    trxId: '', senderMsisdn: '', receiverMsisdn: '', noise: false,
+    trxId: '', senderMsisdn: '', receiverMsisdn: '', balance: 0, noise: false,
   };
   if (!text) return { ...empty, reason: 'empty message' };
 
@@ -91,6 +99,12 @@ export function parseSms(rawBody: string, senderHint = ''): ParsedSms {
   for (const rx of AMOUNT_PATTERNS) {
     const m = text.match(rx);
     if (m) { amount = toNumber(m[1]); if (amount > 0) break; }
+  }
+
+  let balance = 0;
+  for (const rx of BALANCE_PATTERNS) {
+    const m = text.match(rx);
+    if (m) { balance = toNumber(m[1]); if (balance > 0) break; }
   }
 
   let trxId = '';
@@ -123,6 +137,7 @@ export function parseSms(rawBody: string, senderHint = ''): ParsedSms {
     trxId,
     senderMsisdn: (fromMatch && fromMatch[1]) || msisdns[0] || '',
     receiverMsisdn: (toMatch && toMatch[1]) || '',
+    balance,
     noise,
   };
 }

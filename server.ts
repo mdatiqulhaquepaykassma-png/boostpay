@@ -11613,6 +11613,9 @@ const paymentLocks = new Map<string, Promise<any>>();
       appVersion: d.appVersion || '', batteryOk: d.batteryOk !== false,
       payoutAppVersion: d.payoutAppVersion || '', queueDryRun: d.queueDryRun === true,
       lastJobAt: d.lastJobAt || 0,
+      // Wallet balance tracking (from SMS) — the admin sees the last verified balance.
+      lastBalanceBdt: Number(d.lastBalanceBdt) || 0, lastBalanceAt: d.lastBalanceAt || 0,
+      balanceVerified: d.balanceVerified === true, balanceMismatch: d.balanceMismatch === true,
     };
   }
   function findDeviceByToken(db: any, token: string) {
@@ -11743,6 +11746,42 @@ const paymentLocks = new Map<string, Promise<any>>();
    * The relay app's single endpoint. Header `x-sms-token: BPX-…`
    * body: { sender, message, receivedAt, appVersion, batteryOk }
    */
+  /**
+   * Balance verification. Every bKash/Nagad SMS carries the wallet balance AFTER the
+   * transaction. We track the last verified balance per device and check that this
+   * transaction's delta matches: CREDIT → balance = last + amount; DEBIT → balance =
+   * last - amount. A match means the money really moved; a mismatch means something
+   * else happened to the wallet (another transaction, a fee, a manual move) and the
+   * admin must look. Returns { verified, note, expected }.
+   */
+  function verifyBalance(dev: any, direction: string, amount: number, smsBalance: number): { verified: boolean; note: string; expected: number } {
+    const last = Number(dev.lastBalanceBdt) || 0;
+    if (!smsBalance || smsBalance <= 0) {
+      return { verified: false, note: 'SMS carries no balance — cannot verify', expected: 0 };
+    }
+    if (!last || last <= 0) {
+      // First balance we have ever seen for this wallet — accept it as the baseline.
+      dev.lastBalanceBdt = smsBalance;
+      dev.lastBalanceAt = Date.now();
+      dev.balanceVerified = true;
+      dev.balanceMismatch = false;
+      return { verified: true, note: `Baseline balance set: ${smsBalance} BDT`, expected: smsBalance };
+    }
+    const expected = direction === 'CREDIT' ? last + amount : last - amount;
+    const diff = Math.abs(smsBalance - expected);
+    // Allow 1 BDT for rounding/fees the SMS does not itemise.
+    if (diff <= 1.005) {
+      dev.lastBalanceBdt = smsBalance;
+      dev.lastBalanceAt = Date.now();
+      dev.balanceVerified = true;
+      dev.balanceMismatch = false;
+      return { verified: true, note: `Balance verified: ${last} ${direction === 'CREDIT' ? '+' : '-'} ${amount} = ${smsBalance} BDT`, expected };
+    }
+    dev.balanceMismatch = true;
+    dev.balanceVerified = false;
+    return { verified: false, note: `Balance mismatch: expected ${expected} BDT (${last} ${direction === 'CREDIT' ? '+' : '-'} ${amount}), SMS says ${smsBalance} BDT (diff ${diff.toFixed(2)})`, expected };
+  }
+
   app.post('/api/sms/ingest', rateLimit(240), (req: any, res) => {
     try {
       const token = String(req.headers['x-sms-token'] || (req.body && req.body.deviceToken) || '').trim();
@@ -11772,6 +11811,7 @@ const paymentLocks = new Map<string, Promise<any>>();
         deviceId: dev.id, deviceLabel: dev.label, methodId: dev.methodId, methodName: dev.methodName,
         at: Date.now(), receivedAt, sender, provider,
         direction: parsed.direction, amount: parsed.amount, trxId: parsed.trxId,
+        balance: parsed.balance || 0, balanceVerified: false, balanceNote: '',
         status: 'IGNORED', note: parsed.reason || '', requestId: '', userId: '', raw: message.slice(0, 400),
       };
       const finish = (status: number, payload: any) => {
@@ -11795,10 +11835,18 @@ const paymentLocks = new Map<string, Promise<any>>();
           row.note = 'a debit SMS that matches no job in the payout queue';
           return finish(200, { success: true, status: 'IGNORED', credit: false, note: row.note });
         }
+        // Balance verification: the SMS balance must equal last balance minus this payout.
+        const balCheck = verifyBalance(dev, 'DEBIT', Number(job.amountBdt) || parsed.amount, parsed.balance || 0);
+        row.balanceVerified = balCheck.verified;
+        row.balanceNote = balCheck.note;
+        if (!balCheck.verified && parsed.balance) {
+          recordAuditLog(db, 'BALANCE_MISMATCH', smsDeviceActor(dev),
+            `Withdrawal payout ${job.id} (${job.amountBdt} BDT): ${balCheck.note}`, job.userId ? String(job.userId) : undefined);
+        }
         row.status = 'PAYOUT_PAID';
         row.amount = Number(job.amountBdt) || parsed.amount;
         row.trxId = job.trxId || parsed.trxId;
-        row.note = `Payout job ${job.id} confirmed by SMS — ${job.number} · ${job.amountBdt} BDT`;
+        row.note = `Payout job ${job.id} confirmed by SMS — ${job.number} · ${job.amountBdt} BDT${balCheck.verified ? ' · balance verified' : parsed.balance ? ' · ⚠ balance mismatch (see audit)' : ''}`;
         if (job.kind === 'WITHDRAW' && job.withdrawId) {
           const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
           if (wr && wr.status === 'PENDING') {
@@ -11862,11 +11910,23 @@ const paymentLocks = new Map<string, Promise<any>>();
         return finish(200, { success: true, status: 'AMOUNT_MISMATCH', credit: false, note: row.note });
       }
 
+      // Balance verification: the SMS balance must equal last balance plus this deposit.
+      const balCheck = verifyBalance(dev, 'CREDIT', parsed.amount, parsed.balance || 0);
+      row.balanceVerified = balCheck.verified;
+      row.balanceNote = balCheck.note;
       req0.smsDeviceId = dev.id;
       req0.smsReceivedAt = receivedAt;
       req0.smsVerifiedAt = Date.now();
       req0.smsAmount = parsed.amount;
       req0.smsTrxId = parsed.trxId;
+      req0.smsBalance = parsed.balance || 0;
+      req0.smsBalanceVerified = balCheck.verified;
+      if (!balCheck.verified && parsed.balance) {
+        req0.smsFlag = 'BALANCE_MISMATCH';
+        req0.smsNote = balCheck.note;
+        recordAuditLog(db, 'BALANCE_MISMATCH', smsDeviceActor(dev),
+          `Deposit ${req0.id} (${parsed.amount} BDT): ${balCheck.note}`, String(req0.userId));
+      }
 
       if (dev.autoCredit === false) {
         row.status = 'MATCHED';
