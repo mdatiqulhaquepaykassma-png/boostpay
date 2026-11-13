@@ -20,6 +20,7 @@ import java.util.Deque;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Keeps asking the admin panel for payout jobs and sends them — with the screen off.
@@ -60,6 +61,10 @@ public class QueueService extends Service {
     private Handler handler;
     private PowerManager.WakeLock wake;
     private Thread worker;
+    /** Only one polling loop may ever run in this process — a second one double-claims jobs. */
+    private static final AtomicBoolean LOOP = new AtomicBoolean(false);
+    /** send() returns this when it never attempted the job (another run owns the phone). */
+    private static final String SKIP = "\u0000SKIP";
     private volatile boolean stop;
     private CountDownLatch jobDone;
     private volatile boolean jobOk;
@@ -117,8 +122,14 @@ public class QueueService extends Service {
             startForeground(NOTE_ID, notification("Queue running", "Waiting for a job from the panel…"));
             acquireWake();
             say("queue: started — asking the panel for jobs", "running");
-            worker = new Thread(this::loop, "bp-payout-queue");
-            worker.start();
+            // One loop per process, ever: a second thread here is what double-claimed a job
+            // and paid-and-refunded a customer on 2026-11-13.
+            if (LOOP.compareAndSet(false, true)) {
+                worker = new Thread(this::loop, "bp-payout-queue");
+                worker.start();
+            } else {
+                say("queue: a polling loop is already running — not starting a second one", "running");
+            }
             KeepAlive.setWanted(this, true);      // survives a reboot / task swipe
             KeepAlive.schedule(this);             // 15-minute wake-up keeps it alive
             watchDog();                           // restarts the polling thread if it dies
@@ -159,9 +170,11 @@ public class QueueService extends Service {
                 try {
                     if (worker == null || !worker.isAlive()) {
                         stop = false;
-                        worker = new Thread(QueueService.this::loop, "bp-payout-queue");
-                        worker.start();
-                        say("queue: the polling thread had stopped — restarted automatically", "watchdog");
+                        if (LOOP.compareAndSet(false, true)) {
+                            worker = new Thread(QueueService.this::loop, "bp-payout-queue");
+                            worker.start();
+                            say("queue: the polling thread had stopped — restarted automatically", "watchdog");
+                        }
                     }
                 } catch (Throwable ignored) { }
                 handler.postDelayed(this, 60_000);
@@ -175,7 +188,10 @@ public class QueueService extends Service {
     // ── the loop ─────────────────────────────────────────────────────────────
 
     private void loop() {
+        try {
         while (!stop) {
+            // A run that never reported back must not block the queue for ever.
+            if (Guard.stale()) { Guard.forceEnd(); say("queue: cleared a stuck run lock", "watchdog"); }
             Queue.Fixed fixed = Queue.fixServer(Runner.prefs(this).getString("server", ""));
             String server = fixed.url;
             if (!fixed.note.isEmpty()) {                 // wrong address saved → repair it once
@@ -221,6 +237,15 @@ public class QueueService extends Service {
 
             LOG.clear();                      // each job carries only its own screens
             String failure = send(job, dryRun);
+            if (SKIP.equals(failure)) {
+                // This loop never owned the run — another run (or the manual path) is using
+                // the phone. Reporting FAILED here is what paid-and-refunded a customer, so
+                // say nothing to the server: the job stays CLAIMED for the real owner, and
+                // releaseStale frees it if that owner died.
+                say("queue: skipped job " + job.id + " — another run owns the phone; leaving it claimed", "skipped");
+                sleep(3000);
+                continue;
+            }
             String status;
             String note;
             boolean pinRejected = failure != null && failure.startsWith("PIN_REJECTED:");
@@ -266,13 +291,18 @@ public class QueueService extends Service {
             }
             sleep(2500);
         }
+        } finally {
+            LOOP.set(false);      // the watchdog may start a fresh loop now
+        }
     }
 
     /** @return null when the run finished cleanly, otherwise the reason it did not. */
     private String send(Queue.Job job, boolean dryRun) {
-        if (!UssdService.isEnabled(this)) return "accessibility service is off on this phone";
-        if (Guard.isRunning()) { sleep(4000); if (Guard.isRunning()) return "another run is still in progress"; }
-        if (!Guard.begin()) return "the daily limit check refused this job";
+        // These three mean "this loop never attempted the job" — they must NOT become a
+        // FAILED report (that is what paid-and-refunded a customer on 2026-11-13).
+        if (!UssdService.isEnabled(this)) return SKIP;
+        if (Guard.isRunning()) { sleep(4000); if (Guard.isRunning()) return SKIP; }
+        if (!Guard.begin()) return SKIP;
 
         Runner.Setup setup = Runner.build(this, job.provider, job.number, job.amount, job.ref, dryRun, true);
         if (!dryRun && (setup.plan == null || setup.plan.pin == null || setup.plan.pin.isEmpty())) {

@@ -12094,7 +12094,24 @@ const paymentLocks = new Map<string, Promise<any>>();
       const status = raw === 'SENT' ? 'SENT' : raw === 'DRYRUN' ? 'DRYRUN' : 'FAILED';
       const noteText = sanitizeText(body.note, 300);
       const trxId = String(body.trxId || '').trim().slice(0, 40);
-      const out = markResult(ensurePayoutJobs(db), String(req.params.id), status as any, {
+      const jobs = ensurePayoutJobs(db);
+      const existing: any = jobs.find((j: any) => String(j.id) === String(req.params.id));
+      // A loop that never owned the run mutex cries "another run is still in progress" (or the
+      // daily-limit / accessibility variants). It never attempted this job — the loop that IS
+      // dialling will report the real result. Failing the job here is what paid-and-refunded a
+      // customer on 2026-11-13, so such a report is ignored while the job is freshly claimed;
+      // releaseStale frees it if the owner truly died.
+      if (status === 'FAILED' && existing
+          && /another run is still in progress|daily limit check refused|accessibility service is off/i.test(noteText)
+          && Number(existing.claimedAt || 0) > 0 && (Date.now() - Number(existing.claimedAt)) < 160_000) {
+        dev.lastSeenAt = Date.now();
+        recordAuditLog(db, 'PAYOUT_BOGUS_FAIL_IGNORED', smsDeviceActor(dev),
+          `Ignored a bogus FAILED for job ${existing.id} ("${noteText.slice(0, 80)}") — the owning loop is still working it`,
+          existing.userId ? String(existing.userId) : undefined);
+        writeDb(db);
+        return res.json({ success: true, job: publicJob(existing), ignored: 'bogus-fail' });
+      }
+      const out = markResult(jobs, String(req.params.id), status as any, {
         note: noteText, log: String(body.log || '').slice(0, 4000), deviceId: dev.id, trxId,
       });
       if (!out.ok) return res.status(409).json({ error: out.error });
@@ -12145,6 +12162,14 @@ const paymentLocks = new Map<string, Promise<any>>();
       recordAuditLog(db, 'PAYOUT_' + status, smsDeviceActor(dev),
         `Payout job ${job.id} → ${status}${job.trxId ? ' · TrxID ' + job.trxId : ''}${body.note ? ' · ' + sanitizeText(body.note, 120) : ''}`,
         job.userId ? String(job.userId) : undefined);
+      // A receipt that arrived after the job was already failed: the money DID leave the
+      // wallet. If the withdrawal was already refunded, Treasury must DEBIT the user — that
+      // is always a separate, deliberate action, never automatic.
+      if ((job as any).lateReceipt) {
+        recordAuditLog(db, 'PAYOUT_LATE_RECEIPT', smsDeviceActor(dev),
+          `Job ${job.id} was already FAILED when its SENT+TrxID arrived — receipt accepted (TrxID ${job.trxId || trxId}). If the withdrawal was already refunded, Treasury must DEBIT the user to settle it.`,
+          job.userId ? String(job.userId) : undefined);
+      }
       writeDb(db);
       res.json({ success: true, job: publicJob(job) });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not record the payout result.' }); }

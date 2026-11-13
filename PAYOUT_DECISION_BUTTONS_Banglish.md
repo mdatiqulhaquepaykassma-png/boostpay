@@ -91,13 +91,33 @@ POST /api/admin/payouts/refund      { jobId } | { withdrawId }, reason?      (su
 3. **Wallet top-up**: Nagad payout wallet-e ekhon **Tk 107.35** — 102 BDT-er beshi protita job
    `not enough balance` khaebe. Notun code-o sheta thik kore na.
 
-## Ja EKHONO kora hoyni (baki kaj)
+## Update 2026-11-13 (rate) — D1/D2/D3/D5 shesh, APK 2.1.8 live
 
-- **App 2.1.8 (D1)** — lock haara loop jeno **kichui report na kore** (`skip silently`) ar
-  ek-i shomoy ek-i loop (`AtomicBoolean` guard, `onStartCommand:120` + `watchDog:161` duita-i
-  `new Thread(this::loop)`), ar queue `if (Guard.stale()) Guard.forceEnd();`.
-  Ekhonkar server-fix er por eta **money-safe** dik theka ar jaruri noy — kintu double log/ar
-  arogulo bar bar hobe. Bolle build+publish kore dei (toolchain: `sh /home/user/fix_tools.sh`).
+- **D1 (app 2.1.8, code 23) — DONE + deployed.** `QueueService.java`:
+  - ek-i process-e **ek-i loop** — `AtomicBoolean LOOP` CAS duita `new Thread(this::loop)` site-e
+    (`onStartCommand` + `watchDog`); loop shesh hole `LOOP.set(false)` (watchdog notun loop dite pare).
+  - **lock haara loop kichui report kore na** — `send()`-er "another run / daily limit / accessibility
+    off" tin-ta case ekhon `SKIP` sentinel; loop seta dekhle **server-ke kichui bole na**, job
+    `CLAIMED`-i thake (asol owner report korbe, na hole `releaseStale` 3 min-e chhere debe).
+  - **D5 self-heal** — protita loop iteration-e `if (Guard.stale()) Guard.forceEnd();` (120 s-er beshi
+    atke thaka run lock auto-clear).
+  - Build: `BUILD SUCCESSFUL in 50s`; `aapt` → `versionName='2.1.8' versionCode='23'`.
+    `/opt/boostpay-apks/`-e SCP + container restart; public link 200 (64,659 / 64,679 B);
+    `check.py` **100 pass / 0 fail**; public `/api/health` 200.
+- **D2 (server) — DONE.** `POST /api/payout/:id/result`: FAILED report jodi
+  `/another run is still in progress|daily limit check refused|accessibility service is off/i`
+  match kore **ar** `now − claimedAt < 160_000` hoy, tahole **ignore** (job `CLAIMED`-i thake) +
+  `PAYOUT_BOGUS_FAIL_IGNORED` audit. Defense-in-depth — app ekhon pathay-i na.
+- **D3 (server) — DONE.** Late SENT+TrxID accept hole **`PAYOUT_LATE_RECEIPT`** audit row (clawback
+  DEBIT-er kotha soho). `tsc` clean, `tools/payout-queue.test.ts` **73/0**.
+
+## Ja EKHONO baki (apnar hat-e)
+
+- **Deploy** (server + admin panel) — `main` ekhon ei commit soho. Dokploy API key lagbe
+  (sandbox-e nei) — apni key din ba Dokploy-te Deploy chapun.
+- **Ajker clawback** — user 67: `POST /api/admin/adjust {userId:67, type:'DEBIT', amount:1.6}`
+  (super-admin + MFA). Age panel-e `✔ Mark paid` → `76BA500O`, tarpor DEBIT.
+- **Wallet top-up** — Nagad payout wallet **Tk 107.35**; 102 BDT-er upor-er job FAIL korbe.
 - **D4 · SMS relay** — payout phone-e relay app chalu korle debit SMS server-e ashbe →
   auto-verify + `matchDebit()` + apnar kache swadhin proman thakbe. Ekhon `smsInbox` = 1 row (self-test).
 - Ekhonkar customer (`WDR-MWF662BX-O2K`) **notun withdrawal** ekhoni korbe? **Na** — age deploy,
