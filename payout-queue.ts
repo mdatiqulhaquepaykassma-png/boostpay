@@ -45,6 +45,9 @@ export interface PayoutJob {
   trxId?: string;
   resultNote?: string;
   screenLog?: string;
+  markedPaidAt?: number;      // the admin recorded the wallet TrxID by hand
+  markedPaidBy?: string;      // who recorded it
+  lateReceipt?: boolean;      // the receipt arrived after the job was already failed
 }
 
 export const CLAIM_MS = 3 * 60 * 1000;      // a claim outlives a slow dial + PIN
@@ -173,6 +176,42 @@ export function claimNext(
 }
 
 /** The phone finished: "I sent it" (waiting for the SMS) or "I could not". */
+/** A wallet receipt is letters/digits/dashes, upper case, max 40. */
+export function cleanTrxId(input: any): string {
+  return String(input == null ? '' : input).toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 40);
+}
+
+/**
+ * ✔ The admin saw the money leave the wallet but the phone never delivered a receipt
+ * (its report arrived after another loop failed the job, or the SMS relay is off).
+ * Recording a receipt closes the JOB — it never moves money by itself, so this is safe
+ * to call even when the withdrawal was already refunded: the caller decides what the
+ * withdrawal does. Refused for PAID (the SMS already proved it) and CANCELLED (a job no
+ * phone may run again must not be quietly revived).
+ */
+export function recordReceipt(
+  jobs: PayoutJob[],
+  jobId: string,
+  opts: { trxId: string; by?: string; note?: string; now?: number },
+): { ok: true; job: PayoutJob } | { ok: false; error: string } {
+  const job = jobs.find((j) => j.id === jobId);
+  if (!job) return { ok: false, error: 'That job does not exist.' };
+  if (job.status === 'PAID') return { ok: false, error: 'The debit SMS already confirmed this payout.' };
+  if (job.status === 'CANCELLED') return { ok: false, error: 'This job is CANCELLED — queue the withdrawal again instead.' };
+  if (job.status === 'SENT' && job.trxId) return { ok: false, error: `This job already has TrxID ${job.trxId}.` };
+  const trx = cleanTrxId(opts.trxId);
+  if (trx.length < 3) return { ok: false, error: 'A wallet TrxID is required — at least 3 letters or numbers, so the customer has a receipt.' };
+  const now = Number(opts.now) || Date.now();
+  job.status = 'SENT';
+  job.trxId = trx;
+  job.sentAt = Number(job.sentAt) || now;
+  job.finishedAt = now;
+  job.markedPaidAt = now;
+  job.markedPaidBy = String(opts.by || '').slice(0, 60);
+  job.resultNote = String(opts.note || 'marked paid in the admin panel').slice(0, 300);
+  return { ok: true, job };
+}
+
 export function markResult(
   jobs: PayoutJob[],
   jobId: string,
@@ -187,7 +226,12 @@ export function markResult(
   if (job.status === 'PAID' || job.status === 'CANCELLED') {
     return { ok: false, error: `This job is already ${job.status}.` };
   }
-  if (job.status !== 'CLAIMED' && job.status !== 'SENT') {
+  // A receipt is proof money moved, so it is never refused for being late: the phone that
+  // actually dialled often reports after a second (double-claimed) loop already failed the
+  // job — dropping that report is what caused a 199.64 BDT payout to be paid AND refunded.
+  const lateReceipt = status === 'SENT' && String(opts.trxId || '').trim().length >= 3
+    && (job.status === 'FAILED' || job.status === 'DRYRUN' || job.status === 'QUEUED');
+  if (job.status !== 'CLAIMED' && job.status !== 'SENT' && !lateReceipt) {
     return { ok: false, error: `This job is ${job.status}, not claimed.` };
   }
   const now = Number(opts.now) || Date.now();
@@ -195,7 +239,8 @@ export function markResult(
   if (opts.log) job.screenLog = String(opts.log).slice(0, 4000);
   if (status === 'SENT') {
     job.status = 'SENT';
-    job.sentAt = now;
+    job.sentAt = Number(job.sentAt) || now;
+    if (lateReceipt) { job.finishedAt = now; job.lateReceipt = true; }
     // The wallet's own transaction id, straight from the confirmation screen.
     const trx = String(opts.trxId || '').trim().slice(0, 40);
     if (trx) job.trxId = trx;
@@ -281,8 +326,9 @@ export function retryJob(
   if (job.status === 'CLAIMED') {
     return { ok: false, error: 'A phone is working on this job right now — cancel it first if it is stuck.' };
   }
-  if (job.status !== 'FAILED') {
-    return { ok: false, error: `Only a FAILED job can be retried — this one is ${job.status}.` };
+  // DRYRUN = the phone walked the menu and sent nothing, so a retry cannot pay twice either.
+  if (job.status !== 'FAILED' && job.status !== 'DRYRUN') {
+    return { ok: false, error: `Only a FAILED or DRYRUN job can be retried — this one is ${job.status}.` };
   }
   job.status = 'QUEUED';
   job.deviceId = undefined;
@@ -305,6 +351,7 @@ export function publicJob(j: PayoutJob) {
     createdAt: j.createdAt, claimedAt: j.claimedAt || 0, sentAt: j.sentAt || 0,
     paidAt: j.paidAt || 0, finishedAt: j.finishedAt || 0,
     trxId: j.trxId || '', resultNote: j.resultNote || '', screenLog: j.screenLog || '',
+    markedPaidAt: j.markedPaidAt || 0, markedPaidBy: j.markedPaidBy || '', lateReceipt: j.lateReceipt === true,
   };
 }
 

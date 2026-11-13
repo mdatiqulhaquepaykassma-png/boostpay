@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Bot, RefreshCw, Send, Ban, CheckCheck, AlertTriangle, Smartphone, Link2, Loader2 } from 'lucide-react';
+import { Bot, RefreshCw, Send, Ban, CheckCheck, Undo2, AlertTriangle, Smartphone, Link2, Loader2 } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 
 /**
@@ -11,8 +11,17 @@ import { BoostPayStore } from '../services/store';
  *   and completes the user's withdrawal.
  *
  * A test job has no user and no withdrawal attached, so a mistake here can move
- * money out of the wallet but can never pay or refund a customer wrongly. A failed
- * job refunds the withdrawal automatically.
+ * money out of the wallet but can never pay or refund a customer wrongly.
+ *
+ * A FAILED job is NOT a refund — never was a safe one, because the phone can send the
+ * money and lose its receipt (2026-11-13: 199.64 BDT paid AND refunded by two polling
+ * loops on one phone). Since then the panel holds three money actions per job and the
+ * admin chooses one:
+ *   ↻ retry      → queue it again, only while the withdrawal is still PENDING
+ *   ✔ mark paid  → the wallet really sent it; a TrxID is mandatory, the customer gets
+ *                  the receipt and the withdrawal is completed through the normal path
+ *   ↩ refund     → you checked the wallet: nothing left it; the money returns to the
+ *                  user and the job is cancelled so no phone can send it later
  */
 
 // NOTE: adminAuthHeaders() already sets Content-Type — never add it twice.
@@ -54,7 +63,11 @@ type Job = {
   status: string; deviceId: string; deviceLabel: string; attempts: number;
   createdAt: number; claimedAt: number; sentAt: number; paidAt: number; finishedAt: number;
   trxId: string; resultNote: string; screenLog: string;
+  markedPaidAt?: number; markedPaidBy?: string; lateReceipt?: boolean;
   retryable?: boolean; retryBlocked?: string;
+  markPaid?: boolean; markPaidBlocked?: string;
+  refund?: boolean; refundBlocked?: string;
+  withdrawStatus?: string; needsDecision?: boolean;
 };
 type Pending = {
   id: string; userId: string; userName: string; userPhone: string; methodName: string;
@@ -73,6 +86,7 @@ const STATUS_STYLE: Record<string, string> = {
   CLAIMED: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
   SENT: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
   PAID: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+  DRYRUN: 'bg-zinc-600/30 text-zinc-300 border-zinc-500/40',
   FAILED: 'bg-red-500/15 text-red-300 border-red-500/40',
   CANCELLED: 'bg-zinc-700/40 text-zinc-300 border-zinc-600/40',
 };
@@ -100,6 +114,9 @@ export const PayoutRobotAdmin = () => {
   const [err, setErr] = useState('');
   const [note, setNote] = useState('');
   const [open, setOpen] = useState<string>('');
+  // ✔ Mark paid needs a TrxID, so it opens a small inline form instead of a blind click
+  const [payFor, setPayFor] = useState<string>('');
+  const [payTrx, setPayTrx] = useState('');
   const [form, setForm] = useState({ provider: 'nagad', number: '', amountBdt: '20', ref: '1' });
   const [loaded, setLoaded] = useState(false);
   const [httpNote, setHttpNote] = useState('');
@@ -163,7 +180,7 @@ export const PayoutRobotAdmin = () => {
   };
 
   const queueWithdraw = (p: Pending) => {
-    if (!window.confirm(`Send $${num(p.amountUsd).toFixed(2)} (${num(p.amountBdt)} BDT) to ${str(p.number) || str((p as any).destination)} via the robot?\n\nThe withdrawal is refunded automatically if the phone fails.`)) return;
+    if (!window.confirm(`Send $${num(p.amountUsd).toFixed(2)} (${num(p.amountBdt)} BDT) to ${str(p.number) || str((p as any).destination)} via the robot?\n\nIf the phone fails, nothing is refunded automatically: the job stays here so you can retry it, mark it paid with the wallet TrxID, or refund it yourself.`)) return;
     void call('/api/admin/payouts/queue', { withdrawId: p.id }, `Withdrawal ${str(p.id)} queued for the robot.`);
   };
 
@@ -175,6 +192,35 @@ export const PayoutRobotAdmin = () => {
   const retry = (j: Job) => {
     if (!window.confirm(`Queue ${str(j.id)} again?\n\nOnly a job that FAILED can be retried, and a withdrawal is only retried while it is still pending — so this can never pay twice.`)) return;
     void call(`/api/admin/payouts/${j.id}/retry`, {}, `${str(j.id)} is back in the queue — the phone will pick it up.`);
+  };
+
+  const cleanTrx = (v: string) => String(v || '').toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 40);
+
+  const submitMarkPaid = (key: string, body: any) => {
+    const trxId = cleanTrx(payTrx);
+    if (trxId.length < 3) { setErr('Type the TrxID the wallet showed — at least 3 letters or numbers.'); return; }
+    setPayFor(''); setPayTrx('');
+    void call('/api/admin/payouts/mark-paid', { ...body, trxId },
+      `Recorded as paid · TrxID ${trxId} — the customer sees the receipt and the withdrawal is closed.`);
+  };
+
+  const refundJob = (j: Job) => {
+    if (!window.confirm(
+      `Refund ${str(j.withdrawId) || 'this withdrawal'} to the user?\n\n` +
+      'Only press this after you checked the wallet: the money must NOT have left it. ' +
+      'The withdrawal is refunded, the customer is notified, and the job is cancelled so no phone sends it.'
+    )) return;
+    void call('/api/admin/payouts/refund', { jobId: j.id, reason: 'refunded in the payout panel' },
+      `${str(j.withdrawId) || str(j.id)} refunded to the user and the job is closed.`);
+  };
+
+  const refundPending = (p: Pending) => {
+    if (!window.confirm(
+      `Refund $${num(p.amountUsd).toFixed(2)} to ${str(p.userName) || str(p.userId)}?\n\n` +
+      'This returns the held withdrawal without a payout. Only for money the wallet never sent.'
+    )) return;
+    void call('/api/admin/payouts/refund', { withdrawId: p.id, reason: 'refunded in the payout panel' },
+      `${str(p.id)} refunded to the user.`);
   };
 
   const patchDevice = async (d: Device, body: any, okText: string) => {
@@ -349,13 +395,43 @@ export const PayoutRobotAdmin = () => {
                     {str(p.methodName)} · {str(p.number) || str((p as any).destination) || 'no number'} · {p.amountBdt != null ? `${num(p.amountBdt)} BDT` : 'no BDT rate'} · {ago(num(p.createdAt))}
                   </div>
                 </div>
-                <button
-                  disabled={busy || p.queued || !p.number || p.amountBdt == null}
-                  onClick={() => queueWithdraw(p)}
-                  className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-[10px] font-black text-cyan-300 disabled:opacity-40"
-                >
-                  {p.queued ? 'in queue' : 'Send via robot'}
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    disabled={busy || p.queued || !p.number || p.amountBdt == null}
+                    onClick={() => queueWithdraw(p)}
+                    className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-[10px] font-black text-cyan-300 disabled:opacity-40"
+                  >
+                    {p.queued ? 'in queue' : 'Send via robot'}
+                  </button>
+                  <button
+                    onClick={() => { const k = 'w:' + str(p.id); if (payFor === k) { setPayFor(''); setPayTrx(''); } else { setPayFor(k); setPayTrx(''); } }}
+                    disabled={busy}
+                    title="you paid this by hand (agent, bank, wallet) — record the reference so the customer sees a receipt"
+                    className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-[10px] font-black text-emerald-300 disabled:opacity-40"
+                  >
+                    <CheckCheck className="inline w-3 h-3" /> paid
+                  </button>
+                  <button
+                    onClick={() => refundPending(p)}
+                    disabled={busy}
+                    title="return the held money — no payout was made"
+                    className="rounded-xl border border-fuchsia-500/40 bg-fuchsia-500/10 px-2.5 py-1.5 text-[10px] font-black text-fuchsia-300 disabled:opacity-40"
+                  >
+                    <Undo2 className="inline w-3 h-3" /> refund
+                  </button>
+                </div>
+                {payFor === 'w:' + str(p.id) ? (
+                  <div className="flex w-full flex-wrap items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-2 py-1.5">
+                    <span className="text-[10px] font-bold text-emerald-300">TrxID / reference</span>
+                    <input
+                      autoFocus value={payTrx} onChange={(e) => setPayTrx(e.target.value)} placeholder="e.g. 76BA500O"
+                      className="w-40 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 font-mono text-[11px] text-white outline-none focus:border-emerald-400"
+                    />
+                    <button onClick={() => submitMarkPaid('w:' + str(p.id), { withdrawId: p.id })} disabled={busy}
+                      className="rounded-lg bg-emerald-500 px-2.5 py-1 text-[10px] font-black text-zinc-950 disabled:opacity-50">save receipt</button>
+                    <button onClick={() => { setPayFor(''); setPayTrx(''); }} className="text-[10px] font-bold text-zinc-400">cancel</button>
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
@@ -465,27 +541,65 @@ export const PayoutRobotAdmin = () => {
                       {str(j.trxId) ? ` · TrxID ${str(j.trxId)}` : ''}
                       {num(j.attempts) ? ` · ${num(j.attempts)} attempt(s)` : ''}
                     </div>
-                    {j.status === 'FAILED' ? (
+                    {j.status === 'FAILED' || j.status === 'DRYRUN' ? (
                       <div className="mt-1 text-[10px] text-red-300">
-                        failed: {str(j.resultNote) || 'the phone did not say why'}
+                        {j.status === 'FAILED' ? 'failed' : 'not sent (dry run)'}: {str(j.resultNote) || 'the phone did not say why'}
                         {j.retryable === false && str(j.retryBlocked) ? <span className="text-zinc-500"> · {str(j.retryBlocked)}</span> : null}
                       </div>
+                    ) : null}
+                    {j.needsDecision ? (
+                      <div className="mt-1 text-[10px] font-bold text-amber-300">
+                        ⚠ no money moved automatically — nothing was refunded. Decide: ↻ retry, ✔ mark paid with the wallet TrxID, or ↩ refund.
+                        {str(j.withdrawStatus) ? ` (withdrawal ${str(j.withdrawStatus)})` : ''}
+                      </div>
+                    ) : null}
+                    {num(j.markedPaidAt) ? (
+                      <div className="mt-1 text-[10px] text-zinc-500">
+                        receipt recorded by hand{str(j.markedPaidBy) ? ` · ${str(j.markedPaidBy)}` : ''} · {ago(num(j.markedPaidAt))}
+                      </div>
+                    ) : null}
+                    {str(j.markPaidBlocked) && j.markPaid === false && ['FAILED', 'DRYRUN', 'CLAIMED', 'QUEUED'].includes(j.status) ? (
+                      <div className="mt-1 text-[10px] text-zinc-600">mark paid off: {str(j.markPaidBlocked)}</div>
                     ) : null}
                   </div>
                   <div className="flex items-center gap-2">
                     <button onClick={() => setOpen(open === j.id ? '' : j.id)} className="rounded-lg border border-zinc-700 px-2 py-1 text-[10px] font-bold text-zinc-300">
                       {open === j.id ? 'hide' : 'log'}
                     </button>
-                    {j.status === 'FAILED' ? (
+                    {['FAILED', 'DRYRUN'].includes(j.status) ? (
                       <button
                         onClick={() => retry(j)}
                         disabled={busy || j.retryable === false}
-                        title={j.retryable === false ? (str(j.retryBlocked) || 'this job cannot be retried') : 'queue this failed job again'}
+                        title={j.retryable === false ? (str(j.retryBlocked) || 'this job cannot be retried') : 'queue this job again — the withdrawal is still pending, so this cannot pay twice'}
                         className={`rounded-lg border px-2 py-1 text-[10px] font-black ${j.retryable === false
                           ? 'cursor-not-allowed border-zinc-700 bg-zinc-800/60 text-zinc-500'
                           : 'border-amber-500/50 bg-amber-500/15 text-amber-200'}`}
                       >
                         <RefreshCw className="inline w-3 h-3" /> retry
+                      </button>
+                    ) : null}
+                    {['FAILED', 'DRYRUN', 'CLAIMED', 'QUEUED', 'SENT'].includes(j.status) ? (
+                      <button
+                        onClick={() => { if (payFor === j.id) { setPayFor(''); setPayTrx(''); } else { setPayFor(j.id); setPayTrx(str(j.trxId) || ''); } }}
+                        disabled={busy || j.markPaid === false}
+                        title={j.markPaid === false ? (str(j.markPaidBlocked) || 'this job cannot be marked paid') : 'the wallet really sent this — record its TrxID'}
+                        className={`rounded-lg border px-2 py-1 text-[10px] font-black ${j.markPaid === false
+                          ? 'cursor-not-allowed border-zinc-700 bg-zinc-800/60 text-zinc-500'
+                          : 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200'}`}
+                      >
+                        <CheckCheck className="inline w-3 h-3" /> mark paid
+                      </button>
+                    ) : null}
+                    {['QUEUED', 'CLAIMED', 'FAILED', 'DRYRUN'].includes(j.status) ? (
+                      <button
+                        onClick={() => refundJob(j)}
+                        disabled={busy || j.refund === false}
+                        title={j.refund === false ? (str(j.refundBlocked) || 'nothing to refund here') : 'return the held withdrawal to the user and close this job'}
+                        className={`rounded-lg border px-2 py-1 text-[10px] font-black ${j.refund === false
+                          ? 'cursor-not-allowed border-zinc-700 bg-zinc-800/60 text-zinc-500'
+                          : 'border-fuchsia-500/50 bg-fuchsia-500/15 text-fuchsia-200'}`}
+                      >
+                        <Undo2 className="inline w-3 h-3" /> refund
                       </button>
                     ) : null}
                     {['QUEUED', 'CLAIMED', 'FAILED'].includes(j.status) ? (
@@ -495,6 +609,22 @@ export const PayoutRobotAdmin = () => {
                     ) : null}
                   </div>
                 </div>
+                {payFor === j.id ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-2 py-2">
+                    <span className="text-[10px] font-bold text-emerald-300">wallet TrxID for {num(j.amountBdt)} BDT → {str(j.number) || '—'}</span>
+                    <input
+                      autoFocus value={payTrx} onChange={(e) => setPayTrx(e.target.value)}
+                      placeholder="e.g. 76BA500O"
+                      className="w-40 rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 font-mono text-[11px] text-white outline-none focus:border-emerald-400"
+                    />
+                    <button onClick={() => submitMarkPaid(j.id, { jobId: j.id })} disabled={busy}
+                      className="rounded-lg bg-emerald-500 px-2.5 py-1 text-[10px] font-black text-zinc-950 disabled:opacity-50">save receipt</button>
+                    <button onClick={() => { setPayFor(''); setPayTrx(''); }} className="text-[10px] font-bold text-zinc-400">cancel</button>
+                    {str(j.withdrawStatus) === 'REJECTED' ? (
+                      <span className="text-[9.5px] font-bold text-amber-300">this withdrawal was already refunded — the receipt is recorded, then settle it in Treasury (debit the user)</span>
+                    ) : null}
+                  </div>
+                ) : null}
                 {open === j.id ? (
                   <div className="mt-2 space-y-1 rounded-lg border border-zinc-800 bg-zinc-950 p-2">
                     <div className="text-[10px] text-zinc-400">

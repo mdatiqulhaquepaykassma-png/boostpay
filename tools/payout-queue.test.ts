@@ -8,6 +8,7 @@
  */
 import {
   buildJob, claimNext, markResult, matchDebit, cancelJob, releaseStale, retryJob,
+  recordReceipt, cleanTrxId,
   queueStats, cleanMsisdn, cleanAmount, CLAIM_MS, type PayoutJob,
 } from '../payout-queue';
 
@@ -154,6 +155,56 @@ const retryCancel = make({ kind: 'TEST', amountBdt: 55 });
 cancelJob(jobs, retryCancel.id, { reason: 'test' });
 check('a CANCELLED job is not retried', !retryJob(jobs, retryCancel.id).ok, retryCancel.status);
 check('an unknown job is not retried', !retryJob(jobs, 'PAY-NOPE').ok, 'no error');
+
+// ── ✔ THE RECEIPT IS THE ONLY PROOF: late reports and hand-recorded TrxIDs ────
+const claimByHand = (j: PayoutJob, dev: string, now: number) => {
+  j.status = 'CLAIMED'; j.deviceId = dev; j.claimedAt = now; return j;
+};
+
+const late = make({ kind: 'TEST', amountBdt: 200 });
+claimByHand(late, 'DL', 10100);
+markResult(jobs, late.id, 'FAILED', { deviceId: 'DL', note: 'another run is still in progress', now: 10200 });
+const lateOk = markResult(jobs, late.id, 'SENT', { deviceId: 'DL', trxId: '76BA500O', now: 10300 });
+check('a SENT report with a TrxID lands on a FAILED job (the 2026-11-13 loss)', lateOk.ok && late.status === 'SENT', late.status);
+check('the late receipt is flagged so the audit trail can see it', late.lateReceipt === true, String(late.lateReceipt));
+check('the late receipt keeps the wallet TrxID', late.trxId === '76BA500O', late.trxId);
+check('a late receipt closes the job on time', Number(late.finishedAt) === 10300, String(late.finishedAt));
+const lateNoTrx = make({ kind: 'TEST', amountBdt: 210 });
+claimByHand(lateNoTrx, 'DL', 10350);
+markResult(jobs, lateNoTrx.id, 'FAILED', { deviceId: 'DL', note: 'no reason', now: 10400 });
+check('a SENT report with NO TrxID cannot resurrect a FAILED job',
+  !markResult(jobs, lateNoTrx.id, 'SENT', { deviceId: 'DL', now: 10500 }).ok, 'accepted');
+check('…and the job stays FAILED, so nothing is proved paid', lateNoTrx.status === 'FAILED', lateNoTrx.status);
+
+const rr = make({ kind: 'TEST', amountBdt: 220 });
+claimByHand(rr, 'DM', 10600);
+markResult(jobs, rr.id, 'FAILED', { deviceId: 'DM', note: 'the report never arrived', now: 10700 });
+check('mark paid refuses a blank TrxID (the customer needs a receipt)', !recordReceipt(jobs, rr.id, { trxId: '   ' }).ok, 'accepted');
+check('mark paid refuses a TrxID shorter than 3 characters', !recordReceipt(jobs, rr.id, { trxId: 'AB' }).ok, 'accepted');
+check('…and the job is untouched by a refused receipt', rr.status === 'FAILED', rr.status);
+const rec = recordReceipt(jobs, rr.id, { trxId: ' 76ba-500o ', by: 'admin:root', now: 10800 });
+check('the admin can record the wallet TrxID by hand', rec.ok && rr.status === 'SENT', rr.status);
+check('the recorded TrxID is cleaned to one form', rr.trxId === '76BA-500O', rr.trxId);
+check('the receipt says who recorded it', rec.ok && rr.markedPaidBy === 'admin:root', String(rr.markedPaidBy));
+check('the receipt carries the time it was recorded', Number(rr.markedPaidAt) === 10800, String(rr.markedPaidAt));
+check('a job paid by hand is never retried again', !retryJob(jobs, rr.id).ok, rr.status);
+check('a second hand receipt on the same job is refused', !recordReceipt(jobs, rr.id, { trxId: 'OTHER123' }).ok, 'accepted');
+const rrCancel = make({ kind: 'TEST', amountBdt: 230 });
+claimByHand(rrCancel, 'DM', 10850);
+markResult(jobs, rrCancel.id, 'FAILED', { deviceId: 'DM', now: 10900 });
+cancelJob(jobs, rrCancel.id, { reason: 'refunded from the payout panel' });
+check('a refunded/cancelled job cannot be marked paid', !recordReceipt(jobs, rrCancel.id, { trxId: 'XYZ123' }).ok, rrCancel.status);
+
+// ── DRYRUN is retryable: the phone walked the menu and sent nothing ────────────
+const dr = make({ kind: 'TEST', amountBdt: 240 });
+claimByHand(dr, 'DD', 11000);
+markResult(jobs, dr.id, 'DRYRUN', { deviceId: 'DD', note: 'the wallet never saw this job', now: 11100 });
+check('a DRYRUN job can be queued again', retryJob(jobs, dr.id, { note: 'retry live' }).ok && dr.status === 'QUEUED', dr.status);
+check('a DRYRUN job burns no attempt (nothing was tried and failed)', Number(dr.attempts) === 0, String(dr.attempts));
+
+// ── the receipt text is cleaned before anything stores it ──────────────────────
+check('cleanTrxId keeps only receipt-shaped characters', cleanTrxId(' 76ba500o! ') === '76BA500O', cleanTrxId(' 76ba500o! '));
+check('cleanTrxId caps a long id at 40 characters', cleanTrxId('x'.repeat(90)).length === 40, String(cleanTrxId('x'.repeat(90)).length));
 
 console.log('\n' + pass + ' pass / ' + fail + ' fail');
 process.exit(fail === 0 ? 0 : 1);

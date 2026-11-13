@@ -18,7 +18,7 @@ import {
 import { parseSms, normalizeTrxId } from './sms-parse';
 import {
   ensurePayoutJobs, buildJob, claimNext, markResult, cancelJob, retryJob, matchDebit,
-  publicJob, queueStats, cleanMsisdn, cleanAmount,
+  publicJob, queueStats, cleanMsisdn, cleanAmount, recordReceipt, cleanTrxId,
 } from './payout-queue';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -10834,6 +10834,8 @@ const paymentLocks = new Map<string, Promise<any>>();
     r.reviewedAt = Date.now();
     r.reviewedBy = String(opts.actor);
     r.reason = sanitizeText(opts.reason, 200).trim();
+    // the payout panel 'needs a decision' flag is answered by this review
+    delete r.payoutDecisionAt; delete r.payoutDecisionNote; delete r.payoutDecisionDevice;
     recordAuditLog(db, `WITHDRAW_${r.status}`, String(opts.actor), `Withdrawal ${r.id} $${Number(r.amountUsd).toFixed(2)} ${r.status.toLowerCase()}`, String(user.id));
     return { status: 200, body: { success: true, request: r } };
   }
@@ -12124,16 +12126,19 @@ const paymentLocks = new Map<string, Promise<any>>();
         }
       }
 
-      // Money safety: "sent but no TrxID" may still have moved money, so the withdrawal is
-      // NOT refunded automatically — it stays pending for the admin to check.
-      const unsure = status === 'FAILED' && /NO_TRXID/i.test(noteText);
-      if (status === 'FAILED' && job.kind === 'WITHDRAW' && job.withdrawId && !unsure) {
+      // A FAILED job is NOT a refund. The phone may have sent the money and lost the receipt
+      // on the way, or a second polling loop on the same phone may have failed a job the first
+      // one was still dialling (that is exactly how 199.64 BDT was paid AND refunded on
+      // 2026-11-13). Nothing is returned to the customer automatically any more: the
+      // withdrawal stays PENDING and an admin decides — ↻ Retry, ✔ Mark paid (wallet TrxID
+      // required) or ↩ Refund. The customer keeps seeing "processing" until then, which is the
+      // honest state: nobody knows yet whether the wallet sent it.
+      if (status === 'FAILED' && job.kind === 'WITHDRAW' && job.withdrawId) {
         const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
         if (wr && wr.status === 'PENDING') {
-          reviewWithdrawCore(db, {
-            id: String(wr.id), action: 'REJECT', actor: 'payout-robot',
-            reason: `The phone could not send it: ${sanitizeText(body.note, 140) || 'no reason given'}`,
-          });
+          wr.payoutDecisionAt = Date.now();
+          wr.payoutDecisionNote = (sanitizeText(noteText, 160) || 'the phone failed the job').slice(0, 160);
+          wr.payoutDecisionDevice = String(dev.label || dev.id || '').slice(0, 40);
         }
       }
       // A DRYRUN moves no money and leaves a real withdrawal PENDING for a live retry.
@@ -12153,14 +12158,48 @@ const paymentLocks = new Map<string, Promise<any>>();
     if (!job) return 'That job does not exist.';
     if (job.status === 'SENT' || job.status === 'PAID') return 'already sent — do not send twice';
     if (job.status === 'CLAIMED') return 'a phone is working on it right now';
-    if (job.status !== 'FAILED') return `only a FAILED job can be retried (this is ${job.status})`;
+    if (job.status === 'QUEUED') return 'already waiting for a phone';
+    if (job.status === 'CANCELLED') return 'cancelled — queue the withdrawal again instead';
+    // FAILED and DRYRUN both mean "this phone did not finish the job"; a receipt is what
+    // proves money moved, and a job that carries one is SENT, not FAILED.
+    if (job.status !== 'FAILED' && job.status !== 'DRYRUN') return `only a FAILED or DRYRUN job can be retried (this is ${job.status})`;
+    if (job.trxId) return 'this job already has a TrxID — nothing to retry';
     if (job.kind === 'WITHDRAW' && job.withdrawId) {
       const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId));
       if (wr && wr.status !== 'PENDING') {
-        return `withdrawal ${wr.id} is ${wr.status} (already refunded) — retrying would pay it twice`;
+        return `withdrawal ${wr.id} is ${wr.status} — retrying would pay it twice`;
       }
     }
     return '';
+  }
+
+  /**
+   * What an admin may still do with one job: ↻ Retry, ✔ Mark paid, ↩ Refund.
+   * Every rule here is about money-safety, so the panel can grey a button out and say why
+   * instead of letting a click double-pay somebody.
+   */
+  function payoutMoneyActions(db: any, job: any) {
+    const wr: any = job && job.withdrawId
+      ? (db.withdrawRequests || []).find((w: any) => String(w.id) === String(job.withdrawId)) : null;
+    const wrStatus = String((wr && wr.status) || '');
+    const blocked = retryBlocker(db, job);
+    let markPaidBlocked = '';
+    if (!job) markPaidBlocked = 'That job does not exist.';
+    else if (job.status === 'PAID') markPaidBlocked = 'the debit SMS already confirmed this payout';
+    else if (job.status === 'CANCELLED') markPaidBlocked = 'this job is cancelled — queue the withdrawal again';
+    else if (job.status === 'SENT' && job.trxId) markPaidBlocked = `this job already has TrxID ${job.trxId}`;
+    else if (wr && wrStatus === 'COMPLETED') markPaidBlocked = 'the withdrawal is already COMPLETED';
+    let refundBlocked = '';
+    if (!job && !wr) refundBlocked = 'nothing to refund';
+    else if (!wr) refundBlocked = job && job.kind === 'TEST' ? 'a test payout has no user money to refund' : 'no withdrawal is attached to this job';
+    else if (wrStatus !== 'PENDING') refundBlocked = `withdrawal ${wr.id} is ${wrStatus} — there is nothing to refund`;
+    return {
+      retryable: !blocked, retryBlocked: blocked,
+      markPaid: !markPaidBlocked, markPaidBlocked,
+      refund: !refundBlocked, refundBlocked,
+      withdrawStatus: wrStatus,
+      needsDecision: !!job && (job.status === 'FAILED' || job.status === 'DRYRUN') && wrStatus === 'PENDING',
+    };
   }
 
   /** Everything the admin "Payout Robot" screen paints. */
@@ -12186,10 +12225,7 @@ const paymentLocks = new Map<string, Promise<any>>();
       res.setHeader('Cache-Control', 'no-store');
       res.json({
         success: true,
-        jobs: jobs.slice(0, 120).map((j: any) => {
-          const blocked = retryBlocker(db, j);
-          return { ...publicJob(j), retryable: !blocked, retryBlocked: blocked };
-        }),
+        jobs: jobs.slice(0, 120).map((j: any) => ({ ...publicJob(j), ...payoutMoneyActions(db, j) })),
         pending,
         stats: queueStats(jobs),
         devices: smsDevicesOf(db).map((d: any) => ({
@@ -12214,7 +12250,8 @@ const paymentLocks = new Map<string, Promise<any>>();
         rate: { BDT: fxRate(db, 'BDT') },
         // The debit SMS is what turns SENT into PAID — with no SMS at all, nothing can.
         smsStats: (() => {
-          const list: any[] = (db.smsMessages || db.sms || []) as any[];
+          const list: any[] = ((Array.isArray(db.smsInbox) && db.smsInbox.length
+            ? db.smsInbox : (db.smsMessages || db.sms || [])) as any[]);
           const last: any = list.length ? list[list.length - 1] : null;
           return {
             count: list.length,
@@ -12321,6 +12358,134 @@ const paymentLocks = new Map<string, Promise<any>>();
       writeDb(db);
       res.json({ success: true, job: publicJob(out.job) });
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not retry that job.' }); }
+  });
+
+  /**
+   * Admin ✔ Mark paid. The wallet screen said the money left, but the phone never delivered a
+   * receipt: its SENT report arrived after a second loop had already failed the job, or the SMS
+   * relay is off. A wallet TrxID is MANDATORY — a payout the customer cannot prove did not
+   * happen. A PENDING withdrawal is approved through the normal review path, so the ledger row,
+   * the notification and the audit entry are identical to any other approval. If the withdrawal
+   * was ALREADY refunded (the 2026-11-13 case) the refund is left alone and only the receipt is
+   * recorded, plus a loud PAYOUT_CLAWBACK_NEEDED audit row: taking money back from a customer is
+   * always a separate, deliberate Treasury action.
+   */
+  app.post('/api/admin/payouts/mark-paid', rateLimit(40), requireAdmin, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const trxId = cleanTrxId(body.trxId);
+      if (trxId.length < 3) {
+        return res.status(400).json({ error: 'The wallet TrxID is required — at least 3 letters or numbers, so the customer has a receipt.' });
+      }
+      // Find the withdrawal first: the lock key must be the same one the review screens use.
+      const pre = ensurePaymentCollections(readDb());
+      const preJobs = ensurePayoutJobs(pre);
+      const preJob: any = body.jobId
+        ? preJobs.find((j: any) => String(j.id) === String(body.jobId))
+        : (body.withdrawId ? preJobs.find((j: any) => String(j.withdrawId || '') === String(body.withdrawId) && j.status !== 'CANCELLED') : null);
+      const wrKey = String((preJob && preJob.withdrawId) || body.withdrawId || '');
+      const out = await withPaymentLock('WDRREVIEW:' + (wrKey || String(body.jobId || 'none')), () => {
+        const db = ensurePaymentCollections(readDb());
+        const jobs = ensurePayoutJobs(db);
+        let job: any = preJob ? jobs.find((j: any) => String(j.id) === String(preJob.id)) : null;
+        const wr: any = wrKey ? (db.withdrawRequests || []).find((w: any) => String(w.id) === wrKey) : null;
+        if (!job && !wr) return { status: 404, body: { error: 'Neither that job nor that withdrawal exists.' } };
+        const by = 'admin:' + String(req.authAdmin);
+        if (job) {
+          const rec = recordReceipt(jobs, String(job.id), {
+            trxId, by, note: (sanitizeText(body.note, 160) || '').trim() || `marked paid in the payout panel by ${by}`,
+          });
+          if (!rec.ok) return { status: 409, body: { error: rec.error } };
+          job = rec.job;
+        }
+        let decision = 'job_only';
+        if (wr && wr.status === 'PENDING') {
+          const approved = reviewWithdrawCore(db, {
+            id: String(wr.id), action: 'APPROVE', actor: by, payoutRef: trxId,
+            jobId: job ? String(job.id) : '', reason: `Paid by the payout robot, receipt recorded in the panel · TrxID ${trxId}`,
+          });
+          if (approved.status !== 200) return { status: approved.status, body: approved.body };
+          decision = 'approved';
+        } else if (wr && wr.status === 'REJECTED') {
+          // Money left the wallet AND came back to the customer. Record the proof, touch no
+          // balance: the clawback is a separate, deliberate Treasury decision.
+          wr.payoutTrxId = trxId; wr.payoutTrxAt = Date.now(); wr.payoutLateReceipt = true;
+          if (job) wr.payoutJobId = String(job.id);
+          decision = 'already_refunded';
+          recordAuditLog(db, 'PAYOUT_CLAWBACK_NEEDED', by,
+            `Withdrawal ${wr.id} was refunded AND paid (TrxID ${trxId}) — Treasury DEBIT $${Number(wr.amountUsd || 0).toFixed(2)} on user ${wr.userId} to settle it`,
+            String(wr.userId || ''));
+        } else if (wr) {
+          decision = 'already_' + String(wr.status).toLowerCase();
+        }
+        recordAuditLog(db, 'PAYOUT_MARK_PAID', by,
+          `${job ? 'Job ' + job.id : wrKey} marked paid · TrxID ${trxId} · withdrawal ${wrKey || '-'} → ${decision}`,
+          String((job && job.userId) || (wr && wr.userId) || ''));
+        writeDb(db);
+        return {
+          status: 200,
+          body: {
+            success: true, decision, trxId,
+            job: job ? publicJob(job) : null,
+            withdrawal: wr ? { id: wr.id, status: wr.status, payoutTrxId: wr.payoutTrxId || '', clawbackUsd: decision === 'already_refunded' ? Number(wr.amountUsd || 0) : 0 } : null,
+          },
+        };
+      });
+      res.status(out.status).json(out.body);
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not record that receipt.' }); }
+  });
+
+  /**
+   * Admin ↩ Refund. Since a FAILED job no longer refunds anybody by itself, this button is the
+   * place where a refund becomes a decision: "I checked the wallet, the money never left." The
+   * withdrawal is rejected through the normal review path (refund + notification + ledger), and
+   * the job is cancelled so no phone can ever pick it up again — a refund and a payout for the
+   * same withdrawal can never both exist.
+   */
+  app.post('/api/admin/payouts/refund', rateLimit(40), requireAdmin, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const pre = ensurePaymentCollections(readDb());
+      const preJobs = ensurePayoutJobs(pre);
+      const preJob: any = body.jobId
+        ? preJobs.find((j: any) => String(j.id) === String(body.jobId))
+        : (body.withdrawId ? preJobs.find((j: any) => String(j.withdrawId || '') === String(body.withdrawId) && j.status !== 'CANCELLED') : null);
+      const wrKey = String((preJob && preJob.withdrawId) || body.withdrawId || '');
+      if (!wrKey) {
+        return res.status(400).json({ error: preJob && preJob.kind === 'TEST'
+          ? 'A test payout has no user money to refund — that money is the wallet owner\u0027s.'
+          : 'No withdrawal is attached to this job.' });
+      }
+      const out = await withPaymentLock('WDRREVIEW:' + wrKey, () => {
+        const db = ensurePaymentCollections(readDb());
+        const jobs = ensurePayoutJobs(db);
+        let job: any = preJob ? jobs.find((j: any) => String(j.id) === String(preJob.id)) : null;
+        const wr: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === wrKey);
+        if (!wr) return { status: 404, body: { error: 'That withdrawal does not exist.' } };
+        if (wr.status !== 'PENDING') {
+          return { status: 409, body: { error: `withdrawal ${wr.id} is ${wr.status} — there is nothing to refund` } };
+        }
+        const by = 'admin:' + String(req.authAdmin);
+        const rejected = reviewWithdrawCore(db, {
+          id: String(wr.id), action: 'REJECT', actor: by, jobId: job ? String(job.id) : '',
+          reason: (sanitizeText(body.reason, 160) || '').trim() || 'Refunded from the payout panel — the wallet never sent it',
+        });
+        if (rejected.status !== 200) return { status: rejected.status, body: rejected.body };
+        if (job && ['QUEUED', 'CLAIMED', 'FAILED', 'DRYRUN'].includes(String(job.status))) {
+          const cancelled = cancelJob(jobs, String(job.id), { reason: 'refunded from the payout panel' });
+          if (cancelled.ok) job = cancelled.job;
+        }
+        recordAuditLog(db, 'PAYOUT_REFUND', by,
+          `Withdrawal ${wr.id} refunded from the payout panel ($${Number(wr.amountUsd || 0).toFixed(2)})${job ? ' · job ' + job.id + ' cancelled' : ''}`,
+          String(wr.userId || ''));
+        writeDb(db);
+        return {
+          status: 200,
+          body: { success: true, decision: 'refunded', refundUsd: Number(wr.amountUsd || 0), job: job ? publicJob(job) : null },
+        };
+      });
+      res.status(out.status).json(out.body);
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not refund that withdrawal.' }); }
   });
 
   app.post('/api/admin/payouts/devices/:id/token', rateLimit(10), requireAdmin, requireSuperAdmin, (req: any, res) => {
