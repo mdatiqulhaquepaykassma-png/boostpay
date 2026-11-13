@@ -20,7 +20,10 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APK_DIR = path.join(__dirname, 'apks');
+// APK_DIR lets the deployment mount the builds somewhere a git reset can never delete
+// (the checkout is reset by every deploy — that once emptied ./apks and every download
+// link started answering 404 "Not ready").
+const APK_DIR = process.env.APK_DIR ? path.resolve(process.env.APK_DIR) : path.join(__dirname, 'apks');
 const PORT = Number(process.env.PORT || 3000);
 
 /** The catalogue. `slug` is the public link: app.boostpay.online/<slug> */
@@ -285,7 +288,13 @@ const server = http.createServer((req, res) => {
   const method = req.method || 'GET';
   if (method !== 'GET' && method !== 'HEAD') return json(res, 405, { error: 'GET only' });
 
-  if (p === '/api/health' || p === '/health') return json(res, 200, { status: 'ok', service: 'apk-portal', version: '1.0.0', apps: APPS.length });
+  if (p === '/api/health' || p === '/health') {
+    const missing = APPS.filter((a) => !statApk(a.file).ready).map((a) => a.file);
+    return json(res, missing.length ? 503 : 200, {
+      status: missing.length ? 'degraded' : 'ok', service: 'apk-portal', version: '1.1.0',
+      apps: APPS.length, apkDir: APK_DIR, missing,
+    });
+  }
   if (p === '/api/apks') return json(res, 200, { success: true, apps: envelope(APPS) });
 
   if (p === '/' || p === '/index.html') return html(res, 200, indexHtml());
@@ -308,6 +317,6 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   const ready = APPS.filter((a) => statApk(a.file).ready).length;
-  console.log(`[apk-portal] listening on :${PORT} · ${ready}/${APPS.length} APKs on disk`);
+  console.log(`[apk-portal] listening on :${PORT} · ${ready}/${APPS.length} APKs in ${APK_DIR}`);
   for (const a of APPS) console.log(`  /${a.slug}  →  ${a.file} (${statApk(a.file).ready ? mb(statApk(a.file).size) : 'missing'})`);
 });
