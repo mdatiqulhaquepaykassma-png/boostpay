@@ -38,7 +38,7 @@ export function CurrencyProvider({ children, token }: { children: React.ReactNod
     } catch { /* keep the last table */ }
   }, []);
 
-  useEffect(() => { void reload(); }, [reload, token]);
+  useEffect(() => { void reload(); const onAuth = () => { void reload(); }; window.addEventListener('bpa:auth-changed', onAuth); return () => window.removeEventListener('bpa:auth-changed', onAuth); }, [reload, token]);
   useEffect(() => { const id = setInterval(() => { void reload(); }, 10 * 60 * 1000); return () => clearInterval(id); }, [reload]);
 
   const currency = useMemo(() => {
@@ -61,7 +61,8 @@ export function CurrencyProvider({ children, token }: { children: React.ReactNod
 
   const fmt = useCallback((usd: number, opts?: { decimals?: number; withSymbol?: boolean }) => {
     const cur = currency;
-    const rate = cur && cur.rate > 0 ? cur.rate : 1;
+    if (cur && !(cur.rate > 0)) return `${cur.code} rate unavailable`;
+    const rate = cur ? cur.rate : 1;
     const dec = opts?.decimals ?? (cur ? cur.decimals : 2);
     const body = ((Number(usd) || 0) * rate).toLocaleString('en-US', { minimumFractionDigits: Math.min(dec, 8), maximumFractionDigits: Math.min(dec, 8) });
     return opts?.withSymbol === false ? body : `${cur ? cur.symbol : '$'}${body}`;

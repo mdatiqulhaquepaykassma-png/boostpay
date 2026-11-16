@@ -30,7 +30,6 @@ type LedgerRow = {
   balanceAfter: number; userId?: string; note?: string; actor?: string;
 };
 
-const money = (n: number) => (Number.isFinite(Number(n)) ? Number(n) : 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const timeAgo = (ts: number) => {
   const d = Math.max(0, Date.now() - ts) / 1000;
   if (d < 60) return 'just now';
@@ -351,7 +350,7 @@ const AgentCurrencyPicker: React.FC = () => {
             ))}
             {list.length === 0 && <div className="px-2 py-3 text-center text-[10px] text-zinc-500">No currency matches.</div>}
           </div>
-          <div className="border-t border-zinc-800 px-2 py-1 text-[9px] text-zinc-500">{rateNote() || 'Display only — your wallet stays in USD.'}</div>
+          <div className="border-t border-zinc-800 px-2 py-1 text-[9px] text-zinc-500">{rateNote() || 'Your wallet ledger stays in USD.'}</div>
         </div>
       )}
     </div>
@@ -362,7 +361,7 @@ const AgentCurrencyPicker: React.FC = () => {
 const HomeScreen: React.FC<{
   agent: Agent; settings: Settings; platform: any; onCopy: (v: string) => void; onGoto: (t: Tab) => void;
 }> = ({ agent, settings, platform, onCopy, onGoto }) => {
-  const cur = useCurrency();
+  const { fmt: money } = useCurrency();
   return (
   <div className="space-y-3">
     <div className="relative overflow-hidden rounded-3xl border border-amber-500/30 bg-gradient-to-br from-amber-500/20 via-zinc-900 to-zinc-950 p-5">
@@ -377,7 +376,7 @@ const HomeScreen: React.FC<{
       </div>
       <div className="mt-2 flex items-end gap-1">
         <span className="text-3xl font-black tracking-tight text-white">
-          {cur && cur.currency && cur.currency.code !== 'USD' ? cur.money(agent.balance) : `$${money(agent.balance)}`}
+          {money(agent.balance)}
         </span>
       </div>
       <div className="mt-4 flex gap-2">
@@ -396,7 +395,7 @@ const HomeScreen: React.FC<{
           <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-emerald-300">
             <Sparkles className="h-3 w-3" /> Lifetime commission
           </div>
-          <div className="mt-1 text-2xl font-black text-white">${money(agent.commissionLifetime)}</div>
+          <div className="mt-1 text-2xl font-black text-white">{money(agent.commissionLifetime)}</div>
         </div>
         <div className="rounded-2xl bg-emerald-500/15 p-3"><CircleDollarSign className="h-6 w-6 text-emerald-400" /></div>
       </div>
@@ -415,11 +414,11 @@ const HomeScreen: React.FC<{
     <div className="grid grid-cols-2 gap-3">
       <Card>
         <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><ArrowDownLeft className="h-3 w-3 text-emerald-400" /> Received</div>
-        <div className="mt-1.5 text-lg font-black text-white">${money(agent.receivedTotal)}</div>
+        <div className="mt-1.5 text-lg font-black text-white">{money(agent.receivedTotal)}</div>
       </Card>
       <Card>
         <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-500"><ArrowUpRight className="h-3 w-3 text-amber-400" /> Sent</div>
-        <div className="mt-1.5 text-lg font-black text-white">${money(agent.sentTotal)}</div>
+        <div className="mt-1.5 text-lg font-black text-white">{money(agent.sentTotal)}</div>
       </Card>
     </div>
 
@@ -431,6 +430,7 @@ const HomeScreen: React.FC<{
 const SendScreen: React.FC<{
   agent: Agent; settings: Settings; onSent: (agent: Agent) => void; toast: (t: any) => void;
 }> = ({ agent, settings, onSent, toast }) => {
+  const { fmt: money, currency } = useCurrency();
   const [userId, setUserId] = useState('');
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
@@ -438,19 +438,24 @@ const SendScreen: React.FC<{
   const [error, setError] = useState('');
   const [receipt, setReceipt] = useState<{ amount: number; commission: number; userId: string; txId: string } | null>(null);
 
-  const numAmount = Number(amount || 0);
+  const enteredAmount = Number(amount || 0);
+  const rate = currency?.code === 'USD' ? 1 : Number(currency?.rate || 0);
+  const numAmount = rate > 0 ? Math.round((enteredAmount / rate) * 100) / 100 : 0;
   const commission = useMemo(() => Math.round((numAmount * settings.commissionPercentOnSend / 100) * 100) / 100, [numAmount, settings.commissionPercentOnSend]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     if (!/^\d+(\.\d{1,2})?$/.test(amount.trim())) { setError('Enter an amount with at most 2 decimals.'); return; }
+    if (!currency || !(rate > 0)) { setError('Exchange rate is unavailable. Please reload or select USD.'); return; }
+    if (numAmount < 0.1 || numAmount > settings.maxUserSend) { setError(`Amount must be between ${money(0.1)} and ${money(settings.maxUserSend)} after rounding.`); return; }
+    if (numAmount > agent.balance) { setError('Insufficient agent balance.'); return; }
     setBusy(true);
     try {
-      const res = await api<any>('/api/agent/send', { method: 'POST', body: { userId: userId.trim(), amount: amount.trim(), note: note.trim(), idempotencyKey: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` } });
+      const res = await api<any>('/api/agent/send', { method: 'POST', body: { userId: userId.trim(), amount: amount.trim(), currency: currency.code, expectedRate: rate, note: note.trim(), idempotencyKey: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` } });
       setReceipt({ amount: res.amount, commission: res.commission, userId: res.user?.id || userId.trim(), txId: res.transaction?.id || '' });
       onSent(res.agent);
-      toast({ type: 'ok', text: `$${money(res.amount)} sent to user #${res.user?.id || userId}` });
+      toast({ type: 'ok', text: `${money(res.amount)} sent to user #${res.user?.id || userId}` });
       setAmount(''); setNote('');
     } catch (err: any) {
       setError(err?.message || 'Transfer failed.');
@@ -465,12 +470,12 @@ const SendScreen: React.FC<{
         <Card className="border-emerald-500/30 bg-emerald-500/[0.07] text-center">
           <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-emerald-500/20"><Check className="h-7 w-7 text-emerald-400" /></div>
           <div className="mt-3 text-lg font-black text-white">Sent successfully</div>
-          <div className="mt-1 text-3xl font-black text-emerald-300">${money(receipt.amount)}</div>
+          <div className="mt-1 text-3xl font-black text-emerald-300">{money(receipt.amount)}</div>
           <div className="mt-1 text-[11px] text-zinc-400">to user #{receipt.userId}</div>
           <div className="mt-4 space-y-1.5 rounded-2xl bg-zinc-950/60 p-3 text-left text-[11px]">
-            <div className="flex justify-between"><span className="text-zinc-500">Commission earned ({settings.commissionPercentOnSend}%)</span><span className="font-bold text-emerald-300">+${money(receipt.commission)}</span></div>
+            <div className="flex justify-between"><span className="text-zinc-500">Commission earned ({settings.commissionPercentOnSend}%)</span><span className="font-bold text-emerald-300">+{money(receipt.commission)}</span></div>
             <div className="flex justify-between"><span className="text-zinc-500">Reference</span><span className="font-mono text-zinc-300">{receipt.txId}</span></div>
-            <div className="flex justify-between"><span className="text-zinc-500">Agent balance</span><span className="font-bold text-white">${money(agent.balance)}</span></div>
+            <div className="flex justify-between"><span className="text-zinc-500">Agent balance</span><span className="font-bold text-white">{money(agent.balance)}</span></div>
           </div>
         </Card>
         <button onClick={() => setReceipt(null)} className="h-12 w-full rounded-2xl bg-amber-500 text-sm font-black text-zinc-950 active:scale-[0.99]">Send another</button>
@@ -483,22 +488,22 @@ const SendScreen: React.FC<{
       <Card>
         <div className="flex items-center justify-between">
           <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Agent balance</span>
-          <span className="text-sm font-black text-white">${money(agent.balance)}</span>
+          <span className="text-sm font-black text-white">{money(agent.balance)}</span>
         </div>
       </Card>
       <Field label="Recipient User ID" hint="Only numeric User IDs — names and emails are never shown.">
         <input className={inputCls} inputMode="numeric" placeholder="e.g. 100000" value={userId} onChange={(e) => setUserId(e.target.value)} required />
       </Field>
-      <Field label="Amount (USD)">
+      <Field label={`Amount (${currency?.code || 'USD'})`} hint="Converted to USD and rounded to cents for the wallet ledger.">
         <input className={inputCls} inputMode="decimal" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} required />
       </Field>
       <Field label="Note (optional)">
         <input className={inputCls} placeholder="Cash handover, bank deposit…" value={note} onChange={(e) => setNote(e.target.value)} />
       </Field>
       <div className="rounded-2xl border border-zinc-800 bg-zinc-950/70 p-3 text-[11px]">
-        <div className="flex justify-between py-0.5"><span className="text-zinc-500">You send</span><span className="font-semibold text-white">${money(numAmount)}</span></div>
-        <div className="flex justify-between py-0.5"><span className="text-zinc-500">Commission ({settings.commissionPercentOnSend}%)</span><span className="font-semibold text-emerald-400">+${money(commission)}</span></div>
-        <div className="mt-1 flex justify-between border-t border-zinc-800 pt-1.5"><span className="text-zinc-400">Balance after</span><span className="font-black text-white">${money(agent.balance - numAmount + commission)}</span></div>
+        <div className="flex justify-between py-0.5"><span className="text-zinc-500">You send (after rounding)</span><span className="font-semibold text-white">{money(numAmount)}</span></div>
+        <div className="flex justify-between py-0.5"><span className="text-zinc-500">Commission ({settings.commissionPercentOnSend}%)</span><span className="font-semibold text-emerald-400">+{money(commission)}</span></div>
+        <div className="mt-1 flex justify-between border-t border-zinc-800 pt-1.5"><span className="text-zinc-400">Balance after</span><span className="font-black text-white">{money(agent.balance - numAmount + commission)}</span></div>
       </div>
       {error ? <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
       <button type="submit" disabled={busy} className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-amber-500 text-sm font-black text-zinc-950 active:scale-[0.99] disabled:opacity-60">
@@ -513,6 +518,7 @@ const ReceiveScreen: React.FC<{
   agent: Agent; settings: Settings; onCopy: (v: string) => void; history: LedgerRow[];
   toast: (t: { type: 'ok' | 'err'; text: string }) => void; onRedeemed: () => void;
 }> = ({ agent, settings, onCopy, history, toast, onRedeemed }) => {
+  const { fmt: money } = useCurrency();
   const incoming = history.filter((h) => h.type === 'USER_TO_AGENT');
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
@@ -529,7 +535,7 @@ const ReceiveScreen: React.FC<{
       const res = await api<any>('/api/agent/redeem', { method: 'POST', body: { code: clean } });
       setDone({ amount: Number(res.amount) || 0, commission: Number(res.commission) || 0, userId: String(res.userId || '') });
       setCode('');
-      toast({ type: 'ok', text: `Received $${money(res.amount)} from User #${res.userId}` });
+      toast({ type: 'ok', text: `Received ${money(res.amount)} from User #${res.userId}` });
       onRedeemed();
     } catch (e2: any) {
       setErr(e2?.message || 'Could not claim this code.');
@@ -558,7 +564,7 @@ const ReceiveScreen: React.FC<{
         {err ? <div className="mt-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[10.5px] font-semibold text-red-200">{err}</div> : null}
         {done ? (
           <div className="mt-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[10.5px] font-semibold text-emerald-200">
-            Received ${money(done.amount)} from User #{done.userId}{done.commission > 0 ? ` (+$${money(done.commission)} commission)` : ''} — new balance ${money(agent.balance)}.
+            Received {money(done.amount)} from User #{done.userId}{done.commission > 0 ? ` (+${money(done.commission)} commission)` : ''} — new balance {money(agent.balance)}.
           </div>
         ) : null}
       </Card>
@@ -577,7 +583,7 @@ const ReceiveScreen: React.FC<{
       <Card>
         <div className="mb-2 flex items-center justify-between">
           <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Recent incoming</span>
-          <span className="text-[10px] font-bold text-emerald-400">${money(agent.receivedTotal)} total</span>
+          <span className="text-[10px] font-bold text-emerald-400">{money(agent.receivedTotal)} total</span>
         </div>
         {incoming.length === 0 ? (
           <p className="py-4 text-center text-[11px] text-zinc-600">No incoming payments yet.</p>
@@ -590,7 +596,7 @@ const ReceiveScreen: React.FC<{
                   <div className="text-[9px] text-zinc-500">{timeAgo(h.at)}</div>
                 </div>
                 <div className="text-right">
-                  <div className="text-[11px] font-black text-emerald-400">+${money(h.amount)}</div>
+                  <div className="text-[11px] font-black text-emerald-400">+{money(h.amount)}</div>
                   {h.commission > 0 ? <div className="text-[9px] text-zinc-500">+{money(h.commission)} comm.</div> : null}
                 </div>
               </div>
@@ -909,6 +915,7 @@ const labelFor = (t: string) => ({
 } as Record<string, string>)[t] || t;
 
 const HistoryScreen: React.FC<{ rows: LedgerRow[]; loading: boolean }> = ({ rows, loading }) => {
+  const { fmt: money } = useCurrency();
   const [open, setOpen] = useState<LedgerRow | null>(null);
   const [q, setQ] = useState('');
   const creditOf = (t: string) => ['USER_TO_AGENT', 'MGMT_CREDIT', 'ADMIN_CREDIT', 'OPENING_BALANCE'].includes(t);
@@ -944,12 +951,12 @@ const HistoryScreen: React.FC<{ rows: LedgerRow[]; loading: boolean }> = ({ rows
                     <div className="min-w-0">
                       <div className="truncate text-[11px] font-semibold text-white">{labelFor(r.type)}</div>
                       <div className="truncate text-[9px] text-zinc-500">{r.userId ? `User #${r.userId} · ` : ''}{timeAgo(r.at)}</div>
-                      {r.fee > 0 ? <div className="text-[9px] text-zinc-600">User fee ${money(r.fee)}</div> : null}
+                      {r.fee > 0 ? <div className="text-[9px] text-zinc-600">User fee {money(r.fee)}</div> : null}
                     </div>
                   </div>
                   <div className="shrink-0 text-right">
-                    <div className={`text-[11px] font-black ${credit ? 'text-emerald-400' : 'text-amber-400'}`}>{credit ? '+' : '-'}${money(r.amount)}</div>
-                    <div className="text-[9px] text-zinc-500">bal ${money(r.balanceAfter)}</div>
+                    <div className={`text-[11px] font-black ${credit ? 'text-emerald-400' : 'text-amber-400'}`}>{credit ? '+' : '-'}{money(r.amount)}</div>
+                    <div className="text-[9px] text-zinc-500">bal {money(r.balanceAfter)}</div>
                     {r.commission > 0 ? <div className="text-[9px] font-semibold text-emerald-400/90">+{money(r.commission)} comm.</div> : null}
                   </div>
                 </button>
@@ -971,7 +978,7 @@ const HistoryScreen: React.FC<{ rows: LedgerRow[]; loading: boolean }> = ({ rows
             </div>
 
             <div className="mb-3 rounded-2xl border border-zinc-800 bg-zinc-950/70 p-3 text-center">
-              <div className={`text-2xl font-black ${creditOf(open.type) ? 'text-emerald-400' : 'text-amber-400'}`}>{creditOf(open.type) ? '+' : '-'}${money(open.amount)}</div>
+              <div className={`text-2xl font-black ${creditOf(open.type) ? 'text-emerald-400' : 'text-amber-400'}`}>{creditOf(open.type) ? '+' : '-'}{money(open.amount)}</div>
               <div className="mt-0.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-500">{creditOf(open.type) ? 'Credited' : 'Debited'}</div>
             </div>
 
@@ -983,10 +990,10 @@ const HistoryScreen: React.FC<{ rows: LedgerRow[]; loading: boolean }> = ({ rows
                 ['Type code', open.type],
                 ['User', open.userId ? `User #${open.userId}` : '—'],
                 ['Actor', open.actor ? String(open.actor) : '—'],
-                ['Amount', `$${money(open.amount)}`],
-                ['User fee', `$${money(open.fee || 0)}`],
-                ['Agent commission', `$${money(open.commission || 0)}`],
-                ['Balance after', `$${money(open.balanceAfter)}`],
+                ['Amount', money(open.amount)],
+                ['User fee', money(open.fee || 0)],
+                ['Agent commission', money(open.commission || 0)],
+                ['Balance after', money(open.balanceAfter)],
                 ['Note', open.note || '—']
               ].map(([k, v]) => (
                 <div key={String(k)} className="flex items-start justify-between gap-3 border-b border-zinc-800/60 pb-1.5 last:border-0">
@@ -1093,6 +1100,7 @@ const EmailVerifyCard: React.FC<{ agent: Agent; toast: (t: { type: 'ok' | 'err';
 };
 
 const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () => void; toast: (t: { type: 'ok' | 'err'; text: string }) => void; onRefresh?: () => void }> = ({ agent, settings, onLogout, toast, onRefresh }) => {
+  const { fmt: money } = useCurrency();
   const [openPw, setOpenPw] = useState(false);
   // Shown on the profile so it is obvious whether the phone is running the
   // latest build or a cached older one (that caused "the fix is not there").
@@ -1134,8 +1142,8 @@ const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () =
         </div>
         <div className="mt-3 space-y-1.5 text-[11px]">
           <div className="flex items-center justify-between"><span className="text-zinc-500">Email</span><span className="flex items-center gap-1 font-semibold text-zinc-200">{agent.email}{agent.emailVerified ? <BadgeCheck className="h-3 w-3 text-emerald-400" /> : null}</span></div>
-          <div className="flex justify-between"><span className="text-zinc-500">Balance</span><span className="font-black text-white">${money(agent.balance)}</span></div>
-          <div className="flex justify-between"><span className="text-zinc-500">Lifetime commission</span><span className="font-black text-emerald-400">${money(agent.commissionLifetime)}</span></div>
+          <div className="flex justify-between"><span className="text-zinc-500">Balance</span><span className="font-black text-white">{money(agent.balance)}</span></div>
+          <div className="flex justify-between"><span className="text-zinc-500">Lifetime commission</span><span className="font-black text-emerald-400">{money(agent.commissionLifetime)}</span></div>
           <div className="flex justify-between"><span className="text-zinc-500">User fee (paid by user)</span><span className="font-semibold text-zinc-200">{settings.feePercentOnUserSend}%</span></div>
           <div className="flex justify-between"><span className="text-zinc-500">Commission on receive</span><span className="font-semibold text-zinc-200">{settings.commissionPercentOnReceive}%</span></div>
           <div className="flex justify-between"><span className="text-zinc-500">Commission on send</span><span className="font-semibold text-zinc-200">{settings.commissionPercentOnSend}%</span></div>
@@ -1174,6 +1182,7 @@ const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () =
 type Tab = 'HOME' | 'SEND' | 'RECEIVE' | 'CHATS' | 'HISTORY' | 'PROFILE';
 
 export default function App() {
+  const { fmt: money } = useCurrency();
   const [agent, setAgent] = useState<Agent | null>(() => {
     try { const raw = localStorage.getItem(AGENT_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; }
   });
@@ -1218,6 +1227,8 @@ export default function App() {
       setChatUnread(Number(res.unread) || 0);
     } catch { /* ignore */ } finally { if (!quiet) setLoadingChats(false); }
   }, []);
+
+  useEffect(() => { window.dispatchEvent(new Event('bpa:auth-changed')); }, [token]);
 
   useEffect(() => {
     const onSignedOut = () => { setAgent(null); setToken(''); };
@@ -1290,7 +1301,7 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <div className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-bold text-emerald-300">${money(agent.balance)}</div>
+            <div className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-bold text-emerald-300">{money(agent.balance)}</div>
             <button onClick={() => setTab('PROFILE')} className="flex h-8 w-8 items-center justify-center rounded-full border border-zinc-800 bg-zinc-900 text-zinc-400"><Wallet className="h-4 w-4" /></button>
           </div>
         </header>

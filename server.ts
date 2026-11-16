@@ -10511,13 +10511,16 @@ async function startServer() {
       // Optional auth: this route is public (the signup screen needs the list), so
       // resolve the caller from the token directly instead of relying on middleware.
       let uid = String(req.authUserId || '');
+      let agentId = '';
       if (!uid) {
         try {
           const payload: any = verifyToken(getBearerToken(req));
-          if (payload && payload.role !== 'AGENT' && payload.role !== 'ADMIN') uid = String(payload.sub || '');
+          if (payload?.role === 'AGENT') agentId = String(payload.sub || '');
+          else if (payload && payload.role !== 'ADMIN') uid = String(payload.sub || '');
         } catch { /* anonymous */ }
       }
-      const me = uid ? (db.users || []).find((u: any) => String(u.id) === uid) : null;
+      const me = agentId ? (db.agents || []).find((a: any) => String(a.id) === agentId)
+        : uid ? (db.users || []).find((u: any) => String(u.id) === uid) : null;
       res.setHeader('Cache-Control', 'no-store');
       res.json(currencyOptionsPayload(db, me ? entryCurrencyOf(me) : undefined));
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load currencies.' }); }
@@ -14167,9 +14170,12 @@ const paymentLocks = new Map<string, Promise<any>>();
     const dup = idemKey ? agentIdempotency.get(idemKey) : undefined;
     if (dup && Date.now() - dup.at < 60000) return res.json({ ...dup.resp, duplicate: true });
     try {
-      const settings = agentSettingsOf(readDb());
-      const parsed = parseAgentAmount(req.body && req.body.amount, 0.1, settings.maxUserSend);
-      if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+      // Older clients send USD without a currency field. New clients explicitly
+      // send the chosen currency and the displayed rate, so a stale quote cannot
+      // silently change the amount of a transfer.
+      const currencyCode = String(req.body?.currency || 'USD').toUpperCase();
+      const parsedInput = parseAgentAmount(req.body && req.body.amount, 0, Number.MAX_SAFE_INTEGER / 100);
+      if (!parsedInput.ok) return res.status(400).json({ error: parsedInput.error });
       const userId = String((req.body && req.body.userId) || '').trim();
       if (!userId) return res.status(400).json({ error: 'Recipient User ID is required.' });
       const note = sanitizeText(req.body && req.body.note, 120);
@@ -14180,10 +14186,20 @@ const paymentLocks = new Map<string, Promise<any>>();
         const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId));
         const user = (db.users || []).find((u: any) => String(u.id) === userId);
         if (!agent) return { status: 404, body: { error: 'Agent not found.' } };
+        if (req.body?.currency && currencyCode !== entryCurrencyOf(agent)) return { status: 400, body: { error: 'Currency preference changed. Refresh before sending.' } };
+        if (req.body?.currency) {
+          const currentRate = fxRate(db, currencyCode);
+          const quotedRate = Number(req.body.expectedRate);
+          if (!(currentRate > 0) || !(quotedRate > 0) || Math.abs(currentRate - quotedRate) > 1e-10) return { status: 409, body: { error: 'Exchange rate changed or is unavailable. Refresh and review the amount before sending.' } };
+        }
+        const converted = entryAmountToUsd(db, agent, parsedInput.value, currencyCode);
+        if (converted.error) return { status: 400, body: { error: converted.error } };
+        const parsed = parseAgentAmount(converted.usd.toFixed(2), 0.1, s.maxUserSend);
+        if (!parsed.ok) return { status: 400, body: { error: 'Amount is outside the permitted transfer limits.' } };
         if (!user) return { status: 404, body: { error: `User ID #${userId} was not found.` } };
         if (user.isBlocked) return { status: 403, body: { error: 'That user account is suspended.' } };
         if (Number(agent.balance || 0) < parsed.value) {
-          return { status: 400, body: { error: `Insufficient agent balance. Need ${parsed.value.toFixed(2)}, available ${round2(agent.balance || 0).toFixed(2)}.` } };
+          return { status: 400, body: { error: 'Insufficient agent balance.' } };
         }
         const commission = pctOf(parsed.value, s.commissionPercentOnSend);
         agent.balance = round2(Number(agent.balance || 0) - parsed.value + commission);
