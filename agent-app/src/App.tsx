@@ -1245,6 +1245,21 @@ export default function App() {
     return () => window.clearInterval(iv);
   }, [token, refresh, loadHistory, loadChats]);
 
+  // Only a visible agent app sends heartbeats: background polling alone does not
+  // mean that the agent is available to customers.
+  useEffect(() => {
+    if (!token) return;
+    const beat = () => {
+      if (document.visibilityState !== 'visible') return;
+      void fetch('/api/agent/presence', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: '{}' }).catch(() => {});
+    };
+    const onVisible = () => { if (document.visibilityState === 'visible') beat(); };
+    beat();
+    const iv = window.setInterval(beat, 20_000);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { window.clearInterval(iv); document.removeEventListener('visibilitychange', onVisible); };
+  }, [token]);
+
   useEffect(() => {
     if (!token) return;
     if ('serviceWorker' in navigator) {

@@ -21,6 +21,7 @@
   // Keep in sync with MOBILE_HOSTS_DEFAULT in server.ts; the server can also change
   // this list remotely via GET /api/mobile/hosts.
   var HOSTS = [
+    'https://management.boostpay.online',
     'https://boostpay.online',
     'https://boostpay.72-60-42-18.sslip.io'
   ];
@@ -72,11 +73,9 @@
     var cached = null;
     try { cached = localStorage.getItem(STORE_KEY); } catch (e) { /* ignore */ }
 
-    // Cached host first (fast path), then the rest in order.
+    // The management API is canonical. Never restore an unapproved cached host.
+    if (hostIndex(cached) < 0) cached = null;
     var order = HOSTS.slice();
-    if (cached && hostIndex(cached) > 0) {
-      order = [cached].concat(HOSTS.filter(function (h) { return h !== cached; }));
-    }
 
     choosing = order.reduce(function (chain, host) {
       return chain.then(function (found) {
@@ -123,7 +122,7 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
         if (data && Array.isArray(data.hosts) && data.hosts.length) {
-          HOSTS = data.hosts.filter(function (h) { return /^https:\/\//.test(h); });
+          HOSTS = ['https://management.boostpay.online'].concat(data.hosts.filter(function (h) { return /^https:\/\//.test(h) && h !== 'https://management.boostpay.online' && !/^https:\/\/app\.boostpay\.online(?:[:\/]|$)/i.test(h); }));
           window.__BP_API_HOSTS__ = HOSTS.slice();
         }
         return HOSTS;

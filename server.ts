@@ -13786,6 +13786,10 @@ const paymentLocks = new Map<string, Promise<any>>();
     return `MGT-${n}`;
   }
 
+  // Presence records belong to the authenticated session, not the account status.
+  const agentPresence = new Map<string, { at: number; sid: string }>();
+  const AGENT_ONLINE_MS = 70_000;
+
   function requireAgent(req: any, res: any, next: any) {
     const payload = verifyToken(getBearerToken(req));
     if (!payload || payload.role !== 'AGENT') {
@@ -13913,6 +13917,14 @@ const paymentLocks = new Map<string, Promise<any>>();
       if (payload && payload.sid) {
         const db = readDb();
         revokeSession(db, String(payload.sid));
+        if (payload.role === 'AGENT') {
+          const presence = agentPresence.get(String(payload.sub));
+          if (presence && presence.sid === String(payload.sid)) {
+            const agent = (db.agents || []).find((a: any) => String(a.id) === String(payload.sub));
+            if (agent) agent.lastSeenAt = Math.max(Number(agent.lastSeenAt) || 0, presence.at);
+            agentPresence.delete(String(payload.sub));
+          }
+        }
         writeDb(db);
       }
       res.json({ success: true });
@@ -14282,6 +14294,23 @@ const paymentLocks = new Map<string, Promise<any>>();
     return res.status(501).json({ error: 'Agent boost is not enabled on this deployment yet.' });
   });
 
+  // Presence is based on a foreground heartbeat, not account-enabled status.
+  // Keep the freshest timestamp in memory; persist at most once per minute so
+  // last-seen survives a restart without writing the DB on every heartbeat.
+  app.post('/api/agent/presence', requireAgent, (req: any, res) => {
+    const db = readDb();
+    const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId));
+    if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+    const now = Date.now();
+    agentPresence.set(String(agent.id), { at: now, sid: String(req.authSid || '') });
+    if (now - Number(agent.lastSeenAt || 0) >= 60_000) {
+      agent.lastSeenAt = now;
+      writeDb(db);
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true });
+  });
+
   // ── User side: pay an agent (fee is charged to the user) ───────────────────
   app.get('/api/agents', requireUser, (req: any, res) => {
     const db = ensureAgentCollections(readDb());
@@ -14301,8 +14330,13 @@ const paymentLocks = new Map<string, Promise<any>>();
       balance: round2(Number(me && me.balance) || 0),
       agents: (db.agents || [])
         .filter((a: any) => a.isActive !== false)
-        // Agent float stays private — users only need the ID and display name.
-        .map((a: any) => ({ id: a.id, name: a.name || '' })),
+        // No balance or private account fields are exposed.
+        .map((a: any) => {
+          const presence = agentPresence.get(String(a.id));
+          const lastSeenAt = Math.max(Number(a.lastSeenAt) || 0, presence?.at || 0);
+          return { id: a.id, name: a.name || '', lastSeenAt, online: !!presence && Date.now() - presence.at < AGENT_ONLINE_MS };
+        })
+        .sort((a: any, b: any) => Number(b.online) - Number(a.online) || b.lastSeenAt - a.lastSeenAt || String(a.id).localeCompare(String(b.id))),
       unreadMessages: agentUnreadForUser(db, String(req.authUserId))
     });
   });
