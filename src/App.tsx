@@ -180,11 +180,19 @@ function AppInner() {
         refreshState();
       }
     };
+    // Mobile networks can drop while the PWA is backgrounded. Refresh immediately
+    // when connectivity returns or the user opens it again, rather than waiting
+    // for the next polling interval. This is a read, never a replay of payments.
+    const onReconnect = () => { if (document.visibilityState === 'visible') void refreshState(); };
+    window.addEventListener('online', onReconnect);
+    document.addEventListener('visibilitychange', onReconnect);
     window.addEventListener('storage', onStorage);
     return () => {
       unsubUser();
       unsubBanner();
       clearInterval(interval);
+      window.removeEventListener('online', onReconnect);
+      document.removeEventListener('visibilitychange', onReconnect);
       window.removeEventListener('storage', onStorage);
     };
   }, [currentUser?.id]);

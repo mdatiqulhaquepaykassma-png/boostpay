@@ -1580,7 +1580,7 @@ export class BoostPayStore {
     } catch (err) {
       console.warn('startServerBoost network error:', err);
       this.boostPendingAtClient = 0;
-      this.boostFailureToast('Connection problem', 'You are offline - boosting is controlled by the server.');
+      this.boostFailureToast('Connection problem', 'Cannot reach the server right now. Check your connection and try again.');
       return null;
     }
   }
@@ -1609,7 +1609,7 @@ export class BoostPayStore {
     } catch (err) {
       console.warn('pauseServerBoost network error:', err);
       this.boostPendingAtClient = 0;
-      this.boostFailureToast('Connection problem', 'You are offline - boosting is controlled by the server.');
+      this.boostFailureToast('Connection problem', 'Cannot reach the server right now. Check your connection and try again.');
       return null;
     }
   }
@@ -1638,7 +1638,7 @@ export class BoostPayStore {
     } catch (err) {
       console.warn('resumeServerBoost network error:', err);
       this.boostPendingAtClient = 0;
-      this.boostFailureToast('Connection problem', 'You are offline - boosting is controlled by the server.');
+      this.boostFailureToast('Connection problem', 'Cannot reach the server right now. Check your connection and try again.');
       return null;
     }
   }

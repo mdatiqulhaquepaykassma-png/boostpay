@@ -1,6 +1,6 @@
 // Loaded by the generated (workbox) worker through workbox.importScripts,
 // and directly in dev where this file is served as /sw.js.
-importScripts('/push-sw.js');
+importScripts('/push-sw.js', '/pwa-navigation.js');
 // BoostPay Progressive Web App Service Worker
 const CACHE_NAME = 'boostpay-cache-v1';
 const CORE_ASSETS = [
@@ -30,7 +30,7 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((keys) => {
       return Promise.all(
         keys.map((key) => {
-          if (key !== CACHE_NAME) {
+          if (key !== CACHE_NAME && key !== 'boostpay-pwa-app-shell-v1') {
             return caches.delete(key);
           }
         })
@@ -46,7 +46,8 @@ self.addEventListener('fetch', (event) => {
   if (
     event.request.method !== 'GET' ||
     url.pathname.startsWith('/api') ||
-    url.pathname.includes('/stream')
+    url.pathname.includes('/stream') ||
+    (event.request.mode === 'navigate' && (url.pathname === '/app' || url.pathname === '/app/'))
   ) {
     return;
   }

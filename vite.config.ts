@@ -23,7 +23,7 @@ export default defineConfig(() => {
           // The generated worker must load the Web Push handlers (public/push-sw.js):
           // a push event is what wakes a closed app, and generateSW does not read
           // public/sw.js at all.
-          importScripts: ['push-sw.js'],
+          importScripts: ['push-sw.js', 'pwa-navigation.js'],
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           // /app is the installable entry point and must ALWAYS come from the
           // server (its HTML links /app/manifest.json). Letting the worker's
