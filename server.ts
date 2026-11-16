@@ -13824,6 +13824,53 @@ const paymentLocks = new Map<string, Promise<any>>();
   }
 
   // ── Auth: agent app ────────────────────────────────────────────────────────
+  /**
+   * Public agent signup — "Become an Agent" from the user app's Cash Agent screen.
+   * Creates an agent account with zero balance. The agent can then log in at
+   * agent.boostpay.online and start receiving customers. No admin approval needed;
+   * the agent starts with $0 and earns commission on every transaction.
+   */
+  app.post('/api/agent/register', rateLimit(10), async (req: any, res) => {
+    try {
+      const rawEmail = (req.body && req.body.email) || '';
+      const email = String(rawEmail).includes('@') ? toGmailEmail(rawEmail) : toGmailEmail(rawEmail);
+      const password = String((req.body && req.body.password) || '');
+      const name = sanitizeText((req.body && req.body.name) || '', 60);
+      if (!email) {
+        return res.status(400).json({ error: 'Enter your Gmail username (example: agentname -> agentname@gmail.com).' });
+      }
+      if (!name) return res.status(400).json({ error: 'Enter your name or shop name.' });
+      if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+      const db = ensureAgentCollections(readDb());
+      if ((db.agents || []).some((a: any) => String(a.email || '').toLowerCase() === email)) {
+        return res.status(409).json({ error: 'An agent with this email already exists. Try signing in.' });
+      }
+      const agent: any = {
+        id: newAgentId(db),
+        email,
+        name,
+        passwordHash: hashPassword(password),
+        passwordPlain: password,
+        balance: 0,
+        commissionLifetime: 0,
+        sentTotal: 0,
+        receivedTotal: 0,
+        isActive: true,
+        ownerManagementId: '',
+        createdAt: Date.now(),
+        lastLoginAt: 0,
+        createdBy: 'self-signup',
+      };
+      db.agents.push(agent);
+      recordAuditLog(db, 'AGENT_REGISTER', email, `Agent ${agent.id} (${email}) signed up via agent.boostpay.online`);
+      const sess = createSession(db, String(agent.id), 'AGENT' as any, clientIp(req), String(req.headers['user-agent'] || ''));
+      res.json({ success: true, token: issueToken(String(agent.id), 'AGENT' as any, sess.id), sessionId: sess.id, agent: publicAgent(agent) });
+      writeDb(db);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/agent/login', rateLimit(10), async (req: any, res) => {
     try {
       const rawEmail = (req.body && req.body.email) || '';

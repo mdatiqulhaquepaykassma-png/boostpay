@@ -294,6 +294,12 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
             </div>
           </div>
           <div className="flex items-center gap-1.5">
+            <a
+              href="https://agent.boostpay.online/signup"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[9.5px] font-bold text-amber-300 cursor-pointer"
+            >Become an Agent</a>
             <button
               type="button"
               onClick={() => setView((v) => (v === 'CHAT' ? 'PAY' : 'CHAT'))}

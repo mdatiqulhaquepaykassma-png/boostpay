@@ -108,11 +108,14 @@ const gmailLocal = (v: string) => {
 };
 
 const LoginScreen: React.FC<{ onDone: (agent: Agent) => void; toast: (t: { type: 'ok' | 'err'; text: string }) => void }> = ({ onDone, toast }) => {
+  // /signup deep link (from the user app's "Become an Agent" button) opens signup mode.
+  const initialMode = typeof window !== 'undefined' && window.location.pathname.includes('signup') ? 'SIGNUP' : 'LOGIN';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [mode, setMode] = useState<'LOGIN' | 'FORGOT' | 'RESET'>('LOGIN');
+  const [mode, setMode] = useState<'LOGIN' | 'FORGOT' | 'RESET' | 'SIGNUP'>(initialMode);
   const [resetEmail, setResetEmail] = useState('');
   const [resetCode, setResetCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -151,6 +154,27 @@ const LoginScreen: React.FC<{ onDone: (agent: Agent) => void; toast: (t: { type:
     } catch (err: any) {
       setError(err?.message || 'Could not send the reset code.');
     } finally { setBusy(false); }
+  };
+
+  const submitSignup = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(''); setInfo('');
+    const local = gmailLocal(email);
+    if (!local) { setError('Enter your Gmail username (example: agentname → agentname@gmail.com)'); return; }
+    if (!name.trim()) { setError('Enter your name or shop name.'); return; }
+    if (password.length < 6) { setError('Password must be at least 6 characters.'); return; }
+    setBusy(true);
+    try {
+      const res = await api<{ token: string; agent: Agent }>('/api/agent/register', { method: 'POST', body: { email: local, password, name: name.trim() } });
+      localStorage.setItem(TOKEN_KEY, res.token);
+      localStorage.setItem(AGENT_KEY, JSON.stringify(res.agent));
+      toast({ type: 'ok', text: `Welcome, ${res.agent.name || res.agent.id}! Your agent account is ready.` });
+      onDone(res.agent);
+    } catch (err: any) {
+      setError(err?.message || 'Sign up failed.');
+    } finally {
+      setBusy(false);
+    }
   };
 
   const submitReset = async (e: React.FormEvent) => {
@@ -210,6 +234,40 @@ const LoginScreen: React.FC<{ onDone: (agent: Agent) => void; toast: (t: { type:
               {!busy && <ChevronRight className="h-4 w-4" />}
             </button>
             <button type="button" onClick={() => { setMode('FORGOT'); setResetEmail(email); setError(''); setInfo(''); }} className="w-full text-center text-[11px] font-bold text-amber-400/90">Forgot password?</button>
+            <button type="button" onClick={() => { setMode('SIGNUP'); setError(''); setInfo(''); }} className="w-full text-center text-[11px] font-bold text-zinc-400">New here? <span className="text-amber-400">Become an Agent</span></button>
+          </form>
+        ) : mode === 'SIGNUP' ? (
+          <form onSubmit={submitSignup} className="space-y-3">
+            <Field label="Your name or shop name" hint="Shown to customers when they chat with you.">
+              <input className={inputCls} placeholder="e.g. Rahim Store" value={name} onChange={(e) => setName(e.target.value)} required />
+            </Field>
+            <Field label="Gmail username" hint="Only @gmail.com — type the part before @ (example: agentname)">
+              <div className="flex items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 focus-within:border-amber-500/70">
+                <input
+                  className="min-w-0 flex-1 bg-transparent py-3 text-sm text-white placeholder-zinc-600 outline-none"
+                  autoComplete="username" placeholder="agentname" value={email}
+                  onChange={(e) => setEmail(gmailLocal(e.target.value))} required
+                />
+                <span className="shrink-0 text-[12px] font-semibold text-zinc-500">@gmail.com</span>
+              </div>
+            </Field>
+            <Field label="Password" hint="At least 6 characters.">
+              <div className="flex items-center gap-1.5 rounded-2xl border border-zinc-800 bg-zinc-950 px-4 focus-within:border-amber-500/70">
+                <input
+                  className="min-w-0 flex-1 bg-transparent py-3 text-sm text-white placeholder-zinc-600 outline-none"
+                  type={showPw ? 'text' : 'password'} autoComplete="new-password" placeholder="••••••••"
+                  value={password} onChange={(e) => setPassword(e.target.value)} required
+                />
+                <button type="button" onClick={() => setShowPw((v) => !v)} className="shrink-0 text-[10px] font-bold text-zinc-500">{showPw ? 'HIDE' : 'SHOW'}</button>
+              </div>
+            </Field>
+            {error ? <div className="rounded-2xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] font-semibold text-red-200">{error}</div> : null}
+            {info ? <div className="rounded-2xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[11px] font-semibold text-emerald-200">{info}</div> : null}
+            <button type="submit" disabled={busy} className="mt-2 flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-amber-500 text-sm font-black text-zinc-950 transition active:scale-[0.99] disabled:opacity-60">
+              {busy ? 'Creating account…' : 'Become an Agent'}
+              {!busy && <ChevronRight className="h-4 w-4" />}
+            </button>
+            <button type="button" onClick={() => { setMode('LOGIN'); setError(''); setInfo(''); }} className="w-full text-center text-[11px] font-bold text-zinc-400">Already an agent? Sign in</button>
           </form>
         ) : mode === 'FORGOT' ? (
           <form onSubmit={requestCode} className="space-y-3">
