@@ -423,23 +423,6 @@ const HomeScreen: React.FC<{
       </Card>
     </div>
 
-    <Card>
-      <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400"><Lock className="h-3 w-3" /> Boost</div>
-      <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-500">
-        Boost is available for <span className="font-semibold text-zinc-300">user accounts only</span>. Agent and management accounts cannot start a boost.
-      </p>
-    </Card>
-
-    {platform ? (
-      <Card>
-        <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">Network</div>
-        <div className="mt-2 space-y-1.5 text-[11px]">
-          <div className="flex justify-between"><span className="text-zinc-500">Active agents</span><span className="font-semibold text-white">{platform.agents}</span></div>
-          <div className="flex justify-between"><span className="text-zinc-500">Volume in (all agents)</span><span className="font-semibold text-white">${money(platform.volumeIn)}</span></div>
-          <div className="flex justify-between"><span className="text-zinc-500">Volume out (all agents)</span><span className="font-semibold text-white">${money(platform.volumeOut)}</span></div>
-        </div>
-      </Card>
-    ) : null}
   </div>
   );
 };
