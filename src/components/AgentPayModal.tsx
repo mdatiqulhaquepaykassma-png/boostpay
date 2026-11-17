@@ -56,7 +56,7 @@ const agentStatus = (agent: AgentOption, now: number) => {
   return `Last seen ${new Date(last).toLocaleDateString()}`;
 };
 
-const ContactActions: FC<{ agent: AgentOption; onMessage: () => void }> = ({ agent, onMessage }) => {
+const ContactActions: FC<{ agent: AgentOption; onMessage: () => void; unread?: number }> = ({ agent, onMessage, unread = 0 }) => {
   const c = agent.contacts;
   const telegram = c?.telegram && /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(c.telegram) ? `https://t.me/${c.telegram}` : '';
   const whatsapp = c?.whatsapp && /^[1-9]\d{7,14}$/.test(c.whatsapp) ? `https://wa.me/${c.whatsapp}` : '';
@@ -68,7 +68,7 @@ const ContactActions: FC<{ agent: AgentOption; onMessage: () => void }> = ({ age
   const common = 'flex min-h-10 items-center justify-center rounded-xl border px-1 py-2 text-[10px] font-bold';
   return <div className="space-y-1.5">
     <div className="grid grid-cols-4 gap-1.5">
-      <button type="button" onClick={onMessage} className={`${common} border-emerald-500/40 bg-emerald-500/10 text-emerald-300`}>Message</button>
+      <button type="button" onClick={onMessage} className={`${common} border-emerald-500/40 bg-emerald-500/10 text-emerald-300`}>Message{unread > 0 ? <span className="ml-1 rounded-full bg-emerald-500 px-1 text-[9px] text-zinc-950">{unread}</span> : null}</button>
       {([['Telegram', telegram], ['WhatsApp', whatsapp], ['imo', imo]] as const).map(([name, href]) => href
         ? <a key={name} href={href} target="_blank" rel="noopener noreferrer" className={`${common} border-zinc-700 bg-zinc-950 text-zinc-200`} aria-label={`Message agent on ${name}`}>{name}</a>
         : <span key={name} title={`${name} not set by agent`} aria-disabled="true" className={`${common} border-zinc-800 bg-zinc-950 text-zinc-600`}>{name}</span>)}
@@ -405,7 +405,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                     <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-white">{a.name || a.id}</span><span className="block text-[10px] text-zinc-500">{a.id} · <span className={a.online ? 'text-emerald-400' : ''}>{agentStatus(a, nowTs)}</span></span></span>
                     {agentId === a.id ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : <ChevronDown className="h-4 w-4 text-zinc-500" />}
                   </button>
-                  {agentId === a.id ? <div className="mt-3"><ContactActions agent={a} onMessage={() => setChatOpen(true)} /></div> : null}
+                  {agentId === a.id ? <div className="mt-3"><ContactActions agent={a} unread={unreadByAgent[a.id]} onMessage={() => setChatOpen(true)} /></div> : null}
                 </div>)}</div>}
             <p className="text-[10px] leading-relaxed text-zinc-500">Contact an agent to arrange your deposit. No money moves until a separate transfer is completed.</p>
           </div>
@@ -640,7 +640,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                   ) : null}
                 </div>
 
-                {selectedAgent ? <ContactActions agent={selectedAgent} onMessage={() => setChatOpen(true)} /> : null}
+                {selectedAgent ? <ContactActions agent={selectedAgent} unread={unreadByAgent[selectedAgent.id]} onMessage={() => setChatOpen(true)} /> : null}
 
                 {/* Available Boosted Withdraw — only boost-earned dollars can go out via an agent */}
                 <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5">
