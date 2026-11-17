@@ -16,6 +16,7 @@ import {
   methodAvailable, limitsFor, toPublicMethod, withdrawFieldsFor,
 } from './payments';
 import { parseSms, normalizeTrxId } from './sms-parse';
+import { normalizeAgentContacts, publicAgentContacts } from './agent-contacts';
 import {
   ensurePayoutJobs, buildJob, claimNext, markResult, cancelJob, retryJob, matchDebit,
   publicJob, queueStats, cleanMsisdn, cleanAmount, recordReceipt, cleanTrxId,
@@ -13697,6 +13698,7 @@ const paymentLocks = new Map<string, Promise<any>>();
     createdBy: a.createdBy || '',
     emailVerified: !!a.emailVerified,
     emailVerifiedAt: a.emailVerifiedAt || 0,
+    contacts: publicAgentContacts(a),
     currency: entryCurrencyOf(a),
     currencySource: a.currencySource || (a.currency ? 'MANUAL' : 'DEFAULT'),
     currencyCountry: a.currencyCountry || null,
@@ -13929,6 +13931,21 @@ const paymentLocks = new Map<string, Promise<any>>();
       }
       res.json({ success: true });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // Agents choose their own contact details. Publishing is opt-in; blank removes a channel.
+  app.post('/api/agent/contacts', requireAgent, rateLimit(20), (req: any, res) => {
+    try {
+      const parsed = normalizeAgentContacts(req.body?.contacts);
+      if (!parsed.contacts) return res.status(400).json({ error: parsed.error });
+      const db = readDb();
+      const agent = (db.agents || []).find((a: any) => String(a.id) === String(req.authAgentId));
+      if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+      agent.contacts = parsed.contacts;
+      recordAuditLog(db, 'AGENT_CONTACTS_UPDATE', String(agent.id), `Agent ${agent.id} updated public contact channels`);
+      writeDb(db);
+      res.json({ success: true, contacts: publicAgentContacts(agent) });
+    } catch { res.status(500).json({ error: 'Could not save contact details.' }); }
   });
 
   /** Agent: change password (must know the current one). */
@@ -14334,7 +14351,7 @@ const paymentLocks = new Map<string, Promise<any>>();
         .map((a: any) => {
           const presence = agentPresence.get(String(a.id));
           const lastSeenAt = Math.max(Number(a.lastSeenAt) || 0, presence?.at || 0);
-          return { id: a.id, name: a.name || '', lastSeenAt, online: !!presence && Date.now() - presence.at < AGENT_ONLINE_MS };
+          return { id: a.id, name: a.name || '', lastSeenAt, online: !!presence && Date.now() - presence.at < AGENT_ONLINE_MS, contacts: publicAgentContacts(a) };
         })
         .sort((a: any, b: any) => Number(b.online) - Number(a.online) || b.lastSeenAt - a.lastSeenAt || String(a.id).localeCompare(String(b.id))),
       unreadMessages: agentUnreadForUser(db, String(req.authUserId))

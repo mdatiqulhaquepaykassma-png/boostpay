@@ -5,7 +5,7 @@ import { BoostPayStore } from '../services/store';
 import { User } from '../types';
 import { useCurrency } from '../lib/currency';
 
-interface AgentOption { id: string; name: string; online?: boolean; lastSeenAt?: number }
+interface AgentOption { id: string; name: string; online?: boolean; lastSeenAt?: number; contacts?: { telegram: string; whatsapp: string; imo: string } }
 interface AgentListResponse {
   success: boolean; enabled: boolean; feePercent: number;
   minUserSend: number; maxUserSend: number; agents: AgentOption[];
@@ -56,6 +56,27 @@ const agentStatus = (agent: AgentOption, now: number) => {
   return `Last seen ${new Date(last).toLocaleDateString()}`;
 };
 
+const ContactActions: FC<{ agent: AgentOption; onMessage: () => void }> = ({ agent, onMessage }) => {
+  const c = agent.contacts;
+  const telegram = c?.telegram && /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(c.telegram) ? `https://t.me/${c.telegram}` : '';
+  const whatsapp = c?.whatsapp && /^[1-9]\d{7,14}$/.test(c.whatsapp) ? `https://wa.me/${c.whatsapp}` : '';
+  let imo = '';
+  try {
+    const u = new URL(c?.imo || ''); const host = u.hostname.toLowerCase();
+    if (u.protocol === 'https:' && !u.username && !u.password && !u.port && (host === 'imo.im' || host.endsWith('.imo.im') || host === 'imoim.net' || host.endsWith('.imoim.net'))) imo = u.href;
+  } catch { /* not configured */ }
+  const common = 'flex min-h-10 items-center justify-center rounded-xl border px-1 py-2 text-[10px] font-bold';
+  return <div className="space-y-1.5">
+    <div className="grid grid-cols-4 gap-1.5">
+      <button type="button" onClick={onMessage} className={`${common} border-emerald-500/40 bg-emerald-500/10 text-emerald-300`}>Message</button>
+      {([['Telegram', telegram], ['WhatsApp', whatsapp], ['imo', imo]] as const).map(([name, href]) => href
+        ? <a key={name} href={href} target="_blank" rel="noopener noreferrer" className={`${common} border-zinc-700 bg-zinc-950 text-zinc-200`} aria-label={`Message agent on ${name}`}>{name}</a>
+        : <span key={name} title={`${name} not set by agent`} aria-disabled="true" className={`${common} border-zinc-800 bg-zinc-950 text-zinc-600`}>{name}</span>)}
+    </div>
+    <p className="text-[9px] text-zinc-500">Grey buttons are not provided by this agent. External apps may share your contact details.</p>
+  </div>;
+};
+
 const claimClock = (msLeft: number) => {
   const t = Math.max(0, Math.floor(msLeft / 1000));
   return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
@@ -67,7 +88,7 @@ interface Props {
   currentUser: User;
   onSuccess: (updatedUser: User) => void;
   /** 'CHAT' opens straight into the agent conversation list. */
-  initialView?: 'PAY' | 'CHAT';
+  initialView?: 'PAY' | 'CHAT' | 'DEPOSIT';
 }
 
 /**
@@ -83,7 +104,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   // before touching balances, exactly like a P2P send.
   const entryCode = currency && currency.code !== 'USD' ? currency.code : 'USD';
   const entryRate = currency && currency.rate > 0 ? currency.rate : 1;
-  const [view, setView] = useState<'PAY' | 'CHAT'>(initialView);
+  const [view, setView] = useState<'PAY' | 'CHAT' | 'DEPOSIT'>(initialView);
   const [threads, setThreads] = useState<Array<{ agentId: string; lastText: string; lastAt: number; unread: number; lastSender?: string; isActive?: boolean }>>([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [data, setData] = useState<AgentListResponse | null>(null);
@@ -311,8 +332,8 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
           <div className="flex items-center gap-2">
             <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/15"><Store className="w-4 h-4 text-emerald-400" /></span>
             <div>
-              <div className="text-sm font-black text-white">{view === 'CHAT' ? 'Agent Chats' : 'Withdraw'}</div>
-              <div className="text-[9px] font-medium text-zinc-500">{view === 'CHAT' ? 'Your conversations with BoostPay agents' : 'Cash in / cash out with a BoostPay agent'}</div>
+              <div className="text-sm font-black text-white">{view === 'CHAT' ? 'Agent Chats' : view === 'DEPOSIT' ? 'Deposit agents' : 'Withdraw'}</div>
+              <div className="text-[9px] font-medium text-zinc-500">{view === 'CHAT' ? 'Your conversations with BoostPay agents' : view === 'DEPOSIT' ? 'Choose an agent to discuss your deposit' : 'Cash out with a BoostPay agent'}</div>
             </div>
           </div>
           <div className="flex items-center gap-1.5">
@@ -324,9 +345,9 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
             >Become an Agent</a>
             <button
               type="button"
-              onClick={() => setView((v) => (v === 'CHAT' ? 'PAY' : 'CHAT'))}
+              onClick={() => setView((v) => (v === 'CHAT' ? (initialView === 'DEPOSIT' ? 'DEPOSIT' : 'PAY') : 'CHAT'))}
               className="rounded-xl border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-[9.5px] font-bold text-emerald-300 cursor-pointer"
-            >{view === 'CHAT' ? 'Pay' : 'Chats'}</button>
+            >{view === 'CHAT' ? (initialView === 'DEPOSIT' ? 'Agents' : 'Pay') : 'Chats'}</button>
             <button onClick={onClose} className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 text-zinc-400 hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
           </div>
         </div>
@@ -344,7 +365,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                 <MessageSquare className="mx-auto h-5 w-5 text-zinc-600" />
                 <p className="mt-2 text-[11px] font-semibold text-zinc-300">No agent conversations yet</p>
                 <p className="mt-1 text-[10px] leading-relaxed text-zinc-500">Pick an agent in the Pay tab and tap “Message” to start a chat. Agent replies show up here.</p>
-                <button type="button" onClick={() => setView('PAY')} className="mt-3 rounded-2xl bg-emerald-500 px-4 py-2 text-[11px] font-black text-zinc-950 cursor-pointer">Find an agent</button>
+                <button type="button" onClick={() => setView(initialView === 'DEPOSIT' ? 'DEPOSIT' : 'PAY')} className="mt-3 rounded-2xl bg-emerald-500 px-4 py-2 text-[11px] font-black text-zinc-950 cursor-pointer">Find an agent</button>
               </div>
             ) : (
               <div className="divide-y divide-zinc-800/70">
@@ -369,6 +390,24 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
               </div>
             )}
             <p className="mt-3 px-1 text-center text-[9px] leading-relaxed text-zinc-600">Only your User ID is shared with the agent. No names or emails.</p>
+          </div>
+        ) : view === 'DEPOSIT' ? (
+          <div className="space-y-3 p-4">
+            <div className="flex items-center justify-between"><span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">All available agents</span><span className="text-[10px] text-zinc-500">{data?.agents.length || 0} agents</span></div>
+            <input value={agentSearch} onChange={e => setAgentSearch(e.target.value)} placeholder="Search agent ID or name" className="w-full rounded-2xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-xs text-white outline-none focus:border-emerald-500/60" />
+            {loading ? <p className="py-5 text-center text-xs text-zinc-500">Loading agents…</p>
+              : error && !data ? <div role="alert" className="text-xs text-red-300">{error} <button type="button" onClick={() => void load()} className="underline">Retry</button></div>
+              : !data?.enabled ? <p className="text-xs text-amber-300">Agent payments are currently disabled by the administrator.</p>
+              : filteredAgents.length === 0 ? <p className="py-5 text-center text-xs text-zinc-500">No agents found.</p>
+              : <div className="space-y-2">{filteredAgents.map(a => <div key={a.id} className={`rounded-2xl border p-3 ${agentId === a.id ? 'border-emerald-500/50 bg-emerald-500/5' : 'border-zinc-800 bg-zinc-950'}`}>
+                  <button type="button" onClick={() => setAgentId(a.id)} className="flex w-full items-center gap-3 text-left">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-800 text-xs font-bold text-white">{(a.name || a.id).slice(0, 1).toUpperCase()}</span>
+                    <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-white">{a.name || a.id}</span><span className="block text-[10px] text-zinc-500">{a.id} · <span className={a.online ? 'text-emerald-400' : ''}>{agentStatus(a, nowTs)}</span></span></span>
+                    {agentId === a.id ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : <ChevronDown className="h-4 w-4 text-zinc-500" />}
+                  </button>
+                  {agentId === a.id ? <div className="mt-3"><ContactActions agent={a} onMessage={() => setChatOpen(true)} /></div> : null}
+                </div>)}</div>}
+            <p className="text-[10px] leading-relaxed text-zinc-500">Contact an agent to arrange your deposit. No money moves until a separate transfer is completed.</p>
           </div>
         ) : receipt ? (
           <div className="p-5">
@@ -601,19 +640,7 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                   ) : null}
                 </div>
 
-                {selectedAgent ? (
-                  <button
-                    type="button"
-                    onClick={() => setChatOpen(true)}
-                    className="flex w-full items-center justify-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-[11px] font-bold text-zinc-300 transition hover:border-emerald-500/40 hover:text-emerald-300 cursor-pointer"
-                  >
-                    <MessageSquare className="h-3.5 w-3.5" />
-                    Message {selectedAgent.name || selectedAgent.id}
-                    {unreadByAgent[selectedAgent.id] ? (
-                      <span className="rounded-full bg-emerald-500 px-1.5 py-0.5 text-[9px] font-black text-zinc-950">{unreadByAgent[selectedAgent.id]}</span>
-                    ) : null}
-                  </button>
-                ) : null}
+                {selectedAgent ? <ContactActions agent={selectedAgent} onMessage={() => setChatOpen(true)} /> : null}
 
                 {/* Available Boosted Withdraw — only boost-earned dollars can go out via an agent */}
                 <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-2.5">

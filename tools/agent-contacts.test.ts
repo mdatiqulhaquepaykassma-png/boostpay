@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import { normalizeAgentContacts, publicAgentContacts } from '../agent-contacts';
+const empty = {telegram:'',whatsapp:'',imo:''};
+let r = normalizeAgentContacts(empty); assert.deepEqual(r.contacts, empty);
+r = normalizeAgentContacts({telegram:'@Agent_123',whatsapp:'+880 1712-345678',imo:'https://s.imoim.net/abc123'});
+assert.deepEqual(r.contacts,{telegram:'Agent_123',whatsapp:'8801712345678',imo:'https://s.imoim.net/abc123'});
+assert.equal(normalizeAgentContacts({...empty,telegram:'https://t.me/Agent_123'}).contacts?.telegram,'Agent_123');
+assert.equal(normalizeAgentContacts({...empty,telegram:'https://t.me.evil.example/Agent_123'}).contacts,undefined);
+assert.equal(normalizeAgentContacts({...empty,telegram:'javascript:alert(1)'}).contacts,undefined);
+assert.equal(normalizeAgentContacts({...empty,whatsapp:'+88foo12345678'}).contacts,undefined);
+assert.equal(normalizeAgentContacts({...empty,imo:'https://imo.im.evil.example/profile'}).contacts,undefined);
+assert.equal(normalizeAgentContacts({...empty,imo:'https://imo.im@evil.example/profile'}).contacts,undefined);
+assert.equal(normalizeAgentContacts({...empty,imo:'http://imo.im/profile'}).contacts,undefined);
+assert.equal(normalizeAgentContacts({...empty,imo:'https://s.imoim.net:444/profile'}).contacts,undefined);
+assert.deepEqual(publicAgentContacts({}),empty);
+assert.deepEqual(publicAgentContacts({contacts:{...empty,imo:'javascript:alert(1)'}}),empty);
+console.log('PASS agent contacts validation, normalization, removal and malicious URL rejection');

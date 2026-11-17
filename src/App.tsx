@@ -53,7 +53,7 @@ function AppInner() {
   // so the browser back button closes it instead of leaving the wallet.
   const [paymentsMode, setPaymentsMode] = useState<'deposit' | 'withdraw' | null>(null);
   const [isAgentPayOpen, setIsAgentPayOpen] = useState(false);
-  const [agentPayView, setAgentPayView] = useState<'PAY' | 'CHAT'>('PAY');
+  const [agentPayView, setAgentPayView] = useState<'PAY' | 'CHAT' | 'DEPOSIT'>('PAY');
 
   // System config state
   const [config, setConfig] = useState<SystemConfig>(BoostPayStore.getConfig());
@@ -732,7 +732,7 @@ function AppInner() {
           initialMode={paymentsMode}
           onClose={closePayments}
           onOpenAgentPay={() => { setAgentPayView('PAY'); setIsAgentPayOpen(true); }}
-          onOpenAgentChat={() => { setAgentPayView('CHAT'); setIsAgentPayOpen(true); }}
+          onOpenAgentChat={() => { setAgentPayView('DEPOSIT'); setIsAgentPayOpen(true); }}
           // switching tabs rewrites the same history entry, so one Back press
           // returns to the wallet instead of walking through the tabs
           onModeChange={(m) => { setPaymentsMode(m); try { history.replaceState({ payments: m }, '', `#/${m}`); } catch { /* ignore */ } }}

@@ -17,6 +17,7 @@ type Agent = {
   id: string; name: string; email: string; balance: number; commissionLifetime: number;
   sentTotal: number; receivedTotal: number; isActive: boolean; createdAt: number;
   emailVerified?: boolean; emailVerifiedAt?: number; ownerManagementId?: string;
+  contacts?: { telegram: string; whatsapp: string; imo: string };
 };
 type Settings = {
   feePercentOnUserSend: number; commissionPercentOnReceive: number;
@@ -1099,9 +1100,36 @@ const EmailVerifyCard: React.FC<{ agent: Agent; toast: (t: { type: 'ok' | 'err';
   );
 };
 
+const ContactEditor: React.FC<{ agent: Agent; onSaved: () => void; onCancel: () => void }> = ({ agent, onSaved, onCancel }) => {
+  const [telegram, setTelegram] = useState(agent.contacts?.telegram || '');
+  const [whatsapp, setWhatsapp] = useState(agent.contacts?.whatsapp ? `+${agent.contacts.whatsapp}` : '');
+  const [imo, setImo] = useState(agent.contacts?.imo || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault(); setError(''); setSaving(true);
+    try {
+      await api('/api/agent/contacts', { method: 'POST', body: { contacts: { telegram, whatsapp, imo } } });
+      onSaved();
+    } catch (e2: any) { setError(e2?.message || 'Could not save contacts.'); }
+    finally { setSaving(false); }
+  };
+  return (
+    <form onSubmit={save} className="mt-3 space-y-3">
+      <p className="text-[10px] leading-relaxed text-amber-300">These details will be visible to BoostPay users. Leave any field empty to hide that contact button.</p>
+      <Field label="Telegram username or profile link" hint="Example: @yourusername"><input className={inputCls} value={telegram} onChange={e => setTelegram(e.target.value)} placeholder="@username" maxLength={150} autoCapitalize="none" /></Field>
+      <Field label="WhatsApp phone with country code" hint="Example: +8801…"><input className={inputCls} value={whatsapp} onChange={e => setWhatsapp(e.target.value)} placeholder="+880..." inputMode="tel" maxLength={40} /></Field>
+      <Field label="imo profile link" hint="In imo: Profile → imo QR code → Share → Copy link."><input className={inputCls} value={imo} onChange={e => setImo(e.target.value)} placeholder="https://..." type="url" maxLength={500} /></Field>
+      {error ? <div role="alert" className="rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-200">{error}</div> : null}
+      <div className="flex gap-2"><button type="submit" disabled={saving} className="h-11 flex-1 rounded-2xl bg-amber-500 text-xs font-black text-zinc-950 disabled:opacity-60">{saving ? 'Saving…' : 'Save contacts'}</button><button type="button" onClick={onCancel} disabled={saving} className="h-11 rounded-2xl border border-zinc-700 px-4 text-xs text-zinc-300">Cancel</button></div>
+    </form>
+  );
+};
+
 const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () => void; toast: (t: { type: 'ok' | 'err'; text: string }) => void; onRefresh?: () => void }> = ({ agent, settings, onLogout, toast, onRefresh }) => {
   const { fmt: money } = useCurrency();
   const [openPw, setOpenPw] = useState(false);
+  const [openContacts, setOpenContacts] = useState(false);
   // Shown on the profile so it is obvious whether the phone is running the
   // latest build or a cached older one (that caused "the fix is not there").
   const [build, setBuild] = useState('');
@@ -1148,6 +1176,14 @@ const ProfileScreen: React.FC<{ agent: Agent; settings: Settings; onLogout: () =
           <div className="flex justify-between"><span className="text-zinc-500">Commission on receive</span><span className="font-semibold text-zinc-200">{settings.commissionPercentOnReceive}%</span></div>
           <div className="flex justify-between"><span className="text-zinc-500">Commission on send</span><span className="font-semibold text-zinc-200">{settings.commissionPercentOnSend}%</span></div>
         </div>
+      </Card>
+
+      <Card>
+        <button type="button" onClick={() => setOpenContacts(v => !v)} className="flex w-full items-center justify-between">
+          <span className="flex items-center gap-2 text-[11px] font-bold text-white"><MessageSquare className="h-4 w-4 text-amber-400" /> Telegram, WhatsApp & imo</span>
+          <ChevronRight className={`h-4 w-4 text-zinc-500 transition ${openContacts ? 'rotate-90' : ''}`} />
+        </button>
+        {openContacts ? <ContactEditor agent={agent} onCancel={() => setOpenContacts(false)} onSaved={() => { setOpenContacts(false); onRefresh?.(); toast({ type: 'ok', text: 'Public contact details updated.' }); }} /> : null}
       </Card>
 
       <EmailVerifyCard agent={agent} toast={toast} onVerified={onRefresh} />
