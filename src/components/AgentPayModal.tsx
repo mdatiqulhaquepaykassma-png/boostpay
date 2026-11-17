@@ -65,12 +65,14 @@ const ContactActions: FC<{ agent: AgentOption; onMessage: () => void; unread?: n
     const u = new URL(c?.imo || ''); const host = u.hostname.toLowerCase();
     if (u.protocol === 'https:' && !u.username && !u.password && !u.port && (host === 'imo.im' || host.endsWith('.imo.im') || host === 'imoim.net' || host.endsWith('.imoim.net'))) imo = u.href;
   } catch { /* not configured */ }
+  // Android WebView handles external navigation through its native ACTION_VIEW intent.
+  const native = !!(window as any).Capacitor?.isNativePlatform?.();
   const common = 'flex min-h-10 items-center justify-center rounded-xl border px-1 py-2 text-[10px] font-bold';
   return <div className="space-y-1.5">
     <div className="grid grid-cols-4 gap-1.5">
       <button type="button" onClick={onMessage} className={`${common} border-emerald-500/40 bg-emerald-500/10 text-emerald-300`}>Message{unread > 0 ? <span className="ml-1 rounded-full bg-emerald-500 px-1 text-[9px] text-zinc-950">{unread}</span> : null}</button>
       {([['Telegram', telegram], ['WhatsApp', whatsapp], ['imo', imo]] as const).map(([name, href]) => href
-        ? <a key={name} href={href} target="_blank" rel="noopener noreferrer" className={`${common} border-zinc-700 bg-zinc-950 text-zinc-200`} aria-label={`Message agent on ${name}`}>{name}</a>
+        ? <a key={name} href={href} target={native ? "_self" : "_blank"} rel="noopener noreferrer" className={`${common} border-zinc-700 bg-zinc-950 text-zinc-200`} aria-label={`Message agent on ${name}`}>{name}</a>
         : <span key={name} title={`${name} not set by agent`} aria-disabled="true" className={`${common} border-zinc-800 bg-zinc-950 text-zinc-600`}>{name}</span>)}
     </div>
     <p className="text-[9px] text-zinc-500">Grey buttons are not provided by this agent. External apps may share your contact details.</p>
