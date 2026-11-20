@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import { normalizeCommunityChannels, storedCommunityChannels } from '../community-channels';
-const empty = { telegram: '', whatsapp: '', imo: '' };
+const empty = { telegram: '', telegramGroup: '', whatsapp: '', imo: '' };
 assert.deepEqual(storedCommunityChannels(undefined), empty);
-const ok = { telegram: 'https://t.me/BoostPay', whatsapp: 'https://www.whatsapp.com/channel/abc', imo: 'https://channel.imo.im/123' };
+const ok = { telegram: 'https://t.me/BoostPay', telegramGroup: 'https://t.me/+AbCd123', whatsapp: 'https://www.whatsapp.com/channel/abc', imo: 'https://channel.imo.im/123' };
 assert.deepEqual(normalizeCommunityChannels(ok).channels, ok);
 for (const telegram of ['http://t.me/abc', 'https://t.me.evil.example/abc', 'https://t.me@evil.example/abc', 'javascript:alert(1)', 'https://t.me:444/abc', 'https://t.me/']) assert.equal(normalizeCommunityChannels({ ...empty, telegram }).channels, undefined);
+assert.equal(normalizeCommunityChannels({ ...empty, telegramGroup: 'https://t.me.evil.example/+abc' }).channels, undefined);
+assert.deepEqual(storedCommunityChannels({ telegram: 'https://t.me/channel', whatsapp: '', imo: '' }), { ...empty, telegram: 'https://t.me/channel' });
+assert.equal(normalizeCommunityChannels({ telegram: '', whatsapp: '', imo: '' }).channels?.telegramGroup, '');
 assert.equal(normalizeCommunityChannels({ ...empty, whatsapp: 'https://evil.example/channel/abc' }).channels, undefined);
 assert.equal(normalizeCommunityChannels({ ...empty, imo: 'https://imo.im.evil.example/abc' }).channels, undefined);
 assert.deepEqual(normalizeCommunityChannels(empty).channels, empty);

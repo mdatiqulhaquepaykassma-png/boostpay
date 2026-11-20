@@ -42,11 +42,11 @@ export function CommunityPrompt() {
   if (!channels) return null;
   const native = !!(window as any).Capacitor?.isNativePlatform?.();
   return <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/75 px-4 py-6" role="dialog" aria-modal="true" aria-labelledby="community-title">
-    <div className="w-full max-w-sm rounded-3xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl">
+    <div className="max-h-[calc(100dvh-3rem)] w-full max-w-sm overflow-y-auto rounded-3xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl">
       <h2 id="community-title" className="text-lg font-black text-white">Join our community</h2>
-      <p className="mt-2 text-xs leading-relaxed text-zinc-400">Join the BoostPay channels for updates. Tap a button below to open the channel.</p>
+      <p className="mt-2 text-xs leading-relaxed text-zinc-400">Join the BoostPay channels and group for updates. Tap a button below to open it.</p>
       <div className="mt-4 space-y-2">
-        {([['telegram', 'Join Telegram', 'bg-sky-600'], ['whatsapp', 'Join WhatsApp', 'bg-emerald-600'], ['imo', 'Join imo', 'bg-blue-600']] as const).map(([key, label, color]) => channels[key] ? <a key={key} href={channels[key]} target={native ? '_self' : '_blank'} rel="noopener noreferrer" className={`flex min-h-11 items-center justify-center rounded-xl px-4 text-xs font-bold text-white ${color}`}>{label}</a> : null)}
+        {([['telegram', 'Join Telegram Channel', 'bg-sky-600'], ['telegramGroup', 'Join Telegram Group', 'bg-sky-700'], ['whatsapp', 'Join WhatsApp', 'bg-emerald-600'], ['imo', 'Join imo', 'bg-blue-600']] as const).map(([key, label, color]) => channels[key] ? <a key={key} href={channels[key]} target={native ? '_self' : '_blank'} rel="noopener noreferrer" className={`flex min-h-11 items-center justify-center rounded-xl px-4 text-xs font-bold text-white ${color}`}>{label}</a> : null)}
       </div>
       <p className="mt-3 text-[10px] text-zinc-500">Your confirmation is based on your choice; channel membership is not automatically verified.</p>
       {error ? <p role="alert" className="mt-2 text-xs text-red-300">{error}</p> : null}

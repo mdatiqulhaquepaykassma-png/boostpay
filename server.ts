@@ -10524,9 +10524,16 @@ async function startServer() {
     res.json({ channels: storedCommunityChannels(db.config?.communityChannels) });
   });
   app.post('/api/admin/community', requireAdmin, requireSuperAdmin, requireMfa, (req: any, res) => {
-    const parsed = normalizeCommunityChannels(req.body?.channels);
+    const db: any = readDb();
+    const input = req.body?.channels;
+    // A previously installed admin client has no group field: keep the existing
+    // group link when that client updates its original three channel links.
+    const raw = input && typeof input === 'object' && !Array.isArray(input)
+      ? { ...input, telegramGroup: input.telegramGroup === undefined ? storedCommunityChannels(db.config?.communityChannels).telegramGroup : input.telegramGroup }
+      : input;
+    const parsed = normalizeCommunityChannels(raw);
     if (!parsed.channels) return res.status(400).json({ error: parsed.error });
-    const db: any = readDb(); db.config = db.config || {}; db.config.communityChannels = parsed.channels;
+    db.config = db.config || {}; db.config.communityChannels = parsed.channels;
     recordAuditLog(db, 'COMMUNITY_CHANNELS_UPDATE', String(req.authAdmin || 'admin'), 'Community channel links updated');
     writeDb(db); res.json({ success: true, channels: parsed.channels });
   });

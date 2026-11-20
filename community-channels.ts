@@ -1,14 +1,16 @@
-export type CommunityChannels = { telegram: string; whatsapp: string; imo: string };
+export type CommunityChannels = { telegram: string; telegramGroup: string; whatsapp: string; imo: string };
 const allowed: Record<keyof CommunityChannels, string[]> = {
   telegram: ['t.me', 'telegram.me'],
+  telegramGroup: ['t.me', 'telegram.me'],
   whatsapp: ['whatsapp.com', 'wa.me'],
   imo: ['imo.im', 'imoim.net']
 };
 export function normalizeCommunityChannels(input: unknown): { channels?: CommunityChannels; error?: string } {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return { error: 'Invalid channel links.' };
-  const result: CommunityChannels = { telegram: '', whatsapp: '', imo: '' };
+  const result: CommunityChannels = { telegram: '', telegramGroup: '', whatsapp: '', imo: '' };
   for (const key of Object.keys(result) as Array<keyof CommunityChannels>) {
-    const value = (input as any)[key];
+    // Old clients and old saved settings predate the separate group link.
+    const value = key === 'telegramGroup' && (input as any)[key] === undefined ? '' : (input as any)[key];
     if (typeof value !== 'string' || value.length > 1000) return { error: `Invalid ${key} link.` };
     if (!value.trim()) continue;
     try {
@@ -22,5 +24,5 @@ export function normalizeCommunityChannels(input: unknown): { channels?: Communi
 }
 export function storedCommunityChannels(value: unknown): CommunityChannels {
   const x = value && typeof value === 'object' ? value as any : {};
-  return normalizeCommunityChannels({ telegram: typeof x.telegram === 'string' ? x.telegram : '', whatsapp: typeof x.whatsapp === 'string' ? x.whatsapp : '', imo: typeof x.imo === 'string' ? x.imo : '' }).channels || { telegram: '', whatsapp: '', imo: '' };
+  return normalizeCommunityChannels({ telegram: typeof x.telegram === 'string' ? x.telegram : '', telegramGroup: typeof x.telegramGroup === 'string' ? x.telegramGroup : '', whatsapp: typeof x.whatsapp === 'string' ? x.whatsapp : '', imo: typeof x.imo === 'string' ? x.imo : '' }).channels || { telegram: '', telegramGroup: '', whatsapp: '', imo: '' };
 }
