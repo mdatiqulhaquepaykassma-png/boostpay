@@ -541,6 +541,8 @@ export const FraudView: FC = () => {
 
 const IpBlockManager: FC = () => {
   const [blocks, setBlocks] = useState<any[]>([]);
+  const [temporaryBlocks, setTemporaryBlocks] = useState<{ip:string;until:number}[]>([]);
+  const [unblockingIp, setUnblockingIp] = useState<string | null>(null);
   const [enabled, setEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [ip, setIp] = useState('');
@@ -553,7 +555,9 @@ const IpBlockManager: FC = () => {
     try{
       const d:any = await BoostPayStore.adminApi('/api/admin/antifraud/ip-blocks');
       setBlocks(d.blockedIps||[]);
+      setTemporaryBlocks(Array.isArray(d.temporaryBlocks) ? d.temporaryBlocks : []);
       setEnabled(d.ipBlockEnabled!==false);
+      setErr('');
     }catch(e:any){ setErr(e.message); }
     setLoading(false);
   },[]);
@@ -568,7 +572,17 @@ const IpBlockManager: FC = () => {
   };
   const remove = async(ipDel:string)=>{
     if(!confirm('Unblock '+ipDel+' ?')) return;
-    try{ await BoostPayStore.adminApi(`/api/admin/antifraud/ip-blocks/${encodeURIComponent(ipDel)}`, { method:'DELETE' }); setMsg('Unblocked'); load(); }catch(e:any){ setErr(e.message); }
+    try{ const result:any = await BoostPayStore.adminApi(`/api/admin/antifraud/ip-blocks/${encodeURIComponent(ipDel)}`, { method:'DELETE' }); setMsg(result.temporaryStillBlocked ? 'Manual block removed. This IP still has an active temporary block.' : 'Manual IP block removed.'); await load(); }catch(e:any){ setErr(e.message); }
+  };
+  const unblockTemporary = async(ipDel:string)=>{
+    if (!confirm(`Remove the temporary abuse block for ${ipDel}? A separate manual block may still apply.`)) return;
+    setErr(''); setMsg(''); setUnblockingIp(ipDel);
+    try {
+      const result:any = await BoostPayStore.adminApi(`/api/admin/antifraud/ip-blocks/temporary/${encodeURIComponent(ipDel)}`, {method:'DELETE'});
+      setMsg(result.persistentStillBlocked ? 'Temporary block removed. This IP still has an active manual block.' : 'Temporary IP block removed.');
+      await load();
+    } catch(e:any) { setErr(e.message || 'Could not unblock IP.'); }
+    finally { setUnblockingIp(null); }
   };
   const toggle = async(b:any)=>{
     try{ await BoostPayStore.adminApi(`/api/admin/antifraud/ip-blocks/${encodeURIComponent(b.ip)}`, { method:'PUT', body:{ enabled: !b.enabled } }); load(); }catch(e:any){ setErr(e.message); }
@@ -585,6 +599,21 @@ const IpBlockManager: FC = () => {
       </div>
       {err && <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4"/>{err}</div>}
       {msg && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2 text-xs text-emerald-300 flex items-center gap-2"><Check className="w-4 h-4"/>{msg}</div>}
+      <div className="rounded-xl border border-rose-500/25 bg-rose-950/10 p-3 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <div><h4 className="text-xs font-bold text-rose-300">Temporary abuse blocks ({temporaryBlocks.length})</h4><p className="text-[10px] text-zinc-400">Automatic blocks currently active on this server. Super admin can unblock each IP.</p></div>
+          <button type="button" onClick={load} className="rounded-lg border border-zinc-700 px-2 py-1 text-[10px] text-zinc-200 cursor-pointer">Refresh</button>
+        </div>
+        <div className="space-y-1.5 max-h-52 overflow-y-auto">
+          {temporaryBlocks.length===0 ? <p className="text-center text-[11px] text-zinc-500 py-2">No active temporary abuse blocks</p> : temporaryBlocks.map(b => (
+            <div key={b.ip} className="flex items-center justify-between gap-2 rounded-xl border border-rose-500/20 bg-zinc-950/60 p-2.5">
+              <div className="min-w-0"><p className="text-xs font-mono font-bold text-white break-all">{b.ip}</p><p className="text-[10px] text-zinc-400">Expires: {new Date(b.until).toLocaleString()}</p></div>
+              <button type="button" disabled={!!unblockingIp} onClick={()=>unblockTemporary(b.ip)} className="shrink-0 rounded-lg bg-red-600 px-2.5 py-1 text-[10px] font-bold text-white hover:bg-red-500 disabled:opacity-50 cursor-pointer">{unblockingIp === b.ip ? 'Unblocking...' : 'Unblock'}</button>
+            </div>
+          ))}
+        </div>
+      </div>
+      <h4 className="text-xs font-bold text-zinc-300">Manual / persistent IP blocks</h4>
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
         <input value={ip} onChange={e=> setIp(e.target.value)} placeholder="IP e.g. 1.2.3.4" className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-mono text-white placeholder-zinc-600"/>
         <input value={reason} onChange={e=> setReason(e.target.value)} placeholder="Reason" className="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-white placeholder-zinc-600"/>
@@ -602,7 +631,7 @@ const IpBlockManager: FC = () => {
           </div>
         ))}
       </div>
-      <p className="text-[10px] text-zinc-500">Master ON/OFF controls all persistent blocks. Each IP can be enabled/disabled individually. 429/403 sent with Retry-After.</p>
+      <p className="text-[10px] text-zinc-500">Master ON/OFF controls manual blocks only. Temporary abuse blocks are separate, expire automatically, and clear on server restart. Unblocking one type does not remove the other.</p>
     </div>
   );
 };

@@ -13183,7 +13183,32 @@ const paymentLocks = new Map<string, Promise<any>>();
     const db=readDb();
     const af:any=(db.config||INITIAL_DB.config).antifraud || (INITIAL_DB as any).config.antifraud;
     if (!af.blockedIps) af.blockedIps=[];
-    res.json({ ipBlockEnabled: af.ipBlockEnabled!==false, blockedIps: af.blockedIps, config: af });
+    const now = Date.now();
+    const temporaryBlocks: { ip: string; until: number }[] = [];
+    for (const [ip, until] of ipBlacklist) {
+      if (until <= now) ipBlacklist.delete(ip);
+      else temporaryBlocks.push({ ip, until });
+    }
+    temporaryBlocks.sort((a, b) => a.until - b.until || a.ip.localeCompare(b.ip));
+    res.json({ ipBlockEnabled: af.ipBlockEnabled!==false, blockedIps: af.blockedIps, temporaryBlocks, config: af });
+  });
+  // Auto blocks are process-local and separate from persistent admin blocks.
+  // Clearing a block also clears its rate buckets so the very next request does
+  // not immediately re-block it using the already exceeded counter.
+  app.delete('/api/admin/antifraud/ip-blocks/temporary/:ip', requireAdmin, requireSuperAdmin, (req:any,res)=>{
+    const ip = String(req.params.ip || '').trim();
+    const until = ipBlacklist.get(ip);
+    if (!until || until <= Date.now()) {
+      ipBlacklist.delete(ip);
+      return res.status(404).json({error:'Temporary IP block not found or already expired.'});
+    }
+    ipBlacklist.delete(ip);
+    for (const key of rateBuckets.keys()) if (key.startsWith(`${ip}|`)) rateBuckets.delete(key);
+    const db = readDb();
+    recordAuditLog(db,'IP_TEMP_BLOCK_REMOVE', String(req.authAdmin), `Removed temporary IP abuse block for ${ip}`);
+    writeDb(db);
+    const persistent = isIpPersistentlyBlocked(ip);
+    res.json({success:true, persistentStillBlocked:persistent.blocked});
   });
   app.post('/api/admin/antifraud/ip-blocks', requireAdmin, requireSuperAdmin, (req:any,res)=>{
     const ip=String(req.body?.ip||req.body?.address||'').trim();
@@ -13205,9 +13230,8 @@ const paymentLocks = new Map<string, Promise<any>>();
     const entry:any={ ip, reason, blockedAt: Date.now(), blockedBy: String(req.authAdmin), enabled:true };
     if (until) entry.until=Number(until);
     af.blockedIps.push(entry);
-    // also push to in-memory for instant effect (forever if no until)
-    if (!entry.until) ipBlacklist.set(ip, Date.now()+ 365*24*3600000);
-    else ipBlacklist.set(ip, Number(entry.until));
+    // Persistent blocks are enforced from the database; keep the temporary
+    // abuse blacklist separate so the master toggle and each unblock work.
     recordAuditLog(db,'IP_BLOCK_ADD', String(req.authAdmin), `Blocked IP ${ip} reason: ${reason}${entry.until ? ' until '+new Date(entry.until).toLocaleString():''}`);
     writeDb(db);
     res.json({ success:true, blockedIps: af.blockedIps });
@@ -13230,9 +13254,6 @@ const paymentLocks = new Map<string, Promise<any>>();
         entry.until= Date.now()+ms;
       }
     }
-    if (entry.enabled===false) ipBlacklist.delete(ip);
-    else if (entry.until) ipBlacklist.set(ip, Number(entry.until));
-    else ipBlacklist.set(ip, Date.now()+365*24*3600000);
     recordAuditLog(db,'IP_BLOCK_UPDATE', String(req.authAdmin), `Updated IP block ${ip} enabled=${entry.enabled}`);
     writeDb(db);
     res.json({ success:true, entry });
@@ -13245,10 +13266,9 @@ const paymentLocks = new Map<string, Promise<any>>();
     const idx=af.blockedIps.findIndex((x:any)=> String(x.ip)===ip);
     if (idx<0) return res.status(404).json({error:'IP not found'});
     af.blockedIps.splice(idx,1);
-    ipBlacklist.delete(ip);
-    recordAuditLog(db,'IP_BLOCK_REMOVE', String(req.authAdmin), `Unblocked IP ${ip}`);
+    recordAuditLog(db,'IP_BLOCK_REMOVE', String(req.authAdmin), `Removed manual IP block ${ip}`);
     writeDb(db);
-    res.json({ success:true });
+    res.json({ success:true, temporaryStillBlocked: (ipBlacklist.get(ip) || 0) > Date.now() });
   });
   app.post('/api/admin/antifraud/ip-blocks/toggle-enabled', requireAdmin, requireSuperAdmin, (req:any,res)=>{
     const enabled=!!req.body?.enabled;
