@@ -553,6 +553,7 @@ export const WalletView: FC<Props> = ({
   );
 
   const handleStartBoost = useCallback(async () => {
+    window.dispatchEvent(new Event('boostpay:start-boost-click'));
     if (user.isFrozen) return;
     if (user.balance < 0.1) {
       setZeroBalanceWarning(true);

@@ -34,6 +34,7 @@ import {
   Zap
 } from 'lucide-react';
 import { BoostPayStore, copyToClipboard } from '../services/store';
+import { CommunityChannelsSettings } from './CommunityChannelsSettings';
 
 /* ==========================================================================
    Simple dependency-free SVG charts
@@ -771,6 +772,7 @@ export const AdminSystemSettingsView: FC = () => {
       </div>
       {err && <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-300 flex items-center gap-2"><AlertTriangle className="w-4 h-4"/>{err}</div>}
       {msg && <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300 flex items-center gap-2"><Check className="w-4 h-4"/>{msg}</div>}
+      <CommunityChannelsSettings />
       <div className="rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 p-4 sm:p-5 space-y-4">
         <h3 className="text-xs font-bold text-white">Compounding Engine</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

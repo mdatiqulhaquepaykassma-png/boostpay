@@ -17,6 +17,7 @@ import {
 } from './payments';
 import { parseSms, normalizeTrxId } from './sms-parse';
 import { normalizeAgentContacts, publicAgentContacts } from './agent-contacts';
+import { normalizeCommunityChannels, storedCommunityChannels } from './community-channels';
 import {
   ensurePayoutJobs, buildJob, claimNext, markResult, cancelJob, retryJob, matchDebit,
   publicJob, queueStats, cleanMsisdn, cleanAmount, recordReceipt, cleanTrxId,
@@ -10500,6 +10501,34 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Could not run the welcome backfill.' });
     }
+  });
+
+  // Optional community invitations: the user acknowledgement is account-wide,
+  // not a verification of membership and never changes any financial operation.
+  app.get('/api/user/community', rateLimit(120), requireUser, (req: any, res) => {
+    const db: any = readDb();
+    const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ channels: storedCommunityChannels(db.config?.communityChannels), acknowledged: !!user.communityJoinedAt });
+  });
+  app.post('/api/user/community/acknowledge', rateLimit(30), requireUser, (req: any, res) => {
+    const db: any = readDb();
+    const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    if (!user.communityJoinedAt) { user.communityJoinedAt = Date.now(); writeDb(db); }
+    res.json({ success: true, acknowledged: true });
+  });
+  app.get('/api/admin/community', requireAdmin, requireSuperAdmin, (_req: any, res) => {
+    const db: any = readDb(); res.setHeader('Cache-Control', 'no-store');
+    res.json({ channels: storedCommunityChannels(db.config?.communityChannels) });
+  });
+  app.post('/api/admin/community', requireAdmin, requireSuperAdmin, requireMfa, (req: any, res) => {
+    const parsed = normalizeCommunityChannels(req.body?.channels);
+    if (!parsed.channels) return res.status(400).json({ error: parsed.error });
+    const db: any = readDb(); db.config = db.config || {}; db.config.communityChannels = parsed.channels;
+    recordAuditLog(db, 'COMMUNITY_CHANNELS_UPDATE', String(req.authAdmin || 'admin'), 'Community channel links updated');
+    writeDb(db); res.json({ success: true, channels: parsed.channels });
   });
 
   // ── Global currency selection ───────────────────────────────────────────

@@ -10,6 +10,7 @@ import { User, SystemConfig } from './types';
 import { Navbar } from './components/Navbar';
 import { AuthGate } from './components/AuthGate';
 import { WalletView } from './components/WalletView';
+import { CommunityPrompt } from './components/CommunityPrompt';
 import { CurrencyProvider, useCurrency } from './lib/currency';
 const LeaderboardView = lazy(()=> import('./components/LeaderboardView').then(m=> ({ default: m.LeaderboardView })));
 const ReferView = lazy(()=> import('./components/ReferView').then(m=> ({ default: m.ReferView })));
@@ -725,6 +726,8 @@ function AppInner() {
           </nav>
         </div>
       )}
+
+      {currentUser && <CommunityPrompt key={currentUser.id} />}
 
       {paymentsMode && (
         <PaymentsPage
