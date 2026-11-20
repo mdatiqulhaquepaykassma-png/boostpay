@@ -150,6 +150,10 @@
         return originalFetch(h + url, opts);
       };
       return send(host).catch(function (err) {
+        // A transfer can have committed even when its response was lost. Never
+        // automatically replay a financial POST against another host; the user
+        // can resolve the same saved idempotency key explicitly in Send Money.
+        if (url.split('?')[0] === '/api/transfer' && String(opts.method || 'GET').toUpperCase() !== 'GET') throw err;
         // Network-level failure (domain dead / blocked): walk the remaining hosts.
         return firstReachable(candidatesAfter(host)).then(function (alt) {
           if (!alt) throw err;

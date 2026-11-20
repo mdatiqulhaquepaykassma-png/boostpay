@@ -2051,6 +2051,8 @@ let pgPool: any = null;
 let pgDoc: any = null;
 let pgFlushTimer: any = null;
 let pgPending: any = null;
+// Serialize snapshot writes so an older background flush cannot overwrite a newer committed transfer.
+let pgPersistChain: Promise<void> = Promise.resolve();
 export const pgStatus = {
   mode: (DATABASE_URL ? 'postgres' : 'json-file') as 'postgres' | 'json-file',
   connected: false,
@@ -2127,30 +2129,47 @@ async function initPostgres(): Promise<void> {
   }
 }
 
+function enqueuePgSnapshot(serialized: string): Promise<void> {
+  const job = pgPersistChain.then(async () => {
+    try {
+      if (!pgPool) throw new Error('Postgres unavailable');
+      await pgPool.query(
+        `INSERT INTO app_state (id, data, updated_at) VALUES (1, $1, now())
+         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+        [serialized]
+      );
+      pgStatus.connected = true; pgStatus.lastError = ''; pgStatus.lastPersistAt = Date.now();
+    } catch (err: any) {
+      pgStatus.connected = false; pgStatus.lastError = String(err?.message || err);
+      throw err;
+    }
+  });
+  // Keep the chain usable after a failure; the returned job still rejects.
+  pgPersistChain = job.catch(() => {});
+  return job;
+}
 function schedulePgPersist(data: any) {
   if (!pgPool) return;
   pgPending = data;
   if (pgFlushTimer) return;
-  pgFlushTimer = setTimeout(async () => {
+  pgFlushTimer = setTimeout(() => {
     pgFlushTimer = null;
-    const doc = pgPending;
-    pgPending = null;
+    const doc = pgPending; pgPending = null;
     if (!doc) return;
-    try {
-      await pgPool.query(
-        `INSERT INTO app_state (id, data, updated_at) VALUES (1, $1, now())
-         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
-        [JSON.stringify(doc)]
-      );
-      pgStatus.connected = true;
-      pgStatus.lastError = '';
-      pgStatus.lastPersistAt = Date.now();
-    } catch (err: any) {
-      pgStatus.connected = false;
-      pgStatus.lastError = String(err?.message || err);
-      console.error('PostgreSQL persist error:', pgStatus.lastError);
-    }
+    try { void enqueuePgSnapshot(JSON.stringify(doc)).catch(err => console.error('PostgreSQL persist error:', err?.message || err)); }
+    catch (err) { console.error('PostgreSQL snapshot error:', err); }
   }, PG_FLUSH_MS);
+}
+/** Transfer success is returned only after ledger and receipt are persisted together. */
+async function persistTransferState(data: any): Promise<void> {
+  if (DATABASE_URL) {
+    if (!pgPool) throw new Error('Transfer status uncertain: database unavailable. Retry the same transfer later.');
+    await enqueuePgSnapshot(JSON.stringify(data));
+  } else {
+    const tempFile = `${DB_FILE}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify(data), 'utf-8');
+    fs.renameSync(tempFile, DB_FILE);
+  }
 }
 
 /** Real database latency probe (SELECT 1). */
@@ -3516,43 +3535,29 @@ async function withTransferLock(userId: string, fn: () => Promise<any> | any): P
   const prev = transferLocks.get(key) || Promise.resolve();
   let release!: () => void;
   const cur = new Promise<void>(r => release = r);
-  transferLocks.set(key, prev.then(()=>cur));
+  const chained = prev.then(() => cur);
+  transferLocks.set(key, chained);
   try {
     await prev;
     return await fn();
   } finally {
     release();
     // cleanup if no newer lock queued
-    if (transferLocks.get(key) === cur) transferLocks.delete(key);
+    if (transferLocks.get(key) === chained) transferLocks.delete(key);
   }
 }
-// ---- Idempotency + Replay protection: store recent idempotency keys (24h TTL) ----
-const idempotencyStore = new Map<string, { at: number; response: any }>();
+// ---- P2P transfer idempotency key (durable receipts are saved with the ledger) ----
 function idempotencyKeyForTransfer(senderId: string, body: any): string {
-  // Client may send X-Idempotency-Key header, else derive from amount+recipient+timestamp window
+  // Explicit key from modern clients; legacy clients use a conservative minute bucket.
   const hdr = String(body?.idempotencyKey || body?.idempotency_key || '').trim();
   if (hdr) return `xfer:${senderId}:${hdr}`;
   // fallback: hash of sender+recipient+amount+minute-bucket (prevents accidental double-submit within 1min)
   const a = String(body?.amount||'');
   const r = String(body?.recipientId||'');
+  const currency = String(body?.currency || 'USD').toUpperCase();
   const minute = Math.floor(Date.now()/60000);
-  return `xfer:${senderId}:${r}:${a}:${minute}`;
+  return `xfer:${senderId}:${r}:${currency}:${a}:${minute}`;
 }
-function isDuplicateIdempotency(key: string): any | null {
-  const rec = idempotencyStore.get(key);
-  if (rec && Date.now() - rec.at < 24*3600000) return rec.response;
-  return null;
-}
-function rememberIdempotency(key: string, response: any): void {
-  idempotencyStore.set(key, { at: Date.now(), response });
-  if (idempotencyStore.size > 5000) {
-    // evict oldest 10%
-    const sorted = Array.from(idempotencyStore.entries()).sort((a,b)=> a[1].at - b[1].at);
-    for (let i=0;i<500;i++) idempotencyStore.delete(sorted[i][0]);
-  }
-}
-setInterval(()=>{ const now=Date.now(); for (const [k,v] of idempotencyStore.entries()) if (now - v.at > 24*3600000) idempotencyStore.delete(k); }, 3600000);
-
 // Global IP blacklist for repeated offenders (10x over limit) + persistent admin blocks
 const ipBlacklist = new Map<string, number>();
 function isIpPersistentlyBlocked(ip: string): { blocked:boolean; until?:number; reason?:string } {
@@ -5494,6 +5499,11 @@ async function startServer() {
               boostState: safeBoostState,
               balance: serverUser.balance !== undefined ? Number(serverUser.balance) : Number(incUser.balance || 0),
               lifetimeProfit: serverUser.lifetimeProfit !== undefined ? Number(serverUser.lifetimeProfit) : Number(incUser.lifetimeProfit || 0),
+              // Preferences and the community acknowledgement are changed by
+              // authenticated endpoints, never by a stale client sync snapshot.
+              currency: serverUser.currency,
+              currencySource: serverUser.currencySource,
+              communityJoinedAt: serverUser.communityJoinedAt,
               ...serverOwned
             };
           } else {
@@ -7140,13 +7150,18 @@ async function startServer() {
 
   // 7b. Server-Authoritative Instant P2P Transfer with SMS Notifications
   app.post('/api/transfer', rateLimit(8), async (req: any, res) => {
-    // Idempotency: require header or body key; duplicates return same response without re-executing ledger
-    const idemKey = idempotencyKeyForTransfer(String(req.authUserId||req.body?.senderId||''), req.body);
-    const dup = isDuplicateIdempotency(idemKey);
-    if (dup) {
-      return res.json({ ...dup, duplicate: true });
+    // Preserve the exact intent. A v2 client uses one key per deliberate transfer;
+    // a retry reuses that key, and is reconciled while holding the sender lock.
+    const explicitKey = String(req.body?.idempotencyKey || req.body?.idempotency_key || '').trim();
+    const v2 = req.body?.transferVersion === 2;
+    if ((v2 && !/^[A-Za-z0-9_-]{8,128}$/.test(explicitKey)) || (!v2 && explicitKey.length > 200)) {
+      return res.status(400).json({ error: 'Invalid transfer idempotency key.', transferNotExecuted: true });
     }
-    // Extract and validate amount using precise decimal (avoid float errors) — store as integer cents internally for atomicity
+    const idemKey = idempotencyKeyForTransfer(String(req.authUserId || ''), req.body);
+    const entryCode = String(req.body?.currency || 'USD').toUpperCase();
+    const entryInput = Number(req.body?.amount);
+    const expectedRate = req.body?.expectedRate === undefined ? null : Number(req.body.expectedRate);
+    const intentFingerprint = JSON.stringify([String(req.body?.recipientId || ''), entryInput, entryCode, v2 ? expectedRate : null]);
     let rawAmount = req.body?.amount;
     // Reject client trying to set balance directly
     if (req.body?.balance !== undefined || req.body?.creditAmount !== undefined || req.body?.lifetimeProfit !== undefined) {
@@ -7155,36 +7170,10 @@ async function startServer() {
     }
     try {
       const { senderId, recipientId } = req.body as any;
-      let numAmount = Number(rawAmount);
-      if (!isFinite(numAmount) || isNaN(numAmount) || numAmount < 0.1 || numAmount > 100000) {
+      let numAmount = entryInput;
+      if (!isFinite(numAmount) || numAmount <= 0 || numAmount > 1e12 || !/^\d+(\.\d{1,2})?$/.test(String(rawAmount).trim())) {
         refundRateLimit(req);
-        return res.status(400).json({ error: 'Minimum transfer is 0.1 — enter 0.1 ≤ x ≤ 100,000.' });
-      }
-      // Prevent float precision abuse — max 2 decimals (BigDecimal policy)
-      if (!/^\d+(\.\d{1,2})?$/.test(String(rawAmount).trim())) {
-        refundRateLimit(req);
-        return res.status(400).json({ error: 'Amount must have at most 2 decimal places.' });
-      }
-      // The sender may type the amount in their display currency (owner decision
-      // 2026-11-08). The conversion uses the SERVER's rate — a client-sent USD
-      // figure is never trusted.
-      const _entryCode = String((req.body as any)?.currency || '').toUpperCase();
-      if (_entryCode && _entryCode !== 'USD') {
-        const dbx = readDb();
-        const senderRow = (dbx.users || []).find((u: any) => String(u.id) === String(senderId));
-        const conv = entryAmountToUsd(dbx, senderRow, numAmount, _entryCode);
-        if (conv.error) {
-          refundRateLimit(req);
-          return res.status(400).json({ error: conv.error });
-        }
-        if (!(conv.usd >= 0.1)) {
-          refundRateLimit(req);
-          return res.status(400).json({ error: `That is $${conv.usd.toFixed(2)} — the minimum transfer is $0.10.` });
-        }
-        (req.body as any).entryAmount = { amount: numAmount, code: _entryCode, usd: conv.usd };
-        (req.body as any).amount = conv.usd.toFixed(2);
-        rawAmount = (req.body as any).amount;
-        numAmount = conv.usd;                       // everything below works in USD
+        return res.status(400).json({ error: 'Enter a positive amount with at most 2 decimal places.', transferNotExecuted: true });
       }
       if (String(senderId) === String(recipientId)) {
         refundRateLimit(req);
@@ -7196,50 +7185,74 @@ async function startServer() {
       }
       // Race condition / Double-spend prevention: lock sender account for entire ledger write
       const result = await withTransferLock(String(senderId), async () => {
+        if (DATABASE_URL && (!pgPool || (!pgStatus.connected && !(await pingPostgres()).ok)))
+          return res.status(503).json({ error: 'Database unavailable. Retry this same transfer later.' });
         const db = readDb();
       const sender = db.users.find((u: any) => u.id === senderId);
       const recipient = db.users.find((u: any) => u.id === recipientId);
 
-      if (!sender) return res.status(404).json({ error: 'Sender user not found.' });
-      if (!recipient) { refundRateLimit(req); return res.status(404).json({ error: `Recipient User ID #${recipientId} was not found.` }); }
+      if (!sender) return res.status(404).json({ error: 'Sender user not found.', transferNotExecuted: true });
+      // Reconcile BEFORE rate, preference, balance or account checks: a completed
+      // transfer must remain retrievable even if any of those changed afterwards.
+      const prior = db.p2pReceipts?.[idemKey];
+      if (prior) {
+        if (!explicitKey) return res.status(409).json({ error: 'A similar transfer was recently processed. Check transaction history before sending again.', duplicate: true });
+        if (prior.fingerprint !== intentFingerprint) return res.status(409).json({ error: 'Transfer key already belongs to a different request. Check history or contact support.', duplicate: true });
+        const priorRecipient = (db.users || []).find((u: any) => String(u.id) === String(prior.recipientId));
+        if (!priorRecipient || !prior.sentTx || !prior.recvTx) return res.status(409).json({ error: 'Transfer already recorded but receipt is unavailable. Check history or contact support.', duplicate: true });
+        await persistTransferState(db);
+        const latest = readDb();
+        return { success: true, duplicate: true, sender: publicUser((latest.users || []).find((u: any) => String(u.id) === String(sender.id)) || sender), recipient: publicUser((latest.users || []).find((u: any) => String(u.id) === String(priorRecipient.id)) || priorRecipient), sentTx: prior.sentTx, recvTx: prior.recvTx };
+      }
+      if (!recipient) { refundRateLimit(req); return res.status(404).json({ error: `Recipient User ID #${recipientId} was not found.`, transferNotExecuted: true }); }
+      if (v2 && entryCode !== entryCurrencyOf(sender)) return res.status(409).json({ error: 'Currency changed. Review your amount and try again.', transferNotExecuted: true });
+      if (v2) {
+        const currentRate = fxRate(db, entryCode);
+        if (!(currentRate > 0) || !(expectedRate && expectedRate > 0) || Math.abs(currentRate - expectedRate) > 1e-10)
+          return res.status(409).json({ error: 'Exchange rate changed or is unavailable. Refresh and review the amount before sending.', transferNotExecuted: true });
+      }
+      const conv = entryAmountToUsd(db, sender, entryInput, entryCode);
+      if (conv.error) return res.status(400).json({ error: conv.error, transferNotExecuted: true });
+      numAmount = conv.usd;
+      if (!(numAmount >= 0.1 && numAmount <= 100000)) return res.status(400).json({ error: 'Transfer must be between $0.10 and $100,000 after conversion.', transferNotExecuted: true });
 
-      if (sender.isBlocked) return res.status(403).json({ error: 'Your account is suspended.' });
-      if (sender.isFrozen) return res.status(403).json({ error: 'Your account is currently frozen by administration. Transfers are locked.' });
-      if (recipient.isBlocked) return res.status(403).json({ error: 'Recipient account is restricted.' });
-      if (recipient.isFrozen) return res.status(403).json({ error: 'Recipient account is currently frozen.' });
+      if (sender.isBlocked) return res.status(403).json({ error: 'Your account is suspended.', transferNotExecuted: true });
+      if (sender.isFrozen) return res.status(403).json({ error: 'Your account is currently frozen by administration. Transfers are locked.', transferNotExecuted: true });
+      if (recipient.isBlocked) return res.status(403).json({ error: 'Recipient account is restricted.', transferNotExecuted: true });
+      if (recipient.isFrozen) return res.status(403).json({ error: 'Recipient account is currently frozen.', transferNotExecuted: true });
 
       // "Send to refer only" — checked before any money moves.
       const referBlock = referSendLimitError(db, sender, String(recipient.id), numAmount);
       if (referBlock) {
         refundRateLimit(req);
-        return res.status(403).json({ ...referBlock, referSendLimited: true });
+        return res.status(403).json({ ...referBlock, referSendLimited: true, transferNotExecuted: true });
       }
 
       // Who may receive promotion-bonus money (per-campaign tick).
       const bonusBlock = bonusSendRefusal(db, sender, String(recipient.id), numAmount);
       if (bonusBlock) {
         refundRateLimit(req);
-        return res.status(403).json({ error: bonusBlock, bonusSendLimited: true, ownSendable: ownSendable(sender, db) });
+        return res.status(403).json({ error: bonusBlock, bonusSendLimited: true, ownSendable: ownSendable(sender, db), transferNotExecuted: true });
       }
 
       const senderSendable = sendableBalance(sender);
       if (senderSendable <= 0) {
-        return res.status(403).json({ error: sendLockError(sender), sendLocked: sendLockOf(sender), sendable: senderSendable });
+        return res.status(403).json({ error: sendLockError(sender), sendLocked: sendLockOf(sender), sendable: senderSendable, transferNotExecuted: true });
       }
       if (numAmount > senderSendable) {
         const lock = sendLockOf(sender);
         return res.status(403).json({
           error: lock.amount > 0 ? sendLockError(sender) : 'Insufficient wallet balance for this transfer.',
           sendLocked: lock,
-          sendable: senderSendable
+          sendable: senderSendable, transferNotExecuted: true
         });
       }
       if (Number(sender.balance) < numAmount) {
-        return res.status(400).json({ error: 'Insufficient wallet balance for this transfer.' });
+        return res.status(400).json({ error: 'Insufficient wallet balance for this transfer.', transferNotExecuted: true });
       }
 
       if (sender.boostState && sender.boostState.isActive && !sender.boostState.isPaused) {
-        return res.status(400).json({ error: 'Active boost running! You must pause your boost before sending money.' });
+        return res.status(400).json({ error: 'Active boost running! You must pause your boost before sending money.', transferNotExecuted: true });
       }
 
       // How much of this send comes out of their own money vs. bonus money
@@ -7276,6 +7289,11 @@ async function startServer() {
         notes: `P2P transfer received from #${sender.id}`
       };
 
+      // Store the intent and receipt reference in the same state write as the
+      // ledger, so retries can be reconciled after a normal server restart.
+      (sentTx as any).transferIntent = { entryAmount: entryInput, currency: entryCode, rate: fxRate(db, entryCode) };
+      if (!db.p2pReceipts || typeof db.p2pReceipts !== 'object' || Array.isArray(db.p2pReceipts)) db.p2pReceipts = {};
+      db.p2pReceipts[idemKey] = { fingerprint: intentFingerprint, recipientId: String(recipient.id), sentTx, recvTx };
       db.transactions.unshift(recvTx);
       db.transactions.unshift(sentTx);
 
@@ -7422,10 +7440,13 @@ async function startServer() {
       }
 
         writeDb(db);
+        // Never tell the client a transfer succeeded before its ledger and
+        // idempotency receipt have committed together to the configured store.
+        await persistTransferState(db);
         broadcastUserUpdate(db, sender.id);
         broadcastUserUpdate(db, recipient.id);
-        const responsePayload = { success: true, sender: publicUser(sender), recipient: publicUser(recipient), sentTx, recvTx };
-        rememberIdempotency(idemKey, responsePayload);
+        const latest = readDb();
+        const responsePayload = { success: true, sender: publicUser((latest.users || []).find((u: any) => String(u.id) === String(sender.id)) || sender), recipient: publicUser((latest.users || []).find((u: any) => String(u.id) === String(recipient.id)) || recipient), sentTx, recvTx };
         return responsePayload;
       });
       // send locked result
@@ -15878,11 +15899,7 @@ const paymentLocks = new Map<string, Promise<any>>();
       if (pgPool && (pgPending || pgDoc)) {
         const doc = pgPending || pgDoc;
         pgPending = null;
-        await pgPool.query(
-          `INSERT INTO app_state (id, data, updated_at) VALUES (1, $1, now())
-           ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
-          [JSON.stringify(doc)]
-        );
+        await enqueuePgSnapshot(JSON.stringify(doc));
       }
     } catch (err) { console.error('shutdown pg flush failed:', err); }
   };

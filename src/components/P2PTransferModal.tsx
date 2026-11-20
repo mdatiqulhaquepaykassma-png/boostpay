@@ -1,4 +1,4 @@
-import { FC, useState, useEffect } from 'react';
+import { FC, useState, useEffect, useRef } from 'react';
 import { Send, X, AlertTriangle, CheckCircle2, ArrowRight, QrCode } from 'lucide-react';
 import { BoostPayStore } from '../services/store';
 import { User } from '../types';
@@ -14,6 +14,21 @@ interface Props {
   onOpenQR?: () => void;
 }
 
+type PendingSend = { senderId: string; recipientId: string; amount: number; currency: string; expectedRate: number; idempotencyKey: string; transferVersion: 2 };
+const pendingKey = (id: string) => `boostpay_pending_p2p_v1_${id}`;
+function readPending(id: string): PendingSend | null {
+  try {
+    const x = JSON.parse(localStorage.getItem(pendingKey(id)) || 'null');
+    if (x && x.senderId === id && x.transferVersion === 2 && typeof x.idempotencyKey === 'string' && typeof x.amount === 'number' && typeof x.currency === 'string') return x;
+  } catch { /* no saved pending intent */ }
+  return null;
+}
+function newTransferKey(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, x => x.toString(16).padStart(2, '0')).join('');
+}
+
 export const P2PTransferModal: FC<Props> = ({
   isOpen,
   onClose,
@@ -22,7 +37,7 @@ export const P2PTransferModal: FC<Props> = ({
   recipientPrefill,
   onOpenQR
 }) => {
-  const { currency, fmt, price } = useCurrency();
+  const { currency, price, reload: reloadCurrency } = useCurrency();
   const entryCode = currency && currency.code !== 'USD' ? currency.code : 'USD';
   const [recipientId, setRecipientId] = useState('');
   const [amount, setAmount] = useState('');
@@ -35,6 +50,9 @@ export const P2PTransferModal: FC<Props> = ({
   const [rule, setRule] = useState<any>(null);
   const [step, setStep] = useState<'INPUT' | 'SUCCESS'>('INPUT');
   const [isProcessing, setIsProcessing] = useState(false);
+  const processingRef = useRef(false);
+  const [pending, setPending] = useState<PendingSend | null>(null);
+  const [receipt, setReceipt] = useState<{ amount: number; currency: string; usd: number; reference: string; recipientId: string; duplicate: boolean } | null>(null);
 
   // Reset state completely whenever modal is opened
   useEffect(() => {
@@ -44,10 +62,12 @@ export const P2PTransferModal: FC<Props> = ({
       setError('');
       setStep('INPUT');
       setIsProcessing(false);
+      setPending(readPending(currentUser.id));
+      setReceipt(null);
     } else {
       setRecipientId('');
     }
-  }, [isOpen, recipientPrefill]);
+  }, [isOpen, recipientPrefill, currentUser.id]);
 
   const handleClose = () => {
     setRecipientId('');
@@ -104,109 +124,74 @@ export const P2PTransferModal: FC<Props> = ({
   if (!isOpen) return null;
 
   const isBoostActive = currentUser.boostState.isActive && !currentUser.boostState.isPaused;
+  const inputRate = entryCode === 'USD' ? 1 : Number(currency?.rate || 0);
+  const maxDecimals = Math.min(2, Math.max(0, currency?.decimals ?? 2));
+  const maxScale = 10 ** maxDecimals;
+  const maxEntry = inputRate > 0 ? Math.floor((Number(currentUser.balance) * inputRate + 1e-9) * maxScale) / maxScale : 0;
+  const previewUsd = inputRate > 0 && Number(amount) > 0 ? Math.round(Number(amount) / inputRate * 100) / 100 : null;
 
   const handleExecuteTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError('');
-    setLockNotice('');
-
-    // Check if boost is running
-    if (isBoostActive) {
-      setError('Active boost running! You must pause your boost before sending money.');
-      return;
+    if (processingRef.current) return;
+    setError(''); setLockNotice('');
+    // Never replace an unresolved intent with a fresh key, even after reload.
+    let intent = readPending(currentUser.id) || pending;
+    if (!intent) {
+      if (isBoostActive) { setError('Active boost running! You must pause your boost before sending money.'); return; }
+      if (lockFull) { setLockNotice('Sending money is temporarily locked on your account by support. Receiving money still works — please contact support.'); return; }
+      const numAmount = Number(amount);
+      const rate = entryCode === 'USD' ? 1 : Number(currency?.rate);
+      if (!/^\d+(\.\d{1,2})?$/.test(amount.trim()) || !(numAmount > 0)) { setError('Enter a positive amount with at most 2 decimal places.'); return; }
+      if (!(rate > 0)) { setError('Exchange rate is unavailable. Refresh and try again.'); return; }
+      const usdAmount = Math.round((numAmount / rate) * 100) / 100;
+      if (usdAmount < 0.1 || usdAmount > 100000) { setError('The transfer must be between $0.10 and $100,000 after conversion.'); return; }
+      if (lockCap !== null && lockHeld > 0 && usdAmount > lockCap + 1e-9) {
+        setLockNotice(lockHeld > 0 ? `${price(lockHeld)} of your balance is temporarily held by support. You can send up to ${price(lockCap)} right now.` : 'Insufficient wallet balance for this transfer.'); return;
+      }
+      if (usdAmount > currentUser.balance + 1e-9) { setError('Insufficient wallet balance for this transfer.'); return; }
+      const cleanRecipient = recipientId.trim();
+      if (!cleanRecipient || cleanRecipient === currentUser.id) { setError('Please enter a valid recipient User ID different from your own.'); return; }
+      const blocked = ruleError(cleanRecipient, usdAmount);
+      if (blocked) { setError(blocked); return; }
+      try {
+        intent = { senderId: currentUser.id, recipientId: cleanRecipient, amount: numAmount, currency: entryCode, expectedRate: rate, idempotencyKey: newTransferKey(), transferVersion: 2 };
+        // If storage is unavailable, do not send: we could lose the retry key.
+        localStorage.setItem(pendingKey(currentUser.id), JSON.stringify(intent));
+        setPending(intent);
+      } catch { setError('Cannot safely save this transfer for retry. Please free device storage and try again.'); return; }
     }
-
-    if (lockFull) {
-      setLockNotice('Sending money is temporarily locked on your account by support. Receiving money still works — please contact support.');
-      return;
-    }
-
-    const numAmount = parseFloat(amount);
-    if (isNaN(numAmount) || numAmount < 0.1) {
-      setError('Minimum transfer is 0.1 — enter at least 0.10');
-      return;
-    }
-
-    if (lockCap !== null && numAmount > lockCap) {
-      setLockNotice(lockCap > 0
-        ? `${price(lockHeld)} of your balance is temporarily held by support. You can send up to ${price(lockCap)} right now.`
-        : `${price(lockHeld)} is temporarily held on your account by support, which currently covers your whole balance. You cannot send money right now. Please contact support.`);
-      return;
-    }
-
-    if (numAmount > currentUser.balance) {
-      setError('Insufficient wallet balance for this transfer.');
-      return;
-    }
-
-    const cleanRecipient = recipientId.trim();
-    if (!cleanRecipient || cleanRecipient === currentUser.id) {
-      setError('Please enter a valid recipient User ID different from your own.');
-      return;
-    }
-
-    const blocked = ruleError(cleanRecipient, numAmount);
-    if (blocked) {
-      setError(blocked);
-      return;
-    }
-
-    setIsProcessing(true);
-
+    processingRef.current = true; setIsProcessing(true);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
     try {
-      // 1. Attempt server-side authoritative transfer
-      const res = await fetch('/api/transfer', {
-        method: 'POST',
-        headers: BoostPayStore.authHeaders(),
-        body: JSON.stringify({
-          senderId: currentUser.id,
-          recipientId: cleanRecipient,
-          amount: numAmount,
-          // typed in the display currency — the server converts to USD itself
-          currency: entryCode
-        })
-      });
-
-      if (res.ok) {
-        const data = await res.json();
+      const res = await fetch('/api/transfer', { method: 'POST', headers: BoostPayStore.authHeaders(), body: JSON.stringify(intent), signal: controller.signal });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success && data?.sender && data?.recipient && data?.sentTx && data?.recvTx) {
         const allUsers = BoostPayStore.getUsers();
         const sIdx = allUsers.findIndex(u => u.id === currentUser.id);
-        if (sIdx >= 0) allUsers[sIdx] = { ...allUsers[sIdx], balance: data.sender.balance, boostState: data.sender.boostState };
-        const rIdx = allUsers.findIndex(u => u.id === cleanRecipient);
+        if (sIdx >= 0) allUsers[sIdx] = { ...allUsers[sIdx], ...data.sender };
+        const rIdx = allUsers.findIndex(u => u.id === intent!.recipientId);
         if (rIdx >= 0) allUsers[rIdx] = { ...allUsers[rIdx], balance: data.recipient.balance, boostState: data.recipient.boostState };
         BoostPayStore.saveUsers(allUsers);
-
         if (data.sentTx) BoostPayStore.addTransactionRecord(data.sentTx);
         if (data.recvTx) BoostPayStore.addTransactionRecord(data.recvTx);
-        if (data.sentNotif) BoostPayStore.addNotification(data.sentNotif);
-        if (data.recvNotif) BoostPayStore.addNotification(data.recvNotif);
-
-        const updatedSender: User = {
-          ...currentUser,
-          balance: data.sender.balance,
-          boostState: data.sender.boostState || currentUser.boostState
-        };
+        const updatedSender: User = { ...currentUser, ...data.sender, boostState: data.sender.boostState || currentUser.boostState };
         BoostPayStore.setCurrentUser(updatedSender);
-
-        setIsProcessing(false);
-        setStep('SUCCESS');
-        onSuccess(updatedSender);
-        return;
+        const meta = data.sentTx.transferIntent;
+        setReceipt({ amount: Number(meta?.entryAmount ?? intent.amount), currency: String(meta?.currency ?? intent.currency), usd: Number(data.sentTx.amount), reference: String(data.sentTx.id || ''), recipientId: intent.recipientId, duplicate: !!data.duplicate });
+        localStorage.removeItem(pendingKey(currentUser.id)); setPending(null);
+        setStep('SUCCESS'); onSuccess(updatedSender); return;
+      }
+      if (data?.transferNotExecuted === true) {
+        localStorage.removeItem(pendingKey(currentUser.id)); setPending(null);
+        setError(data.error || 'Transfer was not sent. Please review and try again.');
+        if (/exchange rate|currency changed/i.test(String(data.error || ''))) void reloadCurrency();
       } else {
-        const errData = await res.json().catch(() => null);
-        if (errData?.error) {
-          setError(errData.error);
-          setIsProcessing(false);
-          return;
-        }
+        setError((data?.error ? `${data.error} ` : '') + 'Transfer status is uncertain. Check history or retry this same transfer; do not send it again as a new payment.');
       }
     } catch {
-      setError('Network error — please try again. Server transfer required.');
-      setIsProcessing(false);
-      return;
-    }
-    setError('Transfer failed — server validation required. Please try again.');
-    setIsProcessing(false);
+      setError('Transfer status is uncertain. Check transaction history or retry this same transfer. Do not create a new payment.');
+    } finally { clearTimeout(timer); processingRef.current = false; setIsProcessing(false); }
     return;
     // Local fallback removed for security (server authoritative only)
     // const allUsers = BoostPayStore.getUsers();
@@ -258,6 +243,7 @@ export const P2PTransferModal: FC<Props> = ({
         {/* Step 1: Clean Input Form */}
         {step === 'INPUT' && (
           <form onSubmit={handleExecuteTransfer} className="space-y-4">
+            {pending && <div role="status" className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200">Unconfirmed transfer: {pending.amount} {pending.currency} to User #{pending.recipientId}. Check history or use Retry to safely resolve the same transfer. Do not create a new payment.</div>}
             {/* Send-to-refer rule (set by admin) — shown only when it exists */}
             {ruleMode !== 'off' && (
               <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] p-3 text-[11px] leading-relaxed text-emerald-200">
@@ -300,7 +286,8 @@ export const P2PTransferModal: FC<Props> = ({
               <input
                 type="text"
                 placeholder="Enter recipient User ID (e.g., 2)"
-                value={recipientId}
+                value={pending?.recipientId ?? recipientId}
+                disabled={!!pending || isProcessing}
                 onChange={(e) => setRecipientId(e.target.value.replace(/\D/g, ''))}
                 maxLength={8}
                 autoFocus
@@ -312,7 +299,7 @@ export const P2PTransferModal: FC<Props> = ({
             <div>
               <div className="flex justify-between items-center text-xs mb-1">
                 <label className="font-medium text-zinc-400">
-                  Transfer Amount ({entryCode})
+                  Transfer Amount ({pending?.currency || entryCode})
                 </label>
                 <div className="flex items-center gap-1.5 text-zinc-500 font-mono text-[11px]">
                   <span>Available: <strong className="text-emerald-400 font-bold">{entryCode === 'USD' ? `$${currentUser.balance.toFixed(2)}` : price(currentUser.balance)}</strong>
@@ -320,7 +307,8 @@ export const P2PTransferModal: FC<Props> = ({
                   </span>
                   <button
                     type="button"
-                    onClick={() => setAmount(entryCode === 'USD' ? currentUser.balance.toFixed(2) : fmt(currentUser.balance, { decimals: currency!.decimals, withSymbol: false }).replace(/,/g, ''))}
+                    disabled={!!pending || isProcessing}
+                    onClick={() => setAmount(maxEntry.toFixed(maxDecimals))}
                     className="ml-1 px-1.5 py-0.5 rounded bg-zinc-800 text-amber-400 hover:bg-zinc-700 font-bold text-[10px] cursor-pointer"
                   >
                     MAX
@@ -331,10 +319,12 @@ export const P2PTransferModal: FC<Props> = ({
                 type="text"
                 inputMode="decimal"
                 placeholder="0.00"
-                value={amount}
+                value={pending ? String(pending.amount) : amount}
+                disabled={!!pending || isProcessing}
                 onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ''))}
                 className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-base font-mono text-zinc-100 placeholder-zinc-600 focus:border-amber-500 focus:outline-none"
               />
+              {!pending && entryCode !== 'USD' && previewUsd !== null && <p className="mt-1 text-[10px] text-zinc-500">Estimated USD debit: ${previewUsd.toFixed(2)} · 1 USD = {inputRate} {entryCode}. Final rate is checked by the server.</p>}
             </div>
 
             {lockNotice && (
@@ -352,9 +342,9 @@ export const P2PTransferModal: FC<Props> = ({
 
             <button
               type="submit"
-              disabled={isBoostActive || isProcessing}
+              disabled={(!pending && isBoostActive) || isProcessing}
               className={`w-full rounded-xl py-3 text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-lg cursor-pointer ${
-                isBoostActive || isProcessing
+                (!pending && isBoostActive) || isProcessing
                   ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
                   : 'bg-amber-500 text-zinc-950 hover:bg-amber-400 shadow-amber-500/20'
               }`}
@@ -366,7 +356,7 @@ export const P2PTransferModal: FC<Props> = ({
                 </span>
               ) : (
                 <>
-                  <span>Send Money</span>
+                  <span>{pending ? 'Retry pending transfer' : 'Send Money'}</span>
                   <ArrowRight className="w-4 h-4" />
                 </>
               )}
@@ -383,7 +373,9 @@ export const P2PTransferModal: FC<Props> = ({
             <div>
               <h4 className="text-lg font-bold text-white">Transfer Completed</h4>
               <p className="text-xs text-zinc-400 mt-1">
-                Successfully sent <strong className="text-emerald-400 font-mono">{parseFloat(amount).toFixed(2)} {entryCode}</strong> to User <strong className="font-mono text-white">#{recipientId}</strong>.
+                {receipt?.duplicate ? 'Previously completed transfer confirmed: ' : 'Successfully sent '}
+                <strong className="text-emerald-400 font-mono">{receipt?.amount.toFixed(2)} {receipt?.currency}</strong> to User <strong className="font-mono text-white">#{receipt?.recipientId || recipientId}</strong>.
+                {receipt && <span className="block mt-1">Recorded debit: ${receipt.usd.toFixed(2)} USD · Ref: {receipt.reference}</span>}
               </p>
             </div>
             <div className="pt-2">
