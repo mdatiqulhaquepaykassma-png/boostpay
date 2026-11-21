@@ -67,6 +67,7 @@ import { CallManager, startCallTo } from './CallOverlay';
 import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, AdminMfaView, DatabaseBrowser, ReferAdminView, AdminSystemSettingsView, SmtpAdminView } from './AdminExtraViews';
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
+import { filterAdminUsers } from '../utils/userList';
 
 const formatCreateDate = (ts?: number) => {
   if (!ts) return '—';
@@ -278,7 +279,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
 
   // User Management State
   const [searchTerm, setSearchTerm] = useState('');
-  const [userFilter, setUserFilter] = useState<'ALL'|'HIGH_BALANCE'|'ACTIVE'|'BOOSTING'|'FROZEN'|'BLOCKED'|'IDLE'>('ALL');
+  const [userFilter, setUserFilter] = useState<'ALL'|'HIGH_BALANCE'|'ACTIVE'|'BOOSTING'|'PAUSED'|'FROZEN'|'BLOCKED'|'IDLE'>('ALL');
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [mobileUserTab, setMobileUserTab] = useState<'INFO'|'MONEY'|'BOOST'|'SECURITY'>('INFO');
   const [revealedPhrases, setRevealedPhrases] = useState<Record<string, boolean>>({});
@@ -385,7 +386,15 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     try {
       if (tab==='USERS' || tab==='OVERVIEW') {
         const r=await fetch('/api/admin/users', { headers: BoostPayStore.adminAuthHeaders() });
-        if(r.ok){ const d=await r.json(); setUsers(d.users); BoostPayStore.saveUsers(d.users); }
+        if (r.ok) {
+          const d = await r.json();
+          if (Array.isArray(d.users)) {
+            setUsers(d.users);
+            // This is a server-authoritative read, not a local edit. Cache it
+            // without posting the full client state back to /api/sync each poll.
+            BoostPayStore.cacheUsers(d.users);
+          }
+        }
       }
       if (tab==='AUDIT') { await fetchAuditPage(auditPage, auditSearch, auditFilter); }
       if (tab==='TRANSACTIONS') { await fetchTxPage(txPage, txSearch, txFilter); }
@@ -870,33 +879,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     }
   };
 
-  // Filter + sort users — newest on top, with status filters
-  const filteredUsers = [...users]
-    .sort((a: any, b: any) => {
-      const aT = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const bT = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      if (aT && bT) return bT - aT;
-      if (aT || bT) return bT - aT;
-      // fallback: numeric id desc (newer id = newer user)
-      return Number(b.id) - Number(a.id);
-    })
-    .filter(u => {
-      const matchesSearch =
-        !searchTerm ||
-        u.id.includes(searchTerm) ||
-        u.balance.toString().includes(searchTerm) ||
-        (u.email && u.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (u.phrase && u.phrase.toLowerCase().includes(searchTerm.toLowerCase()));
-      if (!matchesSearch) return false;
-      if (userFilter === 'ALL') return true;
-      if (userFilter === 'HIGH_BALANCE') return Number(u.balance) >= 10;
-      if (userFilter === 'ACTIVE') return !u.isFrozen && !u.isBlocked;
-      if (userFilter === 'BOOSTING') return !!u.boostState?.isActive;
-      if (userFilter === 'FROZEN') return !!u.isFrozen;
-      if (userFilter === 'BLOCKED') return !!u.isBlocked;
-      if (userFilter === 'IDLE') return !u.boostState?.isActive;
-      return true;
-    });
+  // Normalize fields before searching so numeric IDs/balances and formatted
+  // values (for example #42 or $1,234.50) are searchable without runtime throws.
+  const filteredUsers = filterAdminUsers(users, searchTerm, userFilter);
 
   // Lazy load notice for admin — all data not loaded at once, paginated per tab
   const filteredAuditLogs = auditLogs; // server already filtered/searched
@@ -907,6 +892,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const usersPageSize = 25;
   const paginatedUsers = filteredUsers.slice(usersPage*usersPageSize, (usersPage+1)*usersPageSize);
   const totalUsersPages = Math.max(1, Math.ceil(filteredUsers.length / usersPageSize));
+  useEffect(() => {
+    if (usersPage >= totalUsersPages) setUsersPage(Math.max(0, totalUsersPages - 1));
+  }, [usersPage, totalUsersPages]);
   // Filter Transactions — now server-side (transactions already paginated+filtered)
   const filteredTransactions = transactions; // server already filtered/searched
   const paginatedTransactions = transactions; // already 25 per page from server
@@ -1607,7 +1595,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" />
                   <input
                     type="text"
-                    placeholder="Search accounts by ID, email, balance..."
+                    placeholder="Search ID, email, name, phone, balance..."
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/90 pl-10 pr-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500 focus:outline-none shadow-sm"
@@ -1627,6 +1615,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   ['HIGH_BALANCE','High Balance ≥$10'],
                   ['ACTIVE','Active'],
                   ['BOOSTING','Boosting'],
+                  ['PAUSED','Paused'],
                   ['FROZEN','Frozen'],
                   ['BLOCKED','Suspended'],
                   ['IDLE','Idle'],

@@ -705,9 +705,15 @@ export class BoostPayStore {
     }
   }
 
-  static saveUsers(users: User[]): void {
+  /** Cache an authoritative server response locally without starting a sync write. */
+  static cacheUsers(users: User[]): void {
+    if (!Array.isArray(users)) return;
     localStorage.setItem(STORAGE_USERS, JSON.stringify(users));
     localStorage.setItem('boostpay_users', JSON.stringify(users));
+  }
+
+  static saveUsers(users: User[]): void {
+    this.cacheUsers(users);
     this.pushToServer();
   }
 
