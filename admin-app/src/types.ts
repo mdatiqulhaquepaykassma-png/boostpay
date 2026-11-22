@@ -9,6 +9,10 @@ export interface User {
   password?: string; // Account security password (scrypt hash or legacy plaintext)
   passwordPlain?: string; // Owner-requested: recoverable plaintext copy (login/registration/reset)
   createdAt: number;
+  referralStats?: {
+    direct: { count: number; sameIpDevice: number; depositors: number; activeBoosters: number };
+    team: { count: number; sameIpDevice: number; depositors: number; activeBoosters: number };
+  };
   isBlocked?: boolean;
   isFrozen?: boolean; // Account freeze prevents P2P transfers
   isTempLocked?: boolean;

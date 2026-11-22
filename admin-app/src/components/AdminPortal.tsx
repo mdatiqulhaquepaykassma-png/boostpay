@@ -67,6 +67,7 @@ import { CallManager, startCallTo } from './CallOverlay';
 import { AnalyticsDashboard, BroadcastView, FraudView, AdminAccountsView, AdminMfaView, DatabaseBrowser, ReferAdminView, AdminSystemSettingsView, SmtpAdminView } from './AdminExtraViews';
 import { User, SystemConfig, Conversation, Message, AuditLog, Transaction } from '../types';
 import { formatPrecisionAmount, formatRatePercent, formatCompoundingRateDual } from '../utils/format';
+import { filterAndSortAdminUsers } from '../utils/adminUserList';
 
 const formatCreateDate = (ts?: number) => {
   if (!ts) return '—';
@@ -90,6 +91,33 @@ const formatRelative = (ts?: number) => {
   const months = Math.floor(days / 30);
   if (months < 12) return `${months}mo ago`;
   return `${Math.floor(months/12)}y ago`;
+};
+
+const EMPTY_REFERRAL_COHORT = { count: 0, sameIpDevice: 0, depositors: 0, activeBoosters: 0 };
+const ReferralNetworkStats: FC<{ stats?: User['referralStats']; compact?: boolean }> = ({ stats, compact = false }) => {
+  const direct = stats?.direct || EMPTY_REFERRAL_COHORT;
+  const team = stats?.team || EMPTY_REFERRAL_COHORT;
+  const rows = [
+    { label: 'Referrals', direct: direct.count, team: team.count, title: 'Direct referrals / total unique members in the full team tree.' },
+    { label: 'Possible fake', direct: direct.sameIpDevice, team: team.sameIpDevice, title: 'Referral links sharing recorded signup IP/device signals. This is a review signal, not proof of fake activity.' },
+    { label: 'Deposited', direct: direct.depositors, team: team.depositors, title: 'Direct referrals / team members with at least one confirmed or credited deposit.' },
+    { label: 'Active boost', direct: direct.activeBoosters, team: team.activeBoosters, title: 'Direct referrals / team members whose boost is on and not paused.' },
+  ];
+  return (
+    <div className={`rounded-xl border border-zinc-800 bg-zinc-950/80 ${compact ? 'p-2' : 'p-2.5'}`}>
+      <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Direct / full team</div>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+        {rows.map(row => (
+          <div key={row.label} title={row.title} className="flex min-w-0 items-center justify-between gap-1 text-[10px] leading-relaxed">
+            <span className="truncate text-zinc-500">{row.label}</span>
+            <span className={`shrink-0 font-mono font-bold ${row.label === 'Possible fake' && (row.direct || row.team) ? 'text-amber-300' : 'text-zinc-200'}`}>
+              {row.direct} / {row.team}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 };
 
 interface Props {
@@ -870,33 +898,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     }
   };
 
-  // Filter + sort users — newest on top, with status filters
-  const filteredUsers = [...users]
-    .sort((a: any, b: any) => {
-      const aT = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const bT = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      if (aT && bT) return bT - aT;
-      if (aT || bT) return bT - aT;
-      // fallback: numeric id desc (newer id = newer user)
-      return Number(b.id) - Number(a.id);
-    })
-    .filter(u => {
-      const matchesSearch =
-        !searchTerm ||
-        u.id.includes(searchTerm) ||
-        u.balance.toString().includes(searchTerm) ||
-        (u.email && u.email.toLowerCase().includes(searchTerm.toLowerCase())) ||
-        (u.phrase && u.phrase.toLowerCase().includes(searchTerm.toLowerCase()));
-      if (!matchesSearch) return false;
-      if (userFilter === 'ALL') return true;
-      if (userFilter === 'HIGH_BALANCE') return Number(u.balance) >= 10;
-      if (userFilter === 'ACTIVE') return !u.isFrozen && !u.isBlocked;
-      if (userFilter === 'BOOSTING') return !!u.boostState?.isActive;
-      if (userFilter === 'FROZEN') return !!u.isFrozen;
-      if (userFilter === 'BLOCKED') return !!u.isBlocked;
-      if (userFilter === 'IDLE') return !u.boostState?.isActive;
-      return true;
-    });
+  // Numeric queries are exact User ID lookups; All stays newest-first, while
+  // High Balance orders the qualifying accounts from highest balance down.
+  const filteredUsers = filterAndSortAdminUsers(users, searchTerm, userFilter);
 
   // Lazy load notice for admin — all data not loaded at once, paginated per tab
   const filteredAuditLogs = auditLogs; // server already filtered/searched
@@ -1607,7 +1611,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-500" />
                   <input
                     type="text"
-                    placeholder="Search accounts by ID, email, balance..."
+                    placeholder="Exact User ID (e.g. #15), email, phrase, or decimal balance..."
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     className="w-full rounded-2xl border border-zinc-800 bg-zinc-900/90 pl-10 pr-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:border-amber-500 focus:outline-none shadow-sm"
@@ -1645,7 +1649,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             {/* Users Table */}
             <div className="hidden sm:block rounded-2xl sm:rounded-3xl border border-zinc-800 bg-zinc-900/90 shadow-xl overflow-hidden admin-card">
               <div className="overflow-x-auto admin-scroll">
-                <table className="w-full min-w-[680px] text-left text-xs font-mono admin-table">
+                <table className="w-full min-w-[1180px] text-left text-xs font-mono admin-table">
                   <thead>
                     <tr className="border-b border-zinc-800 bg-zinc-950/60 text-[11px] text-zinc-400">
                       <th className="px-4 py-3 font-semibold">User ID</th>
@@ -1653,6 +1657,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <th className="px-4 py-3 font-semibold">Balance</th>
                       <th className="px-4 py-3 font-semibold">Profit</th>
                       <th className="px-4 py-3 font-semibold">Compounding</th>
+                      <th className="px-4 py-3 font-semibold min-w-[270px]">Referral stats <span className="block text-[9px] font-normal text-zinc-600">direct / full team</span></th>
                       <th className="px-4 py-3 font-semibold">Status</th>
                       <th className="px-4 py-3 font-semibold">Email Account</th>
                       <th className="px-4 py-3 font-semibold text-right">Actions</th>
@@ -1690,6 +1695,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             ) : (
                               <span className="text-zinc-500 text-[10px]">Idle</span>
                             )}
+                          </td>
+                          <td className="px-3 py-2 align-top">
+                            <ReferralNetworkStats stats={u.referralStats} />
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-1.5">
@@ -1817,6 +1825,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <div className="text-[9px] text-zinc-500 uppercase">Boost</div>
                       <div className={`text-xs font-bold ${u.boostState?.isActive ? 'text-emerald-400' : 'text-zinc-500'}`}>{u.boostState?.isActive ? (u.boostState.isPaused ? 'Paused' : 'Active') : 'Idle'}</div>
                     </div>
+                  </div>
+                  <div className="mt-2" onClick={e => e.stopPropagation()}>
+                    <ReferralNetworkStats stats={u.referralStats} compact />
                   </div>
 <div className="flex gap-1.5 mt-2" onClick={e=>e.stopPropagation()}>
                     <button onClick={()=>{setFreezeModalUser(u); setFreezeReason('');}} className={`flex-1 rounded-xl py-2 text-xs font-bold border ${u.isFrozen ? 'bg-cyan-500 text-zinc-950 border-cyan-400' : 'bg-zinc-950 text-zinc-300 border-zinc-800'}`}>{u.isFrozen ? 'Unfreeze' : 'Freeze'}</button>

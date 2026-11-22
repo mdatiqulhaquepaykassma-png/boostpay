@@ -16,6 +16,7 @@ import {
   methodAvailable, limitsFor, toPublicMethod, withdrawFieldsFor,
 } from './payments';
 import { listP2PTransfers } from './admin-money-flow';
+import { buildAdminReferralStats } from './admin-user-referrals';
 import {
   ensureWithdrawalPolicy, normalizeWithdrawalPolicy,
   methodSourceLimit, agentSourceLimit, methodWithdrawalSourceInfo,
@@ -8017,7 +8018,24 @@ async function startServer() {
       if (aT || bT) return (bT||0)-(aT||0);
       return Number(b.id)-Number(a.id);
     });
-    res.json({ users: sorted.map((u: any) => adminUserView(u, db)), config: db.config });
+    const activeBoostIds = new Set<string>();
+    for (const user of (db.users || [])) {
+      let boost: any = user.boostState;
+      try { boost = liveBoostState(user); } catch { /* use the stored state */ }
+      if (boost && boost.isActive && !boost.isPaused) activeBoostIds.add(String(user.id));
+    }
+    const referralStats = buildAdminReferralStats(db, activeBoostIds);
+    const emptyReferralStats = {
+      direct: { count: 0, sameIpDevice: 0, depositors: 0, activeBoosters: 0 },
+      team: { count: 0, sameIpDevice: 0, depositors: 0, activeBoosters: 0 },
+    };
+    res.json({
+      users: sorted.map((u: any) => ({
+        ...adminUserView(u, db),
+        referralStats: referralStats.get(String(u.id)) || emptyReferralStats,
+      })),
+      config: db.config
+    });
   });
 
   // Storage Diagnostic Probe: Live read/write verification and stats
