@@ -229,6 +229,8 @@ export const MoneyFlowView: FC = () => {
         </>
       )}
 
+      <P2PTransfersPanel onTrace={(id) => void openNode(id)} />
+
       {/* ── search ─────────────────────────────────────────────────────────── */}
       <div className="rounded-2xl border border-zinc-800 bg-zinc-900/70 p-3">
         <form
@@ -376,6 +378,129 @@ export const MoneyFlowView: FC = () => {
         </div>
       )}
     </div>
+  );
+};
+
+type P2PTransferItem = { id: string; senderId: string; recipientId: string; amount: number; timestamp: number };
+type P2PFilterSet = { senderId: string; recipientId: string; limit: number };
+
+const P2PTransfersPanel: FC<{ onTrace: (id: string) => void }> = ({ onTrace }) => {
+  const [sender, setSender] = useState('');
+  const [recipient, setRecipient] = useState('');
+  const [limit, setLimit] = useState(100);
+  const [applied, setApplied] = useState<P2PFilterSet>({ senderId: '', recipientId: '', limit: 100 });
+  const [items, setItems] = useState<P2PTransferItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: String(applied.limit) });
+      if (applied.senderId) params.set('senderId', applied.senderId);
+      if (applied.recipientId) params.set('recipientId', applied.recipientId);
+      const r = await fetch(`/api/admin/money-tree/p2p?${params.toString()}`, { headers: BoostPayStore.adminAuthHeaders() });
+      const j: any = await r.json();
+      if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`);
+      setItems(Array.isArray(j.items) ? j.items : []);
+      setTotal(Math.max(0, Number(j.total) || 0));
+      setError('');
+    } catch (e: any) {
+      setError(e?.message || 'Could not load P2P transfers.');
+    } finally {
+      setLoading(false);
+    }
+  }, [applied]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const clearFilters = () => {
+    setSender('');
+    setRecipient('');
+    setLimit(100);
+    setApplied({ senderId: '', recipientId: '', limit: 100 });
+  };
+
+  return (
+    <section className="rounded-2xl border border-sky-500/20 bg-zinc-900/70 p-3">
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="min-w-0">
+          <h3 className="text-[12px] font-bold text-sky-300">P2P Money Flow</h3>
+          <p className="mt-0.5 text-[10px] text-zinc-500">Read-only user-to-user transfers. Each payment is counted once from the sender’s debit row.</p>
+        </div>
+        <span className="ml-auto rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[10px] text-zinc-400">
+          {loading ? 'Loading…' : `${total.toLocaleString()} match${total === 1 ? '' : 'es'}`}
+        </span>
+      </div>
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          setApplied({ senderId: sender.trim(), recipientId: recipient.trim(), limit });
+        }}
+        className="mt-3 grid gap-2 sm:grid-cols-[1fr_1fr_auto_auto_auto]"
+      >
+        <input
+          value={sender}
+          onChange={e => setSender(e.target.value)}
+          maxLength={64}
+          placeholder="Sender ID"
+          aria-label="Filter P2P transfers by sender ID"
+          className="min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-[11px] text-white placeholder-zinc-600 focus:border-sky-500 focus:outline-none"
+        />
+        <input
+          value={recipient}
+          onChange={e => setRecipient(e.target.value)}
+          maxLength={64}
+          placeholder="Recipient ID"
+          aria-label="Filter P2P transfers by recipient ID"
+          className="min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-[11px] text-white placeholder-zinc-600 focus:border-sky-500 focus:outline-none"
+        />
+        <select
+          value={limit}
+          onChange={e => setLimit(Number(e.target.value))}
+          aria-label="Maximum P2P transfers to show"
+          className="rounded-xl border border-zinc-700 bg-zinc-950 px-2 py-2 text-[11px] text-zinc-300 focus:border-sky-500 focus:outline-none"
+        >
+          <option value={100}>Latest 100</option>
+          <option value={250}>Latest 250</option>
+          <option value={500}>Latest 500</option>
+        </select>
+        <button type="submit" className="flex items-center justify-center gap-1.5 rounded-xl bg-sky-500 px-3 py-2 text-[11px] font-bold text-zinc-950 hover:bg-sky-400 cursor-pointer">
+          <Search className="h-3.5 w-3.5" /> Apply
+        </button>
+        <button type="button" onClick={clearFilters} className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-[11px] font-semibold text-zinc-400 hover:bg-zinc-800 cursor-pointer">
+          Clear
+        </button>
+      </form>
+
+      {error && <div className="mt-2 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-[10px] text-red-300">{error}</div>}
+      <div className="mt-3 max-h-80 space-y-1 overflow-y-auto pr-1">
+        {items.map((row, index) => (
+          <div key={`${row.id}-${index}`} className="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950 px-2.5 py-2">
+            <span className="font-mono text-[9px] text-zinc-500">{when(row.timestamp)}</span>
+            <span className="font-mono text-[9px] text-zinc-600">{row.id}</span>
+            <button type="button" onClick={() => onTrace(row.senderId)} className="rounded-md bg-sky-500/10 px-1.5 py-0.5 font-mono text-[10px] font-bold text-sky-300 hover:bg-sky-500/20 cursor-pointer">
+              #{row.senderId}
+            </button>
+            <span className="text-zinc-600">→</span>
+            <button type="button" onClick={() => onTrace(row.recipientId)} className="rounded-md bg-sky-500/10 px-1.5 py-0.5 font-mono text-[10px] font-bold text-sky-300 hover:bg-sky-500/20 cursor-pointer">
+              #{row.recipientId}
+            </button>
+            <span className="ml-auto font-mono text-[11px] font-black text-white">{money(row.amount)}</span>
+          </div>
+        ))}
+        {!loading && !error && items.length === 0 && <p className="rounded-xl border border-dashed border-zinc-800 px-3 py-5 text-center text-[11px] text-zinc-500">No P2P transfers match these filters.</p>}
+        {loading && items.length === 0 && <p className="flex items-center justify-center gap-2 py-5 text-[11px] text-zinc-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading transfers…</p>}
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2 text-[9px] text-zinc-600">
+        <span>Showing {items.length.toLocaleString()} of {total.toLocaleString()} matching rows · received-side duplicates excluded</span>
+        <button type="button" onClick={() => void load()} disabled={loading} className="flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-zinc-400 hover:bg-zinc-800 disabled:opacity-50 cursor-pointer">
+          <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} /> Refresh
+        </button>
+      </div>
+    </section>
   );
 };
 

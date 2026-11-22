@@ -15,6 +15,7 @@ import {
   PAYMENT_CATEGORIES, defaultPaymentMethods, ensurePaymentCollections, findMethod,
   methodAvailable, limitsFor, toPublicMethod, withdrawFieldsFor,
 } from './payments';
+import { listP2PTransfers } from './admin-money-flow';
 import {
   ensureWithdrawalPolicy, normalizeWithdrawalPolicy,
   methodSourceLimit, agentSourceLimit, methodWithdrawalSourceInfo,
@@ -7901,6 +7902,21 @@ async function startServer() {
       });
     } catch (e: any) {
       res.status(500).json({ error: 'Could not build the money tree.', detail: String(e?.message || e).slice(0, 200) });
+    }
+  });
+
+  app.get('/api/admin/money-tree/p2p', requireAdmin, (req: any, res: any) => {
+    try {
+      const db = readDb();
+      const result = listP2PTransfers(db.transactions, {
+        senderId: req.query.senderId,
+        recipientId: req.query.recipientId,
+        limit: req.query.limit,
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ success: true, ...result });
+    } catch (e: any) {
+      return res.status(500).json({ error: 'Could not build the P2P transfer list.', detail: String(e?.message || e).slice(0, 200) });
     }
   });
 
