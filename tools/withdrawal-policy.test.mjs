@@ -6,6 +6,7 @@ import {
   collectDepositSources,
   methodSourceLimit,
   methodWithdrawalSourceInfo,
+  isWithdrawalMethodAvailable,
 } from '../withdrawal-policy.ts';
 
 function fixture(overrides = {}) {
@@ -42,6 +43,8 @@ test('collects only credited deposits and does not double-count their linked led
     transactions: [
       { id: 'TX-D1', userId: 'u1', type: 'DEPOSIT', amount: 100, methodId: 'PM-A', metadata: { depositId: 'D1' } },
       { id: 'TX-OLD', userId: 'u1', type: 'DEPOSIT', amount: 25, metadata: { methodId: 'PM-B' } },
+      { id: 'TX-PENDING', userId: 'u1', type: 'DEPOSIT', status: 'PENDING', amount: 500, methodId: 'PM-C' },
+      { id: 'TX-FAILED', userId: 'u1', type: 'DEPOSIT', status: 'FAILED', amount: 600, methodId: 'PM-D' },
       { id: 'TX-CASH', userId: 'u1', type: 'AGENT_TRANSFER_RECEIVED', amount: 30, agentId: 'AGT-1001' },
       { id: 'TX-OTHER', userId: 'u2', type: 'AGENT_TRANSFER_RECEIVED', amount: 999, agentId: 'AGT-1001' },
     ],
@@ -49,6 +52,8 @@ test('collects only credited deposits and does not double-count their linked led
   const sources = collectDepositSources(db, 'u1');
   assert.equal(sources.methods.get('PM-A'), 100);
   assert.equal(sources.methods.get('PM-B'), 25);
+  assert.equal(sources.methods.has('PM-C'), false, 'a pending legacy ledger row must not create source allowance');
+  assert.equal(sources.methods.has('PM-D'), false, 'a failed legacy ledger row must not create source allowance');
   assert.equal(sources.agents.get('WAG-A'), 100);
   assert.equal(sources.agents.has('WAG-B'), false);
   assert.equal(sources.agents.get('AGT-1001'), 30);
@@ -124,6 +129,43 @@ test('wallet-agent options are limited to the selected method and source agents'
   assert.equal(info.agentRequired, true);
   assert.deepEqual(info.walletAgents.map((x) => x.id), ['WAG-A', 'WAG-B']);
   assert.equal(info.methodAvailableUsd, 70);
+});
+
+test('withdrawal catalogue is limited to matching method and cash-agent sources', () => {
+  const db = fixture({
+    paymentMeta: { withdrawalPolicy: { ...DEFAULT_WITHDRAWAL_POLICY, singleMethodUnlimited: false, singleAgentUnlimited: false } },
+    agents: [{ id: 'AGT-1001', name: 'Cash A', isActive: true }],
+  });
+  const methodA = { id: 'PM-A', category: 'EWALLET' };
+  const methodB = { id: 'PM-B', category: 'BANK' };
+  const cashMethod = { id: 'PM-TG-AGENT', category: 'AGENT' };
+
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', methodA), false);
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', cashMethod), false);
+  db.depositRequests.push(approvedDeposit('D1', 'PM-A', 50));
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', methodA), true);
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', methodB), false);
+
+  db.transactions.push({ id: 'TX-CASH', userId: 'u1', type: 'AGENT_TRANSFER_RECEIVED', amount: 30, agentId: 'AGT-1001' });
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', cashMethod), true);
+  db.agentPayouts.push({ id: 'APO-1', userId: 'u1', agentId: 'AGT-1001', amount: 30, status: 'PENDING' });
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', cashMethod), false, 'fully reserved cash-agent source is not offered');
+  db.agents[0].isActive = false;
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', cashMethod), false, 'inactive cash agents are not offered');
+
+  db.paymentMeta.withdrawalPolicy.agentCapsEnabled = false;
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', cashMethod), true, 'Admin can intentionally turn off agent-source enforcement');
+});
+
+test('a disabled wallet agent remains required and cannot fall back to method-only payout', () => {
+  const db = fixture({
+    walletAgents: [{ id: 'WAG-A', name: 'Wallet A', methodId: 'PM-A', active: false }],
+    depositRequests: [approvedDeposit('D1', 'PM-A', 40, 'WAG-A')],
+  });
+  const info = methodWithdrawalSourceInfo(db, 'u1', 'PM-A');
+  assert.equal(info.agentRequired, true);
+  assert.deepEqual(info.walletAgents, []);
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', { id: 'PM-A', category: 'EWALLET' }), false);
 });
 
 test('disabling caps disables enforcement without changing the measured source totals', () => {

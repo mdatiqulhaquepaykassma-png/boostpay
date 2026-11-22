@@ -117,6 +117,23 @@ s, j = req('/api/admin/payment-methods', {
 ck('an admin can create a payment method', s == 200 and (j.get('method') or {}).get('id') == 'PM-TESTWALLET',
    f'{s} {(j.get("error") or "")[:60]}', 'CRITICAL', 'Methods cannot be created.')
 
+s, j = req('/api/admin/payment-methods', {
+    'id': 'PM-TESTOTHER', 'name': 'Unfunded Test Wallet', 'category': 'EWALLET', 'logo': '🧪',
+    'enabled': True, 'depositEnabled': True, 'withdrawEnabled': True,
+    'userDeposit': True, 'userWithdraw': True, 'currencies': ['*'], 'countries': [],
+    'minDeposit': 1, 'maxDeposit': 1000, 'minWithdraw': 1, 'maxWithdraw': 1000,
+    'accountName': 'BoostPay Other Test', 'accountNumber': '01700000001',
+}, token=ADMIN_TOKEN)
+ck('a second test method is available for source-isolation checks', s == 200 and (j.get('method') or {}).get('id') == 'PM-TESTOTHER',
+   f'{s} {(j.get("error") or "")[:60]}', 'HIGH', 'Could not create the method used to verify source isolation.')
+
+s, j = req('/api/admin/withdrawal-policy', {
+    'methodCapsEnabled': True, 'agentCapsEnabled': True,
+    'singleMethodUnlimited': True, 'singleAgentUnlimited': True,
+}, token=ADMIN_TOKEN)
+ck('the admin can save audited source-policy settings', s == 200 and (j.get('policy') or {}).get('methodCapsEnabled') is True,
+   f'{s} {(j.get("error") or "")[:60]}', 'HIGH', 'Source-policy configuration cannot be saved.')
+
 # ── 1. catalogue ─────────────────────────────────────────────────────────────
 section('1. the method catalogue')
 s, j = req('/api/payment/methods?mode=deposit', token=UTOK)
@@ -185,6 +202,11 @@ s, j = req('/api/admin/payment-requests?type=deposit&status=PENDING', token=ADMI
 pending = [r for r in (j.get('requests') or []) if r.get('id') == DEP.get('id')]
 ck('the deposit shows up in the admin queue', len(pending) == 1, f'{len(pending)} found', 'HIGH', 'Admins cannot see the queue.')
 
+s, j = req('/api/payment/methods?mode=withdraw', token=UTOK)
+withdraw_ids = {m.get('id') for m in (j.get('methods') or [])}
+ck('a pending deposit does not unlock a withdrawal method', 'PM-TESTWALLET' not in withdraw_ids,
+   f'{s} listed={sorted(withdraw_ids)}', 'CRITICAL', 'An unverified deposit created withdrawal source allowance.')
+
 s, j = req('/api/admin/payment-requests/deposit/review', {'id': DEP.get('id'), 'action': 'APPROVE'}, token=UTOK)
 ck('a normal user cannot approve a deposit', s in (401, 403), f'{s}', 'CRITICAL', 'Users can credit their own wallet.')
 
@@ -198,9 +220,62 @@ after2 = balance(UID, ADMIN_TOKEN)
 ck('approving the same deposit again is refused and credits nothing', s == 409 and after2 == after, f'{s} balance={after2}',
    'CRITICAL', 'A deposit can be credited twice.')
 
+s, edited_dep = req('/api/admin/payment-requests/deposit', {
+    'id': DEP.get('id'), 'methodId': 'PM-TESTWALLET', 'sourceAgentId': '', 'amountUsd': 30,
+}, token=ADMIN_TOKEN, method='PATCH')
+updated_balance = balance(UID, ADMIN_TOKEN)
+ck('an approved deposit amount edit reconciles balance and source amount',
+   s == 200 and abs((updated_balance or 0) - ((after or 0) + 5)) < 1e-6
+   and abs(float((edited_dep.get('request') or {}).get('amountUsd') or 0) - 30) < 1e-6,
+   f'{s} balance={updated_balance} request={((edited_dep.get("request") or {}).get("amountUsd"))}',
+   'CRITICAL', 'Approved deposit edits did not reconcile the credited balance/source.')
+after = updated_balance
+s, source_info = req(f'/api/admin/withdrawal-sources?userId={UID}&methodId=PM-TESTWALLET', token=ADMIN_TOKEN)
+ck('the source-cap view reflects the corrected approved deposit amount',
+   s == 200 and abs(float(source_info.get('methodDepositedUsd') or 0) - 30) < 1e-6,
+   f'{s} deposited={source_info.get("methodDepositedUsd")}', 'HIGH', 'The source ceiling did not update after a deposit correction.')
+
+s, j = req('/api/payment/methods?mode=withdraw', token=UTOK)
+withdraw_ids = {m.get('id') for m in (j.get('methods') or [])}
+ck('the funded withdrawal method is visible and an unfunded method is hidden',
+   'PM-TESTWALLET' in withdraw_ids and 'PM-TESTOTHER' not in withdraw_ids and 'PM-TG-AGENT' not in withdraw_ids,
+   f'{s} listed={sorted(withdraw_ids)}', 'HIGH', 'Withdrawal options are not filtered to the user’s verified source.')
+
+s, j = req('/api/admin/withdrawal-policy', {'singleMethodUnlimited': False}, token=ADMIN_TOKEN)
+source_dest = {'accountName': 'Test Holder', 'accountNumber': '01800000000'}
+s, cap_error = req('/api/user/withdraw-request', {
+    'methodId': 'PM-TESTWALLET', 'amount': 31, 'destination': source_dest,
+}, token=UTOK)
+ck('with the sole-method exception off, withdrawal cannot exceed that method source',
+   s == 400 and 'remaining withdrawal of $30.00' in str(cap_error.get('error', '')),
+   f'{s} {cap_error.get("error")}', 'CRITICAL', 'The method source ceiling is not enforced.')
+s, cross_error = req('/api/user/withdraw-request', {
+    'methodId': 'PM-TESTOTHER', 'amount': 1, 'destination': source_dest,
+}, token=UTOK)
+ck('withdrawal through a different, unfunded method is refused',
+   s == 400 and 'remaining withdrawal of $0.00' in str(cross_error.get('error', '')),
+   f'{s} {cross_error.get("error")}', 'CRITICAL', 'A user can withdraw through a method they did not fund.')
+req('/api/admin/withdrawal-policy', {'singleMethodUnlimited': True}, token=ADMIN_TOKEN)
+
+# policy/deposit edits must leave an audit trail
+logged_actions = {row.get('action') for row in db_read().get('auditLogs', [])}
+ck('policy and deposit-source edits are audit-logged',
+   'WITHDRAWAL_POLICY_UPDATED' in logged_actions and 'DEPOSIT_SOURCE_UPDATED' in logged_actions,
+   str(sorted(action for action in logged_actions if action and ('WITHDRAWAL' in action or 'DEPOSIT_SOURCE' in action)),),
+   'HIGH', 'A source-policy change was not written to the audit log.')
+
 # rejected deposit never credits
 s, j = req('/api/user/deposit-request', {'methodId': 'PM-TESTWALLET', 'amount': 10, 'reference': f'REF{TAG}D'}, token=UTOK)
 DEP2 = (j.get('request') or {}).get('id')
+s, edited_pending_dep = req('/api/admin/payment-requests/deposit', {
+    'id': DEP2, 'methodId': 'PM-TESTOTHER', 'sourceAgentId': '', 'amountUsd': 12,
+}, token=ADMIN_TOKEN, method='PATCH')
+ck('an admin can edit a pending deposit method/source/amount without crediting it',
+   s == 200 and (edited_pending_dep.get('request') or {}).get('methodId') == 'PM-TESTOTHER'
+   and abs(float((edited_pending_dep.get('request') or {}).get('amountUsd') or 0) - 12) < 1e-6
+   and balance(UID, ADMIN_TOKEN) == after,
+   f'{s} method={(edited_pending_dep.get("request") or {}).get("methodId")} balance={balance(UID, ADMIN_TOKEN)}',
+   'HIGH', 'Pending deposit corrections did not persist or incorrectly credited the wallet.')
 s, j = req('/api/admin/payment-requests/deposit/review', {'id': DEP2, 'action': 'REJECT', 'reason': 'not found'}, token=ADMIN_TOKEN)
 ck('rejecting a deposit leaves the balance untouched', s == 200 and balance(UID, ADMIN_TOKEN) == after,
    f'{s} balance={balance(UID, ADMIN_TOKEN)}', 'CRITICAL', 'A rejected deposit still credited money.')
@@ -269,14 +344,120 @@ s, j = req('/api/admin/payment-requests/withdraw/review', {'id': WDR.get('id'), 
 ck('the same rejection cannot refund twice', s == 409 and balance(UID, ADMIN_TOKEN) == b2, f'{s}', 'CRITICAL',
    'Repeated rejections mint money.')
 
+# A second approved source is used to exercise an Admin's pending method reassignment.
+s, j = req('/api/user/deposit-request', {'methodId': 'PM-TESTOTHER', 'amount': 12, 'reference': f'REF{TAG}F'}, token=UTOK)
+DEP3 = (j.get('request') or {}).get('id')
+s, j = req('/api/admin/payment-requests/deposit/review', {'id': DEP3, 'action': 'APPROVE'}, token=ADMIN_TOKEN)
+ck('a second payment-method deposit is verified for the admin edit test', s == 200, f'{s} {j.get("error", "")}', 'HIGH',
+   'Could not establish a second verified method source.')
+
 # approve → completed, no further balance change
 s, j = req('/api/user/withdraw-request', {'methodId': 'PM-TESTWALLET', 'amount': 20, 'destination': dest}, token=UTOK)
 W2 = (j.get('request') or {}).get('id')
 held = balance(UID, ADMIN_TOKEN)
+
+# Admin may reassign and adjust a pending request, but must pass the new method's source cap.
+s, edited_withdraw = req('/api/admin/payment-requests/withdraw', {
+    'id': W2, 'methodId': 'PM-TESTOTHER', 'agentId': '', 'amountUsd': 8,
+    'destination': dest,
+}, token=ADMIN_TOKEN, method='PATCH')
+reconciled_balance = balance(UID, ADMIN_TOKEN)
+ck('an admin can change pending withdrawal method and amount with balance/hold reconciliation',
+   s == 200 and (edited_withdraw.get('request') or {}).get('methodId') == 'PM-TESTOTHER'
+   and abs(float((edited_withdraw.get('request') or {}).get('amountUsd') or 0) - 8) < 1e-6
+   and abs((reconciled_balance or 0) - ((held or 0) + 12)) < 1e-6,
+   f'{s} method={(edited_withdraw.get("request") or {}).get("methodId")} amount={(edited_withdraw.get("request") or {}).get("amountUsd")} balance={reconciled_balance}',
+   'CRITICAL', 'Pending withdrawal edits did not reconcile the user balance, boosted-profit hold, or source.')
+
 s, j = req('/api/admin/payment-requests/withdraw/review', {'id': W2, 'action': 'APPROVE', 'payoutRef': 'BK123'}, token=ADMIN_TOKEN)
-ck('marking a withdrawal paid keeps the balance as held', s == 200 and balance(UID, ADMIN_TOKEN) == held
-   and (j.get('request') or {}).get('status') == 'COMPLETED', f'{s} balance={balance(UID, ADMIN_TOKEN)}', 'CRITICAL',
-   'Paying a withdrawal touched the balance a second time.')
+ck('marking a withdrawal paid keeps the balance as held', s == 200 and balance(UID, ADMIN_TOKEN) == reconciled_balance
+   and (j.get('request') or {}).get('status') == 'COMPLETED' and (j.get('request') or {}).get('methodId') == 'PM-TESTOTHER',
+   f'{s} balance={balance(UID, ADMIN_TOKEN)}', 'CRITICAL', 'Paying a withdrawal touched the balance a second time or lost its edited method.')
+s, locked_edit = req('/api/admin/payment-requests/withdraw', {'id': W2, 'amountUsd': 1}, token=ADMIN_TOKEN, method='PATCH')
+ck('a paid/completed withdrawal cannot be edited', s == 409, f'{s} {locked_edit.get("error")}', 'CRITICAL',
+   'An admin edit changed a completed payout.')
+
+audit_actions = {row.get('action') for row in db_read().get('auditLogs', [])}
+ck('pending deposit and withdrawal corrections are audit-logged',
+   'DEPOSIT_SOURCE_UPDATED' in audit_actions and 'WITHDRAWAL_ADMIN_EDITED' in audit_actions,
+   str(sorted(action for action in audit_actions if action and ('DEPOSIT_SOURCE' in action or 'WITHDRAWAL_ADMIN' in action)),),
+   'HIGH', 'An Admin payment-request edit was not written to the audit log.')
+
+# Cash-agent source cap: a separate source per cash agent, with pending payouts reserved.
+# This uses the isolated local test DB to create two credited agent deposits.
+data = db_read()
+user_row = next((u for u in data.get('users', []) if str(u.get('id')) == UID), None)
+if user_row:
+    user_row['balance'] = float(user_row.get('balance') or 0) + 35
+    user_row['lifetimeProfit'] = max(1000.0, float(user_row.get('lifetimeProfit') or 0))
+    user_row['boostProfitWithdrawn'] = float(user_row.get('boostProfitWithdrawn') or 0)
+data.setdefault('agents', [])
+for aid, name in [('AGT-POLICY-A', 'Policy Cash A'), ('AGT-POLICY-B', 'Policy Cash B')]:
+    if not any(str(a.get('id')) == aid for a in data['agents']):
+        data['agents'].append({'id': aid, 'name': name, 'balance': 0, 'isActive': True, 'contacts': {}})
+data.setdefault('transactions', [])
+data['transactions'].extend([
+    {'id': 'TX-POLICY-A-' + TAG, 'userId': UID, 'type': 'AGENT_TRANSFER_RECEIVED', 'amount': 15, 'agentId': 'AGT-POLICY-A'},
+    {'id': 'TX-POLICY-B-' + TAG, 'userId': UID, 'type': 'AGENT_TRANSFER_RECEIVED', 'amount': 20, 'agentId': 'AGT-POLICY-B'},
+])
+data.setdefault('config', {}).setdefault('agentSettings', {}).update({
+    'enabled': True, 'feePercentOnUserSend': 0, 'minUserSend': 1, 'maxUserSend': 1000,
+})
+data.setdefault('paymentMeta', {}).setdefault('withdrawalPolicy', {}).update({
+    'agentCapsEnabled': True, 'singleAgentUnlimited': False,
+})
+db_write(data)
+
+s, cash_catalog = req('/api/payment/methods?mode=withdraw', token=UTOK)
+cash_ids = {m.get('id') for m in (cash_catalog.get('methods') or [])}
+ck('a credited cash-agent source unlocks the Cash Agent withdrawal option',
+   s == 200 and 'PM-TG-AGENT' in cash_ids, f'{s} listed={sorted(cash_ids)}',
+   'HIGH', 'The cash-agent withdrawal option does not follow the matching cash source.')
+s, agent_list = req('/api/agents', token=UTOK)
+source_amounts = {a.get('id'): a.get('sourceAvailableUsd') for a in agent_list.get('agents', [])}
+ck('the agent picker shows only the user’s separate source allowances',
+   s == 200 and source_amounts.get('AGT-POLICY-A') == 15 and source_amounts.get('AGT-POLICY-B') == 20,
+   str(source_amounts), 'HIGH', 'Cash-agent options do not show source-specific limits.')
+
+s, cap_error = req('/api/user/send-to-agent', {
+    'agentId': 'AGT-POLICY-A', 'amount': 16, 'currency': 'USD', 'idempotencyKey': 'cash-over-' + TAG,
+}, token=UTOK)
+ck('cash withdrawal cannot exceed the chosen cash agent’s deposit source',
+   s == 400 and 'remaining withdrawal of $15.00' in str(cap_error.get('error', '')),
+   f'{s} {cap_error.get("error")}', 'CRITICAL', 'Cash-agent withdrawal source cap is not enforced.')
+
+s, cash_request = req('/api/user/send-to-agent', {
+    'agentId': 'AGT-POLICY-A', 'amount': 10, 'currency': 'USD', 'idempotencyKey': 'cash-pending-' + TAG,
+}, token=UTOK)
+cash_payout = {
+    'id': cash_request.get('payoutId'), 'status': cash_request.get('status'),
+    'agentId': cash_request.get('agentId'), 'amount': cash_request.get('amount'),
+}
+ck('an eligible cash-agent withdrawal creates a pending, source-reserved payout',
+   s == 200 and cash_payout.get('status') == 'PENDING' and cash_payout.get('agentId') == 'AGT-POLICY-A',
+   f'{s} {cash_payout.get("id", "")}', 'CRITICAL', 'A valid source-backed cash withdrawal could not be created.')
+s, cash_over_reserved = req('/api/user/send-to-agent', {
+    'agentId': 'AGT-POLICY-A', 'amount': 6, 'currency': 'USD', 'idempotencyKey': 'cash-reserve-' + TAG,
+}, token=UTOK)
+ck('a pending cash payout reserves its source allowance',
+   s == 400 and 'remaining withdrawal of $5.00' in str(cash_over_reserved.get('error', '')),
+   f'{s} {cash_over_reserved.get("error")}', 'CRITICAL', 'Pending cash payouts do not reserve source capacity.')
+
+cash_before_edit = balance(UID, ADMIN_TOKEN)
+s, cash_edited = req('/api/admin/payment-requests/withdraw', {
+    'id': cash_payout.get('id'), 'agentId': 'AGT-POLICY-B', 'amountUsd': 8,
+}, token=ADMIN_TOKEN, method='PATCH')
+ck('an admin can reassign a pending cash withdrawal and reconcile its amount',
+   s == 200 and (cash_edited.get('request') or {}).get('agentId') == 'AGT-POLICY-B'
+   and abs(float((cash_edited.get('request') or {}).get('amount') or 0) - 8) < 1e-6
+   and abs((balance(UID, ADMIN_TOKEN) or 0) - ((cash_before_edit or 0) + 2)) < 1e-6,
+   f'{s} agent={(cash_edited.get("request") or {}).get("agentId")} amount={(cash_edited.get("request") or {}).get("amount")} balance={balance(UID, ADMIN_TOKEN)}',
+   'CRITICAL', 'Cash withdrawal admin edits did not reconcile source reservation and user balance.')
+s, post_edit_agents = req('/api/agents', token=UTOK)
+post_edit_caps = {a.get('id'): a.get('sourceAvailableUsd') for a in post_edit_agents.get('agents', [])}
+ck('cash source reservation follows the admin-selected agent',
+   s == 200 and post_edit_caps.get('AGT-POLICY-A') == 15 and post_edit_caps.get('AGT-POLICY-B') == 12,
+   str(post_edit_caps), 'HIGH', 'Editing the cash payout did not move its reservation to the selected agent.')
 
 # ── 5. admin switches ────────────────────────────────────────────────────────
 section('5. admin switches')

@@ -698,6 +698,11 @@ const MethodFlow: React.FC<{
                       )}
                     </label>
                   )}
+                  {sourcePolicy?.agentRequired && sourcePolicy.walletAgents.length === 0 && (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10px] leading-relaxed text-amber-100">
+                      This withdrawal is tied to the wallet agent used for your deposit, but that agent is not currently available. Please contact support.
+                    </div>
+                  )}
                   {method.requires.map((f) => (
                     <label key={f.key} className="block">
                       <span className="mb-1 block text-[9.5px] font-bold uppercase tracking-wider text-zinc-400">{f.label}</span>
@@ -723,7 +728,8 @@ const MethodFlow: React.FC<{
               {error && <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[10.5px] font-semibold text-rose-200">{error}</div>}
 
               <button
-                type="submit" disabled={busy || (mode === 'deposit' && !method.payTo?.accountNumber)}
+                type="submit" disabled={busy || (mode === 'deposit' && !method.payTo?.accountNumber)
+                  || (mode === 'withdraw' && !!sourcePolicy?.agentRequired && sourcePolicy.walletAgents.length === 0)}
                 className="flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-amber-500 text-[12px] font-black text-zinc-950 transition hover:bg-amber-400 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {busy ? <><Loader2 className="h-4 w-4 animate-spin" /> Sending…</> : mode === 'deposit' ? 'Submit deposit' : 'Request withdrawal'}

@@ -91,6 +91,8 @@ function walletAgentIdFromReview(db: any, row: any): string {
 export type DepositSources = {
   methods: Map<string, number>;
   agents: Map<string, number>;
+  /** Wallet-agent source amounts, keyed by payment method, then wallet-agent ID. */
+  walletAgentsByMethod: Map<string, Map<string, number>>;
 };
 
 /**
@@ -102,9 +104,20 @@ export function collectDepositSources(db: any, userId: any): DepositSources {
   const uid = keyOf(userId);
   const methods = new Map<string, number>();
   const agents = new Map<string, number>();
+  const walletAgentsByMethod = new Map<string, Map<string, number>>();
   const creditedRequestIds = new Set<string>();
   const linkedTransactionIds = new Set<string>();
   const requests = Array.isArray(db?.depositRequests) ? db.depositRequests : [];
+
+  const addWalletAgentMethodSource = (methodId: string, agentId: string, amount: number) => {
+    if (!isWalletAgentId(agentId)) return;
+    let byAgent = walletAgentsByMethod.get(methodId);
+    if (!byAgent) {
+      byAgent = new Map<string, number>();
+      walletAgentsByMethod.set(methodId, byAgent);
+    }
+    addAmount(byAgent, agentId, amount);
+  };
 
   for (const row of requests) {
     if (keyOf(row.userId) !== uid) continue;
@@ -114,7 +127,10 @@ export function collectDepositSources(db: any, userId: any): DepositSources {
     if (!methodId || amount <= 0) continue;
     addAmount(methods, methodId, amount);
     const sourceAgentId = walletAgentIdFromReview(db, row);
-    if (sourceAgentId) addAmount(agents, sourceAgentId, amount);
+    if (sourceAgentId) {
+      addAmount(agents, sourceAgentId, amount);
+      addWalletAgentMethodSource(methodId, sourceAgentId, amount);
+    }
     if (row.id) creditedRequestIds.add(keyOf(row.id));
     if (row.txId) linkedTransactionIds.add(keyOf(row.txId));
   }
@@ -129,7 +145,11 @@ export function collectDepositSources(db: any, userId: any): DepositSources {
       continue;
     }
     if (type !== 'DEPOSIT') continue;
-    if (['REJECTED', 'VOID', 'REVERSED', 'REFUNDED'].includes(String(tx.status || '').toUpperCase())) continue;
+    const status = String(tx.status || '').toUpperCase();
+    // A legacy DEPOSIT row without a status is treated as credited (older
+    // successful callbacks had no status field), but explicit non-success rows
+    // must never create withdrawal allowance.
+    if (status && !['CREDITED', 'APPROVED', 'COMPLETED', 'SUCCESS', 'SUCCEEDED', 'SUCCESSFUL'].includes(status)) continue;
     if (linkedTransactionIds.has(keyOf(tx.id))) continue;
     const linkedDepositId = keyOf(tx.metadata?.depositId || tx.depositId || '');
     if (linkedDepositId && creditedRequestIds.has(linkedDepositId)) continue;
@@ -138,25 +158,28 @@ export function collectDepositSources(db: any, userId: any): DepositSources {
     if (!methodId) continue; // do not guess a source for legacy/unattributed deposits
     addAmount(methods, methodId, tx.amount);
     const agentId = keyOf(tx.sourceAgentId || tx.agentId || tx.metadata?.sourceAgentId || tx.metadata?.agentId);
-    if (agentId) addAmount(agents, agentId, tx.amount);
+    if (agentId) {
+      addAmount(agents, agentId, tx.amount);
+      addWalletAgentMethodSource(methodId, agentId, amountOf(tx.amount));
+    }
   }
 
-  return { methods, agents };
+  return { methods, agents, walletAgentsByMethod };
 }
 
 function isCommittedWithdrawal(row: any): boolean {
   return ['PENDING', 'COMPLETED'].includes(String(row?.status || '').toUpperCase());
 }
 
-export function methodSourceLimit(
+function methodSourceLimitFromSources(
   db: any,
   userId: any,
   methodId: any,
-  opts: { excludeWithdrawId?: any } = {},
+  opts: { excludeWithdrawId?: any },
+  sources: DepositSources,
+  policy: WithdrawalPolicy,
 ): SourceLimit {
-  const policy = ensureWithdrawalPolicy(db);
   const id = keyOf(methodId);
-  const sources = collectDepositSources(db, userId);
   const depositedUsd = sources.methods.get(id) || 0;
   const soleMethod = sources.methods.size === 1 && sources.methods.has(id);
   const unlimited = policy.singleMethodUnlimited && soleMethod;
@@ -176,15 +199,25 @@ export function methodSourceLimit(
   };
 }
 
-export function agentSourceLimit(
+export function methodSourceLimit(
   db: any,
   userId: any,
-  agentId: any,
+  methodId: any,
   opts: { excludeWithdrawId?: any } = {},
 ): SourceLimit {
   const policy = ensureWithdrawalPolicy(db);
+  return methodSourceLimitFromSources(db, userId, methodId, opts, collectDepositSources(db, userId), policy);
+}
+
+function agentSourceLimitFromSources(
+  db: any,
+  userId: any,
+  agentId: any,
+  opts: { excludeWithdrawId?: any },
+  sources: DepositSources,
+  policy: WithdrawalPolicy,
+): SourceLimit {
   const id = keyOf(agentId);
-  const sources = collectDepositSources(db, userId);
   const depositedUsd = sources.agents.get(id) || 0;
   const soleAgent = sources.agents.size === 1 && sources.agents.has(id);
   const unlimited = policy.singleAgentUnlimited && soleAgent;
@@ -212,6 +245,16 @@ export function agentSourceLimit(
   };
 }
 
+export function agentSourceLimit(
+  db: any,
+  userId: any,
+  agentId: any,
+  opts: { excludeWithdrawId?: any } = {},
+): SourceLimit {
+  const policy = ensureWithdrawalPolicy(db);
+  return agentSourceLimitFromSources(db, userId, agentId, opts, collectDepositSources(db, userId), policy);
+}
+
 export type WithdrawalAgentOption = {
   id: string;
   name: string;
@@ -220,28 +263,40 @@ export type WithdrawalAgentOption = {
 };
 
 /** Wallet Agents that have source deposits for this user's selected method. */
-export function walletAgentOptionsForMethod(db: any, userId: any, methodId: any): WithdrawalAgentOption[] {
-  const sources = collectDepositSources(db, userId);
+function walletAgentOptionsFromSources(
+  db: any,
+  userId: any,
+  methodId: any,
+  sources: DepositSources,
+  policy: WithdrawalPolicy,
+  opts: { excludeWithdrawId?: any } = {},
+): WithdrawalAgentOption[] {
+  const byAgent = sources.walletAgentsByMethod.get(keyOf(methodId)) || new Map<string, number>();
   const walletAgents = Array.isArray(db?.walletAgents) ? db.walletAgents : [];
   const options: WithdrawalAgentOption[] = [];
-  for (const [id, amount] of sources.agents) {
-    if (!id.startsWith('WAG-') || amount <= 0) continue;
+  for (const [id, amount] of byAgent) {
+    if (!isWalletAgentId(id) || amount <= 0) continue;
     const agent = walletAgents.find((a: any) => keyOf(a.id) === id);
     if (!agent || keyOf(agent.methodId) !== keyOf(methodId) || agent.active === false) continue;
-    const limit = agentSourceLimit(db, userId, id);
+    const limit = agentSourceLimitFromSources(db, userId, id, opts, sources, policy);
     options.push({ id, name: keyOf(agent.name) || id, availableUsd: limit.availableUsd, unlimited: limit.unlimited });
   }
   return options.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 
+export function walletAgentOptionsForMethod(db: any, userId: any, methodId: any): WithdrawalAgentOption[] {
+  const policy = ensureWithdrawalPolicy(db);
+  const sources = collectDepositSources(db, userId);
+  return walletAgentOptionsFromSources(db, userId, methodId, sources, policy);
+}
+
 /** Returns a structured view used by the user app and by Admin edit validation. */
 export function methodWithdrawalSourceInfo(db: any, userId: any, methodId: any, excludeWithdrawId?: any) {
   const policy = ensureWithdrawalPolicy(db);
-  const method = methodSourceLimit(db, userId, methodId, { excludeWithdrawId });
-  const walletAgents = walletAgentOptionsForMethod(db, userId, methodId).map((agent) => {
-    const limit = agentSourceLimit(db, userId, agent.id, { excludeWithdrawId });
-    return { ...agent, availableUsd: limit.availableUsd, unlimited: limit.unlimited };
-  });
+  const sources = collectDepositSources(db, userId);
+  const method = methodSourceLimitFromSources(db, userId, methodId, { excludeWithdrawId }, sources, policy);
+  const walletAgentSources = sources.walletAgentsByMethod.get(keyOf(methodId));
+  const walletAgents = walletAgentOptionsFromSources(db, userId, methodId, sources, policy, { excludeWithdrawId });
   return {
     methodCapEnabled: policy.methodCapsEnabled,
     agentCapEnabled: policy.agentCapsEnabled,
@@ -250,8 +305,53 @@ export function methodWithdrawalSourceInfo(db: any, userId: any, methodId: any, 
     methodDepositedUsd: method.depositedUsd,
     methodReservedUsd: method.reservedUsd,
     walletAgents,
-    agentRequired: policy.agentCapsEnabled && walletAgents.length > 0,
+    // Keep requiring the original source even if that wallet-agent account has
+    // been disabled or removed. Otherwise an empty eligible-agent list used to
+    // turn into a method-only withdrawal and bypass the agent cap.
+    agentRequired: policy.agentCapsEnabled && !!walletAgentSources && Array.from(walletAgentSources.values()).some((amount) => amount > 0),
   };
+}
+
+/**
+ * Whether a configured withdrawal channel can be offered to this user.
+ * Source enforcement still runs again when the request is submitted; this only
+ * prevents showing methods/agents that have no matching deposit source.
+ */
+export function withdrawalMethodAvailability(
+  db: any,
+  userId: any,
+  method: any,
+): { available: boolean; sourcePolicy?: ReturnType<typeof methodWithdrawalSourceInfo> } {
+  const policy = ensureWithdrawalPolicy(db);
+  if (String(method?.category || '').toUpperCase() === 'AGENT') {
+    if (!policy.agentCapsEnabled) return { available: true };
+    const sources = collectDepositSources(db, userId);
+    const cashAgents = Array.isArray(db?.agents) ? db.agents : [];
+    const available = cashAgents.some((agent: any) => {
+      const id = keyOf(agent.id);
+      if (!isCashAgentId(id) || agent.isActive === false) return false;
+      const limit = agentSourceLimitFromSources(db, userId, id, {}, sources, policy);
+      return limit.depositedUsd > 0 && (limit.unlimited || limit.availableUsd > 0);
+    });
+    return { available };
+  }
+
+  const sourcePolicy = methodWithdrawalSourceInfo(db, userId, method?.id);
+  if (policy.methodCapsEnabled && sourcePolicy.methodDepositedUsd <= 0) {
+    return { available: false, sourcePolicy };
+  }
+  if (policy.methodCapsEnabled && !sourcePolicy.methodUnlimited && sourcePolicy.methodAvailableUsd <= 0) {
+    return { available: false, sourcePolicy };
+  }
+  if (policy.agentCapsEnabled && sourcePolicy.agentRequired
+    && !sourcePolicy.walletAgents.some((agent) => agent.unlimited || agent.availableUsd > 0)) {
+    return { available: false, sourcePolicy };
+  }
+  return { available: true, sourcePolicy };
+}
+
+export function isWithdrawalMethodAvailable(db: any, userId: any, method: any): boolean {
+  return withdrawalMethodAvailability(db, userId, method).available;
 }
 
 export function isCashAgentId(id: any): boolean {

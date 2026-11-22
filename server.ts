@@ -19,7 +19,7 @@ import { listP2PTransfers } from './admin-money-flow';
 import { buildAdminReferralStats } from './admin-user-referrals';
 import {
   ensureWithdrawalPolicy, normalizeWithdrawalPolicy,
-  methodSourceLimit, agentSourceLimit, methodWithdrawalSourceInfo,
+  methodSourceLimit, agentSourceLimit, methodWithdrawalSourceInfo, withdrawalMethodAvailability,
   isCashAgentId, isWalletAgentId,
 } from './withdrawal-policy';
 import { parseSms, normalizeTrxId } from './sms-parse';
@@ -10999,16 +10999,18 @@ const paymentLocks = new Map<string, Promise<any>>();
       // bKash and a BD account never sees a US-only method.
       const country = effectiveCountryOf(db, user);
       const all = (db.paymentMethods as any[]) || [];
-      const allowed = all
+      const allowed: any[] = all
         .filter((m) => m.enabled && methodAvailable(m, mode, 'user', currency, country).ok)
         .sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
         .map((m) => {
           const publicMethod: any = toPublicMethod(db, m, mode);
-          if (mode === 'withdraw' && m.category !== 'AGENT') {
-            publicMethod.sourcePolicy = methodWithdrawalSourceInfo(db, user.id, m.id);
-          }
+          if (mode !== 'withdraw') return publicMethod;
+          const source = withdrawalMethodAvailability(db, user.id, m);
+          if (!source.available) return null;
+          if (source.sourcePolicy) publicMethod.sourcePolicy = source.sourcePolicy;
           return publicMethod;
-        });
+        })
+        .filter((m) => m !== null);
       const label = countryLabelOf(country);
       res.setHeader('Cache-Control', 'no-store');
       res.json({
