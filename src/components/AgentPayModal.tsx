@@ -5,9 +5,9 @@ import { BoostPayStore } from '../services/store';
 import { User } from '../types';
 import { useCurrency } from '../lib/currency';
 
-interface AgentOption { id: string; name: string; online?: boolean; lastSeenAt?: number; contacts?: { telegram: string; whatsapp: string; imo: string } }
+interface AgentOption { id: string; name: string; online?: boolean; lastSeenAt?: number; contacts?: { telegram: string; whatsapp: string; imo: string }; sourceAvailableUsd?: number | null; sourceUnlimited?: boolean }
 interface AgentListResponse {
-  success: boolean; enabled: boolean; feePercent: number;
+  success: boolean; enabled: boolean; feePercent: number; agentCapsEnabled?: boolean;
   minUserSend: number; maxUserSend: number; agents: AgentOption[];
   /** Owner rule: only boosted dollars can leave the wallet through an agent. */
   maxWithdraw?: number;
@@ -152,7 +152,11 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || 'Could not load agents.');
       setData(json);
-      if (json.agents?.length === 1) setAgentId(json.agents[0].id);
+      const allAgents: AgentOption[] = Array.isArray(json.agents) ? json.agents : [];
+      const eligible = json.agentCapsEnabled
+        ? allAgents.filter((a) => a.sourceUnlimited || (Number(a.sourceAvailableUsd) || 0) > 0)
+        : allAgents;
+      if (eligible.length === 1) setAgentId(eligible[0].id);
     } catch (err: any) {
       if (!quiet) setError(err?.message || 'Could not load agents.');
     } finally {
@@ -236,8 +240,16 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   const agentFull = !!agentLock?.full;
   const agentCause = agentLock?.cause || 'none';
   const agentCap = typeof agentLock?.sendable === 'number' ? agentLock.sendable : null;
-  // The most that can be typed in right now (boost rules AND the admin hold).
-  const effectiveMax = agentCap === null ? maxWithdraw : Math.min(maxWithdraw, agentCap);
+  const sourceCapEnabled = !!data?.agentCapsEnabled;
+  const selectedAgent = data?.agents.find((a) => a.id === agentId) || null;
+  const selectedSourceCap = sourceCapEnabled && selectedAgent && !selectedAgent.sourceUnlimited
+    ? Math.max(0, Number(selectedAgent.sourceAvailableUsd) || 0) : null;
+  // The most that can be typed in right now (boost profit, source agent cap and admin hold).
+  const effectiveMax = Math.min(
+    maxWithdraw,
+    agentCap === null ? Number.POSITIVE_INFINITY : agentCap,
+    selectedSourceCap === null ? Number.POSITIVE_INFINITY : selectedSourceCap,
+  );
   const numEntry = Number(amount || 0);                       // typed, display currency
   // every balance / limit / fee below is USD, so convert what was typed first
   const numAmount = entryCode === 'USD'
@@ -245,13 +257,17 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
     : Math.round((numEntry / entryRate) * 1e8) / 1e8;
   const fee = useMemo(() => Math.round(numAmount * feePercent) / 100, [numAmount, feePercent]);
   const total = useMemo(() => Math.round((numAmount + fee) * 100) / 100, [numAmount, fee]);
-  const selectedAgent = data?.agents.find((a) => a.id === agentId) || null;
+  const payoutAgents = useMemo(() => {
+    const list = data?.agents || [];
+    if (!sourceCapEnabled) return list;
+    return list.filter((a) => a.sourceUnlimited || (Number(a.sourceAvailableUsd) || 0) > 0);
+  }, [data, sourceCapEnabled]);
   const query = agentSearch.trim().toLowerCase();
   const filteredAgents = useMemo(() => {
-    const list = data?.agents || [];
+    const list = view === 'PAY' ? payoutAgents : (data?.agents || []);
     if (!query) return list;
     return list.filter((a) => `${a.id} ${a.name || ''}`.toLowerCase().includes(query));
-  }, [data, query]);
+  }, [data, payoutAgents, query, view]);
 
   // Typing a new amount / picking another agent clears the previous lock notice.
   useEffect(() => { setLockNotice(''); }, [amount, agentId, isOpen]);
@@ -278,6 +294,11 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
       setLockNotice(agentCause === 'agent'
         ? `${price(agentHeld)} of your balance is temporarily held for agent payments. You can still pay an agent up to ${price(agentCap)}.`
         : `Only ${price(agentCap)} of your balance can go to an agent right now — the rest is temporarily held by support.`);
+      return;
+    }
+    if (sourceCapEnabled && selectedAgent && !selectedAgent.sourceUnlimited
+      && numAmount > (Number(selectedAgent.sourceAvailableUsd) || 0) + 1e-8) {
+      setError(`Deposits through ${selectedAgent.name || selectedAgent.id} allow a remaining cash withdrawal of ${price(Number(selectedAgent.sourceAvailableUsd) || 0)}.`);
       return;
     }
     if (numAmount > maxWithdraw) {
@@ -549,12 +570,16 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
               <div className="rounded-2xl border border-zinc-800 bg-zinc-950 px-3 py-3 text-[11px] text-zinc-400">
                 No agents are available right now. Please try again later.
               </div>
+            ) : view === 'PAY' && sourceCapEnabled && payoutAgents.length === 0 ? (
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-[11px] leading-relaxed text-amber-100">
+                Cash-agent withdrawals are limited to an agent you have deposited through. No eligible cash-agent source is available on your account yet.
+              </div>
             ) : (
               <>
                 <div className="relative">
                   <span className="mb-1.5 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-zinc-400">
                     <span>Choose agent</span>
-                    <span className="font-mono text-[9px] normal-case text-zinc-600">{data.agents.length} available</span>
+                    <span className="font-mono text-[9px] normal-case text-zinc-600">{payoutAgents.length} eligible</span>
                   </span>
 
                   {/* dropdown trigger — shows the chosen agent */}
@@ -574,8 +599,8 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                       <span className={`block truncate text-[12px] font-bold ${selectedAgent ? 'text-white' : 'text-zinc-500'}`}>
                         {selectedAgent ? selectedAgent.name || selectedAgent.id : 'Select an agent'}
                       </span>
-                      <span className="block font-mono text-[9px] text-zinc-500">
-                        {selectedAgent ? selectedAgent.id : 'Search by agent ID or name'}
+                      <span className="block truncate font-mono text-[9px] text-zinc-500">
+                        {selectedAgent ? `${selectedAgent.id}${sourceCapEnabled ? selectedAgent.sourceUnlimited ? ' · unlimited source cap' : ` · ${price(Number(selectedAgent.sourceAvailableUsd) || 0)} source left` : ''}` : 'Search by agent ID or name'}
                       </span>
                       {selectedAgent ? <span className={`block text-[9px] font-semibold ${selectedAgent.online ? 'text-emerald-400' : 'text-zinc-500'}`}>{agentStatus(selectedAgent, nowTs)}</span> : null}
                     </span>
@@ -625,7 +650,9 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                               <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-zinc-800 font-mono text-[10px] font-bold text-zinc-300">{(a.name || a.id).slice(0, 1).toUpperCase()}</span>
                               <span className="min-w-0 flex-1">
                                 <span className="block truncate text-[12px] font-bold text-white">{a.name || a.id}</span>
-                                <span className="block font-mono text-[9px] text-zinc-500">{a.id}</span>
+                                <span className="block font-mono text-[9px] text-zinc-500">
+                                  {a.id}{sourceCapEnabled ? a.sourceUnlimited ? ' · unlimited source cap' : ` · ${price(Number(a.sourceAvailableUsd) || 0)} left` : ''}
+                                </span>
                                 <span className={`flex items-center gap-1 text-[10px] font-semibold ${a.online ? 'text-emerald-400' : 'text-zinc-500'}`}>
                                   <span className={`h-1.5 w-1.5 rounded-full ${a.online ? 'bg-emerald-400' : 'bg-zinc-600'}`} />{agentStatus(a, nowTs)}
                                 </span>
@@ -658,6 +685,11 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                         Only the profit earned from boosting can be withdrawn through an agent.
                         Wallet balance {price(Number(currentUser.balance || 0))}.
                       </div>
+                      {sourceCapEnabled && selectedAgent ? (
+                        <div className="mt-1 text-[9px] text-emerald-200/70">
+                          {selectedAgent.sourceUnlimited ? 'Single-agent exception: no source cap for this agent.' : `Remaining deposit-source allowance: ${price(Number(selectedAgent.sourceAvailableUsd) || 0)}.`}
+                        </div>
+                      ) : null}
                     </div>
                     <button
                       type="button"

@@ -15,6 +15,11 @@ import {
   PAYMENT_CATEGORIES, defaultPaymentMethods, ensurePaymentCollections, findMethod,
   methodAvailable, limitsFor, toPublicMethod, withdrawFieldsFor,
 } from './payments';
+import {
+  ensureWithdrawalPolicy, normalizeWithdrawalPolicy,
+  methodSourceLimit, agentSourceLimit, methodWithdrawalSourceInfo,
+  isCashAgentId, isWalletAgentId,
+} from './withdrawal-policy';
 import { parseSms, normalizeTrxId } from './sms-parse';
 import { normalizeAgentContacts, publicAgentContacts } from './agent-contacts';
 import { normalizeCommunityChannels, storedCommunityChannels } from './community-channels';
@@ -3535,15 +3540,15 @@ async function withTransferLock(userId: string, fn: () => Promise<any> | any): P
   const prev = transferLocks.get(key) || Promise.resolve();
   let release!: () => void;
   const cur = new Promise<void>(r => release = r);
-  const chained = prev.then(() => cur);
-  transferLocks.set(key, chained);
+  const tail = prev.then(() => cur);
+  transferLocks.set(key, tail);
   try {
     await prev;
     return await fn();
   } finally {
     release();
     // cleanup if no newer lock queued
-    if (transferLocks.get(key) === chained) transferLocks.delete(key);
+    if (transferLocks.get(key) === tail) transferLocks.delete(key);
   }
 }
 // ---- P2P transfer idempotency key (durable receipts are saved with the ledger) ----
@@ -7517,7 +7522,19 @@ async function startServer() {
       if (user.isBlocked || user.isFrozen) return res.status(403).json({ error: 'Account restricted, cannot credit.' });
       // 6) Atomic ledger update — use lock
       const beforeBalance = Number(user.balance||0);
-      const tx = { id: 'TX-'+Math.floor(10000000+Math.random()*90000000), userId: String(userId), type: 'DEPOSIT', amount: numAmt, timestamp: Date.now(), provider, providerTxId: transactionId, orderId, currency, referenceId: transactionId, notes: `Verified deposit from ${provider} order ${orderId||''}` };
+      // A provider name that exactly matches a configured payment method is a
+      // usable source attribution; otherwise keep the deposit unassigned rather
+      // than guessing a withdrawal method.
+      const matchingPaymentMethod = (db.paymentMethods || []).find((m: any) =>
+        String(m.id || '').toLowerCase() === String(provider).toLowerCase()
+        || String(m.name || '').trim().toLowerCase() === String(provider).trim().toLowerCase());
+      const tx = {
+        id: 'TX-'+Math.floor(10000000+Math.random()*90000000), userId: String(userId), type: 'DEPOSIT', amount: numAmt,
+        timestamp: Date.now(), provider, providerTxId: transactionId, orderId, currency, referenceId: transactionId,
+        methodId: matchingPaymentMethod ? matchingPaymentMethod.id : '',
+        metadata: { methodId: matchingPaymentMethod ? matchingPaymentMethod.id : '', sourceProvider: String(provider) },
+        notes: `Verified deposit from ${provider} order ${orderId||''}`
+      };
       // Validate ledger: sum of all credits/debits must equal current balance delta (reconciliation sanity)
       user.balance = beforeBalance + numAmt;
       user.lifetimeProfit = (Number(user.lifetimeProfit)||0) + 0; // deposits not profit
@@ -10734,11 +10751,12 @@ const paymentLocks = new Map<string, Promise<any>>();
     const prev = paymentLocks.get(key) || Promise.resolve();
     let release!: () => void;
     const cur = new Promise<void>((r) => { release = r; });
-    paymentLocks.set(key, prev.then(() => cur) as any);
+    const tail = prev.then(() => cur);
+    paymentLocks.set(key, tail as any);
     return prev.then(async () => {
       try { return await fn(); } finally {
         release();
-        if (paymentLocks.get(key) === (cur as any)) paymentLocks.delete(key);
+        if (paymentLocks.get(key) === (tail as any)) paymentLocks.delete(key);
       }
     }) as Promise<T>;
   }
@@ -10765,13 +10783,21 @@ const paymentLocks = new Map<string, Promise<any>>();
    * once" and a single audit trail. Callers own the transaction lock and the
    * writeDb() call.
    */
-  function reviewDepositCore(db: any, opts: { id: string; action: 'APPROVE' | 'REJECT'; actor: string; reason?: string }): { status: number; body: any } {
+  function reviewDepositCore(db: any, opts: { id: string; action: 'APPROVE' | 'REJECT'; actor: string; reason?: string; sourceAgentId?: string }): { status: number; body: any } {
     const r = (db.depositRequests || []).find((d: any) => d.id === opts.id);
     if (!r) return { status: 404, body: { error: 'That deposit does not exist.' } };
     if (r.status !== 'PENDING') return { status: 409, body: { error: `This deposit is already ${r.status}.` } };
     const user = (db.users || []).find((u: any) => String(u.id) === String(r.userId));
     if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
     if (opts.action === 'APPROVE') {
+      const sourceAgentId = String(opts.sourceAgentId || r.sourceAgentId || '').trim();
+      if (opts.sourceAgentId) {
+        const sourceAgent = (db.walletAgents || []).find((a: any) => String(a.id) === sourceAgentId);
+        if (!isWalletAgentId(sourceAgentId) || !sourceAgent || String(sourceAgent.methodId) !== String(r.methodId)) {
+          return { status: 400, body: { error: 'The assigned wallet agent is not bound to this deposit method.' } };
+        }
+      }
+      if (sourceAgentId) r.sourceAgentId = sourceAgentId;
       const credit = Number(Number(r.amountUsd).toFixed(8));
       if (!(credit > 0)) return { status: 400, body: { error: 'The stored amount is not usable.' } };
       user.balance = floor2((Number(user.balance) || 0) + credit);
@@ -10779,14 +10805,17 @@ const paymentLocks = new Map<string, Promise<any>>();
       if (existing) {
         existing.type = 'DEPOSIT'; existing.amount = credit; existing.status = 'CREDITED';
         existing.notes = `Deposit ${r.id} credited · ${r.methodName} · ref ${r.reference}`;
-        existing.metadata = { ...(existing.metadata || {}), status: 'CREDITED', depositId: r.id };
+        existing.metadata = {
+          ...(existing.metadata || {}), status: 'CREDITED', depositId: r.id,
+          methodId: r.methodId, sourceAgentId: r.sourceAgentId || '',
+        };
       }
       const txId = existing ? existing.id : ('TX-' + Math.floor(10000000 + Math.random() * 90000000));
       if (!existing) {
         db.transactions.unshift({
           id: txId, userId: user.id, type: 'DEPOSIT', amount: credit, timestamp: Date.now(), status: 'CREDITED',
           notes: `Deposit ${r.id} credited · ${r.methodName} · ref ${r.reference}`, referenceId: r.id,
-          metadata: { status: 'CREDITED', depositId: r.id },
+          metadata: { status: 'CREDITED', depositId: r.id, methodId: r.methodId, sourceAgentId: r.sourceAgentId || '' },
         });
       }
       r.status = 'APPROVED'; r.txId = txId;
@@ -10851,6 +10880,28 @@ const paymentLocks = new Map<string, Promise<any>>();
     const user = (db.users || []).find((u: any) => String(u.id) === String(r.userId));
     if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
     if (opts.action === 'APPROVE') {
+      const policy = ensureWithdrawalPolicy(db);
+      const method = findMethod(db, String(r.methodId || ''));
+      if (!method || method.category === 'AGENT') return { status: 400, body: { error: 'The withdrawal payment method is no longer valid. Edit the request before paying it.' } };
+      const methodCap = methodSourceLimit(db, user.id, method.id, { excludeWithdrawId: r.id });
+      if (policy.methodCapsEnabled && !methodCap.unlimited && Number(r.amountUsd) > methodCap.availableUsd + 1e-9) {
+        return { status: 400, body: { error: `Verified deposits through ${method.name} allow only $${methodCap.availableUsd.toFixed(2)} for this payout. Edit the request or correct the deposit source.` } };
+      }
+      if (policy.agentCapsEnabled) {
+        const sourceInfo = methodWithdrawalSourceInfo(db, user.id, method.id, r.id);
+        if (sourceInfo.agentRequired && !r.agentId) {
+          return { status: 400, body: { error: 'Assign this withdrawal to a wallet agent the user deposited through before paying it.' } };
+        }
+        if (r.agentId) {
+          if (!isWalletAgentId(r.agentId) || !sourceInfo.walletAgents.some((a: any) => a.id === String(r.agentId))) {
+            return { status: 400, body: { error: 'This withdrawal is not assigned to an eligible wallet agent source.' } };
+          }
+          const agentCap = agentSourceLimit(db, user.id, r.agentId, { excludeWithdrawId: r.id });
+          if (!agentCap.unlimited && Number(r.amountUsd) > agentCap.availableUsd + 1e-9) {
+            return { status: 400, body: { error: `Deposits through this wallet agent allow only $${agentCap.availableUsd.toFixed(2)} for this payout.` } };
+          }
+        }
+      }
       r.status = 'COMPLETED';
       r.payoutRef = sanitizeText(opts.payoutRef, 80).trim();
       const ref = sanitizeText(opts.payoutRef, 80).trim();
@@ -10917,7 +10968,13 @@ const paymentLocks = new Map<string, Promise<any>>();
       const allowed = all
         .filter((m) => m.enabled && methodAvailable(m, mode, 'user', currency, country).ok)
         .sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0))
-        .map((m) => toPublicMethod(db, m, mode));
+        .map((m) => {
+          const publicMethod: any = toPublicMethod(db, m, mode);
+          if (mode === 'withdraw' && m.category !== 'AGENT') {
+            publicMethod.sourcePolicy = methodWithdrawalSourceInfo(db, user.id, m.id);
+          }
+          return publicMethod;
+        });
       const label = countryLabelOf(country);
       res.setHeader('Cache-Control', 'no-store');
       res.json({
@@ -10982,6 +11039,7 @@ const paymentLocks = new Map<string, Promise<any>>();
         methodId: m.id,
         methodName: m.name,
         category: m.category,
+        sourceAgentId: '',
         amountUsd: Number(conv.usd.toFixed(8)),
         entryAmount: Number(body.amount),
         entryCurrency: conv.code,
@@ -11002,7 +11060,7 @@ const paymentLocks = new Map<string, Promise<any>>();
         id: request.txId, userId: user.id, type: 'DEPOSIT_REQUEST', amount: request.amountUsd,
         timestamp: Date.now(), status: 'PENDING',
         notes: `Deposit ${request.id} via ${m.name} (pending verification)`,
-        referenceId: request.id, metadata: { status: 'PENDING', depositId: request.id },
+        referenceId: request.id, metadata: { status: 'PENDING', depositId: request.id, methodId: m.id },
       });
       db.depositRequests.unshift(request);
       if (db.depositRequests.length > 20000) db.depositRequests.length = 20000;
@@ -11029,7 +11087,7 @@ const paymentLocks = new Map<string, Promise<any>>();
     try {
       const body = req.body || {};
       const idem = String(body.idempotencyKey || '').trim();
-      const out = await withPaymentLock('WITHDRAW:' + req.authUserId, () => {
+      const out = await withTransferLock('USER:' + req.authUserId, () => {
         const db = ensurePaymentCollections(readDb());
         const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
         if (!user) return { status: 404, body: { error: 'User not found.' } };
@@ -11049,6 +11107,25 @@ const paymentLocks = new Map<string, Promise<any>>();
         if (!avail.ok) return { status: 400, body: { error: avail.reason } };
         if (m.category === 'AGENT') return { status: 400, body: { error: 'Use the agent screen for agent withdrawals.' } };
 
+        const withdrawalPolicy = ensureWithdrawalPolicy(db);
+        const requestedAgentId = String(body.agentId || '').trim();
+        const sourceInfo = methodWithdrawalSourceInfo(db, user.id, m.id);
+        if (requestedAgentId && !isWalletAgentId(requestedAgentId)) {
+          return { status: 400, body: { error: 'Choose a wallet agent that handles this payment method.' } };
+        }
+        if (withdrawalPolicy.agentCapsEnabled && sourceInfo.agentRequired && !requestedAgentId) {
+          return { status: 400, body: { error: 'Choose a wallet agent you deposited through for this method.' } };
+        }
+        if (requestedAgentId) {
+          const walletAgent = (db.walletAgents || []).find((a: any) => String(a.id) === requestedAgentId);
+          if (!walletAgent || String(walletAgent.methodId) !== String(m.id) || walletAgent.active === false) {
+            return { status: 400, body: { error: 'That wallet agent is not available for this payment method.' } };
+          }
+          if (withdrawalPolicy.agentCapsEnabled && !sourceInfo.walletAgents.some((a: any) => a.id === requestedAgentId)) {
+            return { status: 400, body: { error: 'Withdrawals can only be assigned to a wallet agent you deposited through.' } };
+          }
+        }
+
         const entryCode = String(body.currency || currency).toUpperCase();
         const conv = entryAmountToUsd(db, user, Number(body.amount), entryCode);
         if (conv.error) return { status: 400, body: { error: conv.error } };
@@ -11056,6 +11133,17 @@ const paymentLocks = new Map<string, Promise<any>>();
         if (!(conv.usd > 0)) return { status: 400, body: { error: 'Enter an amount greater than 0.' } };
         if (conv.usd < lim.min) return { status: 400, body: { error: `The minimum withdrawal for ${m.name} is $${lim.min.toFixed(2)}.` } };
         if (conv.usd > lim.max) return { status: 400, body: { error: `The maximum withdrawal for ${m.name} is $${lim.max.toFixed(2)}.` } };
+
+        const methodLimit = methodSourceLimit(db, user.id, m.id);
+        if (withdrawalPolicy.methodCapsEnabled && !methodLimit.unlimited && conv.usd > methodLimit.availableUsd + 1e-9) {
+          return { status: 400, body: { error: `Verified deposits through ${m.name} allow a remaining withdrawal of $${methodLimit.availableUsd.toFixed(2)}.` } };
+        }
+        if (requestedAgentId && withdrawalPolicy.agentCapsEnabled) {
+          const agentLimit = agentSourceLimit(db, user.id, requestedAgentId);
+          if (!agentLimit.unlimited && conv.usd > agentLimit.availableUsd + 1e-9) {
+            return { status: 400, body: { error: `Deposits through this wallet agent allow a remaining withdrawal of $${agentLimit.availableUsd.toFixed(2)}.` } };
+          }
+        }
 
         const dest: Record<string, string> = {};
         for (const f of withdrawFieldsFor(m)) {
@@ -11082,10 +11170,11 @@ const paymentLocks = new Map<string, Promise<any>>();
         db.transactions.unshift({
           id: txId, userId: user.id, type: 'WITHDRAW_REQUEST', amount, fee, status: 'PENDING',
           timestamp: Date.now(), notes: `Withdrawal ${requestId} via ${m.name} (pending review)`,
-          referenceId: requestId, metadata: { status: 'PENDING', withdrawId: requestId },
+          referenceId: requestId, metadata: { status: 'PENDING', withdrawId: requestId, methodId: m.id, agentId: requestedAgentId },
         });
         const request: any = {
           id: requestId, userId: String(user.id), methodId: m.id, methodName: m.name, category: m.category,
+          agentId: requestedAgentId,
           amountUsd: amount, feeUsd: fee, netUsd: net,
           entryAmount: Number(body.amount), entryCurrency: conv.code,
           destination: dest, status: 'PENDING', idempotencyKey: idem,
@@ -11214,15 +11303,181 @@ const paymentLocks = new Map<string, Promise<any>>();
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not delete the method.' }); }
   });
 
+  // ── Admin: withdrawal source policy ───────────────────────────────────────
+  app.get('/api/admin/withdrawal-policy', rateLimit(120), requireAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const policy = ensureWithdrawalPolicy(db);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        success: true,
+        policy,
+        methods: (db.paymentMethods || []).map((m: any) => ({
+          id: m.id, name: m.name, category: m.category, enabled: m.enabled !== false,
+          withdrawEnabled: m.withdrawEnabled !== false, minWithdraw: Number(m.minWithdraw) || 0,
+          maxWithdraw: Number(m.maxWithdraw) || 0, withdrawFeePercent: Number(m.withdrawFeePercent) || 0,
+          withdrawFields: m.category === 'AGENT' ? [] : withdrawFieldsFor(m),
+        })),
+        walletAgents: walletAgentsOf(db).map((a: any) => ({
+          id: a.id, name: a.name || '', methodId: a.methodId, methodName: a.methodName || '',
+          country: a.country || '', active: a.active !== false,
+        })),
+        cashAgents: (db.agents || []).map((a: any) => ({ id: a.id, name: a.name || '', active: a.isActive !== false })),
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load withdrawal policy.' }); }
+  });
+
+  app.post('/api/admin/withdrawal-policy', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      const current = ensureWithdrawalPolicy(db);
+      const next = normalizeWithdrawalPolicy({ ...current, ...(req.body || {}) });
+      const changes = Object.keys(next).filter((k: any) => next[k as keyof typeof next] !== current[k as keyof typeof current]);
+      db.paymentMeta.withdrawalPolicy = next;
+      recordAuditLog(db, 'WITHDRAWAL_POLICY_UPDATED', 'admin:' + String(req.authAdmin),
+        changes.length ? `Updated withdrawal source rules: ${changes.map((k: any) => `${k}=${next[k as keyof typeof next]}`).join(', ')}` : 'Withdrawal source rules unchanged');
+      writeDb(db);
+      res.json({ success: true, policy: next });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save withdrawal policy.' }); }
+  });
+
+  app.get('/api/admin/withdrawal-sources', rateLimit(120), requireAdmin, (req: any, res) => {
+    const userId = String(req.query.userId || '').trim();
+    const methodId = String(req.query.methodId || '').trim();
+    if (!userId || !methodId) return res.status(400).json({ error: 'userId and methodId are required.' });
+    const db = ensurePaymentCollections(readDb());
+    const user = (db.users || []).find((u: any) => String(u.id) === userId);
+    const method = findMethod(db, methodId);
+    if (!user) return res.status(404).json({ error: 'The account no longer exists.' });
+    if (!method || method.category === 'AGENT') return res.status(404).json({ error: 'Payment method not found.' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, ...methodWithdrawalSourceInfo(db, userId, methodId) });
+  });
+
   // ── Admin: deposit / withdrawal queues ─────────────────────────────────────
   app.get('/api/admin/payment-requests', rateLimit(120), requireAdmin, (req: any, res) => {
     const db = ensurePaymentCollections(readDb());
     const type = String(req.query.type || 'deposit') === 'withdraw' ? 'withdraw' : 'deposit';
     const status = String(req.query.status || '').toUpperCase();
     const src = type === 'deposit' ? db.depositRequests : db.withdrawRequests;
-    const rows = (src || []).filter((r: any) => !status || String(r.status) === status).slice(0, 300);
+    let rows = (src || []).filter((r: any) => !status || String(r.status).toUpperCase() === status);
+    if (type === 'withdraw') {
+      if (expireAgentPayouts(db)) writeDb(db);
+      const cashRows = ensureAgentPayouts(db)
+        .map((p: any) => {
+          const state = String(p.status || '').toUpperCase();
+          const displayStatus = state === 'CLAIMED' ? 'COMPLETED' : state;
+          return {
+            id: p.id, userId: p.userId, sourceType: 'CASH_AGENT', channel: 'CASH_AGENT',
+            methodId: 'PM-TG-AGENT', methodName: 'Cash Agent', category: 'AGENT',
+            agentId: p.agentId, amountUsd: p.amount, feeUsd: p.fee || 0, netUsd: p.amount,
+            totalUsd: p.total == null ? Number(p.amount || 0) + Number(p.fee || 0) : p.total,
+            destination: {}, status: displayStatus, rawStatus: state,
+            createdAt: p.createdAt, reviewedAt: p.claimedAt || 0,
+            reviewedBy: state === 'CLAIMED' ? p.agentId : '',
+            reason: p.note || '', payoutRef: p.code ? String(p.code).toUpperCase() : '',
+            expiresAt: p.expiresAt || 0,
+          };
+        })
+        .filter((r: any) => !status || String(r.status).toUpperCase() === status);
+      rows = rows.concat(cashRows);
+    }
+    rows = rows.sort((a: any, b: any) => Number(b.createdAt || 0) - Number(a.createdAt || 0)).slice(0, 300);
     res.setHeader('Cache-Control', 'no-store');
     res.json({ success: true, type, requests: rows });
+  });
+
+  app.patch('/api/admin/payment-requests/deposit', rateLimit(60), requireAdmin, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const id = String(body.id || '');
+      if (!id) return res.status(400).json({ error: 'Deposit request ID is required.' });
+      const probeDb = ensurePaymentCollections(readDb());
+      const probeRow: any = (probeDb.depositRequests || []).find((d: any) => String(d.id) === id);
+      if (!probeRow) return res.status(404).json({ error: 'That deposit request does not exist.' });
+      const out = await withTransferLock('USER:' + String(probeRow.userId), () => withPaymentLock('DEPREVIEW:' + id, () => {
+        const db = ensurePaymentCollections(readDb());
+        const row: any = (db.depositRequests || []).find((d: any) => String(d.id) === id);
+        if (!row) return { status: 404, body: { error: 'That deposit request does not exist.' } };
+        if (!['PENDING', 'APPROVED'].includes(String(row.status || '').toUpperCase())) {
+          return { status: 409, body: { error: `A ${row.status} deposit cannot be edited.` } };
+        }
+        const user: any = (db.users || []).find((u: any) => String(u.id) === String(row.userId));
+        if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
+        const methodId = String(body.methodId === undefined ? row.methodId : body.methodId || '').trim();
+        const method = findMethod(db, methodId);
+        if (!method || method.category === 'AGENT') return { status: 400, body: { error: 'Choose a valid payment method for this deposit.' } };
+        const sourceAgentId = String(body.sourceAgentId === undefined ? (row.sourceAgentId || '') : body.sourceAgentId || '').trim();
+        if (sourceAgentId) {
+          if (!isWalletAgentId(sourceAgentId)) return { status: 400, body: { error: 'The source must be a wallet agent.' } };
+          const sourceAgent = (db.walletAgents || []).find((a: any) => String(a.id) === sourceAgentId);
+          if (!sourceAgent || String(sourceAgent.methodId) !== String(method.id)) {
+            return { status: 400, body: { error: 'That wallet agent is not bound to the selected payment method.' } };
+          }
+        }
+        const oldAmount = Number(row.amountUsd) || 0;
+        let amount = oldAmount;
+        if (body.amountUsd !== undefined) {
+          const raw = Number(body.amountUsd);
+          if (!Number.isFinite(raw) || raw <= 0 || raw > 100000000) return { status: 400, body: { error: 'Enter a positive deposit amount in USD.' } };
+          amount = Number(raw.toFixed(2));
+          if (Math.abs(raw - amount) > 1e-8) return { status: 400, body: { error: 'Admin-adjusted USD amounts must have at most 2 decimal places.' } };
+        }
+        const oldMethodId = String(row.methodId || '');
+        const oldAgentId = String(row.sourceAgentId || '');
+        const changed = oldMethodId !== method.id || oldAgentId !== sourceAgentId || Math.abs(oldAmount - amount) > 1e-8;
+        if (!changed) return { status: 200, body: { success: true, request: row, unchanged: true } };
+        const linked: any = (db.transactions || []).find((t: any) => String(t.id) === String(row.txId));
+        if (String(row.status).toUpperCase() === 'APPROVED' && Math.abs(oldAmount - amount) > 1e-8 && !linked) {
+          return { status: 409, body: { error: 'This approved deposit has no linked ledger row; use the audited balance-correction workflow instead.' } };
+        }
+
+        if (String(row.status).toUpperCase() === 'APPROVED' && Math.abs(oldAmount - amount) > 1e-8) {
+          const delta = amount - oldAmount;
+          const before = Number(user.balance) || 0;
+          if (delta < 0 && before + delta < -1e-8) {
+            return { status: 400, body: { error: `The user only has $${before.toFixed(2)} available; the credited amount cannot be reduced by $${Math.abs(delta).toFixed(2)}.` } };
+          }
+          user.balance = floor2(Math.max(0, before + delta));
+        }
+
+        row.methodId = method.id;
+        row.methodName = method.name;
+        row.category = method.category;
+        row.sourceAgentId = sourceAgentId;
+        row.amountUsd = Number(amount.toFixed(8));
+        row.feeUsd = Number((amount * (Number(method.depositFeePercent) || 0) / 100).toFixed(8));
+        if (Math.abs(oldAmount - amount) > 1e-8) {
+          row.entryAmount = amount;
+          row.entryCurrency = 'USD';
+          row.adminAmountAdjustedAt = Date.now();
+        }
+        row.adminSourceEditedAt = Date.now();
+        if (linked) {
+          linked.amount = row.amountUsd;
+          if (String(row.status).toUpperCase() === 'APPROVED') linked.balanceAfter = user.balance;
+          linked.notes = `Deposit ${row.id} ${row.status === 'APPROVED' ? 'credited' : '(pending verification)'} · ${method.name} · ref ${row.reference || ''}`;
+          linked.metadata = {
+            ...(linked.metadata || {}), depositId: row.id, methodId: method.id,
+            sourceAgentId: sourceAgentId || '',
+            status: row.status === 'APPROVED' ? 'CREDITED' : 'PENDING',
+          };
+        }
+        const details = `Deposit ${id} edited: method ${oldMethodId || '—'}→${method.id}, agent ${oldAgentId || '—'}→${sourceAgentId || '—'}, amount $${oldAmount.toFixed(2)}→$${amount.toFixed(2)}`;
+        recordAuditLog(db, 'DEPOSIT_SOURCE_UPDATED', 'admin:' + String(req.authAdmin), details, String(user.id));
+        if (String(row.status).toUpperCase() === 'APPROVED' && Math.abs(oldAmount - amount) > 1e-8) {
+          pushNotification(db, {
+            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(user.id),
+            type: 'SYSTEM_ALERT', title: 'Deposit updated',
+            message: `An administrator adjusted deposit ${row.id} to $${amount.toFixed(2)} via ${method.name}. Your balance is now $${Number(user.balance).toFixed(2)}.`,
+            amount: amount - oldAmount, timestamp: Date.now(), isRead: false, metadata: { depositId: row.id },
+          } as any);
+        }
+        writeDb(db);
+        return { status: 200, body: { success: true, request: row, balance: user.balance } };
+      }));
+      res.status(out.status).json(out.body);
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not edit the deposit source.' }); }
   });
 
   app.post('/api/admin/payment-requests/deposit/review', rateLimit(60), requireAdmin, requireSuperAdmin, async (req: any, res) => {
@@ -11231,14 +11486,211 @@ const paymentLocks = new Map<string, Promise<any>>();
       const id = String(body.id || '');
       const action = String(body.action || '').toUpperCase();
       if (action !== 'APPROVE' && action !== 'REJECT') return res.status(400).json({ error: 'Action must be APPROVE or REJECT.' });
-      const out = await withPaymentLock('DEPREVIEW:' + id, () => {
+      const probeDb = ensurePaymentCollections(readDb());
+      const probeRow: any = (probeDb.depositRequests || []).find((d: any) => String(d.id) === id);
+      const out = await withTransferLock('USER:' + String(probeRow?.userId || '__missing'), () => withPaymentLock('DEPREVIEW:' + id, () => {
         const db = ensurePaymentCollections(readDb());
-        const result = reviewDepositCore(db, { id, action, actor: String(req.authAdmin), reason: body.reason });
+        const result = reviewDepositCore(db, { id, action, actor: String(req.authAdmin), reason: body.reason, sourceAgentId: body.sourceAgentId });
         if (result.status === 200) writeDb(db);
         return result;
-      });
+      }));
       res.status(out.status).json(out.body);
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not review the deposit.' }); }
+  });
+
+  app.patch('/api/admin/payment-requests/withdraw', rateLimit(60), requireAdmin, requireSuperAdmin, async (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const id = String(body.id || '');
+      if (!id) return res.status(400).json({ error: 'Withdrawal request ID is required.' });
+      const probe = ensurePaymentCollections(readDb());
+      const probeMethod = (probe.withdrawRequests || []).find((w: any) => String(w.id) === id);
+      const probeCash = ensureAgentPayouts(probe).find((p: any) => String(p.id) === id);
+      const userId = String((probeMethod || probeCash || {}).userId || '');
+      if (!userId) return res.status(404).json({ error: 'That pending withdrawal does not exist.' });
+
+      const out = await withPaymentLock('WITHDRAW:' + userId, () => withTransferLock('USER:' + userId, () => {
+        const db = ensurePaymentCollections(readDb());
+        const cash = ensureAgentPayouts(db).find((p: any) => String(p.id) === id);
+        if (cash) {
+          if (String(cash.status || '').toUpperCase() !== 'PENDING') {
+            return { status: 409, body: { error: `A ${cash.status} cash-agent payout cannot be edited.` } };
+          }
+          const user: any = (db.users || []).find((u: any) => String(u.id) === String(cash.userId));
+          if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
+          const newAgentId = String(body.agentId === undefined ? cash.agentId : body.agentId || '').trim();
+          const agent = (db.agents || []).find((a: any) => String(a.id) === newAgentId);
+          if (!isCashAgentId(newAgentId) || !agent || agent.isActive === false) {
+            return { status: 400, body: { error: 'Choose an active cash agent.' } };
+          }
+          const rawAmount = body.amountUsd === undefined ? Number(cash.amount) : Number(body.amountUsd);
+          if (!Number.isFinite(rawAmount) || rawAmount <= 0 || rawAmount > 100000000 || Math.abs(rawAmount - round2Money(rawAmount)) > 1e-8) {
+            return { status: 400, body: { error: 'Enter a positive USD amount with at most 2 decimal places.' } };
+          }
+          const amount = round2Money(rawAmount);
+          const oldAmount = round2Money(Number(cash.amount) || 0);
+          const oldFee = round2Money(Number(cash.fee) || 0);
+          const oldTotal = round2Money(Number(cash.total) || oldAmount + oldFee);
+          const oldFeeRate = oldAmount > 0 ? oldFee / oldAmount : Math.max(0, Number(agentSettingsOf(db).feePercentOnUserSend) || 0) / 100;
+          const fee = round2Money(amount * oldFeeRate);
+          const total = round2Money(amount + fee);
+          const changed = newAgentId !== String(cash.agentId) || Math.abs(amount - oldAmount) > 1e-8;
+          if (!changed) return { status: 200, body: { success: true, request: cash, unchanged: true } };
+          const settings = agentSettingsOf(db);
+          if (amount < Number(settings.minUserSend || 0) || amount > Number(settings.maxUserSend || 100000)) {
+            return { status: 400, body: { error: `Cash-agent withdrawals must be between $${Number(settings.minUserSend || 0).toFixed(2)} and $${Number(settings.maxUserSend || 100000).toFixed(2)}.` } };
+          }
+          const policy = ensureWithdrawalPolicy(db);
+          if (policy.agentCapsEnabled) {
+            const cap = agentSourceLimit(db, user.id, newAgentId, { excludeWithdrawId: id });
+            if (!cap.unlimited && amount > cap.availableUsd + 1e-9) {
+              return { status: 400, body: { error: `Deposits through this cash agent allow a remaining withdrawal of $${cap.availableUsd.toFixed(2)}.` } };
+            }
+          }
+          const deltaAmount = amount - oldAmount;
+          const deltaTotal = total - oldTotal;
+          if (deltaAmount > 1e-9 && boostWithdrawable(user) + 1e-9 < deltaAmount) {
+            return { status: 400, body: { error: `Only $${boostWithdrawable(user).toFixed(2)} of additional boosted profit is available.` } };
+          }
+          if (deltaTotal > 1e-9 && Number(user.balance || 0) + 1e-9 < deltaTotal) {
+            return { status: 400, body: { error: 'The user does not have enough balance for this increase.' } };
+          }
+          user.balance = floor2((Number(user.balance) || 0) - deltaTotal);
+          if (deltaAmount > 1e-9) holdBoostProfit(user, deltaAmount);
+          else if (deltaAmount < -1e-9) releaseBoostProfit(user, -deltaAmount);
+          cash.agentId = newAgentId;
+          cash.amount = amount;
+          cash.fee = fee;
+          cash.total = total;
+          cash.updatedAt = Date.now();
+          cash.adminEditedBy = 'admin:' + String(req.authAdmin);
+          // A changed amount/recipient invalidates the previous claim code. Issue a
+          // fresh code and give the user a new 30-minute window to share it.
+          cash.code = makeClaimCode(db);
+          cash.expiresAt = Date.now() + PAYOUT_TTL_MS;
+          const linked: any = (db.transactions || []).find((t: any) => String(t.id) === String(cash.txId));
+          if (linked) {
+            linked.amount = amount;
+            linked.fee = fee;
+            linked.total = total;
+            linked.agentId = newAgentId;
+            linked.recipientId = newAgentId;
+            linked.claimCode = String(cash.code).toUpperCase();
+            linked.payoutStatus = 'PENDING';
+            linked.notes = `Paid agent ${newAgentId}${fee > 0 ? ` (fee ${fee.toFixed(2)})` : ''} — claim code ${String(cash.code).toUpperCase()}`;
+            linked.balanceAfter = user.balance;
+          }
+          pushNotification(db, {
+            id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000), userId: String(user.id),
+            type: 'SYSTEM_ALERT', title: 'Cash-agent withdrawal updated',
+            message: `Your pending cash-agent withdrawal was updated to $${amount.toFixed(2)} for Agent ${newAgentId}. Use the new claim code ${String(cash.code).toUpperCase()}.`,
+            amount, timestamp: Date.now(), isRead: false, metadata: { payoutId: id, agentId: newAgentId },
+          } as any);
+          recordAuditLog(db, 'WITHDRAWAL_ADMIN_EDITED', 'admin:' + String(req.authAdmin),
+            `Cash-agent payout ${id}: agent ${String(probeCash.agentId)}→${newAgentId}, amount $${oldAmount.toFixed(2)}→$${amount.toFixed(2)}, fee $${oldFee.toFixed(2)}→$${fee.toFixed(2)}`, String(user.id));
+          writeDb(db);
+          return { status: 200, body: { success: true, request: cash, balance: user.balance } };
+        }
+
+        const row: any = (db.withdrawRequests || []).find((w: any) => String(w.id) === id);
+        if (!row) return { status: 404, body: { error: 'That withdrawal request does not exist.' } };
+        if (String(row.status || '').toUpperCase() !== 'PENDING') {
+          return { status: 409, body: { error: `A ${row.status} withdrawal cannot be edited.` } };
+        }
+        const user: any = (db.users || []).find((u: any) => String(u.id) === String(row.userId));
+        if (!user) return { status: 404, body: { error: 'The account no longer exists.' } };
+        const methodId = String(body.methodId === undefined ? row.methodId : body.methodId || '').trim();
+        const method = findMethod(db, methodId);
+        if (!method || method.category === 'AGENT') return { status: 400, body: { error: 'Choose a valid payment method for this withdrawal.' } };
+        const amountWasSupplied = body.amountUsd !== undefined;
+        const amountRaw = amountWasSupplied ? Number(body.amountUsd) : Number(row.amountUsd);
+        if (!Number.isFinite(amountRaw) || amountRaw <= 0 || amountRaw > 100000000
+          || (amountWasSupplied && Math.abs(amountRaw - round2Money(amountRaw)) > 1e-8)) {
+          return { status: 400, body: { error: 'Enter a positive USD amount with at most 2 decimal places.' } };
+        }
+        const amount = amountWasSupplied ? round2Money(amountRaw) : Number(amountRaw.toFixed(8));
+        const limits = limitsFor(method, 'withdraw');
+        if (amount < limits.min || amount > limits.max) {
+          return { status: 400, body: { error: `The amount must be between $${limits.min.toFixed(2)} and $${limits.max.toFixed(2)} for ${method.name}.` } };
+        }
+        const policy = ensureWithdrawalPolicy(db);
+        const agentId = String(body.agentId === undefined ? (row.agentId || '') : body.agentId || '').trim();
+        const sourceInfo = methodWithdrawalSourceInfo(db, user.id, method.id, id);
+        if (agentId && !isWalletAgentId(agentId)) return { status: 400, body: { error: 'Choose a wallet agent for this payment method.' } };
+        if (policy.agentCapsEnabled && sourceInfo.agentRequired && !agentId) {
+          return { status: 400, body: { error: 'Choose a wallet agent the user deposited through.' } };
+        }
+        if (agentId) {
+          const walletAgent = (db.walletAgents || []).find((a: any) => String(a.id) === agentId);
+          if (!walletAgent || String(walletAgent.methodId) !== String(method.id) || walletAgent.active === false) {
+            return { status: 400, body: { error: 'That wallet agent is not active for the selected payment method.' } };
+          }
+          if (policy.agentCapsEnabled && !sourceInfo.walletAgents.some((a: any) => a.id === agentId)) {
+            return { status: 400, body: { error: 'Withdrawals can only be assigned to a wallet agent the user deposited through.' } };
+          }
+        }
+        const methodCap = methodSourceLimit(db, user.id, method.id, { excludeWithdrawId: id });
+        if (policy.methodCapsEnabled && !methodCap.unlimited && amount > methodCap.availableUsd + 1e-9) {
+          return { status: 400, body: { error: `Verified deposits through ${method.name} allow a remaining withdrawal of $${methodCap.availableUsd.toFixed(2)}.` } };
+        }
+        if (agentId && policy.agentCapsEnabled) {
+          const agentCap = agentSourceLimit(db, user.id, agentId, { excludeWithdrawId: id });
+          if (!agentCap.unlimited && amount > agentCap.availableUsd + 1e-9) {
+            return { status: 400, body: { error: `Deposits through this wallet agent allow a remaining withdrawal of $${agentCap.availableUsd.toFixed(2)}.` } };
+          }
+        }
+        const oldDestination = row.destination && typeof row.destination === 'object' ? row.destination : {};
+        const submittedDestination = body.destination && typeof body.destination === 'object' ? body.destination : oldDestination;
+        const destination: Record<string, string> = {};
+        for (const field of withdrawFieldsFor(method)) {
+          const value = sanitizeText(submittedDestination[field.key], 120).trim();
+          if (value.length < 3) return { status: 400, body: { error: `Please provide ${field.label} before saving the edit.` } };
+          destination[field.key] = value;
+        }
+        const oldAmount = Number(row.amountUsd) || 0;
+        const delta = amount - oldAmount;
+        if (delta > 1e-9 && boostWithdrawable(user) + 1e-9 < delta) {
+          return { status: 400, body: { error: `Only $${boostWithdrawable(user).toFixed(2)} of additional boosted profit is available.` } };
+        }
+        if (delta > 1e-9 && Number(user.balance || 0) + 1e-9 < delta) {
+          return { status: 400, body: { error: 'The user does not have enough balance for this increase.' } };
+        }
+        user.balance = floor2((Number(user.balance) || 0) - delta);
+        if (delta > 1e-9) holdBoostProfit(user, delta);
+        else if (delta < -1e-9) releaseBoostProfit(user, -delta);
+        const oldMethodId = String(row.methodId || '');
+        const oldAgentId = String(row.agentId || '');
+        const oldFee = Number(row.feeUsd) || 0;
+        const fee = !amountWasSupplied && method.id === oldMethodId
+          ? oldFee
+          : Number((amount * (Number(method.withdrawFeePercent) || 0) / 100).toFixed(8));
+        const net = Number((amount - fee).toFixed(8));
+        row.methodId = method.id;
+        row.methodName = method.name;
+        row.category = method.category;
+        row.agentId = agentId;
+        row.amountUsd = amount;
+        row.feeUsd = fee;
+        row.netUsd = net;
+        row.entryAmount = amount;
+        row.entryCurrency = 'USD';
+        row.destination = destination;
+        row.adminEditedAt = Date.now();
+        row.adminEditedBy = 'admin:' + String(req.authAdmin);
+        const linked: any = (db.transactions || []).find((t: any) => String(t.id) === String(row.txId))
+          || (db.transactions || []).find((t: any) => String(t.referenceId) === id && String(t.type) === 'WITHDRAW_REQUEST');
+        if (linked) {
+          linked.amount = amount; linked.fee = fee;
+          linked.notes = `Withdrawal ${id} via ${method.name} (pending review)`;
+          linked.metadata = { ...(linked.metadata || {}), status: 'PENDING', withdrawId: id, methodId: method.id, agentId };
+        }
+        recordAuditLog(db, 'WITHDRAWAL_ADMIN_EDITED', 'admin:' + String(req.authAdmin),
+          `Withdrawal ${id}: method ${oldMethodId}→${method.id}, agent ${oldAgentId || '—'}→${agentId || '—'}, amount $${oldAmount.toFixed(2)}→$${amount.toFixed(2)}, fee $${oldFee.toFixed(2)}→$${fee.toFixed(2)}`, String(user.id));
+        writeDb(db);
+        return { status: 200, body: { success: true, request: row, balance: user.balance } };
+      }));
+      res.status(out.status).json(out.body);
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not edit the withdrawal.' }); }
   });
 
   app.post('/api/admin/payment-requests/withdraw/review', rateLimit(60), requireAdmin, requireSuperAdmin, async (req: any, res) => {
@@ -11247,12 +11699,14 @@ const paymentLocks = new Map<string, Promise<any>>();
       const id = String(body.id || '');
       const action = String(body.action || '').toUpperCase();
       if (action !== 'APPROVE' && action !== 'REJECT') return res.status(400).json({ error: 'Action must be APPROVE or REJECT.' });
-      const out = await withPaymentLock('WDRREVIEW:' + id, () => {
+      const probeDb = ensurePaymentCollections(readDb());
+      const probeRow: any = (probeDb.withdrawRequests || []).find((w: any) => String(w.id) === id);
+      const out = await withTransferLock('USER:' + String(probeRow?.userId || '__missing'), () => withPaymentLock('WDRREVIEW:' + id, () => {
         const db = ensurePaymentCollections(readDb());
         const result = reviewWithdrawCore(db, { id, action, actor: String(req.authAdmin), reason: body.reason, payoutRef: body.payoutRef });
         if (result.status === 200) writeDb(db);
         return result;
-      });
+      }));
       res.status(out.status).json(out.body);
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not review the withdrawal.' }); }
   });
@@ -11343,11 +11797,12 @@ const paymentLocks = new Map<string, Promise<any>>();
     const src = type === 'deposit' ? (db.depositRequests || []) : (db.withdrawRequests || []);
     return src
       .filter((r: any) => String(r.methodId) === String(ag.methodId))
+      .filter((r: any) => type !== 'withdraw' || !r.agentId || String(r.agentId) === String(ag.id))
       .filter((r: any) => !status || String(r.status) === status)
       .sort((a: any, b: any) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
       .slice(0, limit)
       .map((r: any) => ({
-        id: r.id, type: type.toUpperCase(), userId: r.userId,
+        id: r.id, type: type.toUpperCase(), userId: r.userId, agentId: r.agentId || '',
         methodId: r.methodId, methodName: r.methodName,
         amountUsd: r.amountUsd, feeUsd: r.feeUsd || 0, netUsd: r.netUsd == null ? r.amountUsd : r.netUsd,
         entryAmount: r.entryAmount, entryCurrency: r.entryCurrency,
@@ -11406,7 +11861,10 @@ const paymentLocks = new Map<string, Promise<any>>();
       const action = String(body.action || '').toUpperCase();
       if (action !== 'APPROVE' && action !== 'REJECT') return res.status(400).json({ error: 'Action must be APPROVE or REJECT.' });
       const lockKey = (type === 'deposit' ? 'DEPREVIEW:' : 'WDRREVIEW:') + id;
-      const out = await withPaymentLock(lockKey, () => {
+      const probeDb = ensurePaymentCollections(readDb());
+      const probeSrc = type === 'deposit' ? (probeDb.depositRequests || []) : (probeDb.withdrawRequests || []);
+      const probeRow: any = probeSrc.find((r: any) => String(r.id) === id);
+      const out = await withTransferLock('USER:' + String(probeRow?.userId || '__missing'), () => withPaymentLock(lockKey, () => {
         const db = ensurePaymentCollections(readDb());
         const ag = walletAgentsOf(db).find((a: any) => a.id === req.authWalletAgentId);
         if (!ag) return { status: 401, body: { error: 'Account not found.' } };
@@ -11419,9 +11877,14 @@ const paymentLocks = new Map<string, Promise<any>>();
           writeDb(db);
           return { status: 403, body: { error: 'This request belongs to a payment method you do not handle.' } };
         }
+        if (type === 'withdraw' && row.agentId && String(row.agentId) !== String(ag.id)) {
+          recordAuditLog(db, 'WALLET_AGENT_SCOPE_DENIED', 'walletagent:' + ag.email, `Attempted ${action} on withdrawal ${id} assigned to ${row.agentId}`, String(row.userId || ''));
+          writeDb(db);
+          return { status: 403, body: { error: 'This withdrawal is assigned to a different wallet agent.' } };
+        }
         const actor = 'walletagent:' + ag.email;
         const result = type === 'deposit'
-          ? reviewDepositCore(db, { id, action, actor, reason: body.reason })
+          ? reviewDepositCore(db, { id, action, actor, reason: body.reason, sourceAgentId: action === 'APPROVE' ? String(ag.id) : undefined })
           : reviewWithdrawCore(db, { id, action, actor, reason: body.reason, payoutRef: body.payoutRef });
         if (result.status === 200) {
           ag.reviewedCount = (Number(ag.reviewedCount) || 0) + 1;
@@ -11429,7 +11892,7 @@ const paymentLocks = new Map<string, Promise<any>>();
           writeDb(db);
         }
         return result;
-      });
+      }));
       res.status(out.status).json(out.body);
     } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not review the request.' }); }
   });
@@ -14201,6 +14664,14 @@ const paymentLocks = new Map<string, Promise<any>>();
         if (expiredChanged) writeDb(db);
         return res.status(404).json({ error: 'No pending payment matches this code. Ask the user to check the code, or the code may have expired.' });
       }
+      const withdrawalPolicy = ensureWithdrawalPolicy(db);
+      if (withdrawalPolicy.agentCapsEnabled) {
+        const sourceCap = agentSourceLimit(db, payout.userId, me, { excludeWithdrawId: payout.id });
+        if (!sourceCap.unlimited && Number(payout.amount) > sourceCap.availableUsd + 1e-9) {
+          if (expiredChanged) writeDb(db);
+          return res.status(409).json({ error: `This cash-agent payout now exceeds the remaining source allowance of $${sourceCap.availableUsd.toFixed(2)}. Ask support to edit it before claiming.` });
+        }
+      }
       const now = Date.now();
       const commission = round2(Number(payout.commission) || 0);
       const amount = round2(Number(payout.amount) || 0);
@@ -14409,10 +14880,11 @@ const paymentLocks = new Map<string, Promise<any>>();
   app.get('/api/agents', requireUser, (req: any, res) => {
     const db = ensureAgentCollections(readDb());
     const s = agentSettingsOf(db);
+    const withdrawalPolicy = ensureWithdrawalPolicy(db);
     // Only boosted dollars can be withdrawn through an agent (owner rule 2026-10-24).
     const me = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
     const maxWithdraw = boostWithdrawable(me);
-    if (!s.enabled) return res.json({ success: true, enabled: false, agents: [], feePercent: 0, minUserSend: 0, maxUserSend: 0, maxWithdraw });
+    if (!s.enabled) return res.json({ success: true, enabled: false, agents: [], feePercent: 0, minUserSend: 0, maxUserSend: 0, maxWithdraw, agentCapsEnabled: withdrawalPolicy.agentCapsEnabled });
     res.json({
       success: true,
       enabled: true,
@@ -14421,14 +14893,22 @@ const paymentLocks = new Map<string, Promise<any>>();
       maxUserSend: s.maxUserSend,
       // "Available Boosted Withdraw" — the hard cap for a single agent payout.
       maxWithdraw,
+      agentCapsEnabled: withdrawalPolicy.agentCapsEnabled,
       balance: round2(Number(me && me.balance) || 0),
       agents: (db.agents || [])
         .filter((a: any) => a.isActive !== false)
-        // No balance or private account fields are exposed.
+        // Agent float stays private; return only this user's source allowance and public agent details.
         .map((a: any) => {
+          const source = agentSourceLimit(db, me && me.id, a.id);
           const presence = agentPresence.get(String(a.id));
           const lastSeenAt = Math.max(Number(a.lastSeenAt) || 0, presence?.at || 0);
-          return { id: a.id, name: a.name || '', lastSeenAt, online: !!presence && Date.now() - presence.at < AGENT_ONLINE_MS, contacts: publicAgentContacts(a) };
+          return {
+            id: a.id, name: a.name || '', lastSeenAt,
+            online: !!presence && Date.now() - presence.at < AGENT_ONLINE_MS,
+            contacts: publicAgentContacts(a),
+            sourceAvailableUsd: withdrawalPolicy.agentCapsEnabled && !source.unlimited ? source.availableUsd : null,
+            sourceUnlimited: withdrawalPolicy.agentCapsEnabled && source.unlimited,
+          };
         })
         .sort((a: any, b: any) => Number(b.online) - Number(a.online) || b.lastSeenAt - a.lastSeenAt || String(a.id).localeCompare(String(b.id))),
       unreadMessages: agentUnreadForUser(db, String(req.authUserId))
@@ -14472,6 +14952,13 @@ const paymentLocks = new Map<string, Promise<any>>();
         if (user.isFrozen) return { status: 403, body: { error: 'Your account is currently frozen. Payments are locked.' } };
         if (user.boostState && user.boostState.isActive && !user.boostState.isPaused) {
           return { status: 400, body: { error: 'Active boost running! Pause your boost before sending money.' } };
+        }
+        const withdrawalPolicy = ensureWithdrawalPolicy(db);
+        if (withdrawalPolicy.agentCapsEnabled) {
+          const source = agentSourceLimit(db, user.id, agent.id);
+          if (!source.unlimited && parsed.value > source.availableUsd + 1e-9) {
+            return { status: 400, body: { error: `Deposits through this cash agent allow a remaining withdrawal of $${source.availableUsd.toFixed(2)}.` } };
+          }
         }
         const fee = pctOf(parsed.value, s.feePercentOnUserSend);
         const total = round2(parsed.value + fee);

@@ -27,6 +27,12 @@ type Method = {
   payTo: { accountName: string; accountNumber: string; instructions: string } | null;
   requires: Array<{ key: string; label: string; placeholder: string }>;
   flow: 'FORM' | 'AGENT';
+  sourcePolicy?: {
+    methodCapEnabled: boolean; agentCapEnabled: boolean; methodAvailableUsd: number;
+    methodUnlimited: boolean; methodDepositedUsd: number; methodReservedUsd: number;
+    agentRequired: boolean;
+    walletAgents: Array<{ id: string; name: string; availableUsd: number; unlimited: boolean }>;
+  };
 };
 
 type Resp = {
@@ -452,7 +458,9 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
 
       {openMethod && (
         <MethodFlow
+          key={openMethod.id}
           method={openMethod}
+          withdrawable={data?.withdrawable ?? null}
           label={nameOf(openMethod)}
           logo={logoTile(openMethod, 'sheet')}
           mode={mode}
@@ -470,13 +478,18 @@ export const PaymentsPage: React.FC<Props> = ({ isOpen, initialMode, onClose, on
 /* ── the per-method request form ─────────────────────────────────────────── */
 const MethodFlow: React.FC<{
   method: Method; label: string; logo: React.ReactNode; mode: Mode; entryCode: string; entryRate: number;
+  withdrawable: number | null;
   price: (usd: number, d?: number) => string;
   onClose: () => void; onDone: () => void;
-}> = ({ method, label, logo, mode, entryCode, entryRate, price, onClose, onDone }) => {
+}> = ({ method, label, logo, mode, entryCode, entryRate, withdrawable, price, onClose, onDone }) => {
   const [amount, setAmount] = useState('');
   const [reference, setReference] = useState('');
   const [note, setNote] = useState('');
   const [dest, setDest] = useState<Record<string, string>>({});
+  const [agentId, setAgentId] = useState(() => {
+    const options = method.sourcePolicy?.walletAgents || [];
+    return options.length === 1 ? options[0].id : '';
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [done, setDone] = useState<{ id: string; amountUsd: number; netUsd?: number; status: string } | null>(null);
@@ -486,11 +499,21 @@ const MethodFlow: React.FC<{
     try { await navigator.clipboard.writeText(text); setCopied(key); setTimeout(() => setCopied(''), 1200); } catch { /* ignore */ }
   };
 
-  const typedUsd = mode === 'deposit' && entryCode !== 'USD'
+  const typedUsd = entryCode !== 'USD'
     ? (Number(amount) || 0) / (entryRate > 0 ? entryRate : 1)
     : (Number(amount) || 0);
   const feeUsd = Math.round(typedUsd * (method.feePercent || 0)) / 100;
   const netUsd = Math.max(0, typedUsd - feeUsd);
+  const sourcePolicy = method.sourcePolicy;
+  const selectedSourceAgent = sourcePolicy?.walletAgents.find((a) => a.id === agentId) || null;
+  const withdrawalMaxUsd = mode === 'withdraw' ? Math.min(
+    Number(method.max) || 0,
+    withdrawable == null ? Number.POSITIVE_INFINITY : Math.max(0, Number(withdrawable) || 0),
+    sourcePolicy?.methodCapEnabled && !sourcePolicy.methodUnlimited
+      ? Math.max(0, Number(sourcePolicy.methodAvailableUsd) || 0) : Number.POSITIVE_INFINITY,
+    sourcePolicy?.agentCapEnabled && selectedSourceAgent && !selectedSourceAgent.unlimited
+      ? Math.max(0, Number(selectedSourceAgent.availableUsd) || 0) : Number.POSITIVE_INFINITY,
+  ) : Number.POSITIVE_INFINITY;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -498,6 +521,21 @@ const MethodFlow: React.FC<{
     if (!(Number(amount) > 0)) { setError('Enter an amount greater than 0.'); return; }
     if (mode === 'deposit' && reference.trim().length < 4) { setError('Enter the transaction ID / reference from your payment.'); return; }
     if (mode === 'withdraw') {
+      if (typedUsd < method.min - 1e-8 || typedUsd > method.max + 1e-8) {
+        setError(`Enter an amount between ${price(method.min)} and ${price(method.max)}.`); return;
+      }
+      if (withdrawable != null && typedUsd > Number(withdrawable) + 1e-8) {
+        setError(`Only ${price(Number(withdrawable))} of boosted profit is currently withdrawable.`); return;
+      }
+      if (sourcePolicy?.methodCapEnabled && !sourcePolicy.methodUnlimited && typedUsd > sourcePolicy.methodAvailableUsd + 1e-8) {
+        setError(`The remaining verified deposit limit for this method is ${price(sourcePolicy.methodAvailableUsd)}.`); return;
+      }
+      if (sourcePolicy?.agentRequired && !agentId) {
+        setError('Choose a wallet agent you deposited through.'); return;
+      }
+      if (sourcePolicy?.agentCapEnabled && selectedSourceAgent && !selectedSourceAgent.unlimited && typedUsd > selectedSourceAgent.availableUsd + 1e-8) {
+        setError(`Deposits through this wallet agent allow up to ${price(selectedSourceAgent.availableUsd)} more.`); return;
+      }
       const missing = method.requires.find((f) => String(dest[f.key] || '').trim().length < 3);
       if (missing) { setError(`Please fill in: ${missing.label}.`); return; }
     }
@@ -511,7 +549,7 @@ const MethodFlow: React.FC<{
         idempotencyKey: `${mode}-${method.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       };
       if (mode === 'deposit') { body.reference = reference.trim(); body.note = note.trim(); }
-      else { body.destination = dest; body.note = note.trim(); }
+      else { body.agentId = agentId; body.destination = dest; body.note = note.trim(); }
       const r = await fetch(path, { method: 'POST', headers: BoostPayStore.authHeaders(), body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j?.error || 'Could not submit the request.');
@@ -621,6 +659,11 @@ const MethodFlow: React.FC<{
                 {mode === 'withdraw' && entryCode !== 'USD' && Number(amount) > 0 && (
                   <span className="mt-1 block text-[9px] text-zinc-500">${typedUsd.toFixed(2)} of your balance · fee {price(feeUsd)}</span>
                 )}
+                {mode === 'withdraw' && (
+                  <span className="mt-1 block text-[9px] text-emerald-300/80">
+                    Maximum available now: {price(withdrawalMaxUsd)}{sourcePolicy?.agentRequired && !agentId ? ' · select a wallet agent to see its source cap' : ''}
+                  </span>
+                )}
               </label>
 
               {mode === 'deposit' ? (
@@ -635,16 +678,37 @@ const MethodFlow: React.FC<{
                   </label>
                 </>
               ) : (
-                method.requires.map((f) => (
-                  <label key={f.key} className="block">
-                    <span className="mb-1 block text-[9.5px] font-bold uppercase tracking-wider text-zinc-400">{f.label}</span>
-                    <input
-                      value={dest[f.key] || ''} onChange={(e) => setDest((d) => ({ ...d, [f.key]: e.target.value }))}
-                      placeholder={f.placeholder}
-                      className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-[11.5px] text-white outline-none focus:border-amber-500/60"
-                    />
-                  </label>
-                ))
+                <>
+                  {!!sourcePolicy?.walletAgents.length && (
+                    <label className="block">
+                      <span className="mb-1 block text-[9.5px] font-bold uppercase tracking-wider text-zinc-400">
+                        Wallet agent you deposited through{sourcePolicy.agentRequired ? ' · required' : ' · optional'}
+                      </span>
+                      <select value={agentId} onChange={(e) => setAgentId(e.target.value)}
+                        className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-[11.5px] text-white outline-none focus:border-amber-500/60">
+                        {!sourcePolicy.agentRequired && <option value="">Use method only</option>}
+                        {sourcePolicy.walletAgents.map((a) => (
+                          <option key={a.id} value={a.id} disabled={!a.unlimited && a.availableUsd <= 0}>
+                            {a.name} · {a.unlimited ? 'unlimited source cap' : `${price(a.availableUsd)} remaining`}
+                          </option>
+                        ))}
+                      </select>
+                      {sourcePolicy.agentCapEnabled && selectedSourceAgent && !selectedSourceAgent.unlimited && (
+                        <span className="mt-1 block text-[9px] text-zinc-500">This wallet-agent source has {price(selectedSourceAgent.availableUsd)} remaining.</span>
+                      )}
+                    </label>
+                  )}
+                  {method.requires.map((f) => (
+                    <label key={f.key} className="block">
+                      <span className="mb-1 block text-[9.5px] font-bold uppercase tracking-wider text-zinc-400">{f.label}</span>
+                      <input
+                        value={dest[f.key] || ''} onChange={(e) => setDest((d) => ({ ...d, [f.key]: e.target.value }))}
+                        placeholder={f.placeholder}
+                        className="w-full rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2.5 text-[11.5px] text-white outline-none focus:border-amber-500/60"
+                      />
+                    </label>
+                  ))}
+                </>
               )}
 
               <label className="block">
