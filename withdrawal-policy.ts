@@ -30,6 +30,18 @@ export const DEFAULT_WITHDRAWAL_POLICY: WithdrawalPolicy = {
   singleAgentUnlimited: true,
 };
 
+/** Per-user withdrawal restrictions configured from Admin → Users. */
+export type UserWithdrawalControls = {
+  /** Hidden withdrawal methods; an empty list keeps all globally-eligible methods visible. */
+  hiddenMethodIds: string[];
+  /** Total lifetime cap per method. Each value may only be below that method's credited deposits. */
+  methodCapOverridesUsd: Record<string, number>;
+  /** Suggested AGT payout handler for future withdrawals; it does not change source attribution. */
+  preferredCashAgentId: string;
+  /** Require this AGT handler for future Cash Agent withdrawals; empty leaves the choice open. */
+  fixedCashAgentId: string;
+};
+
 export type SourceLimit = {
   enabled: boolean;
   unlimited: boolean;
@@ -44,6 +56,52 @@ const amountOf = (v: any) => {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : 0;
 };
+
+export function userWithdrawalControlsOf(user: any): UserWithdrawalControls {
+  const raw = user?.withdrawalControls && typeof user.withdrawalControls === 'object' && !Array.isArray(user.withdrawalControls)
+    ? user.withdrawalControls : {};
+  const hiddenMethodIds = Array.from(new Set<string>((Array.isArray(raw.hiddenMethodIds) ? raw.hiddenMethodIds : [])
+    .map((id: any) => keyOf(id).toUpperCase())
+    .filter((id: string) => /^PM-[A-Z0-9_-]{1,64}$/.test(id)))).slice(0, 300);
+  const methodCapOverridesUsd: Record<string, number> = {};
+  const rawCaps = raw.methodCapOverridesUsd && typeof raw.methodCapOverridesUsd === 'object' && !Array.isArray(raw.methodCapOverridesUsd)
+    ? raw.methodCapOverridesUsd : {};
+  for (const [methodId, rawCap] of Object.entries(rawCaps)) {
+    const id = keyOf(methodId).toUpperCase();
+    const cap = Number(rawCap);
+    if (!/^PM-[A-Z0-9_-]{1,64}$/.test(id) || !Number.isFinite(cap) || cap < 0) continue;
+    methodCapOverridesUsd[id] = round8(cap);
+  }
+  const fixedCashAgentId = keyOf(raw.fixedCashAgentId);
+  return {
+    hiddenMethodIds,
+    methodCapOverridesUsd,
+    preferredCashAgentId: keyOf(raw.preferredCashAgentId || fixedCashAgentId),
+    fixedCashAgentId,
+  };
+}
+
+export function isUserWithdrawalMethodVisible(user: any, methodId: any): boolean {
+  const id = keyOf(methodId).toUpperCase();
+  return !userWithdrawalControlsOf(user).hiddenMethodIds.includes(id);
+}
+
+export function preferredCashAgentIdOf(user: any): string {
+  return userWithdrawalControlsOf(user).preferredCashAgentId;
+}
+
+export function fixedCashAgentIdOf(user: any): string {
+  return userWithdrawalControlsOf(user).fixedCashAgentId;
+}
+
+/** The standalone Cash Agent withdrawal flow is represented by an AGENT method. */
+export function isCashAgentWithdrawalVisible(db: any, user: any): boolean {
+  const methods = Array.isArray(db?.paymentMethods) ? db.paymentMethods : [];
+  const agentMethods = methods.filter((m: any) => String(m?.category || '').toUpperCase() === 'AGENT');
+  if (!agentMethods.length) return true;
+  const cashMethod = agentMethods.find((m: any) => keyOf(m.id).toUpperCase() === 'PM-TG-AGENT') || agentMethods[0];
+  return isUserWithdrawalMethodVisible(user, cashMethod?.id);
+}
 
 export function normalizeWithdrawalPolicy(value: any): WithdrawalPolicy {
   const src = value && typeof value === 'object' ? value : {};
@@ -181,8 +239,15 @@ function methodSourceLimitFromSources(
 ): SourceLimit {
   const id = keyOf(methodId);
   const depositedUsd = sources.methods.get(id) || 0;
+  const user = (Array.isArray(db?.users) ? db.users : []).find((u: any) => keyOf(u.id) === keyOf(userId));
+  const controls = userWithdrawalControlsOf(user);
+  const hasAdminCap = Object.prototype.hasOwnProperty.call(controls.methodCapOverridesUsd, id);
+  const adminCapUsd = hasAdminCap ? controls.methodCapOverridesUsd[id] : depositedUsd;
+  const cappedDepositedUsd = Math.min(depositedUsd, adminCapUsd);
   const soleMethod = sources.methods.size === 1 && sources.methods.has(id);
-  const unlimited = policy.singleMethodUnlimited && soleMethod;
+  // A per-user Admin cap deliberately disables the single-source unlimited
+  // exception for this method. It is still bounded by credited deposits.
+  const unlimited = !hasAdminCap && policy.singleMethodUnlimited && soleMethod;
   const excluded = keyOf(opts.excludeWithdrawId);
   const withdrawals = Array.isArray(db?.withdrawRequests) ? db.withdrawRequests : [];
   const reservedUsd = round8(withdrawals.reduce((sum: number, row: any) => {
@@ -191,11 +256,11 @@ function methodSourceLimitFromSources(
     return isCommittedWithdrawal(row) ? sum + amountOf(row.amountUsd) : sum;
   }, 0));
   return {
-    enabled: policy.methodCapsEnabled,
+    enabled: policy.methodCapsEnabled || hasAdminCap,
     unlimited,
     depositedUsd,
     reservedUsd,
-    availableUsd: round8(Math.max(0, depositedUsd - reservedUsd)),
+    availableUsd: round8(Math.max(0, cappedDepositedUsd - reservedUsd)),
   };
 }
 
@@ -297,8 +362,15 @@ export function methodWithdrawalSourceInfo(db: any, userId: any, methodId: any, 
   const method = methodSourceLimitFromSources(db, userId, methodId, { excludeWithdrawId }, sources, policy);
   const walletAgentSources = sources.walletAgentsByMethod.get(keyOf(methodId));
   const walletAgents = walletAgentOptionsFromSources(db, userId, methodId, sources, policy, { excludeWithdrawId });
+  const user = (Array.isArray(db?.users) ? db.users : []).find((u: any) => keyOf(u.id) === keyOf(userId));
+  const controls = userWithdrawalControlsOf(user);
+  const methodKey = keyOf(methodId);
+  const hasAdminCap = Object.prototype.hasOwnProperty.call(controls.methodCapOverridesUsd, methodKey);
   return {
-    methodCapEnabled: policy.methodCapsEnabled,
+    methodCapEnabled: method.enabled,
+    methodGlobalCapEnabled: policy.methodCapsEnabled,
+    methodAdminCapEnabled: hasAdminCap,
+    methodAdminCapUsd: hasAdminCap ? Math.min(method.depositedUsd, controls.methodCapOverridesUsd[methodKey]) : null,
     agentCapEnabled: policy.agentCapsEnabled,
     methodAvailableUsd: method.availableUsd,
     methodUnlimited: method.unlimited,
@@ -323,7 +395,10 @@ export function withdrawalMethodAvailability(
   method: any,
 ): { available: boolean; sourcePolicy?: ReturnType<typeof methodWithdrawalSourceInfo> } {
   const policy = ensureWithdrawalPolicy(db);
+  const user = (Array.isArray(db?.users) ? db.users : []).find((u: any) => keyOf(u.id) === keyOf(userId));
+  if (!isUserWithdrawalMethodVisible(user, method?.id)) return { available: false };
   if (String(method?.category || '').toUpperCase() === 'AGENT') {
+    if (!isCashAgentWithdrawalVisible(db, user)) return { available: false };
     if (!policy.agentCapsEnabled) return { available: true };
     const sources = collectDepositSources(db, userId);
     const cashAgents = Array.isArray(db?.agents) ? db.agents : [];
@@ -337,10 +412,11 @@ export function withdrawalMethodAvailability(
   }
 
   const sourcePolicy = methodWithdrawalSourceInfo(db, userId, method?.id);
-  if (policy.methodCapsEnabled && sourcePolicy.methodDepositedUsd <= 0) {
+  const methodLimit = methodSourceLimitFromSources(db, userId, method?.id, {}, collectDepositSources(db, userId), policy);
+  if (methodLimit.enabled && methodLimit.depositedUsd <= 0) {
     return { available: false, sourcePolicy };
   }
-  if (policy.methodCapsEnabled && !sourcePolicy.methodUnlimited && sourcePolicy.methodAvailableUsd <= 0) {
+  if (methodLimit.enabled && !methodLimit.unlimited && methodLimit.availableUsd <= 0) {
     return { available: false, sourcePolicy };
   }
   if (policy.agentCapsEnabled && sourcePolicy.agentRequired

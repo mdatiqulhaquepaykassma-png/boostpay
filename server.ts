@@ -20,6 +20,7 @@ import { buildAdminReferralStats } from './admin-user-referrals';
 import {
   ensureWithdrawalPolicy, normalizeWithdrawalPolicy,
   methodSourceLimit, agentSourceLimit, methodWithdrawalSourceInfo, withdrawalMethodAvailability,
+  userWithdrawalControlsOf, isUserWithdrawalMethodVisible, preferredCashAgentIdOf, fixedCashAgentIdOf, isCashAgentWithdrawalVisible,
   isCashAgentId, isWalletAgentId,
 } from './withdrawal-policy';
 import { parseSms, normalizeTrxId } from './sms-parse';
@@ -2890,7 +2891,7 @@ function requireUserOrAdmin(req: any, res: any, next: any) {
 /** Never leak credentials through the API. All sensitive fields stripped — only public profile visible to frontend. */
 function publicUser(u: any): any {
   if (!u || typeof u !== 'object') return u;
-  const { password, passwordPlain, passwordHash, phrase, resetToken, resetExpires, emailVerificationCode, emailVerificationExpires, ...rest } = u;
+  const { password, passwordPlain, passwordHash, phrase, resetToken, resetExpires, emailVerificationCode, emailVerificationExpires, withdrawalControls: _withdrawalControls, ...rest } = u;
   // serverTime lets the app paint boost progress from elapsedMs + time-since-receipt instead of
   // `Date.now() - startedAt`. A phone whose clock is a few minutes off used to show 0 s / 0.0 %
   // (or jump straight to 100 %) while the server compounded normally.
@@ -5448,7 +5449,8 @@ async function startServer() {
     'frozenUntil',
     'isTempFreeze',
     'isPermanentFreeze',
-    'adminNote'
+    'adminNote',
+    'withdrawalControls' // per-user Admin controls; never accept a client /sync overwrite
   ];
 
   app.post('/api/sync', rateLimit(30), (req, res) => {
@@ -5491,6 +5493,12 @@ async function startServer() {
             // temporary hold a few seconds after it was applied — "hold hocche na".)
             const serverOwned: Record<string, any> = {};
             for (const key of SERVER_OWNED_USER_FIELDS) {
+              // A missing server-owned value must still overwrite a client value;
+              // otherwise /sync could bootstrap a new Admin-only setting.
+              if (key === 'withdrawalControls') {
+                serverOwned[key] = serverUser[key];
+                continue;
+              }
               if (serverUser[key] !== undefined) serverOwned[key] = serverUser[key];
             }
             mergedUsers[idx] = {
@@ -11138,6 +11146,9 @@ const paymentLocks = new Map<string, Promise<any>>();
         }
         const m = findMethod(db, String(body.methodId || ''));
         if (!m) return { status: 404, body: { error: 'That payment method does not exist.' } };
+        if (!isUserWithdrawalMethodVisible(user, m.id)) {
+          return { status: 403, body: { error: 'This withdrawal method is unavailable for your account.' } };
+        }
         const currency = entryCurrencyOf(user);
         const avail = methodAvailable(m, 'withdraw', 'user', currency, effectiveCountryOf(db, user));
         if (!avail.ok) return { status: 400, body: { error: avail.reason } };
@@ -11171,7 +11182,7 @@ const paymentLocks = new Map<string, Promise<any>>();
         if (conv.usd > lim.max) return { status: 400, body: { error: `The maximum withdrawal for ${m.name} is $${lim.max.toFixed(2)}.` } };
 
         const methodLimit = methodSourceLimit(db, user.id, m.id);
-        if (withdrawalPolicy.methodCapsEnabled && !methodLimit.unlimited && conv.usd > methodLimit.availableUsd + 1e-9) {
+        if (methodLimit.enabled && !methodLimit.unlimited && conv.usd > methodLimit.availableUsd + 1e-9) {
           return { status: 400, body: { error: `Verified deposits through ${m.name} allow a remaining withdrawal of $${methodLimit.availableUsd.toFixed(2)}.` } };
         }
         if (requestedAgentId && withdrawalPolicy.agentCapsEnabled) {
@@ -11388,6 +11399,167 @@ const paymentLocks = new Map<string, Promise<any>>();
     if (!method || method.category === 'AGENT') return res.status(404).json({ error: 'Payment method not found.' });
     res.setHeader('Cache-Control', 'no-store');
     res.json({ success: true, ...methodWithdrawalSourceInfo(db, userId, methodId) });
+  });
+
+  // ── Admin: per-user withdrawal controls ─────────────────────────────────────
+  app.get('/api/admin/users/:userId/withdrawal-controls', rateLimit(120), requireAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      ensureAgentCollections(db);
+      const user = (db.users || []).find((u: any) => String(u.id) === String(req.params.userId));
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      const controls = userWithdrawalControlsOf(user);
+      const hidden = new Set(controls.hiddenMethodIds);
+      const methods = (db.paymentMethods || [])
+        .slice()
+        .sort((a: any, b: any) => (Number(a.order) || 0) - (Number(b.order) || 0) || String(a.name || '').localeCompare(String(b.name || '')))
+        .map((method: any) => {
+          const id = String(method.id || '').toUpperCase();
+          const source = methodWithdrawalSourceInfo(db, user.id, id);
+          const effective = methodSourceLimit(db, user.id, id);
+          const storedCap = Object.prototype.hasOwnProperty.call(controls.methodCapOverridesUsd, id)
+            ? controls.methodCapOverridesUsd[id] : null;
+          return {
+            id, name: method.name || id, category: String(method.category || '').toUpperCase(),
+            enabled: method.enabled !== false, withdrawEnabled: method.withdrawEnabled !== false,
+            userWithdraw: method.userWithdraw !== false, hidden: hidden.has(id),
+            canSetCap: String(method.category || '').toUpperCase() !== 'AGENT',
+            creditedUsd: source.methodDepositedUsd,
+            reservedUsd: source.methodReservedUsd,
+            // Clamp stale historical values after any source correction; the server
+            // also clamps enforcement, and saving the form persists this safe value.
+            adminCapUsd: storedCap === null ? null : Math.min(storedCap, source.methodDepositedUsd),
+            effectiveAvailableUsd: effective.availableUsd,
+            effectiveUnlimited: effective.unlimited,
+            capEnabled: effective.enabled,
+          };
+        });
+      const cashAgents = (db.agents || [])
+        .filter((agent: any) => isCashAgentId(agent.id))
+        .map((agent: any) => {
+          const source = agentSourceLimit(db, user.id, agent.id);
+          return {
+            id: String(agent.id), name: agent.name || String(agent.id), active: agent.isActive !== false,
+            sourceCapEnabled: source.enabled, sourceDepositedUsd: source.depositedUsd,
+            sourceAvailableUsd: source.availableUsd, sourceUnlimited: source.unlimited,
+          };
+        })
+        .sort((a: any, b: any) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+      for (const assignedId of [controls.fixedCashAgentId, controls.preferredCashAgentId]) {
+        if (assignedId && !cashAgents.some((agent: any) => agent.id === assignedId)) {
+          cashAgents.unshift({ id: assignedId, name: 'Unavailable assigned agent', active: false });
+        }
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        success: true,
+        userId: String(user.id),
+        controls,
+        methods,
+        cashAgents,
+        globalMethodCapsEnabled: ensureWithdrawalPolicy(db).methodCapsEnabled,
+      });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not load user withdrawal controls.' }); }
+  });
+
+  app.post('/api/admin/users/:userId/withdrawal-controls', rateLimit(30), requireAdmin, requireSuperAdmin, (req: any, res) => {
+    try {
+      const db = ensurePaymentCollections(readDb());
+      ensureAgentCollections(db);
+      const user = (db.users || []).find((u: any) => String(u.id) === String(req.params.userId));
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      const body = req.body || {};
+      const current = userWithdrawalControlsOf(user);
+      const methods = Array.isArray(db.paymentMethods) ? db.paymentMethods : [];
+      const methodsById = new Map<string, any>(methods.map((method: any) => [String(method.id || '').toUpperCase(), method]));
+      const next = {
+        hiddenMethodIds: [...current.hiddenMethodIds],
+        methodCapOverridesUsd: { ...current.methodCapOverridesUsd },
+        preferredCashAgentId: current.preferredCashAgentId,
+        fixedCashAgentId: current.fixedCashAgentId,
+      };
+
+      if (body.hiddenMethodIds !== undefined) {
+        if (!Array.isArray(body.hiddenMethodIds) || body.hiddenMethodIds.length > 300) {
+          return res.status(400).json({ error: 'hiddenMethodIds must be an array of at most 300 methods.' });
+        }
+        const ids: string[] = [];
+        for (const rawId of body.hiddenMethodIds) {
+          const id = String(rawId || '').trim().toUpperCase();
+          if (!id) continue;
+          // Keep a valid hidden ID after an Admin later deletes its global method;
+          // if that method is re-created with the same ID it remains hidden for this user.
+          if (!methodsById.has(id) && !/^PM-[A-Z0-9_-]{1,64}$/.test(id)) {
+            return res.status(400).json({ error: `Unknown payment method ${id}.` });
+          }
+          if (!ids.includes(id)) ids.push(id);
+        }
+        next.hiddenMethodIds = ids;
+      }
+
+      if (body.methodCapOverridesUsd !== undefined) {
+        const rawCaps = body.methodCapOverridesUsd;
+        if (!rawCaps || typeof rawCaps !== 'object' || Array.isArray(rawCaps) || Object.keys(rawCaps).length > 300) {
+          return res.status(400).json({ error: 'methodCapOverridesUsd must be an object with at most 300 methods.' });
+        }
+        const caps: Record<string, number> = {};
+        for (const [rawId, rawValue] of Object.entries(rawCaps)) {
+          const id = String(rawId || '').trim().toUpperCase();
+          if (!id) continue;
+          if (rawValue === null || rawValue === '') continue; // blank means remove the Admin cap
+          const method: any = methodsById.get(id);
+          if (!method) return res.status(400).json({ error: `Unknown payment method ${id}.` });
+          if (String(method.category || '').toUpperCase() === 'AGENT') {
+            return res.status(400).json({ error: 'Cash Agent withdrawals use the separate AGT source allowance, not a payment-method cap.' });
+          }
+          const parsed = Number(rawValue);
+          if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1e12) {
+            return res.status(400).json({ error: `Enter a valid non-negative cap for ${method.name || id}.` });
+          }
+          const cap = Number(parsed.toFixed(8));
+          const credited = Number(methodWithdrawalSourceInfo(db, user.id, id).methodDepositedUsd.toFixed(8));
+          if (cap > credited) {
+            return res.status(400).json({ error: `The cap for ${method.name || id} cannot exceed its $${credited.toFixed(2)} credited deposit source.` });
+          }
+          caps[id] = cap;
+        }
+        next.methodCapOverridesUsd = caps;
+      }
+
+      const validateCashAgent = (agentId: string, label: string) => {
+        if (!agentId) return '';
+        if (!isCashAgentId(agentId)) return `Choose a Cash Agent (AGT), not a Wallet Agent (WAG), for ${label}.`;
+        const agent = (db.agents || []).find((a: any) => String(a.id) === agentId);
+        if (!agent || agent.isActive === false) return `The ${label} must be an active Cash Agent.`;
+        return '';
+      };
+      if (body.preferredCashAgentId !== undefined) {
+        const preferredId = String(body.preferredCashAgentId || '').trim();
+        const problem = validateCashAgent(preferredId, 'preferred agent');
+        if (problem) return res.status(400).json({ error: problem });
+        next.preferredCashAgentId = preferredId;
+        if (!preferredId && body.fixedCashAgentId === undefined) next.fixedCashAgentId = '';
+      }
+      if (body.fixedCashAgentId !== undefined) {
+        const fixedId = String(body.fixedCashAgentId || '').trim();
+        const problem = validateCashAgent(fixedId, 'fixed agent');
+        if (problem) return res.status(400).json({ error: problem });
+        next.fixedCashAgentId = fixedId;
+        // A fixed handler is also the default selection shown to the user.
+        if (fixedId && body.preferredCashAgentId === undefined) next.preferredCashAgentId = fixedId;
+      }
+      if (next.fixedCashAgentId && next.preferredCashAgentId !== next.fixedCashAgentId) {
+        return res.status(400).json({ error: 'The required Cash Agent must match the selected preferred agent.' });
+      }
+
+      user.withdrawalControls = next;
+      const hiddenText = next.hiddenMethodIds.length ? next.hiddenMethodIds.join(', ') : 'none';
+      const capText = Object.entries(next.methodCapOverridesUsd).map(([id, cap]) => `${id}=$${Number(cap).toFixed(2)}`).join(', ') || 'none';
+      recordAuditLog(db, 'USER_WITHDRAWAL_CONTROLS_UPDATED', 'admin:' + String(req.authAdmin),
+        `Updated withdrawal controls for user #${user.id}; hidden methods: ${hiddenText}; method caps: ${capText}; preferred Cash Agent: ${next.preferredCashAgentId || 'user choice'}; required Cash Agent: ${next.fixedCashAgentId || 'not fixed'}.`, String(user.id));
+      writeDb(db);
+      res.json({ success: true, controls: userWithdrawalControlsOf(user) });
+    } catch (err: any) { res.status(500).json({ error: err?.message || 'Could not save user withdrawal controls.' }); }
   });
 
   // ── Admin: deposit / withdrawal queues ─────────────────────────────────────
@@ -14920,10 +15092,16 @@ const paymentLocks = new Map<string, Promise<any>>();
     // Only boosted dollars can be withdrawn through an agent (owner rule 2026-10-24).
     const me = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
     const maxWithdraw = boostWithdrawable(me);
-    if (!s.enabled) return res.json({ success: true, enabled: false, agents: [], feePercent: 0, minUserSend: 0, maxUserSend: 0, maxWithdraw, agentCapsEnabled: withdrawalPolicy.agentCapsEnabled });
+    const preferredCashAgentId = preferredCashAgentIdOf(me);
+    const fixedCashAgentId = fixedCashAgentIdOf(me);
+    const cashAgentWithdrawalVisible = isCashAgentWithdrawalVisible(db, me);
+    if (!s.enabled) return res.json({ success: true, enabled: false, agents: [], feePercent: 0, minUserSend: 0, maxUserSend: 0, maxWithdraw, agentCapsEnabled: withdrawalPolicy.agentCapsEnabled, preferredCashAgentId, fixedCashAgentId, cashAgentWithdrawalVisible });
     res.json({
       success: true,
       enabled: true,
+      preferredCashAgentId,
+      fixedCashAgentId,
+      cashAgentWithdrawalVisible,
       feePercent: s.feePercentOnUserSend,
       minUserSend: s.minUserSend,
       maxUserSend: s.maxUserSend,
@@ -14982,6 +15160,13 @@ const paymentLocks = new Map<string, Promise<any>>();
         const user = (db.users || []).find((u: any) => String(u.id) === String(req.authUserId));
         const agent = (db.agents || []).find((a: any) => String(a.id) === agentId);
         if (!user) return { status: 404, body: { error: 'User not found.' } };
+        if (!isCashAgentWithdrawalVisible(db, user)) {
+          return { status: 403, body: { error: 'Cash-agent withdrawals are disabled for your account.' } };
+        }
+        const fixedCashAgentId = fixedCashAgentIdOf(user);
+        if (fixedCashAgentId && agentId !== fixedCashAgentId) {
+          return { status: 403, body: { error: `Your withdrawals must be handled by cash agent ${fixedCashAgentId}.` } };
+        }
         if (!agent) return { status: 404, body: { error: 'Agent not found.' } };
         if (agent.isActive === false) return { status: 403, body: { error: 'This agent is not accepting payments right now.' } };
         if (user.isBlocked) return { status: 403, body: { error: 'Your account is suspended.' } };

@@ -241,6 +241,68 @@ ck('the funded withdrawal method is visible and an unfunded method is hidden',
    'PM-TESTWALLET' in withdraw_ids and 'PM-TESTOTHER' not in withdraw_ids and 'PM-TG-AGENT' not in withdraw_ids,
    f'{s} listed={sorted(withdraw_ids)}', 'HIGH', 'Withdrawal options are not filtered to the user’s verified source.')
 
+# per-user visibility/caps are independent of global method settings and enforced server-side
+section('3b. per-user withdrawal controls')
+controls_path = f'/api/admin/users/{UID}/withdrawal-controls'
+s, controls = req(controls_path, token=ADMIN_TOKEN)
+source_row = next((m for m in (controls.get('methods') or []) if m.get('id') == 'PM-TESTWALLET'), {})
+ck('Admin sees this user’s credited source and current per-user controls',
+   s == 200 and abs(float(source_row.get('creditedUsd') or 0) - 30) < 1e-6,
+   f'{s} credited={source_row.get("creditedUsd")}', 'HIGH', 'The per-user settings view has no source-backed baseline.')
+
+s, above_source = req(controls_path, {
+    'hiddenMethodIds': [], 'methodCapOverridesUsd': {'PM-TESTWALLET': 31}, 'fixedCashAgentId': '',
+}, token=ADMIN_TOKEN)
+ck('Admin cannot set a method cap above its credited source',
+   s == 400 and 'cannot exceed' in str(above_source.get('error', '')),
+   f'{s} {above_source.get("error")}', 'CRITICAL', 'A per-user source cap can be raised above verified deposits.')
+
+s, hidden_controls = req(controls_path, {
+    'hiddenMethodIds': ['PM-TESTWALLET'], 'methodCapOverridesUsd': {'PM-TESTWALLET': 10}, 'fixedCashAgentId': '',
+}, token=ADMIN_TOKEN)
+ck('Admin can save per-user visibility and a reduce-only cap',
+   s == 200 and 'PM-TESTWALLET' in ((hidden_controls.get('controls') or {}).get('hiddenMethodIds') or []),
+   f'{s} {hidden_controls.get("error", "")}', 'HIGH', 'Per-user withdrawal settings were not stored.')
+s, deposit_catalog = req('/api/payment/methods?mode=deposit', token=UTOK)
+ck('hiding a withdrawal method does not hide its deposit method',
+   'PM-TESTWALLET' in {m.get('id') for m in (deposit_catalog.get('methods') or [])},
+   f'{s}', 'HIGH', 'Per-user withdrawal visibility affected deposits.')
+s, withdraw_catalog = req('/api/payment/methods?mode=withdraw', token=UTOK)
+ck('the hidden method is removed from only this user’s withdrawal catalogue',
+   'PM-TESTWALLET' not in {m.get('id') for m in (withdraw_catalog.get('methods') or [])},
+   f'{s}', 'CRITICAL', 'A hidden method remains user-visible.')
+s, hidden_submit = req('/api/user/withdraw-request', {
+    'methodId': 'PM-TESTWALLET', 'amount': 1, 'destination': {'accountName': 'Test Holder', 'accountNumber': '01800000000'},
+}, token=UTOK)
+ck('a hidden method is also blocked by the withdrawal API',
+   s == 403, f'{s} {hidden_submit.get("error")}', 'CRITICAL', 'Client-side hiding can be bypassed.')
+
+s, cap_controls = req(controls_path, {
+    'hiddenMethodIds': [], 'methodCapOverridesUsd': {'PM-TESTWALLET': 10}, 'fixedCashAgentId': '',
+}, token=ADMIN_TOKEN)
+s, capped_catalog = req('/api/payment/methods?mode=withdraw', token=UTOK)
+capped_method = next((m for m in (capped_catalog.get('methods') or []) if m.get('id') == 'PM-TESTWALLET'), {})
+ck('the user catalogue reports the Admin-reduced source allowance',
+   s == 200 and capped_method.get('sourcePolicy', {}).get('methodCapEnabled') is True
+   and abs(float(capped_method.get('sourcePolicy', {}).get('methodAvailableUsd') or 0) - 10) < 1e-6,
+   f'{s} available={capped_method.get("sourcePolicy", {}).get("methodAvailableUsd")}', 'HIGH', 'The lower per-user cap is not reflected in the user view.')
+sync_user = next((u for u in db_read().get('users', []) if str(u.get('id')) == UID), {})
+sync_user['withdrawalControls'] = {'hiddenMethodIds': ['PM-TESTWALLET'], 'methodCapOverridesUsd': {'PM-TESTWALLET': 30}, 'preferredCashAgentId': '', 'fixedCashAgentId': ''}
+s, sync_result = req('/api/sync', {'users': [sync_user]}, token=UTOK)
+s, after_sync_controls = req(controls_path, token=ADMIN_TOKEN)
+ck('client /sync cannot replace or remove Admin-owned withdrawal controls',
+   s == 200 and after_sync_controls.get('controls', {}).get('methodCapOverridesUsd', {}).get('PM-TESTWALLET') == 10
+   and 'PM-TESTWALLET' not in (after_sync_controls.get('controls', {}).get('hiddenMethodIds') or []),
+   f'{s} sync={sync_result.get("success")} controls={after_sync_controls.get("controls")}',
+   'CRITICAL', 'A stale client sync overwrote per-user Admin withdrawal rules.')
+s, over_user_cap = req('/api/user/withdraw-request', {
+    'methodId': 'PM-TESTWALLET', 'amount': 11, 'destination': {'accountName': 'Test Holder', 'accountNumber': '01800000000'},
+}, token=UTOK)
+ck('server-side method withdrawal enforcement respects the reduced user cap',
+   s == 400 and 'remaining withdrawal of $10.00' in str(over_user_cap.get('error', '')),
+   f'{s} {over_user_cap.get("error")}', 'CRITICAL', 'A user can exceed the Admin-reduced method cap.')
+req(controls_path, {'hiddenMethodIds': [], 'methodCapOverridesUsd': {}, 'fixedCashAgentId': ''}, token=ADMIN_TOKEN)
+
 s, j = req('/api/admin/withdrawal-policy', {'singleMethodUnlimited': False}, token=ADMIN_TOKEN)
 source_dest = {'accountName': 'Test Holder', 'accountNumber': '01800000000'}
 s, cap_error = req('/api/user/withdraw-request', {
@@ -419,6 +481,22 @@ ck('the agent picker shows only the user’s separate source allowances',
    s == 200 and source_amounts.get('AGT-POLICY-A') == 15 and source_amounts.get('AGT-POLICY-B') == 20,
    str(source_amounts), 'HIGH', 'Cash-agent options do not show source-specific limits.')
 
+cash_controls_path = f'/api/admin/users/{UID}/withdrawal-controls'
+s, hidden_cash = req(cash_controls_path, {
+    'hiddenMethodIds': ['PM-TG-AGENT'], 'methodCapOverridesUsd': {}, 'preferredCashAgentId': '', 'fixedCashAgentId': '',
+}, token=ADMIN_TOKEN)
+s, hidden_agent_data = req('/api/agents', token=UTOK)
+ck('per-user hidden Cash Agent setting is reflected in the cash-out API',
+   s == 200 and hidden_agent_data.get('cashAgentWithdrawalVisible') is False,
+   f'{s} visible={hidden_agent_data.get("cashAgentWithdrawalVisible")}', 'HIGH', 'Cash Agent visibility is only applied to the payment catalogue.')
+s, hidden_cash_submit = req('/api/user/send-to-agent', {
+    'agentId': 'AGT-POLICY-A', 'amount': 1, 'currency': 'USD', 'idempotencyKey': 'hidden-cash-' + TAG,
+}, token=UTOK)
+ck('a hidden Cash Agent withdrawal is rejected by the server',
+   s == 403 and 'disabled for your account' in str(hidden_cash_submit.get('error', '')),
+   f'{s} {hidden_cash_submit.get("error")}', 'CRITICAL', 'A user can bypass Cash Agent visibility.')
+req(cash_controls_path, {'hiddenMethodIds': [], 'methodCapOverridesUsd': {}, 'preferredCashAgentId': '', 'fixedCashAgentId': ''}, token=ADMIN_TOKEN)
+
 s, cap_error = req('/api/user/send-to-agent', {
     'agentId': 'AGT-POLICY-A', 'amount': 16, 'currency': 'USD', 'idempotencyKey': 'cash-over-' + TAG,
 }, token=UTOK)
@@ -458,6 +536,39 @@ post_edit_caps = {a.get('id'): a.get('sourceAvailableUsd') for a in post_edit_ag
 ck('cash source reservation follows the admin-selected agent',
    s == 200 and post_edit_caps.get('AGT-POLICY-A') == 15 and post_edit_caps.get('AGT-POLICY-B') == 12,
    str(post_edit_caps), 'HIGH', 'Editing the cash payout did not move its reservation to the selected agent.')
+
+fixed_controls_path = f'/api/admin/users/{UID}/withdrawal-controls'
+s, preferred_saved = req(fixed_controls_path, {
+    'hiddenMethodIds': [], 'methodCapOverridesUsd': {}, 'preferredCashAgentId': 'AGT-POLICY-A', 'fixedCashAgentId': '',
+}, token=ADMIN_TOKEN)
+s, preferred_agent_list = req('/api/agents', token=UTOK)
+ck('a suggested AGT is preselected without restricting the user’s choice',
+   s == 200 and preferred_agent_list.get('preferredCashAgentId') == 'AGT-POLICY-A'
+   and not preferred_agent_list.get('fixedCashAgentId'),
+   f'{s} preferred={preferred_agent_list.get("preferredCashAgentId")} fixed={preferred_agent_list.get("fixedCashAgentId")}',
+   'HIGH', 'The Cash Agent preference was not separated from a mandatory agent.')
+
+s, fixed_saved = req(fixed_controls_path, {
+    'hiddenMethodIds': [], 'methodCapOverridesUsd': {}, 'preferredCashAgentId': 'AGT-POLICY-A', 'fixedCashAgentId': 'AGT-POLICY-A',
+}, token=ADMIN_TOKEN)
+s, fixed_agent_list = req('/api/agents', token=UTOK)
+fixed_ids = {a.get('id') for a in (fixed_agent_list.get('agents') or [])}
+ck('Admin can force a future Cash Agent payout to one AGT without changing source data',
+   s == 200 and fixed_agent_list.get('fixedCashAgentId') == 'AGT-POLICY-A'
+   and 'AGT-POLICY-A' in fixed_ids and 'AGT-POLICY-B' in fixed_ids,
+   f'{s} fixed={fixed_agent_list.get("fixedCashAgentId")} listed={sorted(fixed_ids)}',
+   'HIGH', 'The AGT future-handler selection is not returned separately from source options.')
+s, fixed_mismatch = req('/api/user/send-to-agent', {
+    'agentId': 'AGT-POLICY-B', 'amount': 1, 'currency': 'USD', 'idempotencyKey': 'fixed-agent-mismatch-' + TAG,
+}, token=UTOK)
+ck('a fixed AGT is mandatory on future Cash Agent withdrawals',
+   s == 403 and 'must be handled by cash agent AGT-POLICY-A' in str(fixed_mismatch.get('error', '')),
+   f'{s} {fixed_mismatch.get("error")}', 'CRITICAL', 'A user can bypass the per-user fixed Cash Agent.')
+current_pending = next((p for p in db_read().get('agentPayouts', []) if p.get('id') == cash_payout.get('id')), {})
+ck('changing the future fixed AGT does not reassign an existing pending request',
+   current_pending.get('status') == 'PENDING' and current_pending.get('agentId') == 'AGT-POLICY-B',
+   f'{current_pending.get("status")} {current_pending.get("agentId")}', 'HIGH', 'The new fixed-agent setting changed an existing request.')
+req(fixed_controls_path, {'hiddenMethodIds': [], 'methodCapOverridesUsd': {}, 'preferredCashAgentId': '', 'fixedCashAgentId': ''}, token=ADMIN_TOKEN)
 
 # ── 5. admin switches ────────────────────────────────────────────────────────
 section('5. admin switches')

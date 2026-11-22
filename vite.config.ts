@@ -59,6 +59,8 @@ export default defineConfig(() => {
     },
     server: {
       hmr: false,
+      // Arena's live preview is proxied from a per-workspace *.e2b.app host.
+      allowedHosts: ['.e2b.app'],
       watch: {
         ignored: ['**/dev-dist/**', '**/data/**'],
       },

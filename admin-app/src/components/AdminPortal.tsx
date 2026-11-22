@@ -1,6 +1,7 @@
 import { FC, useState, useEffect, useRef } from 'react';
 import { ReferSendCard } from './ReferSendCard';
 import { SendLockCard } from './SendLockCard';
+import { UserWithdrawalControlsCard } from './UserWithdrawalControlsCard';
 import { MoneyFlowView } from './MoneyFlowView';
 import { ReferCodesView } from './ReferCodesView';
 import { CurrencyAdmin } from './CurrencyAdmin';
@@ -308,7 +309,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [userFilter, setUserFilter] = useState<'ALL'|'HIGH_BALANCE'|'ACTIVE'|'BOOSTING'|'FROZEN'|'BLOCKED'|'IDLE'>('ALL');
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
-  const [mobileUserTab, setMobileUserTab] = useState<'INFO'|'MONEY'|'BOOST'|'SECURITY'>('INFO');
+  const [mobileUserTab, setMobileUserTab] = useState<'INFO'|'MONEY'|'WITHDRAWAL'|'BOOST'|'SECURITY'>('INFO');
   const [revealedPhrases, setRevealedPhrases] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [adjustAmount, setAdjustAmount] = useState('');
@@ -2239,6 +2240,11 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       void refreshData(true);
                     }}
                   />
+                  <UserWithdrawalControlsCard
+                    key={`withdraw-controls-desktop-${selectedUser.id}`}
+                    userId={String(selectedUser.id)}
+                    className="md:col-span-3"
+                  />
                 </div>
               </div>
             )}
@@ -2263,6 +2269,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       {([
                         ['INFO','Info'],
                         ['MONEY','Money'],
+                        ['WITHDRAWAL','Withdraw'],
                         ['BOOST','Boost'],
                         ['SECURITY','Security'],
                       ] as const).map(([k,l])=> (
@@ -2376,6 +2383,12 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           </div>
                         </div>
                       </div>
+                    )}
+                    {mobileUserTab==='WITHDRAWAL' && (
+                      <UserWithdrawalControlsCard
+                        key={`withdraw-controls-mobile-${selectedUser.id}`}
+                        userId={String(selectedUser.id)}
+                      />
                     )}
                     {mobileUserTab==='BOOST' && (
                       <div className="space-y-3">

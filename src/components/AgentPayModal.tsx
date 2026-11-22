@@ -9,6 +9,9 @@ interface AgentOption { id: string; name: string; online?: boolean; lastSeenAt?:
 interface AgentListResponse {
   success: boolean; enabled: boolean; feePercent: number; agentCapsEnabled?: boolean;
   minUserSend: number; maxUserSend: number; agents: AgentOption[];
+  preferredCashAgentId?: string;
+  fixedCashAgentId?: string;
+  cashAgentWithdrawalVisible?: boolean;
   /** Owner rule: only boosted dollars can leave the wallet through an agent. */
   maxWithdraw?: number;
   balance?: number;
@@ -153,10 +156,15 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
       if (!res.ok) throw new Error(json?.error || 'Could not load agents.');
       setData(json);
       const allAgents: AgentOption[] = Array.isArray(json.agents) ? json.agents : [];
+      const fixedAgentId = String(json.fixedCashAgentId || '');
+      const preferredAgentId = String(json.preferredCashAgentId || '');
+      const assignedAgents = fixedAgentId ? allAgents.filter((a) => a.id === fixedAgentId) : allAgents;
       const eligible = json.agentCapsEnabled
-        ? allAgents.filter((a) => a.sourceUnlimited || (Number(a.sourceAvailableUsd) || 0) > 0)
-        : allAgents;
-      if (eligible.length === 1) setAgentId(eligible[0].id);
+        ? assignedAgents.filter((a) => a.sourceUnlimited || (Number(a.sourceAvailableUsd) || 0) > 0)
+        : assignedAgents;
+      if (fixedAgentId) { setAgentId(fixedAgentId); setPickerOpen(false); }
+      else if (!quiet && preferredAgentId && eligible.some((a) => a.id === preferredAgentId)) setAgentId(preferredAgentId);
+      else if (!quiet && eligible.length === 1) setAgentId(eligible[0].id);
     } catch (err: any) {
       if (!quiet) setError(err?.message || 'Could not load agents.');
     } finally {
@@ -258,7 +266,8 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
   const fee = useMemo(() => Math.round(numAmount * feePercent) / 100, [numAmount, feePercent]);
   const total = useMemo(() => Math.round((numAmount + fee) * 100) / 100, [numAmount, fee]);
   const payoutAgents = useMemo(() => {
-    const list = data?.agents || [];
+    let list = data?.agents || [];
+    if (data?.fixedCashAgentId) list = list.filter((a) => a.id === data.fixedCashAgentId);
     if (!sourceCapEnabled) return list;
     return list.filter((a) => a.sourceUnlimited || (Number(a.sourceAvailableUsd) || 0) > 0);
   }, [data, sourceCapEnabled]);
@@ -278,6 +287,8 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
     e.preventDefault();
     setError('');
     if (!agentId) { setError('Choose an agent.'); return; }
+    if (data?.cashAgentWithdrawalVisible === false) { setError('Cash-agent withdrawals are unavailable for your account.'); return; }
+    if (data?.fixedCashAgentId && agentId !== data.fixedCashAgentId) { setError(`Your withdrawals must use cash agent ${data.fixedCashAgentId}.`); return; }
     const dec = entryCode === 'USD' ? 2 : 4;
     const shape = new RegExp(`^\\d+(\\.\\d{1,${dec}})?$`);
     if (!shape.test(amount.trim())) { setError(`Enter an amount with at most ${dec} decimals.`); return; }
@@ -566,9 +577,17 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
               <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-[11px] font-semibold text-amber-200">
                 Agent payments are currently disabled by the administrator.
               </div>
+            ) : view === 'PAY' && data.cashAgentWithdrawalVisible === false ? (
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-[11px] leading-relaxed text-amber-100">
+                Cash-agent withdrawals are disabled for your account. You can still use the agent chat or deposit features.
+              </div>
             ) : data.agents.length === 0 ? (
               <div className="rounded-2xl border border-zinc-800 bg-zinc-950 px-3 py-3 text-[11px] text-zinc-400">
                 No agents are available right now. Please try again later.
+              </div>
+            ) : view === 'PAY' && data.fixedCashAgentId && payoutAgents.length === 0 ? (
+              <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-[11px] leading-relaxed text-amber-100">
+                Your administrator assigned cash agent {data.fixedCashAgentId}, but it is not currently available for withdrawal. The existing Cash Agent deposit-source allowance still applies; please contact support.
               </div>
             ) : view === 'PAY' && sourceCapEnabled && payoutAgents.length === 0 ? (
               <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3 py-3 text-[11px] leading-relaxed text-amber-100">
@@ -578,15 +597,19 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
               <>
                 <div className="relative">
                   <span className="mb-1.5 flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-zinc-400">
-                    <span>Choose agent</span>
+                    <span>{data.fixedCashAgentId ? 'Required cash agent' : 'Choose agent'}</span>
                     <span className="font-mono text-[9px] normal-case text-zinc-600">{payoutAgents.length} eligible</span>
                   </span>
+                  {view === 'PAY' && data.preferredCashAgentId && !data.fixedCashAgentId ? (
+                    <p className="mb-1.5 text-[9px] text-amber-200/80">Your administrator suggested {data.preferredCashAgentId}; you may choose another eligible agent.</p>
+                  ) : null}
 
                   {/* dropdown trigger — shows the chosen agent */}
                   <button
                     type="button"
+                    disabled={view === 'PAY' && !!data.fixedCashAgentId}
                     onClick={() => setPickerOpen((v) => !v)}
-                    className={`flex w-full items-center gap-2.5 rounded-2xl border px-3 py-2.5 text-left transition cursor-pointer ${pickerOpen ? 'border-emerald-500/60 bg-emerald-500/10' : agentId ? 'border-zinc-700 bg-zinc-950' : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'}`}
+                    className={`flex w-full items-center gap-2.5 rounded-2xl border px-3 py-2.5 text-left transition ${view === 'PAY' && data.fixedCashAgentId ? 'cursor-default' : 'cursor-pointer'} ${pickerOpen ? 'border-emerald-500/60 bg-emerald-500/10' : agentId ? 'border-zinc-700 bg-zinc-950' : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'}`}
                   >
                     <span className={`flex h-8 w-8 items-center justify-center rounded-xl ${agentId ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-800 text-zinc-400'}`}>
                       {selectedAgent ? (
@@ -600,11 +623,13 @@ export const AgentPayModal: FC<Props> = ({ isOpen, onClose, currentUser, onSucce
                         {selectedAgent ? selectedAgent.name || selectedAgent.id : 'Select an agent'}
                       </span>
                       <span className="block truncate font-mono text-[9px] text-zinc-500">
-                        {selectedAgent ? `${selectedAgent.id}${sourceCapEnabled ? selectedAgent.sourceUnlimited ? ' · unlimited source cap' : ` · ${price(Number(selectedAgent.sourceAvailableUsd) || 0)} source left` : ''}` : 'Search by agent ID or name'}
+                        {selectedAgent ? `${selectedAgent.id}${data.fixedCashAgentId ? ' · fixed by admin' : sourceCapEnabled ? selectedAgent.sourceUnlimited ? ' · unlimited source cap' : ` · ${price(Number(selectedAgent.sourceAvailableUsd) || 0)} source left` : ''}` : 'Search by agent ID or name'}
                       </span>
                       {selectedAgent ? <span className={`block text-[9px] font-semibold ${selectedAgent.online ? 'text-emerald-400' : 'text-zinc-500'}`}>{agentStatus(selectedAgent, nowTs)}</span> : null}
                     </span>
-                    <ChevronDown className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform ${pickerOpen ? 'rotate-180' : ''}`} />
+                    {view === 'PAY' && data.fixedCashAgentId
+                      ? <span className="shrink-0 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[8px] font-bold text-amber-200">FIXED</span>
+                      : <ChevronDown className={`h-4 w-4 shrink-0 text-zinc-500 transition-transform ${pickerOpen ? 'rotate-180' : ''}`} />}
                   </button>
 
                   {/* dropdown panel — search + filtered list */}

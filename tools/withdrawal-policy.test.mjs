@@ -7,6 +7,9 @@ import {
   methodSourceLimit,
   methodWithdrawalSourceInfo,
   isWithdrawalMethodAvailable,
+  isUserWithdrawalMethodVisible,
+  isCashAgentWithdrawalVisible,
+  fixedCashAgentIdOf,
 } from '../withdrawal-policy.ts';
 
 function fixture(overrides = {}) {
@@ -176,4 +179,69 @@ test('disabling caps disables enforcement without changing the measured source t
   assert.equal(methodSourceLimit(db, 'u1', 'PM-A').enabled, false);
   assert.equal(agentSourceLimit(db, 'u1', 'WAG-A').enabled, false);
   assert.equal(methodSourceLimit(db, 'u1', 'PM-A').availableUsd, 5);
+});
+
+test('per-user method visibility hides only the selected user withdrawal method', () => {
+  const db = fixture({
+    users: [
+      { id: 'u1', withdrawalControls: { hiddenMethodIds: ['PM-A'] } },
+      { id: 'u2' },
+    ],
+    depositRequests: [
+      approvedDeposit('D1', 'PM-A', 25),
+      { ...approvedDeposit('D2', 'PM-A', 25), userId: 'u2' },
+    ],
+  });
+  const method = { id: 'PM-A', category: 'EWALLET' };
+  assert.equal(isUserWithdrawalMethodVisible(db.users[0], 'PM-A'), false);
+  assert.equal(isUserWithdrawalMethodVisible(db.users[1], 'PM-A'), true);
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', method), false);
+  assert.equal(isWithdrawalMethodAvailable(db, 'u2', method), true);
+});
+
+test('per-user method caps reduce lifetime allowance, count existing reservations, and never exceed credited source', () => {
+  const db = fixture({
+    depositRequests: [approvedDeposit('D1', 'PM-A', 100)],
+    users: [{ id: 'u1', withdrawalControls: { methodCapOverridesUsd: { 'PM-A': 50 } } }],
+    withdrawRequests: [withdrawal('W1', 'PM-A', 30, 'PENDING')],
+  });
+  const capped = methodSourceLimit(db, 'u1', 'PM-A');
+  assert.deepEqual(capped, { enabled: true, unlimited: false, depositedUsd: 100, reservedUsd: 30, availableUsd: 20 });
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', { id: 'PM-A', category: 'EWALLET' }), true);
+
+  db.users[0].withdrawalControls.methodCapOverridesUsd['PM-A'] = 150; // corrupted/stale storage must fail closed
+  const clamped = methodSourceLimit(db, 'u1', 'PM-A');
+  assert.equal(clamped.unlimited, false);
+  assert.equal(clamped.availableUsd, 70, 'a stored value above deposits is clamped to credited source minus reservations');
+
+  db.users[0].withdrawalControls.methodCapOverridesUsd['PM-A'] = 0;
+  assert.equal(methodSourceLimit(db, 'u1', 'PM-A').availableUsd, 0);
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', { id: 'PM-A', category: 'EWALLET' }), false);
+});
+
+test('per-user caps remain enforced when global method caps are off; AGT selection is distinct from WAG source attribution', () => {
+  const user = { id: 'u1', withdrawalControls: { methodCapOverridesUsd: { 'PM-A': 40 }, fixedCashAgentId: 'AGT-1001' } };
+  const db = fixture({
+    paymentMeta: { withdrawalPolicy: { methodCapsEnabled: false, agentCapsEnabled: true } },
+    users: [user],
+    depositRequests: [approvedDeposit('D1', 'PM-A', 90, 'WAG-A')],
+  });
+  assert.equal(methodSourceLimit(db, 'u1', 'PM-A').enabled, true);
+  assert.equal(methodSourceLimit(db, 'u1', 'PM-A').availableUsd, 40);
+  assert.equal(fixedCashAgentIdOf(user), 'AGT-1001');
+  assert.equal(agentSourceLimit(db, 'u1', 'WAG-A').depositedUsd, 90, 'Admin fixed AGT must not alter the Wallet Agent source');
+  assert.equal(agentSourceLimit(db, 'u1', 'AGT-1001').depositedUsd, 0);
+});
+
+test('hiding the cash-agent method blocks its withdrawal flow without affecting other methods', () => {
+  const db = fixture({
+    paymentMethods: [{ id: 'PM-TG-AGENT', category: 'AGENT' }, { id: 'PM-A', category: 'EWALLET' }],
+    users: [{ id: 'u1', withdrawalControls: { hiddenMethodIds: ['PM-TG-AGENT'] } }],
+    agents: [{ id: 'AGT-1001', name: 'Cash A', isActive: true }],
+    depositRequests: [approvedDeposit('D1', 'PM-A', 25)],
+    transactions: [{ id: 'TX-CASH', userId: 'u1', type: 'AGENT_TRANSFER_RECEIVED', amount: 10, agentId: 'AGT-1001' }],
+  });
+  assert.equal(isCashAgentWithdrawalVisible(db, db.users[0]), false);
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', db.paymentMethods[0]), false);
+  assert.equal(isWithdrawalMethodAvailable(db, 'u1', db.paymentMethods[1]), true);
 });
