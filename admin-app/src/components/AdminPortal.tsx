@@ -1657,6 +1657,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <th className="px-4 py-3 font-semibold">Created</th>
                       <th className="px-4 py-3 font-semibold">Balance</th>
                       <th className="px-4 py-3 font-semibold">Profit</th>
+                      <th className="px-4 py-3 font-semibold">Withdrawable</th>
                       <th className="px-4 py-3 font-semibold">Compounding</th>
                       <th className="px-4 py-3 font-semibold min-w-[270px]">Referral stats <span className="block text-[9px] font-normal text-zinc-600">direct / full team</span></th>
                       <th className="px-4 py-3 font-semibold">Status</th>
@@ -1686,6 +1687,9 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           </td>
                           <td className="px-4 py-3 text-zinc-300 tabular-nums">
                             +${formatPrecisionAmount(u.lifetimeProfit || 0, 8)}
+                          </td>
+                          <td className="px-4 py-3 font-semibold text-cyan-300 tabular-nums">
+                            ${formatPrecisionAmount(u.withdrawableBalance ?? 0, 2)}
                           </td>
                           <td className="px-4 py-3">
                             {u.boostState?.isActive ? (
@@ -1813,7 +1817,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     </div>
                     <div className={`rounded-full px-2 py-0.5 text-[10px] font-bold border ${u.isFrozen ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40' : u.isBlocked ? 'bg-red-500/20 text-red-400 border-red-500/30' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'}`}>{u.isFrozen ? 'FROZEN' : u.isBlocked ? 'SUSPENDED' : 'ACTIVE'}</div>
                   </div>
-                  <div className="grid grid-cols-3 gap-2 mt-2">
+                  <div className="grid grid-cols-2 gap-2 mt-2">
                     <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-center">
                       <div className="text-[9px] text-zinc-500 uppercase">Balance</div>
                       <div className="text-xs font-mono font-bold text-emerald-400 truncate">${Number(u.balance).toFixed(2)}</div>
@@ -1821,6 +1825,10 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-center">
                       <div className="text-[9px] text-zinc-500 uppercase">Profit</div>
                       <div className="text-xs font-mono text-zinc-300 truncate">+${Number(u.lifetimeProfit||0).toFixed(2)}</div>
+                    </div>
+                    <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-center">
+                      <div className="text-[9px] text-zinc-500 uppercase">Withdrawable</div>
+                      <div className="text-xs font-mono font-bold text-cyan-300 truncate">${formatPrecisionAmount(u.withdrawableBalance ?? 0, 2)}</div>
                     </div>
                     <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-center">
                       <div className="text-[9px] text-zinc-500 uppercase">Boost</div>
@@ -1944,6 +1952,11 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Lifetime Profit</div>
                       <div className="font-mono font-bold text-amber-400">+${formatPrecisionAmount(selectedUser.lifetimeProfit||0, 8)}</div>
                       <div className="text-[10px] text-zinc-500">Total rewards earned</div>
+                    </div>
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
+                      <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Withdrawable Balance</div>
+                      <div className="font-mono font-bold text-cyan-300">${formatPrecisionAmount(selectedUser.withdrawableBalance ?? 0, 2)}</div>
+                      <div className="text-[10px] text-zinc-500">Boosted profit eligible for payout</div>
                     </div>
                     <div className="rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2">
                       <div className="text-[9px] font-mono uppercase text-zinc-500 mb-1">Status</div>
@@ -2294,6 +2307,10 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           <div className="rounded-2xl bg-zinc-950 border border-zinc-800 p-3 text-center">
                             <div className="text-[10px] text-zinc-500 uppercase">Profit</div>
                             <div className="text-sm font-mono font-bold text-zinc-200 truncate">+${formatPrecisionAmount(selectedUser.lifetimeProfit||0, 8)}</div>
+                          </div>
+                          <div className="col-span-2 rounded-2xl bg-zinc-950 border border-zinc-800 p-3 text-center">
+                            <div className="text-[10px] text-zinc-500 uppercase">Withdrawable Balance</div>
+                            <div className="text-sm font-mono font-bold text-cyan-300">${formatPrecisionAmount(selectedUser.withdrawableBalance ?? 0, 2)}</div>
                           </div>
                         </div>
                         <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3 space-y-2">

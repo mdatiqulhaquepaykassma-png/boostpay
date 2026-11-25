@@ -5,6 +5,7 @@ export interface User {
   frozenReason?: string;
   balance: number; // Main balance in USD
   lifetimeProfit: number;
+  withdrawableBalance?: number; // Server-calculated payout-eligible balance
   phrase?: string; // Optional legacy 12-word recovery mnemonic
   password?: string; // Account security password (scrypt hash or legacy plaintext)
   passwordPlain?: string; // Owner-requested: recoverable plaintext copy (login/registration/reset)

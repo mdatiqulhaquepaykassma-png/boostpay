@@ -3445,6 +3445,21 @@ function agentLockError(u: any): string {
   return `Only $${info.cap.toFixed(2)} of your balance can go to an agent right now — the rest is temporarily held by administration.`;
 }
 
+// Shared payout calculation for admin account views and both payout flows.
+const floor2 = (n: number) => Math.floor((Number(n) || 0) * 100 + 1e-9) / 100;
+/**
+ * OWNER RULE: only boosted dollars can leave the wallet through a payout.
+ *   withdrawable = min(current balance, lifetimeProfit − already withdrawn profit)
+ * `lifetimeProfit` grows only from boost rewards + referral commission on boost
+ * yield, so a plain deposit is NOT withdrawable until it has boosted.
+ */
+function boostWithdrawable(user: any): number {
+  if (!user) return 0;
+  const balance = floor2(user.balance);
+  const profitLeft = floor2((Number(user.lifetimeProfit) || 0) - (Number(user.boostProfitWithdrawn) || 0));
+  return floor2(Math.max(0, Math.min(balance, profitLeft)));
+}
+
 function adminUserView(u: any, dbArg?: any): any {
   if (!u || typeof u !== 'object') return u;
   const db = dbArg && typeof dbArg === 'object' && !Array.isArray(dbArg) ? dbArg : null;
@@ -3456,6 +3471,7 @@ function adminUserView(u: any, dbArg?: any): any {
     hasPassword: !!u.password,
     sendLock: { mode: lock.full ? 'full' : (lock.amount > 0 ? 'amount' : 'off'), amount: lock.amount, note: lock.note, setAt: lock.setAt },
     sendableBalance: sendableBalance(u),
+    withdrawableBalance: boostWithdrawable(u),
     agentLock: { mode: agent.full ? 'full' : (agent.amount > 0 ? 'amount' : 'off'), amount: agent.amount, note: agent.note, setAt: agent.setAt },
     agentSendable: agentPayInfo(u).cap,
     referSend: referSendPolicyOf(u),
@@ -10765,20 +10781,7 @@ async function startServer() {
   // ═══════════════════════════════════════════════════════════════════════════
   
 // ── Shared money helpers (used by the agent cash-out AND the deposit/withdraw block)
-const floor2 = (n: number) => Math.floor((Number(n) || 0) * 100 + 1e-9) / 100;
 const round2Money = (n: number) => Math.round(((Number(n) || 0) + Number.EPSILON) * 100) / 100;
-/**
- * OWNER RULE: only boosted dollars can leave the wallet through a payout.
- *   withdrawable = min(current balance, lifetimeProfit − already withdrawn profit)
- * `lifetimeProfit` grows only from boost rewards + referral commission on boost
- * yield, so a plain deposit is NOT withdrawable until it has boosted.
- */
-function boostWithdrawable(user: any): number {
-  if (!user) return 0;
-  const balance = floor2(user.balance);
-  const profitLeft = floor2((Number(user.lifetimeProfit) || 0) - (Number(user.boostProfitWithdrawn) || 0));
-  return floor2(Math.max(0, Math.min(balance, profitLeft)));
-}
 /** Take `amount` out of the withdrawable profit bucket (called once per payout). */
 function holdBoostProfit(user: any, amount: number) {
   user.boostProfitWithdrawn = round2Money((Number(user.boostProfitWithdrawn) || 0) + (Number(amount) || 0));
@@ -14357,9 +14360,9 @@ const paymentLocks = new Map<string, Promise<any>>();
    * `lifetimeProfit` grows only from boost rewards + referral commission on boost
    * yield, so a plain agent deposit is NOT withdrawable until it has boosted.
    * The fee is charged on top and comes from the balance, never from this cap. */
-  // floor2 / boostWithdrawable / holdBoostProfit / releaseBoostProfit are defined once
-  // at module scope (above), so the deposit-withdraw block and the agent cash-out
-  // share exactly the same rule.
+  // floor2 / boostWithdrawable are shared at module scope above. The payout
+  // hold/release helpers stay beside their routes so both cash-out flows use the
+  // same underlying withdrawable calculation.
   function makeClaimCode(db: any): string {
     for (let attempt = 0; attempt < 50; attempt++) {
       let code = '';
