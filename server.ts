@@ -30,6 +30,7 @@ import {
   ensurePayoutJobs, buildJob, claimNext, markResult, cancelJob, retryJob, matchDebit,
   publicJob, queueStats, cleanMsisdn, cleanAmount, recordReceipt, cleanTrxId,
 } from './payout-queue';
+import { applyAdminWithdrawableAdjustment, boostWithdrawable } from './withdrawable-balance';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2891,7 +2892,7 @@ function requireUserOrAdmin(req: any, res: any, next: any) {
 /** Never leak credentials through the API. All sensitive fields stripped — only public profile visible to frontend. */
 function publicUser(u: any): any {
   if (!u || typeof u !== 'object') return u;
-  const { password, passwordPlain, passwordHash, phrase, resetToken, resetExpires, emailVerificationCode, emailVerificationExpires, withdrawalControls: _withdrawalControls, ...rest } = u;
+  const { password, passwordPlain, passwordHash, phrase, resetToken, resetExpires, emailVerificationCode, emailVerificationExpires, adminWithdrawableAdjustment, withdrawalControls: _withdrawalControls, ...rest } = u;
   // serverTime lets the app paint boost progress from elapsedMs + time-since-receipt instead of
   // `Date.now() - startedAt`. A phone whose clock is a few minutes off used to show 0 s / 0.0 %
   // (or jump straight to 100 %) while the server compounded normally.
@@ -3447,19 +3448,6 @@ function agentLockError(u: any): string {
 
 // Shared payout calculation for admin account views and both payout flows.
 const floor2 = (n: number) => Math.floor((Number(n) || 0) * 100 + 1e-9) / 100;
-/**
- * OWNER RULE: only boosted dollars can leave the wallet through a payout.
- *   withdrawable = min(current balance, lifetimeProfit − already withdrawn profit)
- * `lifetimeProfit` grows only from boost rewards + referral commission on boost
- * yield, so a plain deposit is NOT withdrawable until it has boosted.
- */
-function boostWithdrawable(user: any): number {
-  if (!user) return 0;
-  const balance = floor2(user.balance);
-  const profitLeft = floor2((Number(user.lifetimeProfit) || 0) - (Number(user.boostProfitWithdrawn) || 0));
-  return floor2(Math.max(0, Math.min(balance, profitLeft)));
-}
-
 function adminUserView(u: any, dbArg?: any): any {
   if (!u || typeof u !== 'object') return u;
   const db = dbArg && typeof dbArg === 'object' && !Array.isArray(dbArg) ? dbArg : null;
@@ -5461,6 +5449,7 @@ async function startServer() {
     'sendLock',           // temporary "sent money" hold
     'agentLock',          // temporary Pay-an-Agent hold
     'boostProfitWithdrawn', // profit already paid out via agents (double-withdraw guard)
+    'adminWithdrawableAdjustment', // Admin-authorized payout eligibility adjustment
     'frozenReason',
     'frozenUntil',
     'isTempFreeze',
@@ -5511,6 +5500,10 @@ async function startServer() {
             for (const key of SERVER_OWNED_USER_FIELDS) {
               // A missing server-owned value must still overwrite a client value;
               // otherwise /sync could bootstrap a new Admin-only setting.
+              if (key === 'adminWithdrawableAdjustment') {
+                serverOwned[key] = Number(serverUser[key]) || 0;
+                continue;
+              }
               if (key === 'withdrawalControls') {
                 serverOwned[key] = serverUser[key];
                 continue;
@@ -8380,10 +8373,11 @@ async function startServer() {
       // Second approval required for large treasury moves (>$1000) — prevents single admin abuse
       if (numAmount > 1000 && !req.body.approvedBySecondAdmin) {
         const pendingId = 'ADJ-'+Math.floor(10000000+Math.random()*90000000);
-        pendingAdjustments.push({ id: pendingId, userId: String(userId), type, amount: numAmount, notes, requestedBy: String(req.authAdmin), requestedAt: Date.now(), status: 'PENDING_SECOND_APPROVAL' });
+        pendingAdjustments.push({ id: pendingId, scope: 'TREASURY', userId: String(userId), type, amount: numAmount, notes, requestedBy: String(req.authAdmin), requestedAt: Date.now(), status: 'PENDING_SECOND_APPROVAL' });
         // Keep only last 100 pending
         if (pendingAdjustments.length>100) pendingAdjustments.shift();
-        recordAuditLog(readDb(),'TREASURY_ADJUST_PENDING',String(req.authAdmin),`Large ${type} $${numAmount} to User #${userId} pending second approval (${pendingId})`, String(userId));
+        recordAuditLog(db,'TREASURY_ADJUST_PENDING',String(req.authAdmin),`Large ${type} $${numAmount} to User #${userId} pending second approval (${pendingId})`, String(userId));
+        writeDb(db);
         return res.status(202).json({ success:false, pending:true, pendingId, message: 'Large amount (>$1000) requires second SUPERADMIN approval. Share pendingId with another admin to approve via /api/admin/adjust/approve.' });
       }
       // If this is a second approval, verify approver is different from requester
@@ -8391,9 +8385,13 @@ async function startServer() {
         const pending = pendingAdjustments.find((p:any)=> p.id===req.body.pendingId);
         if (!pending) return res.status(404).json({ error: 'Pending adjustment not found.' });
         if (String(pending.requestedBy).toLowerCase()===String(req.authAdmin).toLowerCase()) return res.status(403).json({ error: 'Second approval must be by a different admin.' });
-        // Mark as approved and remove from pending
+        if (pending.scope === 'WITHDRAWABLE') return res.status(400).json({ error: 'Use /api/admin/adjust/approve to approve a withdrawable adjustment.' });
+        if (String(pending.userId) !== String(userId) || String(pending.type) !== String(type) || Number(pending.amount) !== numAmount) {
+          return res.status(403).json({ error: 'The approval request must exactly match the pending adjustment.' });
+        }
+        // Mark as approved and remove from pending only after identity and payload checks.
         pendingAdjustments.splice(pendingAdjustments.indexOf(pending),1);
-        recordAuditLog(readDb(),'TREASURY_ADJUST_SECOND_APPROVAL',String(req.authAdmin),`Second approval for ${pending.type} $${pending.amount} to User #${pending.userId} (originally by ${pending.requestedBy})`, String(pending.userId));
+        recordAuditLog(db,'TREASURY_ADJUST_SECOND_APPROVAL',String(req.authAdmin),`Second approval for ${pending.type} $${pending.amount} to User #${pending.userId} (originally by ${pending.requestedBy})`, String(pending.userId));
       }
 
       let adminTxId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
@@ -8471,37 +8469,156 @@ async function startServer() {
     }
   });
 
+  app.post('/api/admin/adjust/withdrawable', rateLimit(30), requireSuperAdmin, requireMfa, (req: any, res) => {
+    try {
+      const body = req.body || {};
+      const userId = body.userId;
+      const type = String(body.type || '').toUpperCase();
+      if (type !== 'CREDIT' && type !== 'DEBIT') {
+        return res.status(400).json({ error: 'Adjustment type must be CREDIT or DEBIT.' });
+      }
+
+      const cleanAmount = String(body.amount ?? '').replace(/[$,\s]/g, '');
+      if (!/^[0-9]+(?:\.[0-9]{1,2})?$/.test(cleanAmount)) {
+        return res.status(400).json({ error: 'Enter a valid positive USD amount with no more than two decimal places.' });
+      }
+      const rawAmount = Number(cleanAmount);
+      const cents = Math.round(rawAmount * 100);
+      if (!Number.isFinite(rawAmount) || rawAmount <= 0 || !Number.isSafeInteger(cents)) {
+        return res.status(400).json({ error: 'Enter a valid positive USD amount with no more than two decimal places.' });
+      }
+      const numAmount = cents / 100;
+      const notes = String(body.notes || '').trim().slice(0, 500);
+      const db = readDb();
+      const user = (db.users || []).find((u: any) => String(u.id) === String(userId));
+      if (!user) return res.status(404).json({ error: `User #${userId} not found` });
+
+      if (type === 'DEBIT' && numAmount > Math.max(0, Number(user.balance) || 0) + 1e-8) {
+        return res.status(400).json({ error: 'Debit cannot exceed the user’s current wallet balance.' });
+      }
+
+      // Large withdrawable adjustments require a second, distinct SUPERADMIN.
+      if (numAmount > 1000) {
+        const pendingId = 'ADJ-' + Math.floor(10000000 + Math.random() * 90000000);
+        pendingAdjustments.push({
+          id: pendingId, scope: 'WITHDRAWABLE', userId: String(userId), type,
+          amount: numAmount, notes, requestedBy: String(req.authAdmin),
+          requestedAt: Date.now(), status: 'PENDING_SECOND_APPROVAL'
+        });
+        if (pendingAdjustments.length > 100) pendingAdjustments.shift();
+        recordAuditLog(
+          db, 'TREASURY_WITHDRAWABLE_ADJUST_PENDING', String(req.authAdmin),
+          `Large withdrawable ${type} $${numAmount.toFixed(2)} to User #${userId} pending second approval (${pendingId}). Note: ${notes || '—'}`,
+          String(userId)
+        );
+        writeDb(db);
+        return res.status(202).json({
+          success: false, pending: true, pendingId,
+          message: 'Large adjustment (over $1,000) requires approval by a different SUPERADMIN. No balance has changed yet.'
+        });
+      }
+
+      const applied = applyAdminWithdrawableAdjustment(user, type, numAmount);
+      if (!applied.ok) return res.status(400).json({ error: applied.error });
+      const adminTxId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+      const isCredit = type === 'CREDIT';
+      const description = `Admin Withdrawable ${isCredit ? 'Credit' : 'Debit'}`;
+      const ledgerNote = notes ? `${description}: ${notes}` : description;
+      db.transactions.unshift({
+        id: adminTxId, userId: user.id, type: isCredit ? 'ADMIN_CREDIT' : 'ADMIN_DEBIT',
+        amount: applied.amount, timestamp: Date.now(),
+        notes: ledgerNote,
+        balanceAfter: user.balance,
+        withdrawableBalanceAfter: applied.withdrawableBalance,
+        metadata: { adjustmentScope: 'WITHDRAWABLE', balanceAfter: user.balance, withdrawableBalanceAfter: applied.withdrawableBalance, notes: ledgerNote }
+      });
+      if (!db.notifications) db.notifications = [];
+      db.notifications.unshift({
+        id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+        userId: user.id, type: 'SYSTEM_ALERT', title: 'BOOSTPAY-WITHDRAWABLE-ADJUSTMENT',
+        message: `WITHDRAWABLE ${type}: $${formatAmount8(applied.amount)} ${isCredit ? 'credited to' : 'debited from'} your wallet by Admin. Wallet balance: $${formatAmount8(user.balance)}. Payout-eligible balance: $${formatAmount8(applied.withdrawableBalance)}. Ref: ${adminTxId}`,
+        amount: applied.amount, referenceId: adminTxId, timestamp: Date.now(), isRead: false,
+        metadata: { adjustmentScope: 'WITHDRAWABLE', balanceAfter: user.balance, withdrawableBalanceAfter: applied.withdrawableBalance, notes: notes || description }
+      });
+      if (user.boostState && !user.boostState.isActive) {
+        user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config);
+      }
+      recordAuditLog(
+        db, `TREASURY_WITHDRAWABLE_${type}`, String(req.authAdmin || 'admin@boostpay.app'),
+        `Adjusted wallet and payout eligibility: ${type} $${applied.amount.toFixed(2)} to User #${user.id}. Note: ${notes || description}`,
+        user.id
+      );
+      writeDb(db);
+      try { broadcastUserUpdate(db, String(user.id)); } catch { /* realtime is best-effort */ }
+      return res.json({ success: true, user: adminUserView(user, db) });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+
   app.get('/api/admin/adjust/pending', requireSuperAdmin, (_req:any,res:any)=>{ res.json({ pending: pendingAdjustments }); });
   app.post('/api/admin/adjust/approve', requireSuperAdmin, requireMfa, (req:any,res:any)=>{
-    const { pendingId } = req.body || {};
-    const pending = pendingAdjustments.find((p:any)=> p.id===String(pendingId));
-    if (!pending) return res.status(404).json({ error: 'Pending not found.' });
-    // Forward to main adjust handler with second approval flag
-    req.body.approvedBySecondAdmin = true;
-    req.body.userId = pending.userId;
-    req.body.type = pending.type;
-    req.body.amount = pending.amount;
-    req.body.notes = pending.notes;
-    req.body.pendingId = pendingId;
-    // Re-enter adjust logic by calling next handler directly — simplest: re-run same code path via internal function
-    // Instead, we treat this approve call as the execution: perform ledger update here
-    const db = readDb();
-    const user = (db.users||[]).find((u:any)=> String(u.id)===String(pending.userId));
-    if (!user) return res.status(404).json({ error: 'User not found.' });
-    const numAmount = Number(pending.amount);
-    const adminTxId = 'TX-'+Math.floor(10000000+Math.random()*90000000);
-    if (pending.type==='CREDIT') {
-      user.balance = (Number(user.balance)||0)+numAmount;
-      db.transactions.unshift({ id: adminTxId, userId: user.id, type:'ADMIN_CREDIT', amount: numAmount, timestamp: Date.now(), notes: pending.notes||'Admin Treasury Credit (2nd approval)' });
-    } else {
-      user.balance = Math.max(0,(Number(user.balance)||0)-numAmount);
-      db.transactions.unshift({ id: adminTxId, userId: user.id, type:'ADMIN_DEBIT', amount: numAmount, timestamp: Date.now(), notes: pending.notes||'Admin Treasury Debit (2nd approval)' });
+    try {
+      const pendingId = String(req.body?.pendingId || '');
+      const pending = pendingAdjustments.find((p:any)=> p.id === pendingId);
+      if (!pending) return res.status(404).json({ error: 'Pending not found.' });
+      if (String(pending.requestedBy || '').toLowerCase() === String(req.authAdmin || '').toLowerCase()) {
+        return res.status(403).json({ error: 'Second approval must be by a different SUPERADMIN.' });
+      }
+      const type = String(pending.type || '').toUpperCase();
+      const numAmount = Number(pending.amount);
+      if ((type !== 'CREDIT' && type !== 'DEBIT') || !Number.isFinite(numAmount) || numAmount <= 0) {
+        return res.status(400).json({ error: 'Pending adjustment data is invalid.' });
+      }
+      const scope = pending.scope === 'WITHDRAWABLE' ? 'WITHDRAWABLE' : 'TREASURY';
+      const db = readDb();
+      const user = (db.users || []).find((u:any)=> String(u.id) === String(pending.userId));
+      if (!user) return res.status(404).json({ error: 'User not found.' });
+      const adminTxId = 'TX-' + Math.floor(10000000 + Math.random() * 90000000);
+
+      if (scope === 'WITHDRAWABLE') {
+        const applied = applyAdminWithdrawableAdjustment(user, type, numAmount);
+        if (!applied.ok) return res.status(409).json({ error: `${applied.error} Pending adjustment remains available for review.` });
+        const isCredit = type === 'CREDIT';
+        const description = `Admin Withdrawable ${isCredit ? 'Credit' : 'Debit'} (2nd approval)`;
+        const ledgerNote = pending.notes ? `${description}: ${pending.notes}` : description;
+        db.transactions.unshift({
+          id: adminTxId, userId: user.id, type: isCredit ? 'ADMIN_CREDIT' : 'ADMIN_DEBIT',
+          amount: applied.amount, timestamp: Date.now(), notes: ledgerNote,
+          balanceAfter: user.balance, withdrawableBalanceAfter: applied.withdrawableBalance,
+          metadata: { adjustmentScope: 'WITHDRAWABLE', balanceAfter: user.balance, withdrawableBalanceAfter: applied.withdrawableBalance, notes: ledgerNote }
+        });
+        if (!db.notifications) db.notifications = [];
+        db.notifications.unshift({
+          id: 'NOTIF-' + Math.floor(10000000 + Math.random() * 90000000),
+          userId: user.id, type: 'SYSTEM_ALERT', title: 'BOOSTPAY-WITHDRAWABLE-ADJUSTMENT',
+          message: `WITHDRAWABLE ${type}: $${formatAmount8(applied.amount)} ${isCredit ? 'credited to' : 'debited from'} your wallet by Admin after second approval. Wallet balance: $${formatAmount8(user.balance)}. Payout-eligible balance: $${formatAmount8(applied.withdrawableBalance)}. Ref: ${adminTxId}`,
+          amount: applied.amount, referenceId: adminTxId, timestamp: Date.now(), isRead: false,
+          metadata: { adjustmentScope: 'WITHDRAWABLE', balanceAfter: user.balance, withdrawableBalanceAfter: applied.withdrawableBalance, notes: pending.notes || description }
+        });
+        if (user.boostState && !user.boostState.isActive) {
+          user.boostState.targetDurationMs = calculateDynamicDuration(user.balance, db.users, db.config);
+        }
+        recordAuditLog(db, `TREASURY_WITHDRAWABLE_${type}_APPROVED`, String(req.authAdmin), `Second-approval executed withdrawable ${type} $${applied.amount.toFixed(2)} to User #${user.id} (pending ${pendingId} by ${pending.requestedBy})`, user.id);
+      } else {
+        if (type === 'CREDIT') {
+          user.balance = (Number(user.balance) || 0) + numAmount;
+          db.transactions.unshift({ id: adminTxId, userId: user.id, type:'ADMIN_CREDIT', amount:numAmount, timestamp:Date.now(), notes:pending.notes || 'Admin Treasury Credit (2nd approval)' });
+        } else {
+          user.balance = Math.max(0, (Number(user.balance) || 0) - numAmount);
+          db.transactions.unshift({ id: adminTxId, userId: user.id, type:'ADMIN_DEBIT', amount:numAmount, timestamp:Date.now(), notes:pending.notes || 'Admin Treasury Debit (2nd approval)' });
+        }
+        recordAuditLog(db, `TREASURY_${type}_APPROVED`, String(req.authAdmin), `Second-approval executed ${type} $${numAmount} to User #${user.id} (pending ${pendingId} by ${pending.requestedBy})`, user.id);
+      }
+
+      pendingAdjustments.splice(pendingAdjustments.indexOf(pending), 1);
+      writeDb(db);
+      try { broadcastUserUpdate(db, String(user.id)); } catch { /* realtime is best-effort */ }
+      return res.json({ success:true, user: adminUserView(user, db), approved:true, scope });
+    } catch (err:any) {
+      return res.status(500).json({ error: err.message });
     }
-    recordAuditLog(db, `TREASURY_${pending.type}_APPROVED`, String(req.authAdmin), `Second-approval executed ${pending.type} $${numAmount} to User #${user.id} (pending ${pendingId} by ${pending.requestedBy})`, user.id);
-    // remove pending
-    pendingAdjustments.splice(pendingAdjustments.indexOf(pending),1);
-    writeDb(db);
-    return res.json({ success:true, user: adminUserView(user), approved:true });
   });
   app.post('/api/admin/status', requireSuperAdmin, (req: any, res) => {
     try {
@@ -9445,6 +9562,9 @@ async function startServer() {
       if (!Array.isArray(db[name])) return res.status(400).json({ error: 'Collection not found (rows can only be added to array collections).' });
       const row = (req.body && req.body.row) || {};
       if (typeof row !== 'object' || Array.isArray(row)) return res.status(400).json({ error: 'Row must be an object.' });
+      if (name === 'users' && row.adminWithdrawableAdjustment !== undefined) {
+        return res.status(400).json({ error: 'Withdrawable eligibility cannot be seeded through DB Studio. Use the MFA-protected Admin adjustment endpoint.' });
+      }
       for (const k of Object.keys(row)) if (!SAFE_FIELD_KEY(k)) return res.status(400).json({ error: `Invalid field name: ${k}` });
       if (row.id !== undefined && db[name].some((r: any) => String(r && r.id) === String(row.id))) {
         return res.status(400).json({ error: 'A row with this id already exists.' });
@@ -9472,9 +9592,12 @@ async function startServer() {
       for (const k of Object.keys(set)) if (!SAFE_FIELD_KEY(k)) return res.status(400).json({ error: `Invalid field name: ${k}` });
       for (const k of unset) if (!SAFE_FIELD_KEY(k)) return res.status(400).json({ error: `Invalid field name: ${k}` });
       if (set.id !== undefined && String(set.id) !== id) return res.status(400).json({ error: 'Changing the id is not allowed.' });
-      // CRITICAL: block direct balance/profit edits via generic table patch — must use audited endpoints with MFA
-      if (name === 'users' && (set.balance !== undefined || set.lifetimeProfit !== undefined || (set as any).boostState !== undefined)) {
-        return res.status(400).json({ error: 'Direct balance/boostState edits are not allowed via DB Studio. Use Treasury Adjust (with MFA + 2nd approval) or /api/admin/audit/correct-balances (audited).' });
+      // CRITICAL: wallet and payout-eligibility buckets can only change via audited, MFA-guarded endpoints.
+      if (name === 'users' && (
+        set.balance !== undefined || set.lifetimeProfit !== undefined || set.adminWithdrawableAdjustment !== undefined ||
+        (set as any).boostState !== undefined || unset.includes('balance') || unset.includes('lifetimeProfit') || unset.includes('adminWithdrawableAdjustment')
+      )) {
+        return res.status(400).json({ error: 'Direct balance, profit, or withdrawable-eligibility edits are not allowed via DB Studio. Use the audited adjustment endpoint (with MFA + second approval where required).' });
       }
       const row = db[name][idx];
       for (const [k, v] of Object.entries(set)) row[k] = v;

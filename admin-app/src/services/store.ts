@@ -1057,6 +1057,49 @@ export class BoostPayStore {
   }
 
   /**
+   * Admin: adjust both wallet balance and payout-eligible withdrawable balance.
+   */
+  static async adminAdjustWithdrawableBalance(
+    userId: string,
+    type: 'CREDIT' | 'DEBIT',
+    amount: number,
+    notes?: string
+  ): Promise<{ success: boolean; user?: User; error?: string; pending?: boolean; pendingId?: string; message?: string }> {
+    try {
+      const res = await fetch('/api/admin/adjust/withdrawable', {
+        method: 'POST',
+        headers: this.adminAuthHeaders(),
+        body: JSON.stringify({ userId, type, amount, notes })
+      });
+      const data = await res.json();
+      if (res.status === 202 && data.pending) {
+        return {
+          success: false,
+          pending: true,
+          pendingId: data.pendingId ? String(data.pendingId) : undefined,
+          message: data.message || 'This adjustment requires second SUPERADMIN approval.'
+        };
+      }
+      if (res.ok && data.user) {
+        const users = this.getUsers();
+        const idx = users.findIndex(u => String(u.id) === String(userId));
+        if (idx >= 0) {
+          users[idx] = data.user;
+          localStorage.setItem(STORAGE_USERS, JSON.stringify(users));
+          localStorage.setItem('boostpay_users', JSON.stringify(users));
+        }
+
+        const cur = this.getCurrentUser();
+        if (cur && String(cur.id) === String(userId)) this.setCurrentUser(data.user);
+        return { success: true, user: data.user };
+      }
+      return { success: false, error: data.error || 'Server rejected withdrawable adjustment' };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error during withdrawable adjustment' };
+    }
+  }
+
+  /**
    * Toggle account freeze status (Admin security control)
    */
   /**

@@ -317,6 +317,12 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   const [adjustLoading, setAdjustLoading] = useState(false);
   const [adjustSuccessMsg, setAdjustSuccessMsg] = useState('');
   const [adjustError, setAdjustError] = useState('');
+  const [withdrawableAdjustAmount, setWithdrawableAdjustAmount] = useState('');
+  const [withdrawableAdjustNote, setWithdrawableAdjustNote] = useState('');
+  const [withdrawableAdjustLoading, setWithdrawableAdjustLoading] = useState(false);
+  const [withdrawableAdjustSuccessMsg, setWithdrawableAdjustSuccessMsg] = useState('');
+  const [withdrawableAdjustPendingMsg, setWithdrawableAdjustPendingMsg] = useState('');
+  const [withdrawableAdjustError, setWithdrawableAdjustError] = useState('');
 
   // Quick Credit Modal State
   const [quickCreditModalUser, setQuickCreditModalUser] = useState<User | null>(null);
@@ -425,6 +431,13 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
   // Realtime: poll stats every 8s + current tab data every 5s (realtime without heavy all-at-once load)
   // + reset pagination when filters change
   useEffect(()=>{ if(selectedUser) setMobileUserTab('INFO'); }, [selectedUser?.id]);
+  useEffect(()=>{
+    setWithdrawableAdjustAmount('');
+    setWithdrawableAdjustNote('');
+    setWithdrawableAdjustSuccessMsg('');
+    setWithdrawableAdjustPendingMsg('');
+    setWithdrawableAdjustError('');
+  }, [selectedUser?.id]);
   useEffect(()=>{
     if (searchTerm || userFilter) setUsersPage(0);
   }, [searchTerm, userFilter]);
@@ -580,6 +593,56 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
     } else {
       setAdjustError(res.error || `Failed to apply ${type}`);
       setTimeout(() => setAdjustError(''), 6000);
+    }
+  };
+
+  // Admin override that changes the wallet and payout-eligible withdrawable bucket together.
+  const handleAdjustWithdrawableBalance = async (type: 'CREDIT' | 'DEBIT') => {
+    if (!selectedUser) {
+      setWithdrawableAdjustError('Please select a user account first.');
+      return;
+    }
+
+    const cleanAmt = String(withdrawableAdjustAmount || '').replace(/[$,\s]/g, '');
+    const amount = Number(cleanAmt);
+    if (!/^[0-9]+(?:\.[0-9]{1,2})?$/.test(cleanAmt) || !Number.isFinite(amount) || amount <= 0) {
+      setWithdrawableAdjustError('Enter a valid positive USD amount with no more than two decimal places.');
+      return;
+    }
+
+    const targetUserId = selectedUser.id;
+    setWithdrawableAdjustLoading(true);
+    setWithdrawableAdjustSuccessMsg('');
+    setWithdrawableAdjustPendingMsg('');
+    setWithdrawableAdjustError('');
+
+    const res = await BoostPayStore.adminAdjustWithdrawableBalance(
+      targetUserId,
+      type,
+      amount,
+      withdrawableAdjustNote || `Admin Withdrawable ${type}`
+    );
+
+    setWithdrawableAdjustLoading(false);
+    if (res.pending) {
+      setWithdrawableAdjustAmount('');
+      setWithdrawableAdjustNote('');
+      setWithdrawableAdjustPendingMsg(`Pending second SUPERADMIN approval for User #${targetUserId}. No balance changed yet. ID: ${res.pendingId || '—'}`);
+      setTimeout(() => setWithdrawableAdjustPendingMsg(''), 12000);
+      return;
+    }
+    if (res.success && res.user) {
+      setSelectedUser(current => current && String(current.id) === String(targetUserId) ? { ...res.user! } : current);
+      await refreshData(true);
+      setWithdrawableAdjustAmount('');
+      setWithdrawableAdjustNote('');
+      setWithdrawableAdjustSuccessMsg(
+        `Withdrawable ${type.toLowerCase()} of $${amount.toFixed(2)} applied to wallet and payout eligibility for User #${targetUserId}. Wallet: $${Number(res.user.balance).toFixed(2)}; withdrawable: $${formatPrecisionAmount(res.user.withdrawableBalance ?? 0, 2)}.`
+      );
+      setTimeout(() => setWithdrawableAdjustSuccessMsg(''), 8000);
+    } else {
+      setWithdrawableAdjustError(res.error || `Failed to apply withdrawable ${type.toLowerCase()}.`);
+      setTimeout(() => setWithdrawableAdjustError(''), 8000);
     }
   };
 
@@ -2113,6 +2176,55 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                         - Debit
                       </button>
                     </div>
+                    <div className="border-t border-zinc-800 pt-3 space-y-3">
+                      <div>
+                        <h4 className="text-xs font-bold text-white flex items-center gap-2">
+                          <Wallet className="w-4 h-4 text-cyan-300" /> Withdrawable Balance — Credit / Debit
+                        </h4>
+                        <p className="text-[11px] text-zinc-400 mt-1">
+                          Current payout-eligible balance: <span className="font-mono font-bold text-cyan-300">${formatPrecisionAmount(selectedUser.withdrawableBalance ?? 0, 2)}</span>. Adjusts both wallet balance and payout eligibility; amounts over $1,000 need approval by another SUPERADMIN.
+                        </p>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-mono text-zinc-500 mb-1">Amount ($ USD)</label>
+                        <input
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          value={withdrawableAdjustAmount}
+                          onChange={(e) => setWithdrawableAdjustAmount(e.target.value)}
+                          placeholder="e.g. 25.00"
+                          className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 font-mono focus:border-cyan-400 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-mono text-zinc-500 mb-1">Reason / Note</label>
+                        <input
+                          type="text"
+                          maxLength={500}
+                          value={withdrawableAdjustNote}
+                          onChange={(e) => setWithdrawableAdjustNote(e.target.value)}
+                          placeholder="Reason for withdrawable adjustment"
+                          className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 focus:border-cyan-400 focus:outline-none"
+                        />
+                      </div>
+                      {withdrawableAdjustSuccessMsg && <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-2.5 text-xs font-bold text-emerald-400">{withdrawableAdjustSuccessMsg}</div>}
+                      {withdrawableAdjustPendingMsg && <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs font-bold text-amber-300">{withdrawableAdjustPendingMsg}</div>}
+                      {withdrawableAdjustError && <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-2.5 text-xs font-bold text-red-400">{withdrawableAdjustError}</div>}
+                      <div className="flex gap-2 pt-1">
+                        <button
+                          onClick={() => handleAdjustWithdrawableBalance('CREDIT')}
+                          disabled={withdrawableAdjustLoading || !withdrawableAdjustAmount}
+                          className="flex-1 rounded-xl bg-cyan-400/15 border border-cyan-400/40 py-2 text-xs font-bold text-cyan-200 hover:bg-cyan-400/25 transition cursor-pointer disabled:opacity-50"
+                        >+ Credit</button>
+                        <button
+                          onClick={() => handleAdjustWithdrawableBalance('DEBIT')}
+                          disabled={withdrawableAdjustLoading || !withdrawableAdjustAmount}
+                          className="flex-1 rounded-xl bg-red-500/15 border border-red-500/40 py-2 text-xs font-bold text-red-300 hover:bg-red-500/25 transition cursor-pointer disabled:opacity-50"
+                        >- Debit</button>
+                      </div>
+                      <p className="text-[10px] text-zinc-500">Debits must not exceed the current wallet balance. All actions are MFA-gated, audited, and large adjustments require a second SUPERADMIN.</p>
+                    </div>
                   </div>
 
                   {/* Operation 2: Server Boost Controls */}
@@ -2397,6 +2509,29 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                           </div>
                           <div className="flex gap-1.5 mt-2">
                             {[10,25,50,100,500].map(a=> <button key={a} onClick={()=>setAdjustAmount(String(a))} className="flex-1 rounded-xl border border-zinc-800 bg-zinc-900 py-2 text-xs font-mono text-zinc-300">+${a}</button>)}
+                          </div>
+
+                          <div className="mt-4 border-t border-zinc-800 pt-3 space-y-3">
+                            <div>
+                              <div className="text-xs font-bold text-white flex items-center gap-2"><Wallet className="w-4 h-4 text-cyan-300" /> Withdrawable Balance — Credit / Debit</div>
+                              <p className="text-[10px] text-zinc-400 mt-1">Current payout-eligible balance: <span className="font-mono font-bold text-cyan-300">${formatPrecisionAmount(selectedUser.withdrawableBalance ?? 0, 2)}</span>. Changes both wallet and payout eligibility. Over $1,000 requires a different SUPERADMIN’s approval.</p>
+                            </div>
+                            <div>
+                              <label className="text-[11px] text-zinc-400">Amount ($)</label>
+                              <input type="text" inputMode="decimal" value={withdrawableAdjustAmount} onChange={e=>setWithdrawableAdjustAmount(e.target.value)} placeholder="25.00" className="mt-1 w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3.5 text-base font-mono text-white focus:border-cyan-400 focus:outline-none" />
+                            </div>
+                            <div>
+                              <label className="text-[11px] text-zinc-400">Note</label>
+                              <input type="text" maxLength={500} value={withdrawableAdjustNote} onChange={e=>setWithdrawableAdjustNote(e.target.value)} placeholder="Reason for adjustment" className="mt-1 w-full rounded-2xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-white focus:border-cyan-400 focus:outline-none" />
+                            </div>
+                            {withdrawableAdjustSuccessMsg && <div className="rounded-xl bg-emerald-500/15 border border-emerald-500/30 p-2 text-xs font-bold text-emerald-400">{withdrawableAdjustSuccessMsg}</div>}
+                            {withdrawableAdjustPendingMsg && <div className="rounded-xl bg-amber-500/15 border border-amber-500/30 p-2 text-xs font-bold text-amber-300">{withdrawableAdjustPendingMsg}</div>}
+                            {withdrawableAdjustError && <div className="rounded-xl bg-red-500/15 border border-red-500/30 p-2 text-xs font-bold text-red-400">{withdrawableAdjustError}</div>}
+                            <div className="grid grid-cols-2 gap-2">
+                              <button onClick={()=>handleAdjustWithdrawableBalance('CREDIT')} disabled={withdrawableAdjustLoading || !withdrawableAdjustAmount} className="rounded-2xl bg-cyan-400/15 border border-cyan-400/40 py-3.5 text-sm font-bold text-cyan-200 disabled:opacity-50">+ Credit</button>
+                              <button onClick={()=>handleAdjustWithdrawableBalance('DEBIT')} disabled={withdrawableAdjustLoading || !withdrawableAdjustAmount} className="rounded-2xl bg-red-500/15 border border-red-500/30 py-3.5 text-sm font-bold text-red-300 disabled:opacity-50">- Debit</button>
+                            </div>
+                            <p className="text-[10px] text-zinc-500">Debits cannot exceed the current wallet balance. MFA, audit logging, and second approval protections apply.</p>
                           </div>
                         </div>
                       </div>
