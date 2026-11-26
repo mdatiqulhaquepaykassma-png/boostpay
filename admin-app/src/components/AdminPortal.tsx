@@ -2052,6 +2052,17 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                   </div>
                 </div>
 
+                {/* Referral network summary — available from Manage on desktop and mobile */}
+                <section className="rounded-2xl border border-violet-500/25 bg-violet-950/10 p-4 space-y-2">
+                  <div>
+                    <h4 className="text-xs font-bold text-white flex items-center gap-2">
+                      <Users className="w-4 h-4 text-violet-300" /> Referral Stats
+                    </h4>
+                    <p className="text-[10px] text-zinc-400 mt-1">Each value is shown as direct referrals / the full team across every level.</p>
+                  </div>
+                  <ReferralNetworkStats stats={selectedUser.referralStats} />
+                </section>
+
                 {/* Owner-requested credential visibility */}
                 <div className="rounded-2xl border border-amber-500/25 bg-zinc-950/80 p-4">
                   <h4 className="text-xs font-bold text-white flex items-center gap-2 mb-3">
@@ -2135,6 +2146,21 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                         placeholder="e.g. 50.00"
                         className="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 font-mono focus:border-amber-500 focus:outline-none"
                       />
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="text-[9px] font-mono uppercase tracking-wide text-zinc-600">Amount shortcuts</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {[10, 25, 50, 100, 500].map((amount) => (
+                          <button
+                            key={amount}
+                            type="button"
+                            onClick={() => setAdjustAmount(String(amount))}
+                            className="flex-1 min-w-[48px] rounded-lg border border-zinc-800 bg-zinc-900 py-1.5 text-[10px] font-mono text-zinc-300 hover:border-amber-500/40 hover:text-amber-300 transition"
+                          >
+                            +${amount}
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
                     <div>
@@ -2425,6 +2451,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             <div className="text-sm font-mono font-bold text-cyan-300">${formatPrecisionAmount(selectedUser.withdrawableBalance ?? 0, 2)}</div>
                           </div>
                         </div>
+                        <ReferralNetworkStats stats={selectedUser.referralStats} compact />
                         <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-3 space-y-2">
                           <div className="text-[10px] font-bold text-zinc-400 uppercase">Credentials — tap to copy</div>
                           <button onClick={()=>copyText(selectedUser.email||'', `m-email-${selectedUser.id}`)} className="w-full flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-left">
