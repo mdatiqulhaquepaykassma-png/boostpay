@@ -1722,7 +1722,6 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <th className="px-4 py-3 font-semibold">Profit</th>
                       <th className="px-4 py-3 font-semibold">Withdrawable</th>
                       <th className="px-4 py-3 font-semibold">Compounding</th>
-                      <th className="px-4 py-3 font-semibold min-w-[270px]">Referral stats <span className="block text-[9px] font-normal text-zinc-600">direct / full team</span></th>
                       <th className="px-4 py-3 font-semibold">Status</th>
                       <th className="px-4 py-3 font-semibold">Email Account</th>
                       <th className="px-4 py-3 font-semibold text-right">Actions</th>
@@ -1763,9 +1762,6 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             ) : (
                               <span className="text-zinc-500 text-[10px]">Idle</span>
                             )}
-                          </td>
-                          <td className="px-3 py-2 align-top">
-                            <ReferralNetworkStats stats={u.referralStats} />
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-1.5">
@@ -1897,9 +1893,6 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <div className="text-[9px] text-zinc-500 uppercase">Boost</div>
                       <div className={`text-xs font-bold ${u.boostState?.isActive ? 'text-emerald-400' : 'text-zinc-500'}`}>{u.boostState?.isActive ? (u.boostState.isPaused ? 'Paused' : 'Active') : 'Idle'}</div>
                     </div>
-                  </div>
-                  <div className="mt-2" onClick={e => e.stopPropagation()}>
-                    <ReferralNetworkStats stats={u.referralStats} compact />
                   </div>
 <div className="flex gap-1.5 mt-2" onClick={e=>e.stopPropagation()}>
                     <button onClick={()=>{setFreezeModalUser(u); setFreezeReason('');}} className={`flex-1 rounded-xl py-2 text-xs font-bold border ${u.isFrozen ? 'bg-cyan-500 text-zinc-950 border-cyan-400' : 'bg-zinc-950 text-zinc-300 border-zinc-800'}`}>{u.isFrozen ? 'Unfreeze' : 'Freeze'}</button>
