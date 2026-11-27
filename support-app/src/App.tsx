@@ -74,7 +74,11 @@ function buildThreads(conversations: SupportConversation[], messages: SupportMes
     const unread = fromUser.filter((m) => Number(m.timestamp) > readAt).length;
     out.push({ peerId, conversationId: conv.id, messages: list, lastUserMessage, lastMessage: list[list.length - 1], unread });
   }
-  return out.sort((a, b) => (b.lastUserMessage?.timestamp || 0) - (a.lastUserMessage?.timestamp || 0));
+  return out.sort((a, b) => {
+    const unreadFirst = Number(b.unread > 0) - Number(a.unread > 0);
+    if (unreadFirst) return unreadFirst;
+    return (b.lastUserMessage?.timestamp || 0) - (a.lastUserMessage?.timestamp || 0);
+  });
 }
 
 // ---------------------------------------------------------------------------
