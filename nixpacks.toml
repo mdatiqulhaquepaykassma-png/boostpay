@@ -2,10 +2,10 @@
 nixPkgs = ["nodejs_20", "bun"]
 
 [phases.install]
-cmds = ["bun install"]
+cmds = ["npm ci"]
 
 [phases.build]
-cmds = ["bun run build"]
+cmds = ["npm run build"]
 
 # Raise the open-file limit before the server starts.
 # The container default is 1024 soft (hard = 524288), and every open app holds one
