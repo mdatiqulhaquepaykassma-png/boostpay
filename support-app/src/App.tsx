@@ -26,6 +26,22 @@ type Thread = {
   unread: number;
 };
 
+type SupportHistoryState = {
+  supportChatApp: true;
+  screen: 'inbox' | 'thread';
+  threadId?: string;
+  photoPreview?: true;
+  photoUrl?: string;
+};
+
+function threadIdFromHistory(state: unknown): string {
+  if (!state || typeof state !== 'object') return '';
+  const value = state as Partial<SupportHistoryState>;
+  return value.supportChatApp === true && value.screen === 'thread' && typeof value.threadId === 'string'
+    ? value.threadId
+    : '';
+}
+
 function timeAgo(ts?: number): string {
   if (!ts) return '';
   const diff = Date.now() - ts;
@@ -156,7 +172,7 @@ function LoginScreen({ onDone }: { onDone: () => void }) {
 // ---------------------------------------------------------------------------
 // Message bubble
 // ---------------------------------------------------------------------------
-function Bubble({ msg, mine }: { msg: SupportMessage; mine: boolean }) {
+function Bubble({ msg, mine, onPhotoClick }: { msg: SupportMessage; mine: boolean; onPhotoClick?: (url: string) => void }) {
   const url = mediaUrl(msg);
   const isPhoto = msg.kind === 'photo';
   const isVoice = msg.kind === 'voice';
@@ -168,9 +184,14 @@ function Bubble({ msg, mine }: { msg: SupportMessage; mine: boolean }) {
         }`}
       >
         {isPhoto && url ? (
-          <a href={url} target="_blank" rel="noreferrer">
+          <button
+            type="button"
+            onClick={() => onPhotoClick?.(url)}
+            aria-label="Open photo"
+            className="block cursor-zoom-in border-0 bg-transparent p-0"
+          >
             <img src={url} alt="Photo" className="max-h-56 w-auto rounded-xl" />
-          </a>
+          </button>
         ) : isVoice && url ? (
           <div className="flex flex-col gap-1">
             <audio controls src={url} className="h-9 w-56 max-w-full" />
@@ -314,12 +335,72 @@ function ThreadView({ thread, onBack, onSent }: { thread: Thread; onBack: () => 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const photoHistoryRef = useRef(false);
   const endRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' });
     markRead(thread.conversationId);
   }, [thread.conversationId, thread.messages.length]);
+
+  const openPhoto = useCallback((url: string) => {
+    const photoState: SupportHistoryState = {
+      ...(window.history.state || {}),
+      supportChatApp: true,
+      screen: 'thread',
+      threadId: thread.conversationId,
+      photoPreview: true,
+      photoUrl: url,
+    };
+    if (photoHistoryRef.current) {
+      window.history.replaceState(photoState, '', window.location.href);
+    } else {
+      window.history.pushState(photoState, '', window.location.href);
+      photoHistoryRef.current = true;
+    }
+    setPhotoPreview(url);
+  }, [thread.conversationId]);
+
+  const closePhoto = useCallback(() => {
+    setPhotoPreview(null);
+    if (photoHistoryRef.current) {
+      photoHistoryRef.current = false;
+      window.history.back();
+    }
+  }, []);
+
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      const state = event.state as Partial<SupportHistoryState> | null;
+      const restoredPhoto = state?.supportChatApp === true
+        && state.screen === 'thread'
+        && state.threadId === thread.conversationId
+        && state.photoPreview === true
+        && typeof state.photoUrl === 'string'
+        ? state.photoUrl
+        : null;
+
+      if (restoredPhoto) {
+        photoHistoryRef.current = true;
+        setPhotoPreview(restoredPhoto);
+      } else {
+        photoHistoryRef.current = false;
+        setPhotoPreview(null);
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [thread.conversationId]);
+
+  useEffect(() => {
+    if (!photoPreview) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closePhoto();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [photoPreview, closePhoto]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -363,7 +444,7 @@ function ThreadView({ thread, onBack, onSent }: { thread: Thread; onBack: () => 
 
       <div className="flex-1 space-y-2 px-3 py-4">
         {thread.messages.map((m) => (
-          <Bubble key={m.id} msg={m} mine={String(m.senderId) === SUPPORT_ID} />
+          <Bubble key={m.id} msg={m} mine={String(m.senderId) === SUPPORT_ID} onPhotoClick={openPhoto} />
         ))}
         <div ref={endRef} />
       </div>
@@ -393,6 +474,31 @@ function ThreadView({ thread, onBack, onSent }: { thread: Thread; onBack: () => 
           </button>
         </div>
       </form>
+
+      {photoPreview && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Photo preview"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/95 p-4"
+          onClick={closePhoto}
+        >
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); closePhoto(); }}
+            aria-label="Close photo"
+            className="absolute right-4 top-4 grid h-10 w-10 place-items-center rounded-full border border-white/20 bg-zinc-900/90 text-2xl leading-none text-white"
+          >
+            ×
+          </button>
+          <img
+            src={photoPreview}
+            alt="Photo preview"
+            className="max-h-[90vh] max-w-[94vw] object-contain"
+            onClick={(event) => event.stopPropagation()}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -406,7 +512,26 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
-  const [activeId, setActiveId] = useState<string>('');
+  const [activeId, setActiveId] = useState<string>(() => threadIdFromHistory(window.history.state));
+
+  useEffect(() => {
+    const current = window.history.state as Partial<SupportHistoryState> | null;
+    const validScreen = current?.supportChatApp === true
+      && (current.screen === 'inbox' || (current.screen === 'thread' && typeof current.threadId === 'string'));
+    if (!validScreen) {
+      window.history.replaceState({ supportChatApp: true, screen: 'inbox' } satisfies SupportHistoryState, '', window.location.href);
+    } else if (current.photoPreview) {
+      // A reload while a photo was open should not leave an invisible photo history entry behind.
+      const { photoPreview: _photoPreview, photoUrl: _photoUrl, ...routeState } = current;
+      window.history.replaceState(routeState, '', window.location.href);
+    }
+
+    const handlePopState = (event: PopStateEvent) => {
+      setActiveId(threadIdFromHistory(event.state));
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -454,6 +579,21 @@ export default function App() {
 
   const active = threads.find((t) => t.conversationId === activeId);
 
+  const openThread = (threadId: string) => {
+    const state: SupportHistoryState = { supportChatApp: true, screen: 'thread', threadId };
+    window.history.pushState(state, '', window.location.href);
+    setActiveId(threadId);
+  };
+
+  const backToInbox = () => {
+    const current = window.history.state as Partial<SupportHistoryState> | null;
+    if (current?.supportChatApp === true && current.screen === 'thread') {
+      window.history.back();
+    } else {
+      setActiveId('');
+    }
+  };
+
   const signOut = () => {
     auth.clear();
     setSignedIn(false);
@@ -467,7 +607,7 @@ export default function App() {
     return (
       <ThreadView
         thread={active}
-        onBack={() => setActiveId('')}
+        onBack={backToInbox}
         onSent={() => {
           void load();
         }}
@@ -523,7 +663,7 @@ export default function App() {
       <ul className="divide-y divide-zinc-800/70">
         {filtered.map((t) => (
           <li key={t.conversationId}>
-            <button onClick={() => setActiveId(t.conversationId)} className="flex w-full items-start gap-3 px-4 py-3 text-left hover:bg-zinc-900/60">
+            <button onClick={() => openThread(t.conversationId)} className="flex w-full items-start gap-3 px-4 py-3 text-left hover:bg-zinc-900/60">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-[11px] font-bold text-amber-400">
                 {t.peerId.slice(0, 2).toUpperCase()}
               </div>
