@@ -4,6 +4,7 @@ import { ArrowUpRight, ArrowDownLeft, Zap, ShieldAlert, X, Clock, Copy, Check, C
 import { Transaction } from '../types';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { formatPrecisionAmount } from '../utils/format';
+import { getTransactionPartyIds } from '../utils/transactionParties';
 
 interface Props {
   transactions: Transaction[];
@@ -16,6 +17,7 @@ type FilterTab = 'ALL' | 'DEPOSIT' | 'WITHDRAW' | 'REWARD' | 'P2P' | 'REFERRAL';
 export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId, onViewAllTransactions }) => {
   const { currency, fmt, price } = useCurrency();
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
+  const selectedTxPartyIds = selectedTx ? getTransactionPartyIds(selectedTx) : null;
   const [copiedTx, setCopiedTx] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
   const pageSize = 5;
@@ -374,18 +376,14 @@ export const RecentTransactionsSection: FC<Props> = memo(({ transactions, userId
                   <span className="text-zinc-400">{new Date(selectedTx.timestamp).toLocaleString()} (credited)</span>
                 </div>
               )}
-              {selectedTx.recipientId && (
-                <div className="flex justify-between py-1 border-b border-zinc-800/60">
-                  <span className="text-zinc-500">Recipient ID:</span>
-                  <span className="text-zinc-200">#{selectedTx.recipientId}</span>
-                </div>
-              )}
-              {selectedTx.senderId && (
-                <div className="flex justify-between py-1 border-b border-zinc-800/60">
-                  <span className="text-zinc-500">Sender ID:</span>
-                  <span className="text-zinc-200">#{selectedTx.senderId}</span>
-                </div>
-              )}
+              <div className="flex justify-between py-1 border-b border-zinc-800/60">
+                <span className="text-zinc-500">Sender ID:</span>
+                <span className="text-zinc-200">{selectedTxPartyIds?.senderId ? `#${selectedTxPartyIds.senderId}` : '—'}</span>
+              </div>
+              <div className="flex justify-between py-1 border-b border-zinc-800/60">
+                <span className="text-zinc-500">Receiver ID:</span>
+                <span className="text-zinc-200">{selectedTxPartyIds?.receiverId ? `#${selectedTxPartyIds.receiverId}` : '—'}</span>
+              </div>
               {statusOf(selectedTx) ? (
                 <div className="flex justify-between py-1 border-b border-zinc-800/60">
                   <span className="text-zinc-500">Status:</span>

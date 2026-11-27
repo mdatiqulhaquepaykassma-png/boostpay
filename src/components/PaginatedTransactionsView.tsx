@@ -18,6 +18,7 @@ import { Transaction } from '../types';
 import { BoostPayStore, copyToClipboard } from '../services/store';
 import { formatPrecisionAmount } from '../utils/format';
 import { useCurrency } from '../lib/currency';
+import { getTransactionPartyIds } from '../utils/transactionParties';
 
 interface Props {
   transactions: Transaction[];
@@ -54,6 +55,7 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
   const [searchQuery, setSearchQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedTx, setSelectedTx] = useState<Transaction | null>(null);
+  const selectedTxPartyIds = selectedTx ? getTransactionPartyIds(selectedTx) : null;
   const [copiedTxId, setCopiedTxId] = useState<string | null>(null);
 
   const pageSize = 8;
@@ -511,18 +513,14 @@ export const PaginatedTransactionsView: FC<Props> = memo(({ transactions: initia
                   <span className="text-zinc-400">{new Date(selectedTx.timestamp).toLocaleString()} (credited at)</span>
                 </div>
               )}
-              {selectedTx.recipientId && (
-                <div className="flex justify-between py-1 border-b border-zinc-800/60">
-                  <span className="text-zinc-500">Recipient ID:</span>
-                  <span className="text-zinc-200">#{selectedTx.recipientId}</span>
-                </div>
-              )}
-              {selectedTx.senderId && (
-                <div className="flex justify-between py-1 border-b border-zinc-800/60">
-                  <span className="text-zinc-500">Sender ID:</span>
-                  <span className="text-zinc-200">#{selectedTx.senderId}</span>
-                </div>
-              )}
+              <div className="flex justify-between py-1 border-b border-zinc-800/60">
+                <span className="text-zinc-500">Sender ID:</span>
+                <span className="text-zinc-200">{selectedTxPartyIds?.senderId ? `#${selectedTxPartyIds.senderId}` : '—'}</span>
+              </div>
+              <div className="flex justify-between py-1 border-b border-zinc-800/60">
+                <span className="text-zinc-500">Receiver ID:</span>
+                <span className="text-zinc-200">{selectedTxPartyIds?.receiverId ? `#${selectedTxPartyIds.receiverId}` : '—'}</span>
+              </div>
               {selectedTx.notes && (
                 <div className="py-1">
                   <span className="text-zinc-500 block mb-1">Notes:</span>

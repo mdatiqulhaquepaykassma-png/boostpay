@@ -94,6 +94,32 @@ const formatRelative = (ts?: number) => {
   return `${Math.floor(months/12)}y ago`;
 };
 
+const transactionPartyIds = (transaction: Transaction): { senderId: string; receiverId: string } => {
+  const tx = transaction as Transaction & { agentId?: string; metadata?: Record<string, unknown> };
+  const metadata = tx.metadata || {};
+  const type = String(tx.type || '').toUpperCase();
+  const isOutgoing = type === 'TRANSFER_SENT' || type === 'AGENT_TRANSFER_SENT';
+  const isIncoming = type === 'TRANSFER_RECEIVED' || type === 'AGENT_TRANSFER_RECEIVED';
+  const firstId = (...values: unknown[]) => {
+    for (const value of values) {
+      if (value === null || value === undefined) continue;
+      const id = String(value).trim();
+      if (id && id !== 'undefined' && id !== 'null') return id;
+    }
+    return '';
+  };
+
+  return {
+    senderId: firstId(tx.senderId, metadata.senderId, isOutgoing ? tx.userId : undefined),
+    receiverId: firstId(
+      tx.recipientId,
+      metadata.recipientId,
+      type === 'AGENT_TRANSFER_SENT' ? tx.agentId || metadata.agentId : undefined,
+      isIncoming ? tx.userId : undefined,
+    ),
+  };
+};
+
 const EMPTY_REFERRAL_COHORT = { count: 0, sameIpDevice: 0, depositors: 0, activeBoosters: 0 };
 const ReferralNetworkStats: FC<{ stats?: User['referralStats']; compact?: boolean }> = ({ stats, compact = false }) => {
   const direct = stats?.direct || EMPTY_REFERRAL_COHORT;
@@ -2783,13 +2809,14 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                       <th className="px-4 py-3 font-semibold">Reference ID</th>
                       <th className="px-4 py-3 font-semibold">Timestamp</th>
                       <th className="px-4 py-3 font-semibold">Type</th>
-                      <th className="px-4 py-3 font-semibold">User</th>
+                      <th className="px-4 py-3 font-semibold">User & transfer IDs</th>
                       <th className="px-4 py-3 font-semibold">Amount</th>
                       <th className="px-4 py-3 font-semibold">Details / Ledger Note</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60">
                     {paginatedTransactions.map(tx => {
+                      const { senderId, receiverId } = transactionPartyIds(tx);
                       const isCredit = tx.type === 'TRANSFER_RECEIVED' || tx.type === 'REWARD' || tx.type === 'YIELD_REWARD' || tx.type === 'ADMIN_CREDIT';
                       return (
                         <tr key={tx.id} className="hover:bg-zinc-800/30 transition">
@@ -2811,12 +2838,11 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                             </span>
                           </td>
                           <td className="px-4 py-3 font-bold text-zinc-200">
-                            User #{tx.userId}
-                            {tx.recipientId && (
-                              <span className="text-zinc-500 text-[10px] font-normal block">
-                                → #{tx.recipientId}
-                              </span>
-                            )}
+                            <div>User #{tx.userId}</div>
+                            <div className="mt-1 space-y-0.5 text-[10px] font-normal text-zinc-500">
+                              <div>Sender ID: <span className="text-zinc-300">{senderId ? `#${senderId}` : '—'}</span></div>
+                              <div>Receiver ID: <span className="text-zinc-300">{receiverId ? `#${receiverId}` : '—'}</span></div>
+                            </div>
                           </td>
                           <td className={`px-4 py-3 font-bold tabular-nums ${isCredit ? 'text-emerald-400' : 'text-rose-400'}`}>
                             {isCredit ? '+' : '-'}${formatPrecisionAmount(tx.amount, 8)}
@@ -2846,6 +2872,7 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
             {/* Mobile tx cards — Android swipe */}
             <div className="sm:hidden space-y-2">
               {paginatedTransactions.map(tx => {
+                const { senderId, receiverId } = transactionPartyIds(tx);
                 const isCredit = tx.type === 'TRANSFER_RECEIVED' || tx.type === 'REWARD' || tx.type === 'YIELD_REWARD' || tx.type === 'ADMIN_CREDIT';
                 return (
                   <div key={tx.id} className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3">
@@ -2855,7 +2882,11 @@ export const AdminPortal: FC<Props> = ({ onBack }) => {
                     </div>
                     <div className="flex items-center gap-1.5 mt-1">
                       <span className={`rounded-lg px-2 py-0.5 text-[10px] font-bold border ${tx.type.includes('TRANSFER') ? 'bg-sky-500/20 text-sky-400 border-sky-500/30' : tx.type.includes('REWARD') || tx.type.includes('REFERRAL') ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'}`}>{tx.type}</span>
-                      <span className="text-[11px] text-zinc-400 font-mono">User #{tx.userId}{tx.recipientId ? ` → #${tx.recipientId}` : ''}</span>
+                      <span className="text-[11px] text-zinc-400 font-mono">User #{tx.userId}</span>
+                    </div>
+                    <div className="mt-1 space-y-0.5 text-[10px] font-mono text-zinc-500">
+                      <div>Sender ID: <span className="text-zinc-300">{senderId ? `#${senderId}` : '—'}</span></div>
+                      <div>Receiver ID: <span className="text-zinc-300">{receiverId ? `#${receiverId}` : '—'}</span></div>
                     </div>
                     <div className="text-xs text-zinc-300 mt-1 leading-snug">{tx.notes || '—'}</div>
                     <div className="text-[10px] font-mono text-zinc-500 mt-1">{new Date(tx.timestamp).toLocaleString()}</div>
